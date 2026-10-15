@@ -1,3 +1,6 @@
+mod transport;
+pub use transport::*;
+
 use rusqlite::{Connection, OptionalExtension, Row, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -7,7 +10,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 use thiserror::Error;
 
-const SCHEMA_VERSION: i64 = 3;
+const SCHEMA_VERSION: i64 = 4;
 const MAX_JSON_BYTES: usize = 1_048_576;
 const MAX_APPEND_EVENTS: usize = 256;
 const MAX_STATE_BYTES: usize = 8 * MAX_JSON_BYTES;
@@ -48,6 +51,12 @@ pub enum StorageError {
         "cleanup attestation for tool call {0} conflicts with its immutable journal or an existing attestation"
     )]
     ToolCleanupConflict(String),
+    #[error("transport capacity exhausted: {0}")]
+    TransportCapacity(&'static str),
+    #[error("transport identity or durable message conflict: {0}")]
+    TransportConflict(String),
+    #[error("replica synchronization gap: expected at most {expected}, received {actual}")]
+    SyncGap { expected: u64, actual: u64 },
     #[error("device {0} is revoked")]
     RevokedDevice(String),
 }
@@ -313,6 +322,9 @@ impl Store {
         }
         if version < 3 {
             transaction.execute_batch(include_str!("../migrations/0003_tool_cleanup.sql"))?;
+        }
+        if version < 4 {
+            transaction.execute_batch(include_str!("../migrations/0004_device_transport.sql"))?;
             transaction.pragma_update(None, "user_version", SCHEMA_VERSION)?;
         }
         transaction.commit()?;
@@ -321,7 +333,7 @@ impl Store {
         })
     }
 
-    fn connection(&self) -> StorageResult<MutexGuard<'_, Connection>> {
+    pub(crate) fn connection(&self) -> StorageResult<MutexGuard<'_, Connection>> {
         self.connection.lock().map_err(|_| StorageError::Poisoned)
     }
 
@@ -1043,6 +1055,9 @@ impl Store {
             "DELETE FROM outbox WHERE device_id = ?1 AND delivered_at IS NULL",
             [id],
         )?;
+        transaction.execute("UPDATE transport_inbox SET state = 'rejected', detail = 'sender_revoked', payload = NULL WHERE sender = ?1 AND state = 'pending'", [id])?;
+        transaction.execute("UPDATE remote_commands SET state = 'rejected', result = '{\"reason\":\"sender_revoked\"}', updated_at = max(updated_at, ?2) WHERE sender = ?1 AND state = 'pending'", params![id, revoked_at])?;
+        transaction.execute("DELETE FROM sync_offers WHERE device_id = ?1", [id])?;
         transaction.commit()?;
         Ok(())
     }
