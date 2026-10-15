@@ -360,8 +360,9 @@ impl Agent {
         {
             let lease = crate::service::StateLease::acquire(path).await?;
             blocking(move || {
-                let _database = lease.validate_database()?;
-                let store = Store::open(lease.path().join("everything.sqlite3"))?;
+                let database = lease.validate_database()?;
+                let store =
+                    Store::open_validated(lease.path().join("everything.sqlite3"), database)?;
                 Ok(Self::from_leased_store(store, lease))
             })
             .await

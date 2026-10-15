@@ -137,8 +137,11 @@ impl HostService {
         let prepared_lease = Arc::clone(&lease);
         let (agent, settings, devices, registry, authorizer, discovery, task_tools, relay_origin) =
             tokio::task::spawn_blocking(move || {
-                let _database = prepared_lease.validate_database()?;
-                let store = Store::open(prepared_lease.path().join("everything.sqlite3"))?;
+                let database = prepared_lease.validate_database()?;
+                let store = Store::open_validated(
+                    prepared_lease.path().join("everything.sqlite3"),
+                    database,
+                )?;
                 let directory =
                     cap_std::fs::Dir::from_std_file(prepared_lease.directory.file.try_clone()?);
                 let identity = crate::devices::load_or_create_identity_in(&directory)?;
