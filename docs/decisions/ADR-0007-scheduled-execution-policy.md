@@ -2,7 +2,7 @@
 
 ## Status
 
-Implemented on the issue #52 branch. Integration and final runtime validation remain pending.
+Implemented on the issue #52 branch. The disposable local walkthrough, Rust 1.88 static checks and optimized all-feature workspace build passed. Integration review and required CI remain pending.
 
 ## Context
 
@@ -14,10 +14,10 @@ Use the existing native Scheduler and Tool Broker. Reserve each serial attempt a
 
 Automatic retry requires the actual actor's typed ProviderUnavailable retirement proof: exact inactive task and command, no consumed or pending controls, no request, no round, zero native counters and no broker operations. Persist retirement identity before calling that proof and settlement/backoff before reserving a successor. Generic failure, cancellation and uncertainty cannot authorize retry. A distinct never-paid attempt may capture fresh local inputs; an active native resume retains its exact Definition. Explicit classifier approval does not transfer to a new task.
 
-Keep Unknown outcomes immutable and occupying overlap. A trusted owner may append an acknowledgement bound to the exact occurrence, complete outcome digest, command identity, effective UID, note and time. That acknowledgement changes only scheduling overlap admission. It does not erase history, resume work, clear broker quarantine or certify an external effect stopped.
+Check the native saved phase, typed waiting reason and immutable Running/Unknown tool journal independently before classifying any terminal result. Tool cleanup acknowledgement is separate from knowing an effect outcome. Keep Unknown outcomes immutable and occupying overlap. A trusted owner may append an acknowledgement bound to the exact occurrence, complete outcome digest, command identity, effective UID, note and time. That acknowledgement changes only scheduling overlap admission. It does not erase history, resume work, clear broker quarantine or certify an external effect stopped.
 
 Reserve optional conversation delivery before effects and make its full bounded notification ready atomically with terminal settlement. Publish one append-only ScheduledRunFinished event only while the destination has no pending turn. Compare the complete original request on replay before checking current busy state. Commit event, command journal and unchanged conversation checkpoint together; acknowledge the outbox against that complete journal. No message, model turn, native checkpoint or configuration changes during publication.
 
 ## Consequences
 
-Factory retries are bounded and fail closed, while paid retries remain explicit owner decisions. Unknown can block future scheduling until owner acknowledgement. Busy or missing destinations retain bounded pending delivery with visible diagnostics. Attempt, policy, result, acknowledgement and delivery quotas can block new admission; retained history is not silently pruned. No second execution service or backup subsystem is introduced. Automation for crash, race and resource boundaries remains deferred to issue #32; local walkthroughs do not establish production readiness.
+Factory retries are bounded and fail closed, while paid retries remain explicit owner decisions. Unknown can block future scheduling until owner acknowledgement. Busy or missing destinations retain bounded pending delivery with visible diagnostics. Capacity-blocked legacy backfill keeps its preparation diagnostic while existing ready deliveries drain; only actual backfill progress clears it. Attempt, policy, result, acknowledgement and delivery quotas can block new admission; retained history is not silently pruned. No second execution service or backup subsystem is introduced. Automation for crash, race and resource boundaries remains deferred to issue #32; local walkthroughs do not establish production readiness.
