@@ -46,6 +46,7 @@ def write_checkpoint(path, value):
 def main():
     parser = argparse.ArgumentParser(description="Refresh the authoritative Everything issue backlog")
     parser.add_argument("--coordination", type=Path)
+    parser.add_argument("--acknowledge", type=int, nargs="*", default=[])
     arguments = parser.parse_args()
     common = Path(command(["git", "rev-parse", "--path-format=absolute", "--git-common-dir"]).strip())
     directory = common / "everything-orchestration"
@@ -87,6 +88,19 @@ def main():
     coordination = previous.get("coordination", {})
     if arguments.coordination:
         coordination = json.loads(arguments.coordination.read_text())
+        for number, assignment in coordination.get("assignments", {}).items():
+            if number in snapshots:
+                assignment.setdefault("assigned_requirement_digest", snapshots[number]["requirement_digest"])
+                assignment.setdefault("assigned_comment_digest", digest(snapshots[number]["comments"]))
+    pending = {str(change["number"]): change for change in previous.get("pending_changes", previous.get("changes", []))}
+    for number in arguments.acknowledge:
+        pending.pop(str(number), None)
+    for change in changes:
+        number = str(change["number"])
+        original = pending.get(number)
+        if original:
+            change = dict(change, changes=sorted(set(original["changes"]) | set(change["changes"])))
+        pending[number] = change
     now = datetime.datetime.now(datetime.timezone.utc)
     checkpoint = {
         "schema_version": 1,
@@ -95,10 +109,11 @@ def main():
         "next_sync_due": (now + datetime.timedelta(minutes=5)).isoformat(),
         "issues": snapshots,
         "changes": changes,
+        "pending_changes": sorted(pending.values(), key=lambda change: change["number"]),
         "coordination": coordination,
     }
     write_checkpoint(path, checkpoint)
-    print(json.dumps({"checkpoint": str(path), "last_successful_sync": checkpoint["last_successful_sync"], "next_sync_due": checkpoint["next_sync_due"], "open_issues": sorted(int(number) for number, issue in snapshots.items() if issue["state"] == "open"), "changes": changes}, indent=2))
+    print(json.dumps({"checkpoint": str(path), "last_successful_sync": checkpoint["last_successful_sync"], "next_sync_due": checkpoint["next_sync_due"], "open_issues": sorted(int(number) for number, issue in snapshots.items() if issue["state"] == "open"), "changes": changes, "pending_changes": checkpoint["pending_changes"]}, indent=2))
 
 
 if __name__ == "__main__":
