@@ -279,6 +279,16 @@ impl Consolidator {
         Self::open_inner(wiki, journal_path, None, None).await
     }
 
+    pub async fn wait_idle(&self) -> Result<(), ConsolidationError> {
+        let _permit = self
+            .inner
+            .admission
+            .acquire()
+            .await
+            .map_err(|_| ConsolidationError::Worker("maintenance admission closed".into()))?;
+        Ok(())
+    }
+
     pub async fn retrieve(
         &self,
         question: String,
