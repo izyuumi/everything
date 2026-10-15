@@ -30,6 +30,7 @@ pub(super) struct HandleInner {
     sender: mpsc::Sender<Control>,
     shutdown_grace: std::time::Duration,
     changed: watch::Sender<u64>,
+    drained: watch::Receiver<Option<ShutdownReport>>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -97,11 +98,12 @@ impl Scheduler {
         let (ready, started) = oneshot::channel();
         let (changed, _) = watch::channel(0);
         let actor_changed = changed.clone();
+        let (drained_sender, drained) = watch::channel(None);
         let runtime = tokio::runtime::Handle::current();
         let shutdown_grace = limits.shutdown_grace;
         tokio::task::spawn_blocking(move || {
             runtime.block_on(async move {
-                let mut actor = Actor::new(services, limits, receiver, actor_changed);
+                let mut actor = Actor::new(services, limits, receiver, actor_changed, drained_sender);
                 match actor.recover().await {
                     Ok(()) => {
                         if ready.send(Ok(())).is_ok() {
@@ -120,6 +122,7 @@ impl Scheduler {
                 sender,
                 shutdown_grace,
                 changed,
+                drained,
             }),
         })
     }
@@ -235,16 +238,39 @@ impl Scheduler {
     }
 
     pub async fn shutdown(&self) -> Result<ShutdownReport, SchedulerError> {
+        if let Some(report) = self.inner.drained.borrow().clone() {
+            return Ok(report);
+        }
         let (reply, result) = oneshot::channel();
-        self.inner
+        if self
+            .inner
             .sender
             .send(Control::Shutdown(reply))
             .await
-            .map_err(|_| SchedulerError::Stopped)?;
-        tokio::time::timeout(self.inner.shutdown_grace, result)
-            .await
-            .map_err(|_| SchedulerError::ShutdownPending)?
-            .map_err(|_| SchedulerError::Stopped)
+            .is_err()
+        {
+            return self
+                .inner
+                .drained
+                .borrow()
+                .clone()
+                .ok_or(SchedulerError::Stopped);
+        }
+        match tokio::time::timeout(self.inner.shutdown_grace, result).await {
+            Ok(Ok(report)) => Ok(report),
+            Ok(Err(_)) => self
+                .inner
+                .drained
+                .borrow()
+                .clone()
+                .ok_or(SchedulerError::Stopped),
+            Err(_) => self
+                .inner
+                .drained
+                .borrow()
+                .clone()
+                .ok_or(SchedulerError::ShutdownPending),
+        }
     }
 
     pub(super) async fn tool_spawn(
@@ -335,6 +361,7 @@ struct Actor {
     shutdown: Vec<oneshot::Sender<ShutdownReport>>,
     controls_closed: bool,
     changed: watch::Sender<u64>,
+    drained: watch::Sender<Option<ShutdownReport>>,
 }
 
 impl Actor {
@@ -343,6 +370,7 @@ impl Actor {
         limits: SchedulerLimits,
         receiver: mpsc::Receiver<Control>,
         changed: watch::Sender<u64>,
+        drained: watch::Sender<Option<ShutdownReport>>,
     ) -> Self {
         Self {
             services: Arc::new(services),
@@ -357,6 +385,7 @@ impl Actor {
             shutdown: Vec::new(),
             controls_closed: false,
             changed,
+            drained,
         }
     }
 
@@ -438,6 +467,7 @@ impl Actor {
                     active_tasks: 0,
                     broker_quarantined: self.services.broker.is_quarantined(),
                 };
+                self.drained.send_replace(Some(report.clone()));
                 for reply in self.shutdown.drain(..) {
                     let _ = reply.send(report.clone());
                 }
