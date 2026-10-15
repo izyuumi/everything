@@ -80,6 +80,7 @@ pub enum ProviderResume {
     RetryUncertain,
 }
 
+#[derive(Clone)]
 pub struct ToolRunSetup {
     pub broker: TaskToolBroker,
     pub registry: Arc<ToolRegistry>,
@@ -378,6 +379,108 @@ impl NativeCheckpoint {
 }
 
 impl Agent {
+    pub async fn capture_tools_setup(
+        &self,
+        conversation_id: ConversationId,
+        command_id: CommandId,
+        setup: ToolRunSetup,
+        cancellation: CancellationToken,
+    ) -> Result<NativeRunInfo, AgentError> {
+        if cancellation.is_cancelled() {
+            return Err(AgentError::Cancelled);
+        }
+        let admission = self.admit(conversation_id)?;
+        let conversation = self.conversation(conversation_id).await?;
+        if cancellation.is_cancelled() {
+            return Err(AgentError::Cancelled);
+        }
+        if conversation.info.pending_command_id != Some(command_id) {
+            return Err(AgentError::CommandConflict(command_id));
+        }
+        let conversation = self
+            .capture_native_setup(conversation, Arc::new(setup), admission)
+            .await?;
+        if cancellation.is_cancelled() {
+            return Err(AgentError::Cancelled);
+        }
+        conversation
+            .native_run()
+            .ok_or(AgentError::NativeSetupRequired)
+    }
+
+    pub(crate) async fn guard_unstarted_tools(
+        &self,
+        conversation_id: ConversationId,
+        command_id: CommandId,
+        task_id: TaskId,
+    ) -> Result<impl Send + 'static, AgentError> {
+        let admission = self.admit(conversation_id)?;
+        let write = self.write_gate(conversation_id)?.lock_owned().await;
+        let owner = self.clone();
+        blocking(move || {
+            let conversation = load_conversation(&owner.store, conversation_id)?;
+            if conversation.info.pending_command_id != Some(command_id)
+                || conversation.checkpoint.continuation.is_some()
+                || !conversation.checkpoint.inputs.is_empty()
+            {
+                return Err(AgentError::InvalidData("unstarted task boundary changed"));
+            }
+            if let Some(native) = &conversation.checkpoint.native {
+                let turn = native
+                    .turn
+                    .as_ref()
+                    .ok_or(AgentError::NativeSetupRequired)?;
+                if turn.command_id != command_id
+                    || turn.definition.task_id != task_id
+                    || turn.status != LoopStatus::Ready
+                    || turn.round.is_some()
+                    || turn.attempts != 0
+                    || turn.tool_calls != 0
+                    || turn.reserved_output_tokens != Some(0)
+                    || turn.charged_tokens != 0
+                    || turn.reported_input_tokens != 0
+                    || turn.reported_output_tokens != 0
+                {
+                    return Err(AgentError::InvalidData("task has entered native execution"));
+                }
+            }
+            Ok((owner, admission, write))
+        })
+        .await
+    }
+
+    async fn capture_native_setup(
+        &self,
+        mut conversation: Conversation,
+        setup: Arc<ToolRunSetup>,
+        admission: Admission,
+    ) -> Result<Conversation, AgentError> {
+        let owner = self.clone();
+        let (captured, native) = blocking(move || {
+            let definition = prepare_definition(&owner.store, &conversation, &setup)?;
+            let native = prepare_native(&conversation, definition)?;
+            if native
+                .turn
+                .as_ref()
+                .is_some_and(|turn| turn.round.is_none())
+            {
+                let mut validated = conversation.checkpoint.clone();
+                validated.native = Some(native.clone());
+                let checkpoint = std::mem::replace(&mut conversation.checkpoint, validated);
+                build_context(&conversation, &setup)?;
+                conversation.checkpoint = checkpoint;
+            }
+            Ok((conversation, native))
+        })
+        .await?;
+        conversation = captured;
+        let mut checkpoint = conversation.checkpoint.clone();
+        checkpoint.native = Some(native);
+        self.save_native(&mut conversation, checkpoint, Vec::new(), admission)
+            .await?;
+        Ok(conversation)
+    }
+
     pub async fn run_tools(
         &self,
         conversation_id: ConversationId,
@@ -428,35 +531,9 @@ impl Agent {
             {
                 return Err(AgentError::ToolsUnsupported);
             }
-            let owner = self.clone();
-            let preparation = Arc::clone(setup);
-            let (captured, native) = blocking(move || {
-                let definition = prepare_definition(&owner.store, &conversation, &preparation)?;
-                let native = prepare_native(&conversation, definition)?;
-                if native
-                    .turn
-                    .as_ref()
-                    .is_some_and(|turn| turn.round.is_none())
-                {
-                    let mut validated = conversation.checkpoint.clone();
-                    validated.native = Some(native.clone());
-                    let checkpoint = std::mem::replace(&mut conversation.checkpoint, validated);
-                    build_context(&conversation, &preparation)?;
-                    conversation.checkpoint = checkpoint;
-                }
-                Ok((conversation, native))
-            })
-            .await?;
-            conversation = captured;
-            let mut checkpoint = conversation.checkpoint.clone();
-            checkpoint.native = Some(native);
-            self.save_native(
-                &mut conversation,
-                checkpoint,
-                Vec::new(),
-                Arc::clone(&admission),
-            )
-            .await?;
+            conversation = self
+                .capture_native_setup(conversation, Arc::clone(setup), Arc::clone(&admission))
+                .await?;
         } else if conversation.checkpoint.native.is_some()
             || conversation.checkpoint.inputs.has_pending()
         {

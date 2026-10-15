@@ -9,8 +9,9 @@ mod workspace;
 pub use actor::{Scheduler, ShutdownReport};
 pub use tools::{SCHEDULER_TOOL_NAMES, SchedulerToolBinding, SchedulerTools};
 pub use types::{
-    DiscoveryServices, ExecutionPolicy, SchedulerError, SchedulerLimits, SchedulerServices,
-    TaskProviderFactory, TaskSnapshot, TaskSubmission, WaitingReason,
+    DiscoveryServices, ExecutionPolicy, PreparedTaskInputs, SchedulerError, SchedulerLimits,
+    SchedulerServices, TaskPreparation, TaskPreparationRequest, TaskProviderFactory, TaskSnapshot,
+    TaskSubmission, WaitingReason,
 };
 
 pub fn task_snapshot(
