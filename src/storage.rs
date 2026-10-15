@@ -1,14 +1,16 @@
 use rusqlite::{Connection, OptionalExtension, Row, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use std::path::Path;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 use thiserror::Error;
 
-const SCHEMA_VERSION: i64 = 1;
+const SCHEMA_VERSION: i64 = 2;
 const MAX_JSON_BYTES: usize = 1_048_576;
 const MAX_APPEND_EVENTS: usize = 256;
+const MAX_STATE_BYTES: usize = 8 * MAX_JSON_BYTES;
 const MAX_PAGE_SIZE: usize = 1_000;
 const MAX_PAGE_BYTES: usize = 16 * MAX_JSON_BYTES;
 
@@ -34,6 +36,8 @@ pub enum StorageError {
     NotFound { entity: &'static str, id: String },
     #[error("conversation sequence conflict: expected {expected}, found {actual}")]
     SequenceConflict { expected: u64, actual: u64 },
+    #[error("conversation state revision conflict: expected {expected}, found {actual}")]
+    StateRevisionConflict { expected: u64, actual: u64 },
     #[error("command {0} was previously used for a different request")]
     CommandConflict(String),
     #[error("{entity} {id} changed state or cannot make the requested transition")]
@@ -58,6 +62,20 @@ pub struct ConversationRow {
     pub created_at: i64,
     pub updated_at: i64,
     pub last_sequence: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ConversationStateRow {
+    pub conversation_id: String,
+    pub revision: u64,
+    pub payload: Value,
+    pub updated_at: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ConversationStateUpdate {
+    pub expected_revision: u64,
+    pub payload: Value,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -262,6 +280,9 @@ impl Store {
         }
         if version == 0 {
             transaction.execute_batch(include_str!("../migrations/0001_initial.sql"))?;
+        }
+        if version < 2 {
+            transaction.execute_batch(include_str!("../migrations/0002_conversation_state.sql"))?;
             transaction.pragma_update(None, "user_version", SCHEMA_VERSION)?;
         }
         transaction.commit()?;
@@ -309,6 +330,23 @@ impl Store {
             .optional()?)
     }
 
+    pub fn conversation_state(
+        &self,
+        conversation_id: &str,
+    ) -> StorageResult<Option<ConversationStateRow>> {
+        validate_id(conversation_id)?;
+        Ok(self.connection()?.query_row(
+            "SELECT conversation_id, revision, payload, updated_at FROM conversation_states WHERE conversation_id = ?1",
+            [conversation_id],
+            |row| Ok(ConversationStateRow {
+                conversation_id: row.get(0)?,
+                revision: row.get(1)?,
+                payload: decode_json(row, 2)?,
+                updated_at: row.get(3)?,
+            }),
+        ).optional()?)
+    }
+
     pub fn conversations(&self, limit: usize) -> StorageResult<Vec<ConversationRow>> {
         validate_limit(limit)?;
         let connection = self.connection()?;
@@ -319,6 +357,22 @@ impl Store {
     }
 
     pub fn append(&self, request: &AppendRequest) -> StorageResult<AppendOutcome> {
+        self.append_internal(request, None)
+    }
+
+    pub fn append_with_state(
+        &self,
+        request: &AppendRequest,
+        state: &ConversationStateUpdate,
+    ) -> StorageResult<AppendOutcome> {
+        self.append_internal(request, Some(state))
+    }
+
+    fn append_internal(
+        &self,
+        request: &AppendRequest,
+        state: Option<&ConversationStateUpdate>,
+    ) -> StorageResult<AppendOutcome> {
         validate_id(&request.conversation_id)?;
         validate_id(&request.command_id)?;
         validate_sequence(request.expected_sequence)?;
@@ -340,17 +394,34 @@ impl Store {
         if encoded_request.len() > MAX_JSON_BYTES * 4 {
             return invalid("append request exceeds 4 MiB");
         }
+        let encoded_state = state
+            .map(|state| {
+                validate_sequence(state.expected_revision)?;
+                encode_json_with_limit(&state.payload, MAX_STATE_BYTES)
+            })
+            .transpose()?;
+        let state_digest = state
+            .map(|state| {
+                let mut hash = Sha256::new();
+                hash.update(b"everything.conversation.state-update.v1\0");
+                hash.update(serde_json::to_vec(state)?);
+                Ok::<_, StorageError>(format!("{:x}", hash.finalize()))
+            })
+            .transpose()?;
         let mut connection = self.connection()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let previous: Option<(String, String, u64, u64)> = transaction
+        let previous: Option<(String, String, u64, u64, Option<String>)> = transaction
             .query_row(
-                "SELECT conversation_id, request, first_sequence, last_sequence FROM commands WHERE id = ?1",
+                "SELECT conversation_id, request, first_sequence, last_sequence, state_digest FROM commands WHERE id = ?1",
                 [&request.command_id],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
             )
             .optional()?;
-        if let Some((conversation_id, original, first, last)) = previous {
-            if original != encoded_request || conversation_id != request.conversation_id {
+        if let Some((conversation_id, original, first, last, original_state_digest)) = previous {
+            if original != encoded_request
+                || conversation_id != request.conversation_id
+                || original_state_digest != state_digest
+            {
                 return Err(StorageError::CommandConflict(request.command_id.clone()));
             }
             let mut statement = transaction.prepare(
@@ -378,6 +449,32 @@ impl Store {
                 actual,
             });
         }
+        let next_revision = if let Some(state) = state {
+            let actual_revision: u64 = transaction
+                .query_row(
+                    "SELECT revision FROM conversation_states WHERE conversation_id = ?1",
+                    [&request.conversation_id],
+                    |row| row.get(0),
+                )
+                .optional()?
+                .unwrap_or(0);
+            if actual_revision != state.expected_revision {
+                return Err(StorageError::StateRevisionConflict {
+                    expected: state.expected_revision,
+                    actual: actual_revision,
+                });
+            }
+            Some(
+                actual_revision
+                    .checked_add(1)
+                    .filter(|revision| *revision <= i64::MAX as u64)
+                    .ok_or_else(|| {
+                        StorageError::InvalidInput("conversation state revision exhausted".into())
+                    })?,
+            )
+        } else {
+            None
+        };
         let last = actual
             .checked_add(request.events.len() as u64)
             .filter(|value| *value <= i64::MAX as u64)
@@ -404,9 +501,15 @@ impl Store {
             "UPDATE conversations SET last_sequence = ?2, updated_at = max(updated_at, ?3) WHERE id = ?1",
             params![request.conversation_id, last, updated_at],
         )?;
+        if let (Some(revision), Some(payload)) = (next_revision, encoded_state) {
+            transaction.execute(
+                "INSERT INTO conversation_states(conversation_id, revision, payload, updated_at) VALUES (?1, ?2, ?3, (SELECT updated_at FROM conversations WHERE id = ?1)) ON CONFLICT(conversation_id) DO UPDATE SET revision = excluded.revision, payload = excluded.payload, updated_at = max(conversation_states.updated_at, excluded.updated_at)",
+                params![request.conversation_id, revision, payload],
+            )?;
+        }
         transaction.execute(
-            "INSERT INTO commands(id, conversation_id, request, first_sequence, last_sequence) VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![request.command_id, request.conversation_id, encoded_request, actual + 1, last],
+            "INSERT INTO commands(id, conversation_id, request, first_sequence, last_sequence, state_digest) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![request.command_id, request.conversation_id, encoded_request, actual + 1, last, state_digest],
         )?;
         transaction.commit()?;
         Ok(AppendOutcome {
@@ -1006,9 +1109,13 @@ fn parse_json(value: &str, index: usize) -> rusqlite::Result<Value> {
 }
 
 fn encode_json(value: &Value) -> StorageResult<String> {
+    encode_json_with_limit(value, MAX_JSON_BYTES)
+}
+
+fn encode_json_with_limit(value: &Value, max_bytes: usize) -> StorageResult<String> {
     let encoded = serde_json::to_string(value)?;
-    if encoded.len() > MAX_JSON_BYTES {
-        return invalid("JSON payload exceeds 1 MiB");
+    if encoded.len() > max_bytes {
+        return invalid(&format!("JSON payload exceeds {max_bytes} bytes"));
     }
     Ok(encoded)
 }
