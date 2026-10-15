@@ -1,0 +1,31 @@
+# Schedule engine and native admission
+
+`ScheduleEngine::start(Agent, Scheduler, Arc<ToolRegistry>).await` requires the shared host services and actual schema 8. It opens inactive and performs no schedule dispatch. `activate() -> Result<(), EngineError>` enables due/recovery scans. `wake()` is synchronous and coalesces committed schedule edits/manual claims. `status()` returns `EngineStatus`; `subscribe()` returns a process-local watch receiver. Status has active/stopped flags, total blocked-job count, at most 64 blocked previews and a last-error preview of at most 256 characters.
+
+`shutdown().await` stops intake and drains the current admission operation. Ten seconds without completion returns `ShutdownPending`; retain the engine, host lease, broker and native scheduler, then retry. It does not shut down the shared Scheduler or assert that an admitted external effect stopped. Dropping the final handle requests intake shutdown without aborting workers.
+
+## Calendar and admission
+
+`clock::next_after(spec, after, cancellation)` returns the first UTC occurrence strictly after its boundary. `latest_at_or_before(spec, lower_bound, at, cancellation)` includes both bounds and rejects a reversed range. Once/interval preserve milliseconds; cron returns integral seconds. Cron uses existing parser semantics, IANA timezone, skipped gaps and the earliest UTC fold mapping uniformly. Calculation cancellation is an error, while search/candidate/time/year limits are `ClockError::Blocked`, never a false exhausted schedule. Cron local years are 1–5000; stored once/interval instants remain bounded by year 9999. Each calculation admits at most 100000 candidates and one second of cooperative work; one synchronous library call is nonpreemptible.
+
+The fixed realtime audit is one second. Normal lateness is at most five seconds. Captured Latest can additionally admit its latest due occurrence within its configured window. Older prefixes collapse into terminal missed-range history, with no implied count for omitted occurrences. Native queue wait after a durable claim belongs to the original deadline, not a second misfire decision.
+
+`DueClaim` now has `disposition: DueDisposition`, default `Dispatch`, omitted from serialization for that default. Old dispatch claim JSON/digests therefore replay unchanged. `SkipMissedRange { through }` participates in the exact claim digest and writes a terminal `RunOutcome::SkippedMissedRange { through }` in the same transaction as schedule advancement. Through must lie between the original due instant and actual sampled now, and strictly before a supplied next due instant. One-time ranges end at their one instant. The repository validates chronology; the trusted engine calculates actual matching calendar boundaries.
+
+Due eligibility uses sampled realtime. `ScheduledRun.claimed_at` always records that actual admission sample. Only job/run recording timestamps clamp against a previous update after clock rollback. Clamped timestamps never feed eligibility or occurrence deadlines. A later replay returns the original claim, task identity, time and disposition.
+
+## First attempt
+
+`ScheduleRepository::first_attempt(OccurrenceId)` reads an optional `ScheduledAttempt`. `reserve_first_attempt(OccurrenceId, &ExecutionPolicy)` validates bounded input before replay/serialization and reserves immutable first-attempt identities in one immediate Store transaction. Exact existing policy replays; a changed policy conflicts. Attempt 1 requires a claimed run and uses its reserved initial TaskId. The record also reserves an isolated ConversationId, creation/input CommandIds, original accepted time, exact policy and absolute deadline before either Agent create or accept call. It contains no credential or provider override.
+
+`occurrence_deadline(run)` is checked `claimed_at + captured timeout`. It includes queue, approval, offline and retry waiting and never resets at native dispatch. ExecutionPolicy must retain that exact native absolute deadline and remain within the captured workspace/mode/allowlist/request/tool/output ceiling. The four native scheduler controls `spawn_agent`, `send_agent`, `agent_status`, and `cancel_agent` are filtered until aggregate child budgets exist. Live broker permission checks remain mandatory.
+
+Initial request allowance is `min(captured_requests, floor(total_output / per_response_max))`; the remainder remains unused. Issue #52 owns exact cumulative output reservations, additional attempts and retry policy. The current ledger has only an actually used first-attempt row; it has no placeholder retry or acknowledgement tables.
+
+The first-attempt SQL policy is at most 32768 bytes. Application-level validation and SQL length checks precede stored string copies. Immutable identity triggers prohibit updates. Trigger-maintained aggregate policy bytes are at most 64 MiB. Retained history/identities have no pruning or replacement API.
+
+The engine uses Agent's actual exact-ID conversation and command acceptance, then `Scheduler::enqueue` with the captured submission. It never executes a model itself. A scheduler-owned existing snapshot must match the original task, conversation, command, instruction, parent and acceptance time. Previously admitted missing tasks become Unknown rather than replacement work. The scheduled running timestamp observes native durable admission; it does not claim the model had already begun executing. Terminal outcomes come from the durable native scheduler result; ambiguous provider/tool failure becomes Unknown. Unknown continues occupying overlap under the storage contract.
+
+The same isolated history is retained on restart. Provider configuration is the occurrence's immutable capture; the host factory resolves credentials for that destination. No automatic paid retry or owner approval is issued. Optional conversation result delivery and full run policies remain #52 work.
+
+Validation is pending the complete integration walkthrough. Automated calendar, admission, crash, clock, quota and concurrency coverage is deferred to #32.

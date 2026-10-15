@@ -1,0 +1,37 @@
+# Native scheduling
+
+Issue #51 extends the existing host with `scheduling::engine::ScheduleEngine`, the pure `scheduling::clock` calculator, and a durable first-attempt ledger. It uses the host's existing Agent, Scheduler, ToolRegistry, Store and global Tool Broker. It creates no second task runtime, provider gateway or service. Markdown memory and cloud delegation are independent features.
+
+`ScheduleEngine::start(agent, scheduler, registry)` validates the actual schema-8 ledger and starts in a recovery-only inactive state. It performs no schedule dispatch until the host explicitly calls `activate()`. Host composition must finish broker recovery and native scheduler setup before activation. Disabled jobs are absent from due scans. An explicitly claimed manual run can still execute for a disabled job. Construct one engine for the host; SQLite claims and reserved identities remain the durable deduplication boundary.
+
+The engine owns admission and observation, while the native scheduler owns task execution and cleanup. `wake()` follows committed schedule changes or manual claims. `status()` and `subscribe()` expose process-local operational state, bounded diagnostics, total blocked-job count and up to 64 blocked previews. These are hints, not durable event cursors. A restart rescans storage. Full CLI, paired-client status, retries and result publication belong to their following issues.
+
+## Calendar and timer
+
+See [ADR-0005](../decisions/ADR-0005-scheduling-calendar-and-admission.md) for calendar, clock and admission decisions. Once and anchored intervals retain UTC millisecond instants. Croner 4 generates integral-second wall-calendar candidates under the validated native grammar; chrono-tz maps them to instants. Nonexistent wall times are skipped. Repeated wall times use their earliest UTC mapping exactly once, including wildcard patterns. The reverse latest helper accounts for a later fold's wall-future but UTC-past candidates.
+
+Calculations reject overflow, use checked library calendar arithmetic, observe cancellation, and bound candidate work. The cron library's supported year range is narrower than storage's once/interval range. Search limits are explicit blocked errors, not silent exhaustion. A synchronous library call cannot be forcibly interrupted by the outer cooperative budget; it runs under retained blocking-worker admission.
+
+The timer combines Tokio's monotonic sleep with a fixed one-second realtime audit and explicit edit/native-scheduler wakes. It rereads actual wall time before due admission. Tokio sleep alone does not track wall-clock jumps. Recording timestamps may clamp to the record's prior update time; eligibility never uses that clamp. Backward-clock uncertainty cannot extend native authority.
+
+The engine selects the latest due occurrence at or before the sampled wall time. Five seconds is normal lateness. Default missed Skip dispatches that recent occurrence, including after restart, and does not backfill an old backlog. Captured Latest can additionally admit its latest occurrence within its configured window. Older due prefixes are collapsed into one terminal missed-range history entry. No omitted occurrence count is invented. SQLite atomically persists that skip and next-pointer advancement, avoiding a crash gap which could dispatch skipped work.
+
+Due pages are bounded. Temporarily blocked IDs are excluded from the next page so one failed oldest job does not prevent independent due jobs from progressing. Failures use a five-second backoff and visible diagnostics; retained quotas remain fail-closed. Database/source failures do not become successful empty work. Native watch revisions and explicit wakes shorten latency; the one-second audit recovers missed wake hints.
+
+## Durable native admission
+
+The occurrence claim already reserves one immutable native TaskId. Schema 8 reserves the corresponding isolated ConversationId, conversation-creation CommandId, input CommandId, accepted timestamp, exact captured execution policy and absolute deadline before calling either Agent API. The first task identity must equal the occurrence's reservation. All admission fields are immutable, bounded and read with metadata limits before string copies. Aggregate policy storage is capped at 64 MiB; history is retained.
+
+The engine idempotently creates that isolated conversation from the captured provider/model/endpoint configuration, accepts the exact instruction and enqueues the exact TaskSubmission. Restart uses the same IDs and policy. Existing task snapshots must match the original conversation, command, instruction, parent and acceptance time. A missing previously admitted task becomes Unknown, requiring owner reconciliation; it is never replaced. Ambiguous enqueue or finish returns are reconciled against durable state.
+
+Credentials stay in the host's provider factory and are resolved for the saved destination. Native runtime-control tools are filtered from the initial scheduled allowlist because their independent child budgets are not an aggregate occurrence budget. Other tools remain subject to the inherited explicit ceiling and current broker permission checks. No approval or uncertain paid retry is automatic.
+
+The occurrence deadline is original claim time plus captured timeout, including queue, approval, offline and retry waiting. The native absolute-deadline boundary prevents queued work from extending authority at worker start. A completed native result is recorded only through the scheduler's durable terminal identity. Uncertain native failure records Unknown, keeping the existing overlap slot occupied until the later explicit reconciliation mechanism exists.
+
+Initial model-request allowance is the smaller of the captured request count and `floor(total_output / per_response_max)`. This conservatively reserves no more output than the captured ceiling and leaves a remainder unused. Request/tool/duration limits are captured into the actual native policy. Issue #52 adds exact cross-attempt output reservation and bounded retry policy; this implementation does not claim those later features. Optional conversation delivery is captured storage metadata here; execution history remains isolated and result publication is not implemented by #51.
+
+## Lifecycle and validation
+
+`shutdown()` stops schedule intake and drains any current admission operation. It does not shut down the shared native scheduler. A ten-second wait can return ShutdownPending while the worker still owns host services; the host must retain its state lease, engine and global services and retry. Dropping the final engine handle requests the same stop. The engine never aborts a native worker or treats disconnect as proof an external effect stopped.
+
+Implementation validation is in progress. Formatting, Rust 1.88 all-target/all-feature compilation, strict Clippy, release build and focused real Store/Agent/Scheduler inspection are required before integration. The calculator's disposable observations do not prove successful native inference, full clock adjustment behavior, every crash boundary, Apple runtime behavior or production readiness. Automated coverage remains deferred to [#32](https://github.com/izyuumi/everything/issues/32).
