@@ -77,6 +77,7 @@ impl OwnerCommand {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum OwnerQuery {
+    ScheduleEngine,
     Conversations {
         limit: usize,
     },
@@ -289,6 +290,9 @@ impl ConversationWait {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum OwnerQueryResult {
+    ScheduleEngine {
+        status: Box<crate::scheduling::engine::EngineStatus>,
+    },
     Publication {
         status: crate::host::publication::PublicationStatus,
     },

@@ -33,6 +33,9 @@ impl HostInner {
         query: OwnerQuery,
     ) -> Result<OwnerQueryResult, HostError> {
         match query {
+            OwnerQuery::ScheduleEngine => Ok(OwnerQueryResult::ScheduleEngine {
+                status: Box::new(self.schedule_engine.status()),
+            }),
             OwnerQuery::Conversations { limit } => Ok(OwnerQueryResult::Conversations {
                 conversations: self
                     .agent

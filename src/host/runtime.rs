@@ -52,6 +52,8 @@ pub enum HostError {
     #[error(transparent)]
     Scheduler(#[from] SchedulerError),
     #[error(transparent)]
+    ScheduleEngine(#[from] crate::scheduling::engine::EngineError),
+    #[error(transparent)]
     Tool(#[from] ToolError),
     #[error(transparent)]
     Broker(#[from] BrokerError),
@@ -112,6 +114,7 @@ pub(super) struct HostInner {
     pub(super) registry: Arc<ToolRegistry>,
     pub(super) authorizer: Arc<Authorizer>,
     pub(super) scheduler: Scheduler,
+    pub(super) schedule_engine: crate::scheduling::engine::ScheduleEngine,
     pub(super) broker: ToolBroker,
     pub(super) changed: Notify,
     pub(super) mutation: Mutex<()>,
@@ -218,6 +221,19 @@ impl HostService {
                 return Err(error.into());
             }
         };
+        let schedule_engine = match crate::scheduling::engine::ScheduleEngine::start(
+            agent.clone(),
+            scheduler.clone(),
+            registry.clone(),
+        )
+        .await
+        {
+            Ok(engine) => engine,
+            Err(error) => {
+                scheduler.shutdown().await?;
+                return Err(error.into());
+            }
+        };
         let (relay_updates, relay_status) =
             watch::channel(crate::devices::RelaySessionStatus::Stopped);
         let (receipts, _) = watch::channel(0);
@@ -232,6 +248,7 @@ impl HostService {
             registry,
             authorizer,
             scheduler,
+            schedule_engine,
             broker,
             changed: Notify::new(),
             mutation: Mutex::new(()),
@@ -317,7 +334,11 @@ impl HostService {
                 biased;
                 _ = cancellation.cancelled() => break Ok(()),
                 ready = &mut initial_pass => break match ready {
-                    Ok(()) => inner.scheduler.activate().await.map_err(HostError::from),
+                    Ok(()) => async {
+                        inner.scheduler.activate().await?;
+                        inner.schedule_engine.activate()?;
+                        Ok::<_, HostError>(())
+                    }.await,
                     Err(_) => Err(HostError::Worker),
                 },
                 joined = workers.join_next() => match joined {
@@ -376,6 +397,15 @@ impl HostService {
         work_stop.cancel();
         let scheduler_owner = inner.clone();
         let mut shutdown = Some(tokio::spawn(async move {
+            loop {
+                match scheduler_owner.schedule_engine.shutdown().await {
+                    Ok(()) => break,
+                    Err(_) => tracing::error!(
+                        "schedule admission cleanup remains unconfirmed; native scheduler and state ownership retained"
+                    ),
+                }
+                tokio::time::sleep(Duration::from_secs(1)).await;
+            }
             loop {
                 match scheduler_owner.scheduler.shutdown().await {
                     Ok(report) => return Ok::<_, HostError>(report),
@@ -629,6 +659,7 @@ impl HostInner {
             }
             LocalRequestPayload::Wait { request } => {
                 let mut changed = self.scheduler.subscribe();
+                let mut scheduled = self.schedule_engine.subscribe();
                 let mut metadata = self.metadata_changed.subscribe();
                 let conversation = self.agent.conversation(request.conversation_id).await?;
                 if request.after_sequence > conversation.info.last_sequence {
@@ -642,6 +673,7 @@ impl HostInner {
                         result = tokio::time::timeout(Duration::from_millis(request.timeout_ms), async {
                             tokio::select! {
                                 result = changed.changed() => result,
+                                result = scheduled.changed() => result,
                                 result = metadata.changed() => result,
                             }
                         }) => {
