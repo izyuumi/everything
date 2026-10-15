@@ -33,7 +33,7 @@ Rust 1.99.0 is installed. Apple SDKs and Mac hardware are unavailable locally; G
 | [#17](https://github.com/izyuumi/everything/issues/17) | Implement offline permission-aware tool discovery | #5, #11, #16 | Merged (#61); offline discovery |
 | [#18](https://github.com/izyuumi/everything/issues/18) | Implement native macOS background host service | #1, #2, #3 | Library merged (#48); CLI integration pending |
 | [#19](https://github.com/izyuumi/everything/issues/19) | Implement MCP client tool adapter | #5, #14, #17 | Reviewed local integration; native server walkthrough passed; Actions billing blocks merge |
-| [#20](https://github.com/izyuumi/everything/issues/20) | Implement configurable System One classification | #5, #11, #16, #17 | In progress; generic configurable adapter after merged #17 |
+| [#20](https://github.com/izyuumi/everything/issues/20) | Implement configurable System One classification | #5, #11, #16, #17 | Reviewed local integration; offline/native-unavailable/refused-loopback checks passed; live service and native persistence unverified; Actions billing blocks merge |
 | [#21](https://github.com/izyuumi/everything/issues/21) | Implement sqlite-vec hybrid retrieval and index switching | #6, #12, #31 | Backlog |
 | [#22](https://github.com/izyuumi/everything/issues/22) | Implement device pairing and client sync | #2, #3, #7, #13 | Reviewed local integration; real relay/restart/revocation passed; Actions billing blocks merge |
 | [#23](https://github.com/izyuumi/everything/issues/23) | Implement multi-tool agent loop | #8, #9, #10, #14 | In progress; private model-attempt checkpoint prerequisite |
