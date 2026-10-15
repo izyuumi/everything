@@ -12,7 +12,7 @@ use super::{Tool, ToolError, ToolOutput, ToolRegistry};
 
 pub const MAX_BUILTIN_OUTPUT_BYTES: usize = 65_536;
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Default)]
 pub struct BuiltinConfig {
     pub redact_literals: Vec<String>,
 }
