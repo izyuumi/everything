@@ -44,7 +44,7 @@ The focused #21 branch targets the reviewed local prerequisite branch at revisio
 | [#26](https://github.com/izyuumi/everything/issues/26) | Implement wiki consolidation and lint jobs | #6, #16 | Reviewed local integration; required GitHub checks blocked by account billing |
 | [#27](https://github.com/izyuumi/everything/issues/27) | Build optional SwiftUI menu bar client | #18, #25 | Backlog |
 | [#28](https://github.com/izyuumi/everything/issues/28) | Build native iOS E2EE chat client | #13, #22, #25 | Backlog |
-| [#29](https://github.com/izyuumi/everything/issues/29) | Implement optional scoped cloud worker delegation | #24, #25 | Backlog |
+| [#29](https://github.com/izyuumi/everything/issues/29) | Implement optional scoped cloud worker delegation | #24, #25 | Final normal-package Rust gates and genuine Host/native-Gate/encrypted-relay credential-rejection/recovery walkthrough passed with stated limits; focused Rust PR extraction in progress; required CI and successful inference remain unavailable |
 | [#30](https://github.com/izyuumi/everything/issues/30) | META: Dependency roadmap for parallel agent implementation | None | Backlog |
 | [#31](https://github.com/izyuumi/everything/issues/31) | Define generic embedding contract and index fingerprints | #1, #6 | Merged (#42) |
 | [#50](https://github.com/izyuumi/everything/issues/50) | Persist scheduled jobs and immutable run history | #2, #3, #10; migration order after #22/private checkpoints | Reviewed local integration; real schema 3→6, claims/races/restart and full static/release validation passed; Actions billing blocks merge |
@@ -67,3 +67,11 @@ Automated test creation is deliberately deferred under the mission's explicit no
 ## External integration blocker
 
 GitHub Actions refused new jobs before startup because account payments failed or the spending limit needs attention. The owner was notified with the exact check annotation. Main remains at `570c36f`; local integration is a separate reviewed branch and does not close implementation issues. Required repository checks and merge protection remain in force.
+
+## Scoped worker delegation
+
+Issue29 is implemented in the focused Rust source over the reviewed published PR92 and PR88 dependency closure. It composes the same native kernel, an explicit dedicated executor, owner-only Host preparation/delegation, immutable root reservations, purpose-scoped encrypted transport, cancellation/revocation recovery and opaque atomic result receipts. Schema10–12 and [ADR-0008](../decisions/ADR-0008-scoped-worker-authority.md) record the durable boundaries.
+
+The frozen aggregate source d273c52 passed six normal-package Rust1.88 gates and a real production Host/native-Gate/encrypted-relay CredentialUnavailable rejection/replay/restart walkthrough, with eight owned services joined. [Worker validation](../development/worker.md#combined-host-validation-checkpoint) preserves exact source/artifact provenance, read-only audit and earlier separately seeded/supplied-input qualifications. The newly extracted focused tree still requires its own gates and runtime/parity review before publication; aggregate evidence does not establish that new tree automatically.
+
+Successful paid inference, positive native credential writes, hard arbitrary-code/resource isolation, active-parent/nested delegation, automatic artifact application, Apple runtime and security review are not verified or supported by this profile. Cancellation and revocation retain intent and charge, not stop proof. Automated acceptance remains deferred to issue32. Required CI and normal merge enforcement remain in force; local evidence closes neither this issue nor its prerequisites.

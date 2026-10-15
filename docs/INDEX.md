@@ -17,3 +17,11 @@ Read [AGENTS.md](../AGENTS.md), then [implementation status](status/implementati
 ## Decisions
 
 [ADR-0001: Host authority and local-first boundaries](decisions/ADR-0001-host-authority.md) · [ADR-0002: Local EmbeddingGemma 2 ONNX](decisions/ADR-0002-local-embeddinggemma2-onnx.md) · [ADR-0003: Native MCP SDK](decisions/ADR-0003-native-mcp-sdk.md) · [ADR-0004: Scoped SQLite vector indexing](decisions/ADR-0004-scoped-sqlite-vector-index.md) · [ADR-0005: Scheduling calendar and admission](decisions/ADR-0005-scheduling-calendar-and-admission.md)
+
+## Worker delegation
+
+[Architecture](architecture/cloud-worker.md) · [Worker protocol](contracts/worker.md) · [Staging](contracts/worker-staging.md) · [Executor](contracts/worker-executor.md) · [Terminal sources](contracts/worker-terminal-sources.md) · [Bridge](contracts/worker-bridge.md) · [Revocation](contracts/worker-revocation.md)
+
+[Native reservations](contracts/remote-tasks.md) · [Binding lookup](contracts/remote-binding-lookup.md) · [Attributed reports](contracts/remote-results.md) · [Atomic external storage](contracts/external-task-storage.md) · [Native result admission](contracts/remote-result-admission.md)
+
+[Host data](contracts/host-worker.md) · [Host service](contracts/host-worker-service.md) · [Host admission](contracts/host-worker-admission.md) · [Validation](development/worker.md) · [Files](development/worker-files.md) · [Coordinator CLI](development/worker-coordinator-cli.md) · [ADR-0008: Scoped worker authority](decisions/ADR-0008-scoped-worker-authority.md)
