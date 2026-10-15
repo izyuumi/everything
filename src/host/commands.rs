@@ -487,13 +487,20 @@ impl HostInner {
         let effective = self.capture_command(&input).await?;
         let saved = self
             .blocking(move |host| {
-                Ok(host.inbox.reserve(
-                    &input,
-                    &original,
-                    &origin,
-                    &serde_json::to_value(effective)?,
-                    UnixMillis::now()?,
-                )?)
+                let options = serde_json::to_value(effective)?;
+                let now = UnixMillis::now()?;
+                let reservation = host
+                    .inbox
+                    .reserve(&input, &original, &origin, &options, now);
+                match reservation {
+                    Err(InboxError::Capacity) => {
+                        host.inbox.archive(now)?;
+                        Ok(host
+                            .inbox
+                            .reserve(&input, &original, &origin, &options, now)?)
+                    }
+                    result => Ok(result?),
+                }
             })
             .await?;
         self.changed.notify_one();
