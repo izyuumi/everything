@@ -8,6 +8,7 @@ use super::wiki::{Provenance, WikiError, WikiLink, WikiPage, validate_page_path}
 
 const APPLICATION_ID: i32 = 0x4557_494b;
 const SCHEMA_VERSION: i32 = 1;
+const MAX_BACKLINK_BYTES: usize = 16 * 1024 * 1024;
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct SyncReport {
@@ -81,7 +82,7 @@ impl WikiIndex {
                     start_line INTEGER NOT NULL,
                     end_line INTEGER NOT NULL
                 );
-                CREATE INDEX wiki_links_target ON wiki_links(target_page);
+                CREATE INDEX wiki_links_target ON wiki_links(target_page, page_path, start_line);
                 CREATE VIRTUAL TABLE wiki_fts USING fts5(
                     chunk_id UNINDEXED,
                     page_path UNINDEXED,
@@ -184,11 +185,25 @@ impl WikiIndex {
             });
         }
         let mut statement = self.connection.prepare(
-            "SELECT raw_target, target_page, target_fragment, label, page_path, start_line, end_line
+            "SELECT raw_target, target_page, target_fragment, label, page_path, start_line, end_line,
+                    length(CAST(raw_target AS BLOB)) + length(CAST(target_page AS BLOB)) +
+                    coalesce(length(CAST(target_fragment AS BLOB)), 0) +
+                    length(CAST(label AS BLOB)) + length(CAST(page_path AS BLOB))
              FROM wiki_links WHERE target_page = ?1 ORDER BY page_path, start_line, rowid LIMIT ?2",
         )?;
-        let links = statement.query_map(params![path, limit as i64], |row| {
-            Ok(WikiLink {
+        let mut rows = statement.query(params![path, limit as i64])?;
+        let mut links = Vec::with_capacity(limit);
+        let mut materialized_bytes = limit * size_of::<WikiLink>();
+        while let Some(row) = rows.next()? {
+            let row_bytes: usize = row.get(7)?;
+            materialized_bytes = materialized_bytes.saturating_add(row_bytes);
+            if materialized_bytes > MAX_BACKLINK_BYTES {
+                return Err(WikiError::Limit {
+                    resource: "backlink page bytes",
+                    limit: MAX_BACKLINK_BYTES,
+                });
+            }
+            links.push(WikiLink {
                 raw_target: row.get(0)?,
                 target_page: row.get(1)?,
                 target_fragment: row.get(2)?,
@@ -198,11 +213,9 @@ impl WikiIndex {
                     start_line: row.get(5)?,
                     end_line: row.get(6)?,
                 },
-            })
-        })?;
-        links
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(WikiError::from)
+            });
+        }
+        Ok(links)
     }
 
     pub(crate) fn upsert_page(&mut self, page: &WikiPage) -> Result<(), WikiError> {
