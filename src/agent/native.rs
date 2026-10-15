@@ -460,6 +460,7 @@ impl Agent {
                         LoopStatus::ProviderInFlight { .. } => {
                             let mut checkpoint = conversation.checkpoint.clone(); turn_mut(&mut checkpoint)?.status = LoopStatus::Ready;
                             agent.save_native(&mut conversation, checkpoint, Vec::new(), Arc::clone(&admission)).await?;
+                            continue;
                         }
                         LoopStatus::Paused { reason } => {
                             if matches!(reason, PauseReason::OperationInFlight { .. }) || (setup.provider_resume == ProviderResume::RetryUncertain && matches!(reason, PauseReason::Cancellation | PauseReason::InterruptedTool)) {
