@@ -52,6 +52,14 @@ Other query kinds include `conversations`, `conversation`, `tasks`, `task`, `app
 {"kind":"query","query":{"kind":"approval","conversation_id":"CONVERSATION_UUID","lookup":{"by":"approval","id":"approval:EXACT_ID"}}}
 ```
 
+The same owner input can submit an existing domain command and wait for its durable command receipt. This covers exact operation permission decisions and cancellation for root or spawned tasks:
+
+```json
+{"kind":"command","command":{"schema_version":1,"command_id":"UNIQUE_COMMAND_UUID","conversation_id":"CONVERSATION_UUID","issuing_device_id":null,"issued_at":1792091546149,"payload":{"kind":"cancel_task","task_id":"TASK_UUID"}}}
+```
+
+Preserve the complete envelope and its command ID after an ambiguous response. This CLI variant accepts only the complete current typed representation, including nullable fields, and explicitly rejects unknown fields at any envelope/payload/message level. It never silently drops additive metadata before host identity comparison. Domain IPC itself retains its broader additive-field contract. A Completed receipt establishes command application, not completion of the target task or proof of tool cleanup. A disposable Rust 1.88 release walkthrough used the actual headless host and CLI to resolve a real shell authorization request, replay its exact receipt, cancel a managed task, and reject changed decisions, unknown envelope/payload fields and an omitted nullable field. It did not execute the shell or make a successful model request.
+
 Settings updates use an operation containing `kind: replace_settings`, the expected current revision, and the complete edited settings object. Preserve the schema and revision returned by the query. Recurring default loop limits reject an absolute execution deadline; per-occurrence scheduling captures its own deadline. A changed relay origin returns `restart_required` and takes effect only after restart. No default relay or model is selected automatically.
 
 For a model credential, the input can select `credential_environment` with an exact `ModelCredentialReference` binding. The CLI reads only that provider's `OPENAI_API_KEY` or `ANTHROPIC_API_KEY` from its environment, transfers it through authenticated ephemeral IPC, and prints no secret. The binding specifies `provider`, the official or explicit canonical loopback `endpoint`, a non-nil UUID `reference`, and `storage: session` or `native`. Add the same non-secret binding to settings in a separate revision-checked operation. Session secrets expire with the host; native secrets use the platform credential backend and never fall back to a plaintext file. Configured-but-missing references do not silently use an environment credential. Official provider environment fallback is available only when no reference is configured for that endpoint.

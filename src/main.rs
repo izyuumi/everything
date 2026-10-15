@@ -73,6 +73,9 @@ enum OwnerInput {
     Query {
         query: everything::ipc::OwnerQuery,
     },
+    Command {
+        command: serde_json::Value,
+    },
     Operation {
         operation: Box<everything::ipc::OwnerOperation>,
         request_id: Option<CommandId>,
@@ -454,6 +457,14 @@ async fn owner_cli(
             .await
         }
         OwnerInput::Query { query } => write_json(client.query(query, cancellation).await?).await,
+        OwnerInput::Command { command } => {
+            let typed: everything::protocol::CommandEnvelope =
+                serde_json::from_value(command.clone()).map_err(|_| CliError::OwnerInput)?;
+            if serde_json::to_value(&typed).map_err(|_| CliError::Serialization)? != command {
+                return Err(CliError::OwnerInput);
+            }
+            write_json(client.submit_domain(typed, cancellation).await?).await
+        }
         OwnerInput::Operation {
             operation,
             request_id,
