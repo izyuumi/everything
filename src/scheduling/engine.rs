@@ -62,6 +62,7 @@ pub struct EngineStatus {
     pub last_error: Option<String>,
     pub pending_deliveries: usize,
     pub delivery_error: Option<String>,
+    pub delivery_preparation_error: Option<String>,
 }
 
 #[derive(Clone)]
@@ -581,8 +582,20 @@ impl Actor {
 
     async fn process_deliveries(&mut self) -> Result<(), EngineError> {
         let now = wall_now()?;
-        self.work(move |repository, _| Ok(repository.prepare_terminal_deliveries(BATCH, now)?))
-            .await?;
+        match self
+            .work(move |repository, _| Ok(repository.prepare_terminal_deliveries(BATCH, now)?))
+            .await
+        {
+            Ok(progress) if progress > 0 => self
+                .status
+                .send_modify(|status| status.delivery_preparation_error = None),
+            Ok(_) => {}
+            Err(EngineError::Cancelled) => return Err(EngineError::Cancelled),
+            Err(error) => self.status.send_modify(|status| {
+                status.delivery_preparation_error =
+                    Some(error.to_string().chars().take(256).collect())
+            }),
+        }
         let cursor = self.delivery_cursor;
         let deliveries = self
             .work(move |repository, _| Ok(repository.pending_deliveries(cursor, BATCH)?))
