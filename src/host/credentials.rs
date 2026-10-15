@@ -2,13 +2,18 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::sync::{Arc, Mutex};
 
+use async_trait::async_trait;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use tokio_util::sync::CancellationToken;
 
 use crate::agent::{ConversationConfig, ProviderEndpoint, ProviderKind};
 use crate::credentials::{CredentialError, CredentialSecret, NativeCredentialStore};
 
+use super::mcp::{McpEnvironmentBinding, McpEnvironmentResolver};
 use super::settings::{CredentialStorage, HostSettings, ModelCredentialReference};
+
+const MAX_SESSION_CREDENTIALS: usize = 128;
+const MAX_MODEL_SESSION_CREDENTIALS: usize = 16;
 
 #[derive(Clone)]
 pub struct SecretTransfer(Arc<CredentialSecret>);
@@ -54,6 +59,13 @@ pub enum CredentialOperation {
     Remove {
         binding: ModelCredentialReference,
     },
+    StoreMcp {
+        binding: McpEnvironmentBinding,
+        secret: SecretTransfer,
+    },
+    RemoveMcp {
+        binding: McpEnvironmentBinding,
+    },
 }
 
 struct EnvironmentCredential {
@@ -95,26 +107,22 @@ impl CredentialVault {
     }
 
     pub async fn apply(&self, operation: CredentialOperation) -> Result<(), CredentialError> {
-        let binding = match &operation {
+        match &operation {
             CredentialOperation::Store { binding, .. }
-            | CredentialOperation::Remove { binding } => binding,
-        };
-        binding
-            .validate()
-            .map_err(|_| CredentialError::InvalidKey)?;
+            | CredentialOperation::Remove { binding } => {
+                binding
+                    .validate()
+                    .map_err(|_| CredentialError::InvalidKey)?;
+            }
+            CredentialOperation::StoreMcp { binding, .. }
+            | CredentialOperation::RemoveMcp { binding } => {
+                binding.scope_key()?;
+            }
+        }
         match operation {
             CredentialOperation::Store { binding, secret } => match binding.storage {
                 CredentialStorage::Session => {
-                    let mut session = self
-                        .session
-                        .lock()
-                        .map_err(|_| CredentialError::Unavailable)?;
-                    let key = binding.scope_key();
-                    if !session.contains_key(&key) && session.len() >= 16 {
-                        return Err(CredentialError::Busy);
-                    }
-                    session.insert(key, secret.0);
-                    Ok(())
+                    self.store_session(format!("model:{}", binding.scope_key()), secret.0, true)
                 }
                 CredentialStorage::Native => {
                     self.native
@@ -130,12 +138,64 @@ impl CredentialVault {
                     self.session
                         .lock()
                         .map_err(|_| CredentialError::Unavailable)?
-                        .remove(&binding.scope_key());
+                        .remove(&format!("model:{}", binding.scope_key()));
+                    Ok(())
+                }
+                CredentialStorage::Native => self.native.delete(binding.credential_key()?).await,
+            },
+            CredentialOperation::StoreMcp { binding, secret } => match binding.storage {
+                CredentialStorage::Session => {
+                    self.store_session(format!("mcp:{}", binding.scope_key()?), secret.0, false)
+                }
+                CredentialStorage::Native => {
+                    self.native
+                        .store(
+                            binding.credential_key()?,
+                            CredentialSecret::new(secret.0.expose().to_vec())?,
+                        )
+                        .await
+                }
+            },
+            CredentialOperation::RemoveMcp { binding } => match binding.storage {
+                CredentialStorage::Session => {
+                    self.session
+                        .lock()
+                        .map_err(|_| CredentialError::Unavailable)?
+                        .remove(&format!("mcp:{}", binding.scope_key()?));
                     Ok(())
                 }
                 CredentialStorage::Native => self.native.delete(binding.credential_key()?).await,
             },
         }
+    }
+
+    pub fn native_store(&self) -> NativeCredentialStore {
+        self.native.clone()
+    }
+
+    fn store_session(
+        &self,
+        key: String,
+        secret: Arc<CredentialSecret>,
+        model: bool,
+    ) -> Result<(), CredentialError> {
+        let mut session = self
+            .session
+            .lock()
+            .map_err(|_| CredentialError::Unavailable)?;
+        if !session.contains_key(&key)
+            && (session.len() >= MAX_SESSION_CREDENTIALS
+                || model
+                    && session
+                        .keys()
+                        .filter(|key| key.starts_with("model:"))
+                        .count()
+                        >= MAX_MODEL_SESSION_CREDENTIALS)
+        {
+            return Err(CredentialError::Busy);
+        }
+        session.insert(key, secret);
+        Ok(())
     }
 
     pub async fn resolve(
@@ -169,8 +229,39 @@ impl CredentialVault {
                 .session
                 .lock()
                 .map_err(|_| CredentialError::Unavailable)?
-                .get(&binding.scope_key())
+                .get(&format!("model:{}", binding.scope_key()))
                 .cloned()),
+            CredentialStorage::Native => self
+                .native
+                .read(binding.credential_key()?, cancellation)
+                .await
+                .map(|secret| secret.map(Arc::new)),
+        }
+    }
+}
+
+#[async_trait]
+impl McpEnvironmentResolver for CredentialVault {
+    async fn resolve(
+        &self,
+        binding: &McpEnvironmentBinding,
+        cancellation: CancellationToken,
+    ) -> Result<Option<Arc<CredentialSecret>>, CredentialError> {
+        if cancellation.is_cancelled() {
+            return Err(CredentialError::Cancelled);
+        }
+        let key = binding.scope_key()?;
+        match binding.storage {
+            CredentialStorage::Session => {
+                let session = self
+                    .session
+                    .lock()
+                    .map_err(|_| CredentialError::Unavailable)?;
+                if cancellation.is_cancelled() {
+                    return Err(CredentialError::Cancelled);
+                }
+                Ok(session.get(&format!("mcp:{key}")).cloned())
+            }
             CredentialStorage::Native => self
                 .native
                 .read(binding.credential_key()?, cancellation)
