@@ -1075,7 +1075,7 @@ impl Actor {
             if repository::cancelled_ancestor(&self.store(), id)? {
                 progress = true;
                 task.checkpoint.cancel_requested = true;
-                let uncertainty = native_waiting(&conversation, &task).filter(|reason| {
+                let mut uncertainty = native_waiting(&conversation, &task).filter(|reason| {
                     matches!(
                         reason,
                         WaitingReason::ProviderUncertain { .. }
@@ -1083,6 +1083,9 @@ impl Actor {
                             | WaitingReason::InFlight
                     )
                 });
+                if repository::has_unknown_operations(&self.store(), id)? && uncertainty.is_none() {
+                    uncertainty = Some(WaitingReason::Reconciliation);
+                }
                 if self.services.broker.is_quarantined()
                     || repository::has_running_operations(&self.store(), id)?
                 {
@@ -1206,13 +1209,29 @@ impl Actor {
                 }
             }
             ExecutionStop::Cancelled => {
+                let unknown = repository::has_unknown_operations(&self.store(), outcome.task_id)?;
                 if task.checkpoint.cancel_requested
                     || repository::cancelled_ancestor(&self.store(), outcome.task_id)?
                 {
-                    task.checkpoint.waiting = None;
-                    repository::save(&self.store(), &mut task, TaskStatus::Cancelled)?;
+                    if self.services.broker.is_quarantined()
+                        || repository::has_running_operations(&self.store(), outcome.task_id)?
+                    {
+                        task.checkpoint.waiting = Some(WaitingReason::Reconciliation);
+                        save_waiting(&self.store(), &mut task)?;
+                    } else if unknown {
+                        task.checkpoint.waiting = Some(WaitingReason::Reconciliation);
+                        task.checkpoint.diagnostic = Some("Task cancelled with an immutable unknown tool outcome; owner reconciliation remains required".into());
+                        repository::save(&self.store(), &mut task, TaskStatus::Failed)?;
+                    } else {
+                        task.checkpoint.waiting = None;
+                        repository::save(&self.store(), &mut task, TaskStatus::Cancelled)?;
+                    }
                 } else {
-                    task.checkpoint.waiting = Some(WaitingReason::Stopped);
+                    task.checkpoint.waiting = Some(if unknown {
+                        WaitingReason::Reconciliation
+                    } else {
+                        WaitingReason::Stopped
+                    });
                     repository::save(&self.store(), &mut task, TaskStatus::WaitingForChildren)?;
                 }
             }
@@ -1225,12 +1244,18 @@ impl Actor {
                     if !self.services.broker.is_quarantined()
                         && !repository::has_running_operations(&self.store(), outcome.task_id)?
                     {
-                        let unknown = matches!(
-                            reason,
-                            WaitingReason::ProviderUncertain { .. }
-                                | WaitingReason::Reconciliation
-                                | WaitingReason::InFlight
-                        );
+                        let journal_unknown =
+                            repository::has_unknown_operations(&self.store(), outcome.task_id)?;
+                        let unknown = journal_unknown
+                            || matches!(
+                                reason,
+                                WaitingReason::ProviderUncertain { .. }
+                                    | WaitingReason::Reconciliation
+                                    | WaitingReason::InFlight
+                            );
+                        if journal_unknown {
+                            task.checkpoint.waiting = Some(WaitingReason::Reconciliation);
+                        }
                         task.checkpoint.diagnostic=Some(if unknown{"Task execution cancelled; its previous native outcome remains uncertain and is not retryable"}else{"Task execution and queued follow-up commands cancelled"}.into());
                         repository::save(
                             &self.store(),

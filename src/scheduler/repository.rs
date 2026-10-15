@@ -28,6 +28,14 @@ pub(super) fn has_running_operations(store: &Store, id: TaskId) -> Result<bool, 
     )?)
 }
 
+pub(super) fn has_unknown_operations(store: &Store, id: TaskId) -> Result<bool, SchedulerError> {
+    Ok(store.connection()?.query_row(
+        "SELECT EXISTS(SELECT 1 FROM tool_calls WHERE task_id=?1 AND state='unknown')",
+        [id.to_string()],
+        |row| row.get(0),
+    )?)
+}
+
 pub(super) fn encode(value: &impl Serialize) -> Result<Value, SchedulerError> {
     let encoded = serde_json::to_vec(value)?;
     if encoded.len() > MAX_TASK_BYTES {
