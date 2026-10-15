@@ -474,7 +474,7 @@ fn insert_run(
     now: UnixMillis,
 ) -> ScheduleResult<ScheduledRun> {
     let active: i64 = connection.query_row(
-        "SELECT count(*) FROM scheduled_runs WHERE job_id=?1 AND state IN ('claimed','running')",
+        "SELECT count(*) FROM scheduled_runs WHERE job_id=?1 AND state IN ('claimed','running','unknown')",
         [job.id.to_string()],
         |row| row.get(0),
     )?;
