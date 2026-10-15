@@ -6,7 +6,7 @@
 
 `Store::open(path)` opens or creates a database at an existing parent directory. Startup enables foreign keys, WAL, full synchronous durability, and a five-second busy timeout before applying `migrations/0001_initial.sql` in an immediate transaction. The schema version is SQLite `user_version`; newer databases are rejected. `open_in_memory` uses the same migration and constraints, with SQLite's in-memory journal mode because WAL is unavailable for memory databases. There is no backup or restore API.
 
-The schema contains conversations, ordered events, command deduplication records, tasks, tool calls, permission grants, devices, and encrypted outbox envelopes. All tables use SQLite STRICT typing. Foreign keys reject dangling references. Parent tasks and associated tool calls must belong to their conversation. IDs are nonempty strings of at most 256 bytes without control characters; domain UUID interpretation belongs to `protocol`. JSON payloads are opaque to storage and limited to 1 MiB each. All timestamps are nonnegative Unix milliseconds. Callers own access control and semantic validation of opaque data.
+The schema contains conversations, ordered events, command deduplication records, tasks, tool calls, permission grants, devices, and encrypted outbox envelopes. All tables use SQLite STRICT typing. Foreign keys reject dangling references. Parent tasks must exist and may belong to another conversation so child agents can isolate their histories. Associated tool calls must belong to their task's conversation. The scheduler owns parent authority inheritance and child lifecycle enforcement. IDs are nonempty strings of at most 256 bytes without control characters; domain UUID interpretation belongs to `protocol`. JSON payloads are opaque to storage and limited to 1 MiB each. All timestamps are nonnegative Unix milliseconds. Callers own access control and semantic validation of opaque data.
 
 ## Conversation events and commands
 
@@ -22,7 +22,7 @@ An exact retry of a committed append returns its original rows with `AppendOutco
 
 ## Tasks and tool operations
 
-`create_task` creates a queued task with opaque input and checkpoint JSON. `task` and `tasks` read tasks, optionally filtering by conversation and state. `transition_task` atomically compares the previous state and writes a new checkpoint and timestamp. `checkpoint_task` updates a nonterminal task without transitioning. Timestamps may not move backward. Terminal tasks cannot be reopened.
+`create_task` creates a queued task with opaque input and checkpoint JSON. A parent task may span conversations, while tool calls remain bound to their task's conversation. `task` and `tasks` read tasks, optionally filtering by conversation and state. `transition_task` atomically compares the previous state and writes a new checkpoint and timestamp. `checkpoint_task` updates a nonterminal task without transitioning. Timestamps may not move backward. Terminal tasks cannot be reopened.
 
 Allowed task transitions are queued → running/failed/cancelled, running → queued/waiting/completed/failed/cancelled, and waiting → queued/running/failed/cancelled. Running → queued exists for deliberate recovery after the caller reconciles external effects. Storage never automatically replays task or tool side effects.
 
@@ -34,7 +34,7 @@ Allowed task transitions are queued → running/failed/cancelled, running → qu
 
 ## Permissions, devices, and delivery
 
-`create_permission` persists opaque policy data with optional conversation scope and expiration. `active_permissions(conversation_id, now, limit)` returns unrevoked, unexpired grants created by `now`, including global grants and the requested conversation's grants. An expiration equal to `now` is expired. `revoke_permission` records revocation with a compare-and-update operation. The policy engine owns grant interpretation and applicability checks. This method returns `PermissionLimitExceeded` when the complete active set exceeds the requested limit; policy evaluation must fail closed rather than evaluate a truncated set. The read-byte budget also applies.
+`permission(id)` reads an exact permission record including expired or revoked state, enabling durable approval and revocation recovery. `create_permission` persists opaque policy data with optional conversation scope and expiration. `active_permissions(conversation_id, now, limit)` returns unrevoked, unexpired grants created by `now`, including global grants and the requested conversation's grants. An expiration equal to `now` is expired. `revoke_permission` records revocation with a compare-and-update operation. The policy engine owns grant interpretation and applicability checks. This method returns `PermissionLimitExceeded` when the complete active set exceeds the requested limit; policy evaluation must fail closed rather than evaluate a truncated set. The read-byte budget also applies.
 
 `create_device` persists the public identity metadata supplied by transport; no private keys belong in that payload. `device` and `devices` expose registrations. Crypto verification and proof of possession belong to transport. `revoke_device` atomically revokes registration and removes pending outbound envelopes for the revoked device. Revocation cannot be undone through this API.
 
