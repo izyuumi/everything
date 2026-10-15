@@ -1,6 +1,7 @@
 pub mod acknowledgements;
 pub mod attempts;
 pub mod clock;
+pub mod commands;
 pub mod controls;
 pub mod delivery;
 pub mod engine;
