@@ -693,6 +693,14 @@ impl Store {
         Ok(())
     }
 
+    pub fn permission(&self, id: &str) -> StorageResult<Option<PermissionRow>> {
+        validate_id(id)?;
+        Ok(self.connection()?.query_row(
+            "SELECT id, conversation_id, payload, created_at, expires_at, revoked_at FROM permissions WHERE id = ?1",
+            [id], permission_row,
+        ).optional()?)
+    }
+
     pub fn active_permissions(
         &self,
         conversation_id: Option<&str>,
