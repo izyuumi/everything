@@ -325,7 +325,7 @@ impl EmbeddingGemma2 {
             return Err(native(EmbeddingGemma2Error::GraphContract));
         }
         let revision = format!(
-            "source={SOURCE_MODEL_REVISION};onnx={ONNX_MODEL_REVISION};bundle={artifact_fingerprint};runtime={}",
+            "source_ref={SOURCE_MODEL_REVISION};onnx={ONNX_MODEL_REVISION};bundle={artifact_fingerprint};runtime={}",
             runtime.library_sha256
         );
         let preprocessing = EmbeddingPreprocessing::new(
