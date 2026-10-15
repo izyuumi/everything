@@ -1,0 +1,65 @@
+name: Local embedding benchmark
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - 'src/memory/embedding/**'
+      - 'src/bin/everything-embedding-bench.rs'
+      - '.github/workflows/embedding-benchmark.yml'
+permissions:
+  contents: read
+jobs:
+  embedding:
+    runs-on: macos-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install --only-binary=:all: onnxruntime==1.31.0
+      - name: Provision pinned public model artifacts
+        env:
+          MODEL_ROOT: ${{ runner.temp }}/embeddinggemma2
+        run: |
+          python - <<'PY'
+          import os
+          import pathlib
+          import shutil
+          import urllib.request
+          root = pathlib.Path(os.environ['MODEL_ROOT'])
+          revision = 'daa72c51243991dfcaf9f9137d2c573d8f7790c0'
+          base = f'https://huggingface.co/onnx-community/embeddinggemma-2-ONNX/resolve/{revision}'
+          for name in ['config.json', 'tokenizer.json', 'onnx/model.onnx', 'onnx/model.onnx_data']:
+              destination = root / name
+              destination.parent.mkdir(parents=True, exist_ok=True)
+              with urllib.request.urlopen(f'{base}/{name}', timeout=120) as response:
+                  with destination.open('wb') as output:
+                      shutil.copyfileobj(response, output, 1024 * 1024)
+              print(f'Downloaded {name}: {destination.stat().st_size} bytes')
+          PY
+      - run: cargo build --release --locked --features local-embeddings --bin everything-embedding-bench
+      - name: Run native CPU benchmark
+        env:
+          MODEL_ROOT: ${{ runner.temp }}/embeddinggemma2
+        run: |
+          runtime_library=$(python - <<'PY'
+          import pathlib
+          import onnxruntime
+          libraries = list((pathlib.Path(onnxruntime.__file__).parent / 'capi').glob('libonnxruntime*.dylib'))
+          if len(libraries) != 1:
+              raise SystemExit('Expected exactly one native ONNX Runtime library')
+          print(libraries[0].resolve())
+          PY
+          )
+          /usr/bin/time -l target/release/everything-embedding-bench --runtime-library "$runtime_library" --model-dir "$MODEL_ROOT" --threads 2 --max-tokens 2048 --repetitions 3 --warmup-iterations 1 --inference-timeout-seconds 30 --load-timeout-seconds 120 --deadline-seconds 600 > embedding-report.json 2> embedding-process.txt
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: embedding-macos-report
+          path: |
+            embedding-report.json
+            embedding-process.txt
+          if-no-files-found: ignore

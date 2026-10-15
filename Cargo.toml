@@ -5,6 +5,7 @@ edition = "2024"
 rust-version = "1.85"
 license = "Apache-2.0"
 description = "Local-first native AI agent host"
+default-run = "everything"
 
 [workspace]
 members = ["relay"]
@@ -20,7 +21,7 @@ uuid = { version = "1", features = ["serde", "v4"] }
 async-trait = "0.1"
 futures-core = "0.3"
 tokio-util = { version = "0.7", features = ["rt"] }
-tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "time", "sync"] }
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "time", "sync", "signal"] }
 jsonschema = { version = "0.58", default-features = false }
 rusqlite = { version = "0.37", features = ["bundled"] }
 pulldown-cmark = "0.13"
@@ -40,3 +41,24 @@ async-stream = "0.3"
 futures-util = "0.3"
 bytes = "1"
 url = "2"
+
+[features]
+default = []
+local-embeddings = ["dep:ort", "dep:tokenizers"]
+
+[dependencies.ort]
+version = "=2.0.0-rc.10"
+default-features = false
+features = ["std", "load-dynamic"]
+optional = true
+
+[[bin]]
+name = "everything-embedding-bench"
+path = "src/bin/everything-embedding-bench.rs"
+required-features = ["local-embeddings"]
+
+[dependencies.tokenizers]
+version = "=0.22.2"
+default-features = false
+features = ["fancy-regex"]
+optional = true
