@@ -329,12 +329,6 @@ struct Checkpoint {
     inputs: steering::InputInbox,
 }
 
-#[cfg(unix)]
-struct ForegroundState {
-    _directory: crate::service::state::StateDirectory,
-    _lock: std::fs::File,
-}
-
 #[derive(Clone)]
 pub struct Agent {
     store: Store,
@@ -342,7 +336,7 @@ pub struct Agent {
     acceptance: Arc<Mutex<()>>,
     writes: Arc<AdmissionMutex<HashMap<ConversationId, Weak<Mutex<()>>>>>,
     #[cfg(unix)]
-    _foreground: Option<Arc<ForegroundState>>,
+    _foreground: Option<Arc<crate::service::StateLease>>,
 }
 
 impl Agent {
@@ -364,39 +358,11 @@ impl Agent {
     pub async fn open(path: impl AsRef<Path>) -> Result<Self, AgentError> {
         #[cfg(unix)]
         {
-            let path = path.as_ref().to_path_buf();
+            let lease = crate::service::StateLease::acquire(path).await?;
             blocking(move || {
-                use rustix::fs::{FileType, Mode, OFlags};
-                let directory = crate::service::state::StateDirectory::open(&path, true)?;
-                let lock = directory.lock()?;
-                let file = rustix::fs::openat(
-                    &directory.file,
-                    "everything.sqlite3",
-                    OFlags::RDWR
-                        | OFlags::CREATE
-                        | OFlags::NOFOLLOW
-                        | OFlags::CLOEXEC
-                        | OFlags::NONBLOCK,
-                    Mode::from_raw_mode(0o600),
-                )
-                .map_err(io::Error::from)?;
-                let metadata = rustix::fs::fstat(&file).map_err(io::Error::from)?;
-                if FileType::from_raw_mode(metadata.st_mode) != FileType::RegularFile
-                    || metadata.st_uid != directory.uid
-                    || metadata.st_mode & 0o7777 != 0o600
-                    || metadata.st_nlink != 1
-                {
-                    return Err(AgentError::InvalidData(
-                        "host database must be an owner-only single-link regular file",
-                    ));
-                }
-                let store = Store::open(directory.path.join("everything.sqlite3"))?;
-                let mut agent = Self::from_store(store);
-                agent._foreground = Some(Arc::new(ForegroundState {
-                    _directory: directory,
-                    _lock: lock,
-                }));
-                Ok(agent)
+                let _database = lease.validate_database()?;
+                let store = Store::open(lease.path().join("everything.sqlite3"))?;
+                Ok(Self::from_leased_store(store, lease))
             })
             .await
         }
@@ -405,6 +371,13 @@ impl Agent {
             let _ = path;
             Err(AgentError::UnsupportedPlatform)
         }
+    }
+
+    #[cfg(unix)]
+    pub(crate) fn from_leased_store(store: Store, lease: Arc<crate::service::StateLease>) -> Self {
+        let mut agent = Self::from_store(store);
+        agent._foreground = Some(lease);
+        agent
     }
 
     pub async fn create_conversation(

@@ -2,6 +2,7 @@ use std::fs::File;
 use std::io::{self, Write};
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Component, Path, PathBuf};
+use std::sync::Arc;
 
 use rustix::fs::{AtFlags, FileType, Mode, OFlags};
 
@@ -31,6 +32,51 @@ pub(crate) struct StateDirectory {
     pub(crate) path: PathBuf,
     pub(crate) file: File,
     pub(crate) uid: u32,
+}
+
+pub struct StateLease {
+    pub(crate) directory: Arc<StateDirectory>,
+    _lock: File,
+}
+
+impl StateLease {
+    pub async fn acquire(path: impl AsRef<Path>) -> Result<Arc<Self>, ServiceError> {
+        let path = path.as_ref().to_path_buf();
+        tokio::task::spawn_blocking(move || {
+            let directory = StateDirectory::open(&path, true)?;
+            let lock = directory.lock()?;
+            Ok(Arc::new(Self {
+                directory: Arc::new(directory),
+                _lock: lock,
+            }))
+        })
+        .await
+        .map_err(|_| ServiceError::Worker)?
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.directory.path
+    }
+
+    pub(crate) fn validate_database(&self) -> Result<File, ServiceError> {
+        let descriptor = rustix::fs::openat(
+            &self.directory.file,
+            "everything.sqlite3",
+            OFlags::RDWR | OFlags::CREATE | OFlags::NOFOLLOW | OFlags::CLOEXEC | OFlags::NONBLOCK,
+            Mode::from_raw_mode(0o600),
+        )?;
+        let metadata = rustix::fs::fstat(&descriptor)?;
+        if FileType::from_raw_mode(metadata.st_mode) != FileType::RegularFile
+            || metadata.st_uid != self.directory.uid
+            || metadata.st_mode & 0o7777 != 0o600
+            || metadata.st_nlink != 1
+        {
+            return Err(ServiceError::UnsafePath(
+                "host database must be an owner-only single-link regular file",
+            ));
+        }
+        Ok(File::from(descriptor))
+    }
 }
 
 impl StateDirectory {
