@@ -22,6 +22,7 @@ use super::{
 const AUDIT: Duration = Duration::from_secs(1);
 const NORMAL_LATENESS_MS: u64 = 5_000;
 const BATCH: usize = 8;
+const OUTCOME_PREVIEW_BYTES: usize = 4_096;
 
 #[derive(Debug, Error)]
 pub enum EngineError {
@@ -384,10 +385,10 @@ impl Actor {
             snapshot = self.scheduler.cancel(attempt.task_id).await?;
         }
         let outcome=match snapshot.task.status {
-            TaskStatus::Completed=>Some(RunOutcome::Succeeded {summary:snapshot.last_output.unwrap_or_default()}),
+            TaskStatus::Completed=>Some(RunOutcome::Succeeded {summary:outcome_preview(snapshot.last_output.as_deref().unwrap_or_default())}),
             TaskStatus::Cancelled=>Some(RunOutcome::Cancelled {reason:"native scheduled task cancelled".into()}),
             TaskStatus::Failed if uncertain(snapshot.waiting.as_ref())=>Some(RunOutcome::Unknown {reason:"native scheduled task ended with uncertain effects; owner reconciliation required".into()}),
-            TaskStatus::Failed=>Some(RunOutcome::Failed {code:"native_task_failed".into(),message:snapshot.diagnostic.unwrap_or_else(||"native scheduled task failed".into())}),
+            TaskStatus::Failed=>Some(RunOutcome::Failed {code:"native_task_failed".into(),message:outcome_preview(snapshot.diagnostic.as_deref().unwrap_or("native scheduled task failed"))}),
             _=>None,
         };
         if let Some(outcome) = outcome {
@@ -487,6 +488,14 @@ fn validate_snapshot(
         .into());
     }
     Ok(())
+}
+
+fn outcome_preview(value: &str) -> String {
+    let mut end = value.len().min(OUTCOME_PREVIEW_BYTES);
+    while !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    value[..end].replace('\0', " ")
 }
 
 fn uncertain(reason: Option<&WaitingReason>) -> bool {
