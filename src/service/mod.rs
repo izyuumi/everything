@@ -5,6 +5,8 @@ pub(crate) mod state;
 use thiserror::Error;
 
 pub use launchd::{LaunchdService, ServiceStatus};
+#[cfg(unix)]
+pub use state::StateLease;
 
 #[derive(Debug, Error)]
 pub enum ServiceError {
@@ -32,4 +34,6 @@ pub enum ServiceError {
     Cancelled,
     #[error("launchctl operation timed out")]
     Timeout,
+    #[error("service filesystem worker failed")]
+    Worker,
 }
