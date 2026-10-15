@@ -48,6 +48,9 @@ url = "2"
 qrcode = { version = "0.14", default-features = false, features = ["svg"] }
 tokio-tungstenite = { version = "0.29", features = ["rustls-tls-webpki-roots"] }
 rmcp = { version = "=3.5.1", default-features = false, features = ["client", "transport-async-rw"] }
+chrono = "0.4.42"
+chrono-tz = "0.10.4"
+croner = "=4.0.1"
 
 [features]
 default = []
