@@ -14,7 +14,7 @@ pub struct LaunchdService {
     launch_agents_directory: PathBuf,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct ServiceStatus {
     pub installed: bool,
     pub loaded: bool,

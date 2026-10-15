@@ -44,6 +44,7 @@ struct Arguments {
 
 #[derive(Subcommand)]
 enum Command {
+    Service(everything::service::cli::ServiceArguments),
     Init(InitArguments),
     Chat(ChatArguments),
     Status(StatusArguments),
@@ -227,6 +228,8 @@ struct StatusArguments {
 #[derive(Debug, Error)]
 enum CliError {
     #[error(transparent)]
+    Service(#[from] everything::service::ServiceError),
+    #[error(transparent)]
     Agent(#[from] AgentError),
     #[error(transparent)]
     Model(#[from] everything::model::ModelError),
@@ -295,12 +298,16 @@ async fn execute(arguments: Arguments, cancellation: CancellationToken) -> Resul
         .state_dir
         .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".everything")))
         .ok_or(CliError::StateDirectory)?;
-    let agent = Agent::open(state_dir).await?;
     if cancellation.is_cancelled() {
         return Err(AgentError::Cancelled.into());
     }
     match arguments.command {
+        Command::Service(arguments) => {
+            write_json(everything::service::cli::manage(arguments, state_dir, cancellation).await?)
+                .await
+        }
         Command::Init(arguments) => {
+            let agent = Agent::open(state_dir).await?;
             let conversation = agent
                 .create_conversation(
                     arguments.conversation.unwrap_or_default(),
@@ -311,27 +318,32 @@ async fn execute(arguments: Arguments, cancellation: CancellationToken) -> Resul
                 .await?;
             write_json(conversation.info).await
         }
-        Command::Status(arguments) => match arguments.conversation {
-            Some(id) => {
-                let conversation = agent.conversation(id).await?;
-                if arguments.history {
-                    #[derive(Serialize)]
-                    struct Status {
-                        conversation: everything::agent::ConversationInfo,
-                        messages: Vec<everything::agent::RecordedMessage>,
+        Command::Status(arguments) => {
+            let agent = Agent::open(state_dir).await?;
+            match arguments.conversation {
+                Some(id) => {
+                    let conversation = agent.conversation(id).await?;
+                    if arguments.history {
+                        #[derive(Serialize)]
+                        struct Status {
+                            conversation: everything::agent::ConversationInfo,
+                            messages: Vec<everything::agent::RecordedMessage>,
+                        }
+                        write_json(Status {
+                            conversation: conversation.info,
+                            messages: conversation.messages,
+                        })
+                        .await
+                    } else {
+                        write_json(conversation.info).await
                     }
-                    write_json(Status {
-                        conversation: conversation.info,
-                        messages: conversation.messages,
-                    })
-                    .await
-                } else {
-                    write_json(conversation.info).await
                 }
+                None => write_json(agent.conversations(arguments.limit).await?).await,
             }
-            None => write_json(agent.conversations(arguments.limit).await?).await,
-        },
-        Command::Chat(arguments) => chat(agent, arguments, cancellation).await,
+        }
+        Command::Chat(arguments) => {
+            chat(Agent::open(state_dir).await?, arguments, cancellation).await
+        }
     }
 }
 
