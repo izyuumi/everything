@@ -14,7 +14,7 @@ use crate::context::{
 };
 use crate::permissions::{ApprovalRequest, ExecutionMode};
 use crate::protocol::{OperationId, TaskId, ToolCall, ToolResult};
-use crate::storage::TaskState;
+use crate::storage::{TaskState, ToolCallState};
 use crate::tools::{
     ToolRegistry,
     broker::{BrokerOutcome, OperationResult, TaskToolBroker, ToolInvocation},
@@ -471,6 +471,15 @@ impl Agent {
                         }
                         LoopStatus::Paused { reason } => {
                             if matches!(reason, PauseReason::OperationInFlight { .. }) || (setup.provider_resume == ProviderResume::RetryUncertain && matches!(reason, PauseReason::Cancellation | PauseReason::InterruptedTool)) {
+                                if matches!(reason, PauseReason::OperationInFlight { .. })
+                                    && !clock_allows(native(&conversation)?.turn.as_ref().ok_or(AgentError::NoPendingTurn)?, UnixMillis::now()?.get(), stream_deadline)
+                                {
+                                    let reason = agent.expired_round_reason(&conversation).await?;
+                                    let mut checkpoint = conversation.checkpoint.clone();
+                                    turn_mut(&mut checkpoint)?.status = LoopStatus::Paused { reason: reason.clone() };
+                                    agent.save_native(&mut conversation, checkpoint, Vec::new(), Arc::clone(&admission)).await?;
+                                    yield TurnEvent::Paused { reason }; break;
+                                }
                                 let mut checkpoint = conversation.checkpoint.clone();
                                 let turn = turn_mut(&mut checkpoint)?;
                                 if let Some(round) = &mut turn.round {
@@ -1291,6 +1300,74 @@ impl Agent {
         Ok((conversation, events))
     }
 
+    async fn expired_round_reason(
+        &self,
+        conversation: &Conversation,
+    ) -> Result<PauseReason, AgentError> {
+        let turn = native(conversation)?
+            .turn
+            .as_ref()
+            .ok_or(AgentError::NoPendingTurn)?;
+        let calls = turn
+            .round
+            .as_ref()
+            .ok_or(AgentError::InvalidData("expired tool phase lost its round"))?
+            .calls
+            .clone();
+        let id = conversation.info.id.to_string();
+        let task_id = turn.definition.task_id.to_string();
+        let workspace = turn.definition.workspace.clone();
+        let mode = turn.definition.mode;
+        let owner = self.clone();
+        blocking(move || {
+            let mode = serde_json::to_value(mode).map_err(|_| AgentError::Worker)?;
+            let mut retained = PauseReason::DurationLimit;
+            for call in calls {
+                if let CallPhase::Blocked { reason, .. } = &call.phase
+                    && stop_priority(reason) > stop_priority(&retained)
+                {
+                    retained = reason.clone();
+                }
+                let operation_id = call.call.id.to_string();
+                if let Some(row) = owner.store.tool_call(&operation_id)? {
+                    if row.id != operation_id
+                        || row.conversation_id != id
+                        || row.task_id.as_deref() != Some(task_id.as_str())
+                        || row.tool_name != call.call.name
+                        || row.request.get("arguments") != Some(&call.call.arguments)
+                        || row.request.get("workspace_root").and_then(Value::as_str)
+                            != Some(workspace.as_str())
+                        || row.request.get("mode") != Some(&mode)
+                        || row.request.get("version").and_then(Value::as_u64) != Some(1)
+                    {
+                        return Err(AgentError::InvalidData(
+                            "expired operation journal identity differs from its native call",
+                        ));
+                    }
+                    let reason = match row.state {
+                        ToolCallState::Unknown => {
+                            PauseReason::ReconciliationRequired { operation_id }
+                        }
+                        ToolCallState::Pending if matches!(call.phase, CallPhase::Dispatched) => {
+                            PauseReason::ReconciliationRequired { operation_id }
+                        }
+                        ToolCallState::Running => PauseReason::OperationInFlight { operation_id },
+                        ToolCallState::Succeeded
+                        | ToolCallState::Failed
+                        | ToolCallState::Cancelled
+                        | ToolCallState::Denied
+                        | ToolCallState::Pending => PauseReason::DurationLimit,
+                    };
+                    if stop_priority(&reason) > stop_priority(&retained) {
+                        retained = reason;
+                    }
+                }
+            }
+            Ok(retained)
+        })
+        .await
+    }
+
     async fn execute_round(
         &self,
         conversation: &mut Conversation,
@@ -1315,14 +1392,13 @@ impl Agent {
         let deadline = stream_deadline.min(run_deadline(conversation)?);
         let current_time = UnixMillis::now()?.get();
         if !clock_allows(turn, current_time, stream_deadline) {
+            let reason = self.expired_round_reason(conversation).await?;
             turn.status = LoopStatus::Paused {
-                reason: PauseReason::DurationLimit,
+                reason: reason.clone(),
             };
             self.save_native(conversation, checkpoint, Vec::new(), admission)
                 .await?;
-            return Ok(vec![TurnEvent::Paused {
-                reason: PauseReason::DurationLimit,
-            }]);
+            return Ok(vec![TurnEvent::Paused { reason }]);
         }
         turn.last_observed_wall_ms = observed_floor(turn).max(current_time);
         let wall_deadline = turn.deadline_ms;
@@ -1634,6 +1710,14 @@ impl Agent {
         self.save_native(conversation, checkpoint, payloads, admission)
             .await?;
         Ok(events)
+    }
+}
+
+fn stop_priority(reason: &PauseReason) -> u8 {
+    match reason {
+        PauseReason::ReconciliationRequired { .. } | PauseReason::BrokerRejected { .. } => 3,
+        PauseReason::OperationInFlight { .. } => 2,
+        _ => 0,
     }
 }
 
