@@ -26,4 +26,4 @@ The runtime trace observed exactly three outbound connections, all to literal lo
 
 Automated coverage is deferred in [#32](https://github.com/izyuumi/everything/issues/32). Full host composition and IPC/CLI wiring are tracked by [#68](https://github.com/izyuumi/everything/issues/68).
 
-The focused host owner route separately exercised exact one-shot disclosure/refusal/local fallback and a real approved held loopback request during early drain. Actual cancellation closed its socket and joined the host in under0.02seconds without a classifier response. No successful classification or native credential lookup was inferred; see [composition](host-composition.md).
+The focused host owner route separately exercised exact one-shot disclosure/refusal/local fallback and a real approved held loopback request during early drain. Actual cancellation closed its socket and joined the host in under 0.02 seconds without a classifier response. No successful classification or native credential lookup was inferred; see [composition](host-composition.md).
