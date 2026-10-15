@@ -92,6 +92,13 @@ pub enum OwnerQuery {
     },
     Approvals {
         conversation_id: ConversationId,
+        #[serde(default = "default_approval_page_limit")]
+        limit: usize,
+        cursor: Option<crate::permissions::ApprovalCursor>,
+    },
+    Approval {
+        conversation_id: ConversationId,
+        lookup: ApprovalLookup,
     },
     Settings,
     Identity,
@@ -110,13 +117,51 @@ impl OwnerQuery {
     pub fn validate(&self) -> Result<(), &'static str> {
         if matches!(
             self,
-            Self::Conversations { limit } | Self::Tasks { limit, .. } | Self::Devices { limit }
+            Self::Conversations { limit } | Self::Tasks { limit, .. } | Self::Devices { limit } | Self::Approvals { limit, .. }
                 if !(1..=100).contains(limit)
         ) {
             return Err("query limit must be between one and one hundred");
         }
+        if let Self::Approvals {
+            cursor: Some(cursor),
+            ..
+        } = self
+        {
+            cursor
+                .validate()
+                .map_err(|_| "invalid approval page cursor")?;
+        }
+        if let Self::Approval { lookup, .. } = self {
+            let identifier = match lookup {
+                ApprovalLookup::Approval(identifier) | ApprovalLookup::Operation(identifier) => {
+                    identifier
+                }
+            };
+            if identifier.trim().is_empty()
+                || identifier.len() > 256
+                || identifier.chars().any(char::is_control)
+            {
+                return Err("invalid approval lookup identifier");
+            }
+        }
         Ok(())
     }
+}
+
+fn default_approval_page_limit() -> usize {
+    20
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(
+    tag = "by",
+    content = "id",
+    rename_all = "snake_case",
+    deny_unknown_fields
+)]
+pub enum ApprovalLookup {
+    Approval(String),
+    Operation(String),
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -244,7 +289,11 @@ pub enum OwnerQueryResult {
         task: crate::protocol::TaskRecord,
     },
     Approvals {
-        approvals: Vec<crate::permissions::ApprovalRequest>,
+        approvals: Vec<crate::permissions::ApprovalSummary>,
+        next_cursor: Option<crate::permissions::ApprovalCursor>,
+    },
+    Approval {
+        approval: Option<crate::permissions::ApprovalView>,
     },
     Settings {
         settings: crate::host::settings::HostSettings,
@@ -329,12 +378,52 @@ impl OwnerQueryResult {
                 OwnerQuery::Task { task_id },
                 Self::Task { task, .. } | Self::LegacyForeground { task },
             ) => task.id == *task_id,
-            (OwnerQuery::Approvals { conversation_id }, Self::Approvals { approvals }) => {
-                approvals.len() <= 256
+            (
+                OwnerQuery::Approvals {
+                    conversation_id,
+                    limit,
+                    cursor,
+                },
+                Self::Approvals {
+                    approvals,
+                    next_cursor,
+                },
+            ) => {
+                let ordered = approvals.windows(2).all(|pair| {
+                    (pair[0].requested_at, &pair[0].id) < (pair[1].requested_at, &pair[1].id)
+                });
+                let after = cursor.as_ref().is_none_or(|cursor| {
+                    approvals.first().is_none_or(|first| {
+                        (first.requested_at, &first.id) > (cursor.requested_at, &cursor.approval_id)
+                    })
+                });
+                let continuation = next_cursor.as_ref().is_none_or(|cursor| {
+                    approvals.last().is_some_and(|last| {
+                        last.requested_at == cursor.requested_at && last.id == cursor.approval_id
+                    })
+                });
+                approvals.len() <= *limit
+                    && ordered
+                    && after
+                    && continuation
                     && approvals.iter().all(|approval| {
-                        approval.scope.conversation_id == conversation_id.to_string()
+                        approval.conversation_id == conversation_id.to_string()
+                            && approval.status == crate::permissions::ApprovalStatus::Pending
                     })
             }
+            (
+                OwnerQuery::Approval {
+                    conversation_id,
+                    lookup,
+                },
+                Self::Approval { approval },
+            ) => approval.as_ref().is_none_or(|approval| {
+                approval.request.scope.conversation_id == conversation_id.to_string()
+                    && match lookup {
+                        ApprovalLookup::Approval(id) => approval.request.id == *id,
+                        ApprovalLookup::Operation(id) => approval.request.scope.operation_id == *id,
+                    }
+            }),
             (OwnerQuery::Settings, Self::Settings { .. }) => true,
             (OwnerQuery::Transport, Self::Transport { .. }) => true,
             (OwnerQuery::Runtime, Self::Runtime { .. }) => true,
@@ -355,6 +444,14 @@ impl OwnerQueryResult {
         };
         if !valid {
             return Err("owner query result does not match its request");
+        }
+        if matches!(self, Self::Approvals { .. })
+            && serde_json::to_vec(self)
+                .map_err(|_| "invalid approval metadata response")?
+                .len()
+                > crate::permissions::MAX_APPROVAL_METADATA_BYTES
+        {
+            return Err("approval metadata response exceeds its byte limit");
         }
         Ok(())
     }

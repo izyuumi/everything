@@ -46,7 +46,11 @@ These operations target the current user's launchd login domain, without root. I
 {"kind":"query","query":{"kind":"runtime"}}
 ```
 
-Other query kinds include `conversations`, `conversation`, `tasks`, `task`, `approvals`, `identity`, `devices`, `transport`, `command`, and `tool_recovery`. Lists require a limit from 1 to 100. Individual task metadata reports the actual waiting reason, diagnostic, cancellation state and active command. Private native checkpoints and credentials are not returned.
+Other query kinds include `conversations`, `conversation`, `tasks`, `task`, `approvals`, `approval`, `identity`, `devices`, `transport`, `command`, and `tool_recovery`. Lists require a limit from 1 to 100. Individual task metadata reports the actual waiting reason, diagnostic, cancellation state and active command. Private native checkpoints and credentials are not returned. Pending approval lists return small summaries with default `limit: 20` and an optional cursor. Fetch the exact arguments and scope separately before deciding:
+
+```json
+{"kind":"query","query":{"kind":"approval","conversation_id":"CONVERSATION_UUID","lookup":{"by":"approval","id":"approval:EXACT_ID"}}}
+```
 
 Settings updates use an operation containing `kind: replace_settings`, the expected current revision, and the complete edited settings object. Preserve the schema and revision returned by the query. Recurring default loop limits reject an absolute execution deadline; per-occurrence scheduling captures its own deadline. A changed relay origin returns `restart_required` and takes effect only after restart. No default relay or model is selected automatically.
 
@@ -60,6 +64,6 @@ Pairing begins with an explicit owner operation returning an invitation and full
 
 Cancelling an uncertain task does not erase its native pending turn or manufacture results. Such a conversation requires a new conversation until an explicit abandonment/branch contract exists.
 
-On shutdown, query `runtime` and `tool_recovery` while the host drains. If the broker reports unresolved cleanup, the process deliberately keeps its state lease and owner socket. After owned workers stop, `reconcile_drained` converts stranded Running journal entries to Unknown without retrying effects. An `acknowledge_cleanup` operation supplies the exact returned operation ID and result digest plus the responsible operator and an actual inspection note. Acknowledgement is an explicit operator assertion; the host never generates it automatically. New execution remains disabled until the drained process exits and is intentionally restarted.
+On shutdown, query `runtime` and `tool_recovery` while the host drains. If the broker reports unresolved cleanup, the process deliberately keeps its state lease and owner socket. After owned workers stop, the host obtains an all-admission broker quiescence proof and conservatively converts stranded Running entries to Unknown. It keeps owner IPC available while a busy broker drains. Explicit `reconcile_drained` performs the same bounded classification without retrying effects. An `acknowledge_cleanup` operation supplies the exact returned operation ID and result digest plus the responsible operator and an actual inspection note. Acknowledgement is an explicit operator assertion; the host never generates it automatically. New execution remains disabled until the drained process exits and is intentionally restarted.
 
 Deferred automated CLI, lifecycle, replay, recovery and platform checks are tracked in [#32](https://github.com/izyuumi/everything/issues/32).

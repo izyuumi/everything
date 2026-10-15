@@ -693,21 +693,27 @@ async fn proxy_chat(
                     .map(|id| (id, everything::protocol::PermissionDecision::Deny))
             })
         {
-            let OwnerQueryResult::Approvals { approvals } = client
+            let OwnerQueryResult::Approval { approval } = client
                 .query(
-                    OwnerQuery::Approvals { conversation_id },
+                    OwnerQuery::Approval {
+                        conversation_id,
+                        lookup: everything::ipc::ApprovalLookup::Approval(id),
+                    },
                     cancellation.clone(),
                 )
                 .await?
             else {
                 return Err(CliError::OwnerInput);
             };
-            let approval = approvals
-                .into_iter()
-                .find(|approval| approval.id == id && approval.scope.task_id == task_id.to_string())
+            let approval = approval
+                .filter(|approval| {
+                    approval.status == everything::permissions::ApprovalStatus::Pending
+                        && approval.request.scope.task_id == task_id.to_string()
+                })
                 .ok_or(CliError::ToolOptions(
                     "approval does not belong to this pending task",
-                ))?;
+                ))?
+                .request;
             let operation_id = approval
                 .scope
                 .operation_id

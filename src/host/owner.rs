@@ -99,14 +99,40 @@ impl HostInner {
                 }
                 Err(error) => Err(error.into()),
             },
-            OwnerQuery::Approvals { conversation_id } => {
+            OwnerQuery::Approvals {
+                conversation_id,
+                limit,
+                cursor,
+            } => {
                 self.blocking(move |host| {
+                    let page = host.authorizer.pending_approval_page(
+                        &conversation_id.to_string(),
+                        cursor.as_ref(),
+                        limit,
+                        timestamp(UnixMillis::now()?)?,
+                    )?;
                     Ok(OwnerQueryResult::Approvals {
-                        approvals: host.authorizer.pending_approvals(
-                            &conversation_id.to_string(),
-                            timestamp(UnixMillis::now()?)?,
-                        )?,
+                        approvals: page.approvals,
+                        next_cursor: page.next_cursor,
                     })
+                })
+                .await
+            }
+            OwnerQuery::Approval {
+                conversation_id,
+                lookup,
+            } => {
+                self.blocking(move |host| {
+                    let now = timestamp(UnixMillis::now()?)?;
+                    let approval = match lookup {
+                        crate::ipc::ApprovalLookup::Approval(id) => host
+                            .authorizer
+                            .approval_for_id(&conversation_id.to_string(), &id, now)?,
+                        crate::ipc::ApprovalLookup::Operation(id) => host
+                            .authorizer
+                            .approval_for_operation(&conversation_id.to_string(), &id, now)?,
+                    };
+                    Ok(OwnerQueryResult::Approval { approval })
                 })
                 .await
             }
