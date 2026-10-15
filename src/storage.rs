@@ -97,6 +97,13 @@ pub struct EventRow {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ConversationSnapshot {
+    pub conversation: ConversationRow,
+    pub state: Option<ConversationStateRow>,
+    pub events: Vec<EventRow>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct AppendRequest {
     pub conversation_id: String,
     pub command_id: String,
@@ -338,13 +345,57 @@ impl Store {
         Ok(self.connection()?.query_row(
             "SELECT conversation_id, revision, payload, updated_at FROM conversation_states WHERE conversation_id = ?1",
             [conversation_id],
-            |row| Ok(ConversationStateRow {
-                conversation_id: row.get(0)?,
-                revision: row.get(1)?,
-                payload: decode_json(row, 2)?,
-                updated_at: row.get(3)?,
-            }),
+            conversation_state_row,
         ).optional()?)
+    }
+
+    pub fn conversation_snapshot(
+        &self,
+        conversation_id: &str,
+        after_sequence: u64,
+        limit: usize,
+    ) -> StorageResult<ConversationSnapshot> {
+        validate_id(conversation_id)?;
+        validate_sequence(after_sequence)?;
+        validate_limit(limit)?;
+        let mut connection = self.connection()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Deferred)?;
+        let conversation = transaction.query_row(
+            "SELECT id, title, created_at, updated_at, last_sequence FROM conversations WHERE id = ?1",
+            [conversation_id], conversation_row,
+        ).optional()?.ok_or_else(|| missing("conversation", conversation_id))?;
+        let state = transaction.query_row(
+            "SELECT conversation_id, revision, payload, updated_at FROM conversation_states WHERE conversation_id = ?1",
+            [conversation_id], conversation_state_row,
+        ).optional()?;
+        let mut snapshot = ConversationSnapshot {
+            conversation,
+            state,
+            events: Vec::new(),
+        };
+        let fixed_bytes = serde_json::to_vec(&snapshot)?.len();
+        if fixed_bytes > MAX_PAGE_BYTES {
+            return Err(StorageError::ReadBudgetExceeded);
+        }
+        snapshot.events = {
+            let mut statement = transaction.prepare(
+                "SELECT id, conversation_id, sequence, kind, payload, occurred_at FROM events WHERE conversation_id = ?1 AND sequence > ?2 AND sequence <= ?3 ORDER BY sequence LIMIT ?4",
+            )?;
+            collect_rows_with_budget(
+                statement.query_map(
+                    params![
+                        conversation_id,
+                        after_sequence,
+                        snapshot.conversation.last_sequence,
+                        limit as i64
+                    ],
+                    event_row,
+                )?,
+                fixed_bytes,
+            )?
+        };
+        transaction.commit()?;
+        Ok(snapshot)
     }
 
     pub fn conversations(&self, limit: usize) -> StorageResult<Vec<ConversationRow>> {
@@ -971,6 +1022,15 @@ fn conversation_row(row: &Row<'_>) -> rusqlite::Result<ConversationRow> {
     })
 }
 
+fn conversation_state_row(row: &Row<'_>) -> rusqlite::Result<ConversationStateRow> {
+    Ok(ConversationStateRow {
+        conversation_id: row.get(0)?,
+        revision: row.get(1)?,
+        payload: decode_json(row, 2)?,
+        updated_at: row.get(3)?,
+    })
+}
+
 fn event_row(row: &Row<'_>) -> rusqlite::Result<EventRow> {
     Ok(EventRow {
         id: row.get(0)?,
@@ -1089,9 +1149,27 @@ fn require_related_task(
     }
 }
 
-fn collect_rows<T>(rows: impl Iterator<Item = rusqlite::Result<T>>) -> StorageResult<Vec<T>> {
-    rows.collect::<Result<Vec<_>, _>>()
-        .map_err(StorageError::from)
+fn collect_rows<T: Serialize>(
+    rows: impl Iterator<Item = rusqlite::Result<T>>,
+) -> StorageResult<Vec<T>> {
+    collect_rows_with_budget(rows, 2)
+}
+
+fn collect_rows_with_budget<T: Serialize>(
+    rows: impl Iterator<Item = rusqlite::Result<T>>,
+    mut bytes: usize,
+) -> StorageResult<Vec<T>> {
+    let mut result = Vec::new();
+    for row in rows {
+        let row = row?;
+        bytes = bytes.saturating_add(usize::from(!result.is_empty()));
+        bytes = bytes.saturating_add(serde_json::to_vec(&row)?.len());
+        if bytes > MAX_PAGE_BYTES {
+            return Err(StorageError::ReadBudgetExceeded);
+        }
+        result.push(row);
+    }
+    Ok(result)
 }
 
 fn decode_json(row: &Row<'_>, index: usize) -> rusqlite::Result<Value> {
