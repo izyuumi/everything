@@ -1,0 +1,11 @@
+# Selector contract
+
+`ToolSelector::new(&ToolRegistry, Arc<Authorizer>)` snapshots base descriptors. Catalog construction checks at most 1000 tools and 16 MiB of cumulative serialized descriptors before cloning each descriptor. The catalog excludes `search_tools` itself. Names, descriptions and schemas originate in the validated registry.
+
+`select_local(&ExecutionAuthority, query, limit)` returns a `ToolSelection` with definitions, permission metadata, ranking scores, omission counts and the discovery fallback. Queries are at most 4096 UTF-8 bytes without NUL. Limits are 1–32. Results reserve a 512-KiB serialized budget and omit candidates that cannot fit. The selector preserves whole schemas. `definitions()` produces the selected native model definitions followed by the discovery definition. Call synchronous construction and selection on blocking workers in async host paths.
+
+`ExecutionAuthority::permits_tool(name)` only checks the inherited allowlist. It is not an execution grant. The selector also uses `Authorizer::tool_visibility` for every base candidate. `ToolRegistry::descriptors()` borrows descriptors in name order; `Clone` shares registered implementations and compiled validators.
+
+`SearchTools::new(selector)` creates a local read-only concurrent Tool. Register it with `ToolScopeRule::LocalReadOnly` in the final broker authorizer. Its arguments are `{query?: string, limit?: integer}` with defaults empty query and eight results. Unknown fields are rejected. `bind_task(authority)` returns a non-cloneable `DiscoveryBinding`; duplicate task bindings and more than 256 live bindings fail. Keep the binding in the task owner and drop it when the task finishes. Search checks the host-issued `ToolExecutionContext` against the binding and performs selection on a blocking worker. Direct registry execution still does not substitute for broker permission and durability.
+
+Selection is advisory. The broker independently authorizes each exact invocation, persists approvals and checks availability immediately before execution. This issue introduces no external ranking client or network path. Automated assertions remain deferred to [#32](https://github.com/izyuumi/everything/issues/32).

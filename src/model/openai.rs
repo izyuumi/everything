@@ -1117,10 +1117,10 @@ impl StreamState {
                 if !self.item_ids.insert(identity.id().to_owned()) {
                     return Err(protocol("duplicate output item identifier"));
                 }
-                if let ItemIdentity::Function { call_id, .. } = &identity {
-                    if !self.call_ids.insert(call_id.clone()) {
-                        return Err(protocol("duplicate provider function call identifier"));
-                    }
+                if let ItemIdentity::Function { call_id, .. } = &identity
+                    && !self.call_ids.insert(call_id.clone())
+                {
+                    return Err(protocol("duplicate provider function call identifier"));
                 }
                 self.items.insert(output_index, identity);
                 match item {

@@ -1,0 +1,895 @@
+use super::*;
+use crate::protocol::{CommandEnvelope, SyncBatch, SyncCursor};
+
+const MAX_TRANSPORT_ENVELOPE: usize = 2 * MAX_JSON_BYTES;
+const MAX_PENDING_INBOX: i64 = 1_024;
+const MAX_PENDING_INBOX_BYTES: i64 = 64 * 1_048_576;
+const MAX_PEER_INBOX: i64 = 128;
+const MAX_PEER_INBOX_BYTES: i64 = 8 * 1_048_576;
+const COMMAND_RETENTION_MS: i64 = 7 * 24 * 60 * 60 * 1_000;
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct TransportInboxRow {
+    pub message_id: String,
+    pub sender: String,
+    pub recipient: String,
+    pub envelope_digest: String,
+    pub payload: Vec<u8>,
+    pub received_at: i64,
+    pub expires_at: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct TransportOutboxInsert {
+    pub message: OutboxRow,
+    pub expires_at: i64,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RemoteCommandState {
+    Pending,
+    Completed,
+    Rejected,
+}
+
+impl RemoteCommandState {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Pending => "pending",
+            Self::Completed => "completed",
+            Self::Rejected => "rejected",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct RemoteCommandRow {
+    pub command_id: String,
+    pub sender: String,
+    pub conversation_id: String,
+    pub request: Option<Value>,
+    pub request_digest: String,
+    pub state: RemoteCommandState,
+    pub result: Option<Value>,
+    pub result_digest: Option<String>,
+    pub received_at: i64,
+    pub updated_at: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct RemoteCommandReservation {
+    pub created: bool,
+    pub command: RemoteCommandRow,
+}
+
+pub struct RemoteCommandCompletion<'a> {
+    pub command_id: &'a str,
+    pub original: &'a Value,
+    pub result: &'a Value,
+    pub rejected: bool,
+    pub now: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TransportPruneReport {
+    pub expired_outbox_ids: Vec<String>,
+    pub expired_replay_markers: usize,
+    pub expired_sync_offers: usize,
+    pub archived_command_payloads: usize,
+}
+
+impl Store {
+    pub fn configure_transport_endpoint(
+        &self,
+        device_id: &str,
+        configuration: &Value,
+    ) -> StorageResult<bool> {
+        validate_id(device_id)?;
+        let configuration = encode_json_with_limit(configuration, 16_384)?;
+        let mut connection = self.connection()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let existing: Option<(String, String, Option<i64>)> = transaction.query_row(
+            "SELECT device_id, configuration, revoked_at FROM transport_endpoint WHERE singleton = 1", [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        ).optional()?;
+        if let Some((id, original, revoked_at)) = existing {
+            if id != device_id || original != configuration {
+                return Err(StorageError::TransportConflict(
+                    "local endpoint identity or role".into(),
+                ));
+            }
+            return Ok(revoked_at.is_some());
+        }
+        transaction.execute("INSERT INTO transport_endpoint(singleton, device_id, configuration) VALUES (1, ?1, ?2)", params![device_id, configuration])?;
+        transaction.commit()?;
+        Ok(false)
+    }
+
+    pub fn transport_endpoint_revoked(&self) -> StorageResult<bool> {
+        Ok(self.connection()?.query_row(
+            "SELECT revoked_at IS NOT NULL FROM transport_endpoint WHERE singleton = 1",
+            [],
+            |row| row.get(0),
+        )?)
+    }
+
+    pub fn revoke_transport_endpoint(&self, now: i64) -> StorageResult<()> {
+        validate_time(now)?;
+        let mut connection = self.connection()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        transaction.execute("UPDATE transport_endpoint SET revoked_at = coalesce(revoked_at, ?1) WHERE singleton = 1", [now])?;
+        transaction.execute(
+            "DELETE FROM outbox WHERE id IN (SELECT message_id FROM transport_outbox)",
+            [],
+        )?;
+        transaction.execute("UPDATE transport_inbox SET state='rejected', detail='endpoint_revoked', payload=NULL WHERE state='pending'",[])?;
+        transaction.commit()?;
+        Ok(())
+    }
+
+    pub fn pin_transport_device(
+        &self,
+        device: &DeviceRow,
+        pairing_id: &str,
+    ) -> StorageResult<DeviceRow> {
+        validate_id(&device.id)?;
+        validate_id(pairing_id)?;
+        validate_text(&device.label, "device label", 256)?;
+        validate_time(device.created_at)?;
+        if device.revoked_at.is_some() {
+            return invalid("new paired devices cannot be revoked");
+        }
+        let payload = encode_json_with_limit(&device.public_identity, 16_384)?;
+        let mut connection = self.connection()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let used: Option<String> = transaction
+            .query_row(
+                "SELECT device_id FROM pairing_uses WHERE pairing_id = ?1",
+                [pairing_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if used.as_ref().is_some_and(|id| id != &device.id) {
+            return Err(StorageError::TransportConflict(pairing_id.into()));
+        }
+        let existing = transaction.query_row("SELECT id, label, public_identity, created_at, revoked_at FROM devices WHERE id = ?1", [&device.id], device_row).optional()?;
+        let pinned = if let Some(existing) = existing {
+            if existing.revoked_at.is_some() {
+                return Err(StorageError::RevokedDevice(device.id.clone()));
+            }
+            if existing.public_identity != device.public_identity {
+                return Err(StorageError::TransportConflict(device.id.clone()));
+            }
+            existing
+        } else {
+            let count: i64 =
+                transaction.query_row("SELECT count(*) FROM devices", [], |row| row.get(0))?;
+            if count >= 4_096 {
+                return Err(StorageError::TransportCapacity(
+                    "paired device registrations",
+                ));
+            }
+            transaction.execute("INSERT INTO devices(id, label, public_identity, created_at) VALUES (?1, ?2, ?3, ?4)", params![device.id, device.label, payload, device.created_at])?;
+            device.clone()
+        };
+        if used.is_none() {
+            let uses: i64 =
+                transaction.query_row("SELECT count(*) FROM pairing_uses", [], |row| row.get(0))?;
+            if uses >= 100_000 {
+                return Err(StorageError::TransportCapacity(
+                    "completed pairing identifiers",
+                ));
+            }
+        }
+        transaction.execute("INSERT OR IGNORE INTO pairing_uses(pairing_id, device_id, completed_at) VALUES (?1, ?2, ?3)", params![pairing_id, device.id, device.created_at])?;
+        transaction.commit()?;
+        Ok(pinned)
+    }
+
+    pub fn accept_transport_inbox(
+        &self,
+        receipt: &TransportInboxRow,
+        pinned_identity: &Value,
+    ) -> StorageResult<bool> {
+        validate_inbox(receipt)?;
+        let mut connection = self.connection()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        active_peer(&transaction, &receipt.sender, Some(pinned_identity))?;
+        let local: Option<String> = transaction.query_row("SELECT device_id FROM transport_endpoint WHERE singleton = 1 AND revoked_at IS NULL", [], |row| row.get(0)).optional()?;
+        if local.as_deref() != Some(receipt.recipient.as_str()) {
+            return Err(StorageError::TransportConflict(
+                "local recipient identity".into(),
+            ));
+        }
+        transaction.execute(
+            "DELETE FROM transport_inbox WHERE expires_at <= ?1 AND state != 'pending'",
+            [receipt.received_at],
+        )?;
+        let existing: Option<(String, String, String)> = transaction.query_row("SELECT sender, recipient, envelope_digest FROM transport_inbox WHERE message_id = ?1", [&receipt.message_id], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?))).optional()?;
+        if let Some((sender, recipient, digest)) = existing {
+            if sender != receipt.sender
+                || recipient != receipt.recipient
+                || digest != receipt.envelope_digest
+            {
+                return Err(StorageError::TransportConflict(receipt.message_id.clone()));
+            }
+            return Ok(false);
+        }
+        let (markers, pending, pending_bytes): (i64, i64, i64) = transaction.query_row("SELECT count(*), coalesce(sum(state = 'pending'), 0), coalesce(sum(CASE WHEN state = 'pending' THEN length(payload) ELSE 0 END), 0) FROM transport_inbox", [], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?;
+        let (peer_count, peer_bytes): (i64, i64) = transaction.query_row("SELECT count(*), coalesce(sum(length(payload)), 0) FROM transport_inbox WHERE sender = ?1 AND state = 'pending'", [&receipt.sender], |row| Ok((row.get(0)?, row.get(1)?)))?;
+        if markers >= 100_000
+            || pending >= MAX_PENDING_INBOX
+            || pending_bytes + receipt.payload.len() as i64 > MAX_PENDING_INBOX_BYTES
+            || peer_count >= MAX_PEER_INBOX
+            || peer_bytes + receipt.payload.len() as i64 > MAX_PEER_INBOX_BYTES
+        {
+            return Err(StorageError::TransportCapacity("durable receiver inbox"));
+        }
+        transaction.execute("INSERT INTO transport_inbox(message_id, sender, recipient, envelope_digest, payload, received_at, expires_at, state) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'pending')", params![receipt.message_id, receipt.sender, receipt.recipient, receipt.envelope_digest, receipt.payload, receipt.received_at, receipt.expires_at])?;
+        transaction.commit()?;
+        Ok(true)
+    }
+
+    pub fn pending_transport_inbox(&self, limit: usize) -> StorageResult<Vec<TransportInboxRow>> {
+        validate_limit(limit)?;
+        let connection = self.connection()?;
+        let mut statement = connection.prepare("SELECT i.message_id, i.sender, i.recipient, i.envelope_digest, i.payload, i.received_at, i.expires_at FROM transport_inbox i JOIN devices d ON d.id = i.sender WHERE i.state = 'pending' AND d.revoked_at IS NULL ORDER BY i.received_at, i.message_id LIMIT ?1")?;
+        collect_rows(statement.query_map([limit as i64], inbox_row)?)
+    }
+
+    pub fn finish_transport_inbox(
+        &self,
+        message_id: &str,
+        rejection: Option<&str>,
+    ) -> StorageResult<()> {
+        validate_id(message_id)?;
+        if let Some(reason) = rejection {
+            validate_text(reason, "inbox rejection", 256)?;
+        }
+        let connection = self.connection()?;
+        finish_inbox(&connection, message_id, rejection)
+    }
+
+    pub fn queue_transport_message(
+        &self,
+        item: &TransportOutboxInsert,
+        pinned_identity: &Value,
+        offer: Option<&SyncBatch>,
+        processed_inbox: Option<&str>,
+    ) -> StorageResult<()> {
+        validate_outbound(item)?;
+        if let Some(batch) = offer {
+            batch
+                .validate()
+                .map_err(|_| StorageError::InvalidInput("invalid sync offer".into()))?;
+        }
+        let mut connection = self.connection()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        active_peer(&transaction, &item.message.device_id, Some(pinned_identity))?;
+        enqueue_transport(&transaction, item)?;
+        if let Some(batch) = offer {
+            let conversation_id = batch.cursor.conversation_id.to_string();
+            let head: u64 = transaction
+                .query_row(
+                    "SELECT last_sequence FROM conversations WHERE id = ?1",
+                    [&conversation_id],
+                    |row| row.get(0),
+                )
+                .optional()?
+                .ok_or_else(|| missing("conversation", &conversation_id))?;
+            if batch.next_cursor().after_sequence > head {
+                return invalid("sync offer cursor exceeds the host head");
+            }
+            let offers: i64 =
+                transaction.query_row("SELECT count(*) FROM sync_offers", [], |row| row.get(0))?;
+            if offers >= 4_096 {
+                return Err(StorageError::TransportCapacity(
+                    "unacknowledged synchronization offers",
+                ));
+            }
+            transaction.execute("INSERT INTO sync_offers(message_id, device_id, conversation_id, after_sequence, through_sequence, last_event_id, expires_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)", params![item.message.id, item.message.device_id, conversation_id, batch.cursor.after_sequence, batch.next_cursor().after_sequence, batch.events.last().map(|event|event.event_id.to_string()), item.expires_at])?;
+        }
+        if let Some(id) = processed_inbox {
+            finish_inbox(&transaction, id, None)?;
+        }
+        transaction.commit()?;
+        Ok(())
+    }
+
+    pub fn pending_transport_outbox(
+        &self,
+        now: i64,
+        limit: usize,
+    ) -> StorageResult<Vec<OutboxRow>> {
+        validate_time(now)?;
+        validate_limit(limit)?;
+        let connection = self.connection()?;
+        let mut statement = connection.prepare("SELECT o.id, o.device_id, o.envelope, o.created_at, o.not_before, o.attempts, o.delivered_at FROM outbox o JOIN transport_outbox t ON t.message_id = o.id JOIN devices d ON d.id = o.device_id WHERE o.delivered_at IS NULL AND o.not_before <= ?1 AND t.expires_at > ?1 AND d.revoked_at IS NULL ORDER BY o.not_before, o.created_at, o.id LIMIT ?2")?;
+        collect_rows(statement.query_map(params![now, limit as i64], outbox_row)?)
+    }
+
+    pub fn confirm_transport_outbox(
+        &self,
+        message_id: &str,
+        expected_envelope: &[u8],
+        pinned_identity: &Value,
+        now: i64,
+    ) -> StorageResult<bool> {
+        validate_id(message_id)?;
+        validate_time(now)?;
+        if expected_envelope.len() > MAX_TRANSPORT_ENVELOPE {
+            return invalid("encrypted envelope exceeds bound");
+        }
+        let mut connection = self.connection()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Deferred)?;
+        let row: Option<(String,Vec<u8>)> = transaction.query_row("SELECT o.device_id,o.envelope FROM outbox o JOIN transport_outbox t ON t.message_id=o.id JOIN transport_endpoint e ON e.singleton=1 WHERE o.id=?1 AND o.delivered_at IS NULL AND t.expires_at>?2 AND e.revoked_at IS NULL",params![message_id,now],|row|Ok((row.get(0)?,row.get(1)?))).optional()?;
+        let Some((recipient, bytes)) = row else {
+            return Ok(false);
+        };
+        if bytes != expected_envelope {
+            return Err(StorageError::TransportConflict(message_id.into()));
+        }
+        match active_peer(&transaction, &recipient, Some(pinned_identity)) {
+            Err(StorageError::RevokedDevice(_)) => return Ok(false),
+            result => {
+                result?;
+            }
+        }
+        transaction.commit()?;
+        Ok(true)
+    }
+
+    pub fn accept_transport_outbox(&self, message_id: &str) -> StorageResult<()> {
+        validate_id(message_id)?;
+        self.connection()?.execute("DELETE FROM outbox WHERE id = ?1 AND EXISTS (SELECT 1 FROM transport_outbox t WHERE t.message_id = outbox.id)", [message_id])?;
+        Ok(())
+    }
+
+    pub fn maintain_transport(&self, now: i64) -> StorageResult<TransportPruneReport> {
+        validate_time(now)?;
+        let mut connection = self.connection()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let expired_outbox_ids = {
+            let mut statement = transaction.prepare("SELECT message_id FROM transport_outbox WHERE expires_at <= ?1 ORDER BY message_id LIMIT 1024")?;
+            collect_rows(statement.query_map([now], |row| row.get::<_, String>(0))?)?
+        };
+        transaction.execute("DELETE FROM outbox WHERE id IN (SELECT message_id FROM transport_outbox WHERE expires_at <= ?1)", [now])?;
+        let expired_replay_markers = transaction.execute(
+            "DELETE FROM transport_inbox WHERE expires_at <= ?1 AND state != 'pending'",
+            [now],
+        )?;
+        let expired_sync_offers =
+            transaction.execute("DELETE FROM sync_offers WHERE expires_at <= ?1", [now])?;
+        let archived_command_payloads = transaction.execute("UPDATE remote_commands SET request = NULL, result = NULL WHERE state != 'pending' AND updated_at < ?1 AND (request IS NOT NULL OR result IS NOT NULL)", [now.saturating_sub(COMMAND_RETENTION_MS)])?;
+        transaction.commit()?;
+        Ok(TransportPruneReport {
+            expired_outbox_ids,
+            expired_replay_markers,
+            expired_sync_offers,
+            archived_command_payloads,
+        })
+    }
+
+    pub fn reserve_remote_command(
+        &self,
+        message_id: &str,
+        command: &CommandEnvelope,
+        original: &Value,
+        pinned_identity: &Value,
+        now: i64,
+    ) -> StorageResult<RemoteCommandReservation> {
+        validate_id(message_id)?;
+        validate_time(now)?;
+        let decoded: CommandEnvelope = serde_json::from_value(original.clone())?;
+        if decoded != *command {
+            return invalid("original remote command does not match typed command");
+        }
+        let encoded = encode_json(original)?;
+        let request_digest =
+            transport_digest(b"everything.remote-command.v1\0", encoded.as_bytes());
+        let mut connection = self.connection()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let sender: String = transaction
+            .query_row(
+                "SELECT sender FROM transport_inbox WHERE message_id = ?1 AND state = 'pending'",
+                [message_id],
+                |row| row.get(0),
+            )
+            .optional()?
+            .ok_or_else(|| missing("pending inbox message", message_id))?;
+        active_peer(&transaction, &sender, Some(pinned_identity))?;
+        if command
+            .issuing_device_id
+            .map(|id| id.to_string())
+            .as_deref()
+            != Some(sender.as_str())
+        {
+            return Err(StorageError::TransportConflict(
+                "command issuing device".into(),
+            ));
+        }
+        let id = command.command_id.to_string();
+        let existing = read_remote_command(&transaction, &id)?;
+        let (created, stored) = if let Some(existing) = existing {
+            if existing.sender != sender
+                || existing.conversation_id != command.conversation_id.to_string()
+                || existing.request_digest != request_digest
+                || existing
+                    .request
+                    .as_ref()
+                    .is_some_and(|request| request != original)
+            {
+                return Err(StorageError::TransportConflict(id));
+            }
+            (false, existing)
+        } else {
+            let (count, pending, bytes): (i64, i64, i64) = transaction.query_row("SELECT count(*), coalesce(sum(state = 'pending'), 0), coalesce(sum(coalesce(length(CAST(request AS BLOB)), 0) + coalesce(length(CAST(result AS BLOB)), 0)), 0) FROM remote_commands", [], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?;
+            if count >= 100_000
+                || pending >= 1024
+                || bytes + encoded.len() as i64 + (pending + 1) * 65_536 > 128 * 1_048_576
+            {
+                return Err(StorageError::TransportCapacity("remote command journal"));
+            }
+            transaction.execute("INSERT INTO remote_commands(command_id, sender, conversation_id, request, request_digest, state, received_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, 'pending', ?6, ?6)", params![id, sender, command.conversation_id.to_string(), encoded, request_digest, now])?;
+            let row = RemoteCommandRow {
+                command_id: id.clone(),
+                sender,
+                conversation_id: command.conversation_id.to_string(),
+                request: Some(original.clone()),
+                request_digest,
+                state: RemoteCommandState::Pending,
+                result: None,
+                result_digest: None,
+                received_at: now,
+                updated_at: now,
+            };
+            (true, row)
+        };
+        transaction.execute(
+            "UPDATE transport_inbox SET command_id = ?2 WHERE message_id = ?1",
+            params![message_id, id],
+        )?;
+        transaction.commit()?;
+        Ok(RemoteCommandReservation {
+            created,
+            command: stored,
+        })
+    }
+
+    pub fn pending_remote_commands(&self, limit: usize) -> StorageResult<Vec<RemoteCommandRow>> {
+        validate_limit(limit)?;
+        let connection = self.connection()?;
+        let mut statement = connection.prepare("SELECT command_id, sender, conversation_id, request, request_digest, state, result, result_digest, received_at, updated_at FROM remote_commands WHERE state = 'pending' ORDER BY received_at, command_id LIMIT ?1")?;
+        collect_rows(statement.query_map([limit as i64], remote_command_row)?)
+    }
+
+    pub fn complete_remote_command(
+        &self,
+        completion: &RemoteCommandCompletion<'_>,
+        reply: &TransportOutboxInsert,
+        pinned_identity: &Value,
+    ) -> StorageResult<RemoteCommandRow> {
+        let RemoteCommandCompletion {
+            command_id,
+            original,
+            result,
+            rejected,
+            now,
+        } = *completion;
+        validate_id(command_id)?;
+        validate_time(now)?;
+        validate_outbound(reply)?;
+        let request_digest = transport_digest(
+            b"everything.remote-command.v1\0",
+            encode_json(original)?.as_bytes(),
+        );
+        let result_json = encode_json_with_limit(result, 65_536)?;
+        let result_digest = transport_digest(
+            b"everything.remote-command.result.v1\0",
+            result_json.as_bytes(),
+        );
+        let next = if rejected {
+            RemoteCommandState::Rejected
+        } else {
+            RemoteCommandState::Completed
+        };
+        let mut connection = self.connection()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let mut row = read_remote_command(&transaction, command_id)?
+            .ok_or_else(|| missing("remote command", command_id))?;
+        active_peer(&transaction, &row.sender, Some(pinned_identity))?;
+        if reply.message.device_id != row.sender {
+            return invalid("command completion reply has wrong recipient");
+        }
+        if row.request_digest != request_digest || now < row.updated_at {
+            return Err(StorageError::TransportConflict(command_id.into()));
+        }
+        if row.state != RemoteCommandState::Pending {
+            if row.state != next || row.result_digest.as_deref() != Some(result_digest.as_str()) {
+                return Err(StorageError::TransportConflict(command_id.into()));
+            }
+            enqueue_transport(&transaction, reply)?;
+            transaction.commit()?;
+            return Ok(row);
+        }
+        transaction.execute("UPDATE remote_commands SET state = ?2, result = ?3, result_digest = ?4, updated_at = ?5 WHERE command_id = ?1", params![command_id,next.as_str(),result_json,result_digest,now])?;
+        transaction.execute("UPDATE transport_inbox SET state = 'processed', payload = NULL WHERE command_id = ?1 AND state = 'pending'", [command_id])?;
+        enqueue_transport(&transaction, reply)?;
+        transaction.commit()?;
+        row.state = next;
+        row.result = Some(result.clone());
+        row.result_digest = Some(result_digest);
+        row.updated_at = now;
+        Ok(row)
+    }
+
+    pub fn acknowledge_command_result(&self, message_id: &str) -> StorageResult<()> {
+        validate_id(message_id)?;
+        let mut connection = self.connection()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let (state, payload): (String, Option<Vec<u8>>) = transaction
+            .query_row(
+                "SELECT state, payload FROM transport_inbox WHERE message_id = ?1",
+                [message_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?
+            .ok_or_else(|| missing("transport inbox", message_id))?;
+        if state == "processed" {
+            return Ok(());
+        }
+        if state != "pending" {
+            return Err(StorageError::TransportConflict(message_id.into()));
+        }
+        let value: Value = serde_json::from_slice(
+            payload
+                .as_deref()
+                .ok_or_else(|| missing("inbox payload", message_id))?,
+        )?;
+        if value.pointer("/payload/kind").and_then(Value::as_str) != Some("command_result") {
+            return invalid("application acknowledgement requires a command result");
+        }
+        finish_inbox(&transaction, message_id, None)?;
+        transaction.commit()?;
+        Ok(())
+    }
+
+    pub fn replica_cursor(&self, host_id: &str, conversation_id: &str) -> StorageResult<u64> {
+        validate_id(host_id)?;
+        validate_id(conversation_id)?;
+        Ok(self.connection()?.query_row("SELECT after_sequence FROM replica_cursors WHERE host_id = ?1 AND conversation_id = ?2", params![host_id,conversation_id], |row|row.get(0)).optional()?.unwrap_or(0))
+    }
+
+    pub fn replica_events(
+        &self,
+        host_id: &str,
+        conversation_id: &str,
+        after_sequence: u64,
+        limit: usize,
+    ) -> StorageResult<Vec<crate::protocol::EventEnvelope>> {
+        validate_id(host_id)?;
+        validate_id(conversation_id)?;
+        validate_sequence(after_sequence)?;
+        validate_limit(limit)?;
+        let connection = self.connection()?;
+        let mut statement = connection.prepare("SELECT envelope FROM replica_events WHERE host_id = ?1 AND conversation_id = ?2 AND sequence > ?3 ORDER BY sequence LIMIT ?4")?;
+        let rows = collect_rows(statement.query_map(
+            params![host_id, conversation_id, after_sequence, limit as i64],
+            |row| row.get::<_, String>(0),
+        )?)?;
+        rows.into_iter()
+            .map(|raw| serde_json::from_str(&raw).map_err(StorageError::from))
+            .collect()
+    }
+
+    pub fn apply_replica_sync(
+        &self,
+        message_id: &str,
+        host_id: &str,
+        pinned_identity: &Value,
+        batch: &SyncBatch,
+        replies: &[TransportOutboxInsert],
+    ) -> StorageResult<SyncCursor> {
+        validate_id(message_id)?;
+        validate_id(host_id)?;
+        batch.validate().map_err(|_| {
+            StorageError::InvalidInput("invalid replica synchronization batch".into())
+        })?;
+        if replies.len() > 2 {
+            return invalid("replica application permits at most two response envelopes");
+        }
+        for reply in replies {
+            validate_outbound(reply)?;
+            if reply.message.device_id != host_id {
+                return invalid("replica replies must target the authoritative host");
+            }
+        }
+        let conversation_id = batch.cursor.conversation_id.to_string();
+        let mut connection = self.connection()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        active_peer(&transaction, host_id, Some(pinned_identity))?;
+        require_pending_sender(&transaction, message_id, host_id)?;
+        let current: u64 = transaction.query_row("SELECT after_sequence FROM replica_cursors WHERE host_id = ?1 AND conversation_id = ?2",params![host_id,conversation_id],|row|row.get(0)).optional()?.unwrap_or(0);
+        if batch.cursor.after_sequence > current {
+            return Err(StorageError::SyncGap {
+                expected: current,
+                actual: batch.cursor.after_sequence,
+            });
+        }
+        let mut through = current;
+        for event in &batch.events {
+            validate_sequence(event.sequence.get())?;
+            let encoded = serde_json::to_string(event)?;
+            let existing: Option<(String,String)> = transaction.query_row("SELECT event_id, envelope FROM replica_events WHERE host_id = ?1 AND conversation_id = ?2 AND sequence = ?3",params![host_id,conversation_id,event.sequence.get()],|row|Ok((row.get(0)?,row.get(1)?))).optional()?;
+            if let Some((id, original)) = existing {
+                if id != event.event_id.to_string() || original != encoded {
+                    return Err(StorageError::TransportConflict(format!(
+                        "replica event {}",
+                        event.event_id
+                    )));
+                }
+            } else {
+                if event.sequence.get() != through.saturating_add(1) {
+                    return Err(StorageError::SyncGap {
+                        expected: through,
+                        actual: event.sequence.get(),
+                    });
+                }
+                transaction.execute("INSERT INTO replica_events(host_id,conversation_id,sequence,event_id,envelope) VALUES (?1,?2,?3,?4,?5)",params![host_id,conversation_id,event.sequence.get(),event.event_id.to_string(),encoded])?;
+            }
+            through = through.max(event.sequence.get());
+        }
+        transaction.execute("INSERT INTO replica_cursors(host_id,conversation_id,after_sequence) VALUES (?1,?2,?3) ON CONFLICT(host_id,conversation_id) DO UPDATE SET after_sequence=max(replica_cursors.after_sequence,excluded.after_sequence)",params![host_id,conversation_id,through])?;
+        for reply in replies {
+            enqueue_transport(&transaction, reply)?;
+        }
+        finish_inbox(&transaction, message_id, None)?;
+        transaction.commit()?;
+        Ok(SyncCursor {
+            conversation_id: batch.cursor.conversation_id,
+            after_sequence: through,
+        })
+    }
+
+    pub fn acknowledge_sync_offer(
+        &self,
+        message_id: &str,
+        sender: &str,
+        pinned_identity: &Value,
+        offer_message_id: &str,
+        cursor: SyncCursor,
+        last_event_id: Option<&str>,
+    ) -> StorageResult<()> {
+        validate_id(message_id)?;
+        validate_id(sender)?;
+        validate_id(offer_message_id)?;
+        validate_sequence(cursor.after_sequence)?;
+        validate_optional_id(last_event_id)?;
+        let mut connection = self.connection()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        active_peer(&transaction, sender, Some(pinned_identity))?;
+        require_pending_sender(&transaction, message_id, sender)?;
+        let offer:Option<(String,String,u64,Option<String>)>=transaction.query_row("SELECT device_id,conversation_id,through_sequence,last_event_id FROM sync_offers WHERE message_id=?1",[offer_message_id],|row|Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?))).optional()?;
+        let Some((device, conversation, through, last)) = offer else {
+            let acknowledged: u64 = transaction.query_row(
+                "SELECT after_sequence FROM device_sync_cursors WHERE device_id=?1 AND conversation_id=?2",
+                params![sender,cursor.conversation_id.to_string()], |row|row.get(0),
+            ).optional()?.unwrap_or(0);
+            if cursor.after_sequence <= acknowledged {
+                finish_inbox(&transaction, message_id, None)?;
+                transaction.commit()?;
+                return Ok(());
+            }
+            return Err(missing("sync offer", offer_message_id));
+        };
+        if device != sender
+            || conversation != cursor.conversation_id.to_string()
+            || through != cursor.after_sequence
+            || last.as_deref() != last_event_id
+        {
+            return Err(StorageError::TransportConflict(offer_message_id.into()));
+        }
+        transaction.execute("INSERT INTO device_sync_cursors(device_id,conversation_id,after_sequence) VALUES (?1,?2,?3) ON CONFLICT(device_id,conversation_id) DO UPDATE SET after_sequence=max(device_sync_cursors.after_sequence,excluded.after_sequence)",params![sender,conversation,through])?;
+        transaction.execute(
+            "DELETE FROM sync_offers WHERE message_id=?1",
+            [offer_message_id],
+        )?;
+        finish_inbox(&transaction, message_id, None)?;
+        transaction.commit()?;
+        Ok(())
+    }
+
+    pub fn acknowledged_sync_cursor(
+        &self,
+        device_id: &str,
+        conversation_id: &str,
+    ) -> StorageResult<u64> {
+        validate_id(device_id)?;
+        validate_id(conversation_id)?;
+        Ok(self.connection()?.query_row("SELECT after_sequence FROM device_sync_cursors WHERE device_id=?1 AND conversation_id=?2",params![device_id,conversation_id],|row|row.get(0)).optional()?.unwrap_or(0))
+    }
+}
+
+fn active_peer(
+    connection: &Connection,
+    id: &str,
+    expected: Option<&Value>,
+) -> StorageResult<DeviceRow> {
+    let row = connection
+        .query_row(
+            "SELECT id,label,public_identity,created_at,revoked_at FROM devices WHERE id=?1",
+            [id],
+            device_row,
+        )
+        .optional()?
+        .ok_or_else(|| missing("device", id))?;
+    if row.revoked_at.is_some() {
+        return Err(StorageError::RevokedDevice(id.into()));
+    }
+    if expected.is_some_and(|expected| expected != &row.public_identity) {
+        return Err(StorageError::TransportConflict(id.into()));
+    }
+    Ok(row)
+}
+
+fn validate_inbox(row: &TransportInboxRow) -> StorageResult<()> {
+    validate_id(&row.message_id)?;
+    validate_id(&row.sender)?;
+    validate_id(&row.recipient)?;
+    validate_time(row.received_at)?;
+    validate_time(row.expires_at)?;
+    if row.expires_at <= row.received_at
+        || row.payload.is_empty()
+        || row.payload.len() > MAX_JSON_BYTES
+        || row.envelope_digest.len() != 64
+        || !row
+            .envelope_digest
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit())
+    {
+        return invalid("invalid durable inbox receipt");
+    }
+    Ok(())
+}
+
+fn validate_outbound(item: &TransportOutboxInsert) -> StorageResult<()> {
+    let message = &item.message;
+    validate_id(&message.id)?;
+    validate_id(&message.device_id)?;
+    validate_interval(message.created_at, message.not_before)?;
+    if item.expires_at <= message.created_at
+        || message.envelope.is_empty()
+        || message.envelope.len() > MAX_TRANSPORT_ENVELOPE
+        || message.attempts != 0
+        || message.delivered_at.is_some()
+    {
+        return invalid("invalid encrypted outbox envelope");
+    }
+    Ok(())
+}
+
+fn enqueue_transport(connection: &Connection, item: &TransportOutboxInsert) -> StorageResult<()> {
+    active_peer(connection, &item.message.device_id, None)?;
+    let local_active: bool = connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM transport_endpoint WHERE singleton=1 AND revoked_at IS NULL)",
+        [],
+        |row| row.get(0),
+    )?;
+    if !local_active {
+        return Err(StorageError::TransportConflict(
+            "local endpoint is revoked or unconfigured".into(),
+        ));
+    }
+    let (global_count, global_bytes): (i64, i64) = connection.query_row(
+        "SELECT count(*),coalesce(sum(length(envelope)),0) FROM outbox WHERE delivered_at IS NULL",
+        [],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    let (peer_count,peer_bytes):(i64,i64)=connection.query_row("SELECT count(*),coalesce(sum(length(envelope)),0) FROM outbox WHERE device_id=?1 AND delivered_at IS NULL",[&item.message.device_id],|row|Ok((row.get(0)?,row.get(1)?)))?;
+    if global_count >= 1_024
+        || global_bytes + item.message.envelope.len() as i64 > 128 * 1_048_576
+        || peer_count >= 64
+        || peer_bytes + item.message.envelope.len() as i64 > 16 * 1_048_576
+    {
+        return Err(StorageError::TransportCapacity("encrypted sender outbox"));
+    }
+    connection.execute(
+        "INSERT INTO outbox(id,device_id,envelope,created_at,not_before) VALUES (?1,?2,?3,?4,?5)",
+        params![
+            item.message.id,
+            item.message.device_id,
+            item.message.envelope,
+            item.message.created_at,
+            item.message.not_before
+        ],
+    )?;
+    connection.execute(
+        "INSERT INTO transport_outbox(message_id,expires_at) VALUES (?1,?2)",
+        params![item.message.id, item.expires_at],
+    )?;
+    Ok(())
+}
+
+fn finish_inbox(connection: &Connection, id: &str, rejection: Option<&str>) -> StorageResult<()> {
+    let next = if rejection.is_some() {
+        "rejected"
+    } else {
+        "processed"
+    };
+    let changed=connection.execute("UPDATE transport_inbox SET state=?2,detail=?3,payload=NULL WHERE message_id=?1 AND state='pending'",params![id,next,rejection])?;
+    if changed == 0 {
+        let state: Option<String> = connection
+            .query_row(
+                "SELECT state FROM transport_inbox WHERE message_id=?1",
+                [id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if state.as_deref() != Some(next) {
+            return Err(state_conflict("inbox message", id));
+        }
+    }
+    Ok(())
+}
+
+fn require_pending_sender(connection: &Connection, id: &str, sender: &str) -> StorageResult<()> {
+    let matches:bool=connection.query_row("SELECT EXISTS(SELECT 1 FROM transport_inbox WHERE message_id=?1 AND sender=?2 AND state='pending')",params![id,sender],|row|row.get(0))?;
+    if !matches {
+        return Err(state_conflict("inbox message", id));
+    }
+    Ok(())
+}
+
+fn inbox_row(row: &Row<'_>) -> rusqlite::Result<TransportInboxRow> {
+    Ok(TransportInboxRow {
+        message_id: row.get(0)?,
+        sender: row.get(1)?,
+        recipient: row.get(2)?,
+        envelope_digest: row.get(3)?,
+        payload: row.get(4)?,
+        received_at: row.get(5)?,
+        expires_at: row.get(6)?,
+    })
+}
+
+fn read_remote_command(
+    connection: &Connection,
+    id: &str,
+) -> StorageResult<Option<RemoteCommandRow>> {
+    Ok(connection.query_row("SELECT command_id,sender,conversation_id,request,request_digest,state,result,result_digest,received_at,updated_at FROM remote_commands WHERE command_id=?1",[id],remote_command_row).optional()?)
+}
+
+fn remote_command_row(row: &Row<'_>) -> rusqlite::Result<RemoteCommandRow> {
+    let request: Option<String> = row.get(3)?;
+    let result: Option<String> = row.get(6)?;
+    let state = match row.get::<_, String>(5)?.as_str() {
+        "pending" => RemoteCommandState::Pending,
+        "completed" => RemoteCommandState::Completed,
+        "rejected" => RemoteCommandState::Rejected,
+        state => {
+            return Err(rusqlite::Error::InvalidParameterName(format!(
+                "invalid remote command state {state}"
+            )));
+        }
+    };
+    Ok(RemoteCommandRow {
+        command_id: row.get(0)?,
+        sender: row.get(1)?,
+        conversation_id: row.get(2)?,
+        request: request.map(|raw| parse_json(&raw, 3)).transpose()?,
+        request_digest: row.get(4)?,
+        state,
+        result: result.map(|raw| parse_json(&raw, 6)).transpose()?,
+        result_digest: row.get(7)?,
+        received_at: row.get(8)?,
+        updated_at: row.get(9)?,
+    })
+}
+
+fn transport_digest(domain: &[u8], bytes: &[u8]) -> String {
+    let mut hash = Sha256::new();
+    hash.update(domain);
+    hash.update(bytes);
+    format!("{:x}", hash.finalize())
+}

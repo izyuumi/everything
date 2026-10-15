@@ -135,10 +135,10 @@ impl ProviderEndpoint {
     }
 
     fn validate(&self) -> Result<(), AgentError> {
-        if let Self::Loopback(url) = self {
-            if Self::loopback(url)? != *self {
-                return Err(AgentError::InvalidData("endpoint is not canonical"));
-            }
+        if let Self::Loopback(url) = self
+            && Self::loopback(url)? != *self
+        {
+            return Err(AgentError::InvalidData("endpoint is not canonical"));
         }
         Ok(())
     }
@@ -465,14 +465,15 @@ impl Agent {
                 {
                     return Err(AgentError::CommandConflict(command.command_id));
                 }
-                if let Some(pending) = &conversation.checkpoint.pending {
-                    if pending.command == command && pending.message_id == message.id {
-                        return Ok(TextAcceptance::Pending {
-                            command_id: command.command_id,
-                            message_id: message.id,
-                            duplicate: true,
-                        });
-                    }
+                if let Some(pending) = &conversation.checkpoint.pending
+                    && pending.command == command
+                    && pending.message_id == message.id
+                {
+                    return Ok(TextAcceptance::Pending {
+                        command_id: command.command_id,
+                        message_id: message.id,
+                        duplicate: true,
+                    });
                 }
                 let response = conversation
                     .messages
@@ -651,10 +652,10 @@ impl Agent {
                 }
                 content.push(MessageContent::Text { text });
             }
-            if let Some(continuation) = &response.continuation {
-                if continuation.provider() != conversation.config.provider.id() {
-                    return Err(AgentError::ConfigurationMismatch);
-                }
+            if let Some(continuation) = &response.continuation
+                && continuation.provider() != conversation.config.provider.id()
+            {
+                return Err(AgentError::ConfigurationMismatch);
             }
             let now = UnixMillis::now()?;
             let message = ConversationMessage {

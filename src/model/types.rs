@@ -78,10 +78,10 @@ impl ModelRequest {
         if self.max_output_tokens == Some(0) {
             return Err(invalid("max_output_tokens", "must be greater than zero"));
         }
-        if let Some(temperature) = self.temperature {
-            if !temperature.is_finite() || !(0.0..=2.0).contains(&temperature) {
-                return Err(invalid("temperature", "must be finite and between 0 and 2"));
-            }
+        if let Some(temperature) = self.temperature
+            && (!temperature.is_finite() || !(0.0..=2.0).contains(&temperature))
+        {
+            return Err(invalid("temperature", "must be finite and between 0 and 2"));
         }
         if let Some(continuation) = &self.continuation {
             continuation.validate()?;
