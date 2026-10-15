@@ -31,8 +31,15 @@ impl HostInner {
     pub(super) async fn query(
         self: &Arc<Self>,
         query: OwnerQuery,
+        cancellation: tokio_util::sync::CancellationToken,
     ) -> Result<OwnerQueryResult, HostError> {
         match query {
+            OwnerQuery::Schedule { query } => Ok(OwnerQueryResult::Schedule {
+                result: self
+                    .schedule_controls
+                    .query_as_owner(query, cancellation)
+                    .await?,
+            }),
             OwnerQuery::ScheduleEngine => Ok(OwnerQueryResult::ScheduleEngine {
                 status: Box::new(self.schedule_engine.status()),
             }),
@@ -236,14 +243,46 @@ impl HostInner {
         self: &Arc<Self>,
         operation: OwnerOperation,
         request_id: CommandId,
+        cancellation: tokio_util::sync::CancellationToken,
     ) -> Result<OwnerOperationResult, HostError> {
         if !matches!(
             operation,
-            OwnerOperation::AcknowledgeCleanup { .. } | OwnerOperation::ReconcileDrained
+            OwnerOperation::AcknowledgeCleanup { .. }
+                | OwnerOperation::ReconcileDrained
+                | OwnerOperation::AcknowledgeScheduledUnknown { .. }
         ) {
             self.ensure_accepting()?;
         }
         match operation {
+            OwnerOperation::Schedule { mutation } => {
+                let _mutation = self.mutation.lock().await;
+                self.ensure_accepting()?;
+                let inspected = mutation.clone();
+                let authority = self
+                    .blocking(move |host| {
+                        Ok(owner_schedule_authority(host, &inspected, request_id)?)
+                    })
+                    .await?;
+                Ok(OwnerOperationResult::Schedule {
+                    result: self
+                        .schedule_controls
+                        .mutate_as_owner(mutation, authority, cancellation)
+                        .await?,
+                })
+            }
+            OwnerOperation::AcknowledgeScheduledUnknown { request } => {
+                let _mutation = self.mutation.lock().await;
+                let acknowledgement = self
+                    .blocking(move |host| {
+                        crate::scheduling::ScheduleRepository::new(host.agent.store())
+                            .acknowledge_unknown_as_owner(&request)
+                            .map_err(crate::scheduling::controls::ControlError::from)
+                            .map_err(HostError::from)
+                    })
+                    .await?;
+                self.schedule_engine.wake();
+                Ok(OwnerOperationResult::ScheduledUnknownAcknowledged { acknowledgement })
+            }
             OwnerOperation::DiscardUnapplied {
                 command_id,
                 expected_accepted_at,
@@ -448,4 +487,63 @@ fn legacy_task(row: crate::storage::TaskRow) -> Result<crate::protocol::TaskReco
         ));
     }
     Ok(current)
+}
+
+fn owner_schedule_authority(
+    host: &HostInner,
+    mutation: &crate::scheduling::controls::ScheduleMutation,
+    request_id: CommandId,
+) -> Result<crate::permissions::ExecutionAuthority, crate::scheduling::controls::ControlError> {
+    use crate::permissions::{ExecutionAuthority, ExecutionMode};
+    use crate::scheduling::controls::{ControlError, ScheduleMutation};
+    use crate::scheduling::{ResultDelivery, ScheduleError, ScheduleRepository};
+
+    let target = match mutation {
+        ScheduleMutation::Create { job } | ScheduleMutation::Update { job, .. } => {
+            Some(job.definition.target.clone())
+        }
+        ScheduleMutation::Run { claim } => {
+            let repository = ScheduleRepository::new(host.agent.store());
+            Some(if let Some(run) = repository.run(claim.occurrence_id)? {
+                run.definition.target
+            } else {
+                repository
+                    .job(claim.job_id)?
+                    .ok_or_else(|| ScheduleError::NotFound {
+                        entity: "job",
+                        id: claim.job_id.to_string(),
+                    })?
+                    .definition
+                    .target
+            })
+        }
+        ScheduleMutation::Disable { .. } | ScheduleMutation::Delete { .. } => None,
+    };
+    let (conversation, workspace, mode, tools) = match target {
+        Some(target) => {
+            let conversation = match target.delivery {
+                ResultDelivery::Conversation { conversation_id } => conversation_id.to_string(),
+                _ => request_id.to_string(),
+            };
+            (
+                conversation,
+                target.workspace_root,
+                target.permissions.mode,
+                target.permissions.allowed_tools,
+            )
+        }
+        None => (
+            request_id.to_string(),
+            host.agent
+                .state_directory()
+                .ok_or(ControlError::LeaseRequired)?
+                .to_path_buf(),
+            ExecutionMode::ReadOnly,
+            Default::default(),
+        ),
+    };
+    ExecutionAuthority::new(conversation, request_id.to_string(), workspace, mode)
+        .and_then(|authority| authority.restrict_tools(tools))
+        .map_err(ScheduleError::from)
+        .map_err(ControlError::from)
 }

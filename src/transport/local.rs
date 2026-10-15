@@ -188,6 +188,7 @@ pub struct HostStatus {
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LocalFailureCode {
+    Cancelled,
     InvalidRequest,
     PermissionDenied,
     Unavailable,

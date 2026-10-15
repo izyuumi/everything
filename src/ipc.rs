@@ -77,6 +77,9 @@ impl OwnerCommand {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum OwnerQuery {
+    Schedule {
+        query: crate::scheduling::controls::ScheduleQuery,
+    },
     ScheduleEngine,
     Conversations {
         limit: usize,
@@ -169,6 +172,12 @@ pub enum ApprovalLookup {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum OwnerOperation {
+    Schedule {
+        mutation: crate::scheduling::controls::ScheduleMutation,
+    },
+    AcknowledgeScheduledUnknown {
+        request: crate::scheduling::acknowledgements::UnknownAcknowledgementRequest,
+    },
     DiscardUnapplied {
         command_id: CommandId,
         expected_accepted_at: UnixMillis,
@@ -290,6 +299,9 @@ impl ConversationWait {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum OwnerQueryResult {
+    Schedule {
+        result: crate::scheduling::controls::ScheduleQueryResult,
+    },
     ScheduleEngine {
         status: Box<crate::scheduling::engine::EngineStatus>,
     },
@@ -530,6 +542,12 @@ pub struct TaskExecutionMetadata {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum OwnerOperationResult {
+    Schedule {
+        result: crate::scheduling::controls::ScheduleMutationResult,
+    },
+    ScheduledUnknownAcknowledged {
+        acknowledgement: crate::scheduling::acknowledgements::UnknownAcknowledgement,
+    },
     Command {
         receipt: CommandReceipt,
     },

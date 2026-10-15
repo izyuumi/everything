@@ -1,10 +1,12 @@
 pub mod acknowledgements;
 pub mod attempts;
 pub mod clock;
+pub mod controls;
 pub mod delivery;
 pub mod engine;
 pub mod execution;
 pub mod store;
+pub mod tools;
 
 use std::collections::BTreeSet;
 use std::fmt;
