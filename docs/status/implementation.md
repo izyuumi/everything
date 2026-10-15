@@ -4,21 +4,23 @@ Assessment date: 2026-10-15. The initial main branch contained only LICENSE and 
 
 ## Current integration
 
-Bootstrap #1 merged through [PR #33](https://github.com/izyuumi/everything/pull/33), with Linux/macOS CI passing. Both binaries expose help. No runtime functionality is yet implemented. Independent contracts #2–#7 are in progress in isolated worktrees. Rust 1.99.0 is installed in the Linux development environment. Apple SDKs and hardware are unavailable here. GitHub branch-protection inspection returns HTTP 403; required checks and normal merge enforcement remain authoritative.
+Bootstrap #1, domain contracts #2, provider contracts #4, and tool contracts #5 are merged through PRs #33–#36 after Linux/macOS build CI. Storage #3, wiki #6, and crypto/sync contracts #7 have passed local formatting, compilation, strict Clippy and release builds and are in focused PR integration. Native adapters #8/#9 are in progress against merged provider contracts. No native agent loop or provider inference is yet connected to the CLI; both binaries expose help only.
+
+Disposable manual checks covered storage atomicity/dedup/restart/revocation, wiki CRUD/search/rebuild/path confinement, and Rust pairing/encryption/replay/tamper/expiry. These are focused observations, not automated coverage or a security audit. Rust 1.99.0 is available here. Apple SDKs, Mac hardware benchmarks, Swift interoperability and live model credentials are unavailable. Branch-protection inspection returns HTTP403; merges respect normal GitHub enforcement and passing CI.
 
 ## Dependency graph and ownership
 
 | Issue | Objective | Prerequisites | State |
 | --- | --- | --- | --- |
 | [#1](https://github.com/izyuumi/everything/issues/1) | Bootstrap Rust workspace and CI | None | Merged (#33) |
-| [#2](https://github.com/izyuumi/everything/issues/2) | Define versioned domain and event contracts | None | Implemented, review pending |
-| [#3](https://github.com/izyuumi/everything/issues/3) | Implement SQLite storage and migrations | None | In progress |
-| [#4](https://github.com/izyuumi/everything/issues/4) | Implement model-neutral provider types | None | In progress |
-| [#5](https://github.com/izyuumi/everything/issues/5) | Define Tool trait, registry, and argument validation | None | In progress |
-| [#6](https://github.com/izyuumi/everything/issues/6) | Implement Markdown wiki parser and FTS5 index | None | In progress |
-| [#7](https://github.com/izyuumi/everything/issues/7) | Define relay protocol and crypto test vectors | None | In progress |
-| [#8](https://github.com/izyuumi/everything/issues/8) | Implement Anthropic native Messages adapter | #4 | Backlog |
-| [#9](https://github.com/izyuumi/everything/issues/9) | Implement OpenAI native Responses adapter | #4 | Backlog |
+| [#2](https://github.com/izyuumi/everything/issues/2) | Define versioned domain and event contracts | None | Merged (#34) |
+| [#3](https://github.com/izyuumi/everything/issues/3) | Implement SQLite storage and migrations | None | Implemented, PR #37 validation |
+| [#4](https://github.com/izyuumi/everything/issues/4) | Implement model-neutral provider types | None | Merged (#35) |
+| [#5](https://github.com/izyuumi/everything/issues/5) | Define Tool trait, registry, and argument validation | None | Merged (#36) |
+| [#6](https://github.com/izyuumi/everything/issues/6) | Implement Markdown wiki parser and FTS5 index | None | Implemented, PR #38 validation |
+| [#7](https://github.com/izyuumi/everything/issues/7) | Define relay protocol and crypto test vectors | None | Implemented, integration review |
+| [#8](https://github.com/izyuumi/everything/issues/8) | Implement Anthropic native Messages adapter | #4 | In progress |
+| [#9](https://github.com/izyuumi/everything/issues/9) | Implement OpenAI native Responses adapter | #4 | In progress |
 | [#10](https://github.com/izyuumi/everything/issues/10) | Build persistent CLI conversation loop | #2, #3, #4, #8 | Backlog |
 | [#11](https://github.com/izyuumi/everything/issues/11) | Implement permission policy and persistent grants | #2, #3, #5 | Backlog |
 | [#12](https://github.com/izyuumi/everything/issues/12) | Implement local EmbeddingGemma 2 inference spike | #31 | Backlog |
