@@ -1,5 +1,7 @@
 mod inspection;
+pub(crate) mod publication;
 pub use inspection::{ApprovalCursor, ApprovalPage, ApprovalSummary, MAX_APPROVAL_METADATA_BYTES};
+pub use publication::PermissionDecisionPublication;
 
 use crate::storage::{PermissionRow, StorageError, Store};
 use crate::tools::{ToolCapability, ToolDescriptor, ToolError, ToolRegistry};

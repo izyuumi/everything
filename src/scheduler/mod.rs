@@ -19,3 +19,11 @@ pub fn task_snapshot(
 ) -> Result<TaskSnapshot, SchedulerError> {
     repository::load(store, task).map(|task| task.snapshot())
 }
+
+pub fn task_publication_records(
+    store: &crate::storage::Store,
+    task: crate::protocol::TaskId,
+) -> Result<(crate::protocol::TaskRecord, crate::protocol::TaskRecord), SchedulerError> {
+    let saved = repository::load(store, task)?;
+    Ok((saved.definition.initial, saved.checkpoint.task))
+}
