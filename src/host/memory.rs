@@ -221,6 +221,7 @@ impl EmbeddingExecutionSettings {
 pub enum MemoryDiagnostic {
     MaintenanceProviderUnavailable,
     EmbeddingFeatureUnavailable,
+    EmbeddingTelemetrySuppressionRequired,
     EmbeddingInitializationFailed,
     MaintenanceWorkerFailed,
     QuiescenceFailed,
@@ -624,6 +625,12 @@ async fn configure_embeddings(
     }
     #[cfg(feature = "local-embeddings")]
     {
+        if let Err(error) = crate::memory::embedding::embeddinggemma2::EmbeddingRuntime::require_telemetry_suppression() {
+            consolidator.set_hybrid_search_result(Err(error.into())).await?;
+            return Ok(EmbeddingStatus::Unavailable {
+                diagnostic: MemoryDiagnostic::EmbeddingTelemetrySuppressionRequired,
+            });
+        }
         let configuration = configuration.clone();
         let dimensions = configuration.dimensions;
         let retained_agent = agent.clone();
@@ -665,6 +672,7 @@ fn build_embeddings(
     if cancellation.is_cancelled() {
         return Err(VectorError::Cancelled);
     }
+    EmbeddingRuntime::require_telemetry_suppression()?;
     let descriptor = rustix::fs::open(
         &configuration.runtime_library,
         OFlags::RDONLY | OFlags::NONBLOCK | OFlags::NOFOLLOW | OFlags::CLOEXEC,
