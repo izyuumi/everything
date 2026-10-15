@@ -22,3 +22,4 @@ futures-core = "0.3"
 tokio-util = { version = "0.7", features = ["rt"] }
 tokio = { version = "1", features = ["rt"] }
 jsonschema = { version = "0.58", default-features = false }
+rusqlite = { version = "0.37", features = ["bundled"] }
