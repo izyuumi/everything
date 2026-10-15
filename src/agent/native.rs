@@ -1,4 +1,5 @@
 use std::collections::BTreeSet;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 
 use futures_util::{StreamExt, stream};
@@ -196,6 +197,8 @@ struct NativeTurn {
     definition: Definition,
     definition_digest: String,
     started_at_ms: u64,
+    #[serde(default)]
+    last_observed_wall_ms: u64,
     deadline_ms: u64,
     attempts: u32,
     tool_calls: u32,
@@ -291,6 +294,9 @@ impl NativeCheckpoint {
             }
             if turn.command_id != pending.command.command_id
                 || definition_digest(&turn.definition)? != turn.definition_digest
+                || turn.last_observed_wall_ms > i64::MAX as u64
+                || (turn.last_observed_wall_ms != 0
+                    && turn.last_observed_wall_ms < turn.started_at_ms)
                 || turn.deadline_ms
                     != effective_deadline(turn.started_at_ms, &turn.definition.limits)?
                 || turn.attempts > turn.definition.limits.max_model_attempts
@@ -440,6 +446,7 @@ impl Agent {
         {
             return Err(AgentError::NativeSetupRequired);
         }
+        let stream_deadline = run_deadline(&conversation)?;
         let agent = self.clone();
         let child = cancellation.child_token();
         let cancel_on_drop = child.clone().drop_guard();
@@ -477,7 +484,7 @@ impl Agent {
                             } else { yield TurnEvent::Paused { reason }; break; }
                         }
                         LoopStatus::ExecutingTools | LoopStatus::AwaitingPermission => {
-                            let events = agent.execute_round(&mut conversation, Arc::clone(setup), &child, Arc::clone(&admission)).await?;
+                            let events = agent.execute_round(&mut conversation, Arc::clone(setup), &child, Arc::clone(&admission), stream_deadline).await?;
                             let mut stop = false;
                             for event in events { stop |= matches!(event, TurnEvent::Paused { .. } | TurnEvent::AwaitingPermission { .. }); yield event; }
                             if stop { break; }
@@ -496,7 +503,7 @@ impl Agent {
                         Ok((conversation, built, request))
                     }).await?;
                     conversation = captured;
-                    if let Some(reason) = next_attempt_limit(&conversation, &built)? {
+                    if let Some(reason) = next_attempt_limit(&conversation, &built, stream_deadline)? {
                         let mut checkpoint = conversation.checkpoint.clone(); turn_mut(&mut checkpoint)?.status = LoopStatus::Paused { reason: reason.clone() };
                         agent.save_native(&mut conversation, checkpoint, Vec::new(), Arc::clone(&admission)).await?;
                         yield TurnEvent::Paused { reason }; break;
@@ -507,6 +514,7 @@ impl Agent {
                     state.context.compaction = built.compaction.clone();
                     if built.request.continuation.is_none() { state.context.binding = None; checkpoint.continuation = None; }
                     let turn = state.turn.as_mut().ok_or(AgentError::NoPendingTurn)?;
+                    turn.last_observed_wall_ms = observed_floor(turn).max(UnixMillis::now()?.get());
                     turn.attempts += 1;
                     turn.charged_tokens = turn.charged_tokens.checked_add(reservation(&built)).ok_or(AgentError::ResourceLimit("token accounting"))?;
                     turn.status = LoopStatus::ProviderInFlight { attempt_id };
@@ -522,7 +530,15 @@ impl Agent {
                     conversation = captured;
                     Prepared::Legacy(request)
                 };
-                let deadline = run_deadline(&conversation)?;
+                let deadline = stream_deadline.min(run_deadline(&conversation)?);
+                if let Some(turn) = conversation.checkpoint.native.as_ref().and_then(|native| native.turn.as_ref())
+                    && !clock_allows(turn, UnixMillis::now()?.get(), stream_deadline)
+                {
+                    let mut checkpoint = conversation.checkpoint.clone();
+                    turn_mut(&mut checkpoint)?.status = LoopStatus::Paused { reason: PauseReason::DurationLimit };
+                    agent.save_native(&mut conversation, checkpoint, Vec::new(), Arc::clone(&admission)).await?;
+                    yield TurnEvent::Paused { reason: PauseReason::DurationLimit }; break;
+                }
                 let (request, prepared) = prepared.into_parts();
                 let mut events = tokio::select! {
                     biased;
@@ -759,6 +775,7 @@ fn prepare_native(
             definition,
             definition_digest: digest,
             started_at_ms: now,
+            last_observed_wall_ms: now,
             deadline_ms,
             attempts: 0,
             tool_calls: 0,
@@ -893,13 +910,14 @@ fn effective_deadline(started_at_ms: u64, limits: &LoopLimits) -> Result<u64, Ag
 fn next_attempt_limit(
     conversation: &Conversation,
     built: &BuiltContext,
+    stream_deadline: Instant,
 ) -> Result<Option<PauseReason>, AgentError> {
     let turn = native(conversation)?
         .turn
         .as_ref()
         .ok_or(AgentError::NoPendingTurn)?;
     let now = UnixMillis::now()?.get();
-    Ok(if now < turn.started_at_ms || now >= turn.deadline_ms {
+    Ok(if !clock_allows(turn, now, stream_deadline) {
         Some(PauseReason::DurationLimit)
     } else if turn.attempts >= turn.definition.limits.max_model_attempts {
         Some(PauseReason::ModelAttemptLimit)
@@ -914,6 +932,14 @@ fn next_attempt_limit(
     })
 }
 
+fn observed_floor(turn: &NativeTurn) -> u64 {
+    turn.last_observed_wall_ms.max(turn.started_at_ms)
+}
+
+fn clock_allows(turn: &NativeTurn, now: u64, stream_deadline: Instant) -> bool {
+    now >= observed_floor(turn) && now < turn.deadline_ms && Instant::now() < stream_deadline
+}
+
 fn run_deadline(conversation: &Conversation) -> Result<Instant, AgentError> {
     let remaining = match conversation
         .checkpoint
@@ -921,7 +947,14 @@ fn run_deadline(conversation: &Conversation) -> Result<Instant, AgentError> {
         .as_ref()
         .and_then(|native| native.turn.as_ref())
     {
-        Some(turn) => turn.deadline_ms.saturating_sub(UnixMillis::now()?.get()),
+        Some(turn) => {
+            let now = UnixMillis::now()?.get();
+            if now < observed_floor(turn) {
+                0
+            } else {
+                turn.deadline_ms.saturating_sub(now)
+            }
+        }
         None => 3_600_000,
     };
     Ok(Instant::now() + Duration::from_millis(remaining))
@@ -1264,6 +1297,7 @@ impl Agent {
         setup: Arc<ToolRunSetup>,
         cancellation: &CancellationToken,
         admission: Admission,
+        stream_deadline: Instant,
     ) -> Result<Vec<TurnEvent>, AgentError> {
         let owner = self.clone();
         let scoped = setup.broker.clone();
@@ -1278,9 +1312,9 @@ impl Agent {
         let mut checkpoint = conversation.checkpoint.clone();
         let turn = turn_mut(&mut checkpoint)?;
         let task_id = turn.definition.task_id;
-        let deadline = run_deadline(conversation)?;
+        let deadline = stream_deadline.min(run_deadline(conversation)?);
         let current_time = UnixMillis::now()?.get();
-        if current_time < turn.started_at_ms || current_time >= turn.deadline_ms {
+        if !clock_allows(turn, current_time, stream_deadline) {
             turn.status = LoopStatus::Paused {
                 reason: PauseReason::DurationLimit,
             };
@@ -1290,6 +1324,10 @@ impl Agent {
                 reason: PauseReason::DurationLimit,
             }]);
         }
+        turn.last_observed_wall_ms = observed_floor(turn).max(current_time);
+        let wall_deadline = turn.deadline_ms;
+        let observed_wall = Arc::new(AtomicU64::new(turn.last_observed_wall_ms));
+        let admission_stopped = Arc::new(AtomicBool::new(false));
         let round = turn
             .round
             .as_mut()
@@ -1318,11 +1356,27 @@ impl Agent {
         let _cancel_on_drop = token.clone().drop_guard();
         let broker = setup.broker.clone();
         let child = token.clone();
+        let call_observed_wall = Arc::clone(&observed_wall);
         let calls = stream::iter(requests)
             .map(move |(index, invocation)| {
                 let broker = broker.clone();
                 let token = child.clone();
-                async move { (index, broker.execute(invocation, token).await) }
+                let observed_wall = Arc::clone(&call_observed_wall);
+                let admission_stopped = Arc::clone(&admission_stopped);
+                async move {
+                    let now = UnixMillis::now()?.get();
+                    let floor = observed_wall.fetch_max(now, Ordering::AcqRel);
+                    if admission_stopped.load(Ordering::Acquire)
+                        || now < floor
+                        || now >= wall_deadline
+                        || Instant::now() >= deadline
+                    {
+                        admission_stopped.store(true, Ordering::Release);
+                        Ok::<_, AgentError>((index, None))
+                    } else {
+                        Ok((index, Some(broker.execute(invocation, token).await)))
+                    }
+                }
             })
             .buffer_unordered(setup.limits.max_parallel_calls);
         tokio::pin!(calls);
@@ -1339,10 +1393,27 @@ impl Agent {
                     result = calls.next() => result,
                 }
             };
-            let Some((index, returned)) = next else {
+            let Some(returned) = next else {
                 break;
             };
+            let (index, returned) = returned?;
             let mut checkpoint = conversation.checkpoint.clone();
+            let turn = turn_mut(&mut checkpoint)?;
+            turn.last_observed_wall_ms =
+                observed_floor(turn).max(observed_wall.load(Ordering::Acquire));
+            let Some(returned) = returned else {
+                let call = turn
+                    .round
+                    .as_mut()
+                    .and_then(|round| round.calls.get_mut(index))
+                    .ok_or(AgentError::InvalidData(
+                        "clock-stopped call lost its identity",
+                    ))?;
+                call.phase = CallPhase::Blocked { reason: PauseReason::DurationLimit, diagnostic: "Native deadline or observed clock rollback stopped this call before broker admission".into() };
+                self.save_native(conversation, checkpoint, Vec::new(), Arc::clone(&admission))
+                    .await?;
+                continue;
+            };
             let registry = Arc::clone(&setup.registry);
             let (checkpoint, payloads, emitted, stop) = blocking(move || {
                 let mut emitted = Vec::new();
@@ -1491,11 +1562,19 @@ impl Agent {
             })
             .or_else(|| {
                 round.calls.iter().find_map(|call| {
-                    if let CallPhase::Blocked { reason, .. } = &call.phase {
+                    if let CallPhase::Blocked { reason, .. } = &call.phase
+                        && !matches!(reason, PauseReason::DurationLimit)
+                    {
                         Some(reason.clone())
                     } else {
                         None
                     }
+                })
+            })
+            .or_else(|| {
+                round.calls.iter().find_map(|call| match &call.phase {
+                    CallPhase::Blocked { reason, .. } => Some(reason.clone()),
+                    _ => None,
                 })
             });
         let waiting = round
