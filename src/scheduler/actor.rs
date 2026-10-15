@@ -404,6 +404,14 @@ impl Actor {
         let tasks = repository::unfinished(&self.store(), self.limits.max_pending_tasks)?;
         for mut task in tasks {
             let id = task.definition.initial.id;
+            match repository::encode_checkpoint(&task.checkpoint) {
+                Err(SchedulerError::Capacity("task checkpoint bytes")) => {
+                    tracing::warn!(task_id=%id, "legacy scheduler checkpoint lacks reserved lifecycle capacity; owner inspection is required before admission");
+                    continue;
+                }
+                Err(error) => return Err(error),
+                Ok(_) => {}
+            }
             let captured = self
                 .services
                 .agent
@@ -883,6 +891,7 @@ impl Actor {
             instruction,
             accepted_at: now,
         });
+        repository::encode_checkpoint(&task.checkpoint)?;
         let status = task.checkpoint.task.status;
         repository::save(&self.store(), &mut task, status).map_err(mutation_uncertain)?;
         Ok(task.snapshot())

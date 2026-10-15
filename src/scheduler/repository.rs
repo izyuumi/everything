@@ -44,6 +44,30 @@ pub(super) fn encode(value: &impl Serialize) -> Result<Value, SchedulerError> {
     Ok(serde_json::from_slice(&encoded)?)
 }
 
+pub(super) fn encode_checkpoint(checkpoint: &TaskCheckpoint) -> Result<Value, SchedulerError> {
+    let encoded = serde_json::to_vec(checkpoint)?;
+    let status_bytes = serde_json::to_vec(&checkpoint.last_output)?
+        .len()
+        .saturating_add(serde_json::to_vec(&checkpoint.diagnostic)?.len())
+        .saturating_add(serde_json::to_vec(&checkpoint.waiting)?.len())
+        .saturating_add(serde_json::to_vec(&checkpoint.task.failure)?.len())
+        .saturating_add(serde_json::to_vec(&checkpoint.task.status)?.len())
+        .saturating_add(serde_json::to_vec(&checkpoint.task.updated_at)?.len());
+    let reserve = if checkpoint.task.status.is_terminal() {
+        0
+    } else {
+        81_920_usize.saturating_sub(status_bytes)
+    };
+    if encoded
+        .len()
+        .checked_add(reserve)
+        .is_none_or(|length| length > MAX_TASK_BYTES)
+    {
+        return Err(SchedulerError::Capacity("task checkpoint bytes"));
+    }
+    Ok(serde_json::from_slice(&encoded)?)
+}
+
 pub(super) fn check_child_depth(store: &Store, id: TaskId) -> Result<(), SchedulerError> {
     let mut task = load(store, id)?;
     for _ in 1..16 {
@@ -129,7 +153,7 @@ pub(super) fn insert(
     max_pending: usize,
 ) -> Result<bool, SchedulerError> {
     let input = encode(&task.definition)?;
-    let checkpoint = encode(&task.checkpoint)?;
+    let checkpoint = encode_checkpoint(&task.checkpoint)?;
     let mut connection = store.connection()?;
     let transaction =
         connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
@@ -193,7 +217,7 @@ pub(super) fn save(
         task.checkpoint.task.updated_at = now;
     }
     let next = state(status);
-    let payload = encode(&task.checkpoint)?;
+    let payload = encode_checkpoint(&task.checkpoint)?;
     if task.state == next {
         store.checkpoint_task(
             &task.definition.initial.id.to_string(),
