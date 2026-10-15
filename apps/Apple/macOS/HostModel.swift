@@ -21,6 +21,7 @@ final class HostModel {
     var scheduleCursor: OwnerID?
     var schedulesLoading = false
     var schedulesLoaded = false
+    var schedulesBrowsing = false
     var schedulesError: String?
     var schedulesUpdated: Date?
     var selectedSchedule: HostScheduleJob?
@@ -29,6 +30,7 @@ final class HostModel {
     var scheduleHistoryCursor: JSONValue = .null
     var scheduleHistoryLoading = false
     var scheduleHistoryLoaded = false
+    var scheduleHistoryBrowsing = false
     var scheduleHistoryError: String?
     @ObservationIgnored private var scheduleGeneration = UUID()
     @ObservationIgnored private var historyGeneration = UUID()
@@ -89,6 +91,8 @@ final class HostModel {
         scheduleHistoryLoading = false
         schedulesLoaded = false
         scheduleHistoryLoaded = false
+        schedulesBrowsing = false
+        scheduleHistoryBrowsing = false
         schedulesError = nil
         scheduleHistoryError = nil
         schedulesUpdated = nil
@@ -144,7 +148,7 @@ final class HostModel {
         }
     }
 
-    func loadSchedules(more: Bool = false) async {
+    func loadSchedules(more: Bool = false, automatic: Bool = false) async {
         guard !closing, !schedulesLoading, !more || (scheduleCursor != nil && scheduleJobs.count < 100) else { return }
         let generation = UUID()
         scheduleGeneration = generation
@@ -159,6 +163,7 @@ final class HostModel {
                 let engine = try HostScheduleEngine(status)
                 guard original == connection, version == connectionKey, generation == scheduleGeneration, !closing, !Task.isCancelled else { return }
                 scheduleEngine = engine
+                if automatic && schedulesBrowsing { return }
             }
             let query: JSONValue = .object(["kind": .string("list"), "after_id": after.map { .string($0.string) } ?? .null, "enabled": .null, "include_deleted": .bool(true), "limit": .integer(10)])
             let response = try await client.request(.query("schedule", fields: ["query": query]), connection: original)
@@ -170,6 +175,7 @@ final class HostModel {
             scheduleJobs = previous + page.jobs
             scheduleCursor = page.next
             schedulesLoaded = true
+            schedulesBrowsing = more
             schedulesError = nil
             schedulesUpdated = Date()
         } catch {
@@ -187,12 +193,14 @@ final class HostModel {
         scheduleHistoryCursor = .null
         scheduleHistoryLoading = false
         scheduleHistoryLoaded = false
+        scheduleHistoryBrowsing = false
         scheduleHistoryError = nil
         selectedSchedule = job
     }
 
-    func loadScheduleHistory(_ job: HostScheduleJob, more: Bool = false) async {
+    func loadScheduleHistory(_ job: HostScheduleJob, more: Bool = false, automatic: Bool = false) async {
         guard !closing, job.source == connection, selectedSchedule?.id == job.id,
+              !automatic || !scheduleHistoryBrowsing,
               !more || (scheduleHistoryJob == job.id && !scheduleHistoryLoading && scheduleHistoryCursor != .null && scheduleRuns.count < 100) else { return }
         let generation = UUID()
         historyGeneration = generation
@@ -201,7 +209,7 @@ final class HostModel {
         let original = connection
         let version = connectionKey
         let before = more ? scheduleHistoryCursor : .null
-        if !more {
+        if !more && scheduleHistoryJob != job.id {
             scheduleHistoryJob = job.id
             scheduleRuns = []
             scheduleHistoryCursor = .null
@@ -221,6 +229,7 @@ final class HostModel {
             scheduleRuns = previous + page.runs
             scheduleHistoryCursor = page.next
             scheduleHistoryLoaded = true
+            scheduleHistoryBrowsing = more
             scheduleHistoryError = nil
         } catch {
             if original == connection, version == connectionKey, generation == historyGeneration,

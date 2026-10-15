@@ -55,6 +55,9 @@ struct SchedulesView: View {
                         .disabled(model.schedulesLoading || model.closing)
                 }
             }
+            if model.schedulesBrowsing {
+                Text("Browsing a saved snapshot. Refresh returns to the first page.").font(.caption2).foregroundStyle(.secondary)
+            }
             if model.scheduleJobs.count == 100 {
                 Text("The view is limited to 100 jobs. Refresh starts again at the first page.").font(.caption2).foregroundStyle(.secondary)
             }
@@ -64,7 +67,7 @@ struct SchedulesView: View {
         }
         .padding(.top, 8)
         .privacySensitive()
-        .task(id: ScheduleRefreshIdentity(connection: model.connectionKey, updated: model.lastRefresh)) { await model.loadSchedules() }
+        .task(id: ScheduleRefreshIdentity(connection: model.connectionKey, updated: model.lastRefresh)) { await model.loadSchedules(automatic: true) }
         .sheet(item: $model.selectedSchedule) { job in ScheduleHistoryView(model: model, job: job) }
     }
 }
@@ -145,12 +148,15 @@ private struct ScheduleHistoryView: View {
                 Spacer()
                 Button("Done") { dismiss() }.keyboardShortcut(.defaultAction)
             }
+            if model.scheduleHistoryBrowsing {
+                Text("Browsing a saved snapshot. Refresh loads the newest runs.").font(.caption2).foregroundStyle(.secondary)
+            }
             Text("Inspect Unknown outcomes through the owner CLI before choosing an acknowledgement or another operation.")
                 .font(.caption2).foregroundStyle(.secondary)
         }
         .padding(20).frame(width: 660, height: 560)
         .privacySensitive()
-        .task(id: ScheduleHistoryRefreshIdentity(connection: model.connectionKey, updated: model.lastRefresh, job: job.id)) { await model.loadScheduleHistory(job) }
+        .task(id: ScheduleHistoryRefreshIdentity(connection: model.connectionKey, updated: model.lastRefresh, job: job.id)) { await model.loadScheduleHistory(job, automatic: true) }
     }
 }
 
