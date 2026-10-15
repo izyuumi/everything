@@ -3,5 +3,6 @@ pub mod memory;
 pub mod model;
 pub mod permissions;
 pub mod protocol;
+pub mod relay_protocol;
 pub mod storage;
 pub mod tools;
