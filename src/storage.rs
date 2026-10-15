@@ -34,6 +34,8 @@ pub enum StorageError {
         "active permission set exceeds the requested limit; policy evaluation must fail closed"
     )]
     PermissionLimitExceeded,
+    #[error("permission history exceeds the requested limit; complete inspection is unavailable")]
+    PermissionHistoryLimitExceeded,
     #[error("database schema version {found} is newer than supported version {supported}")]
     UnsupportedSchema { found: i64, supported: i64 },
     #[error("{entity} {id} was not found")]
@@ -1106,6 +1108,26 @@ impl Store {
             "SELECT id, conversation_id, payload, created_at, expires_at, revoked_at FROM permissions WHERE id = ?1",
             [id], permission_row,
         ).optional()?)
+    }
+
+    pub fn permission_history(
+        &self,
+        conversation_id: &str,
+        limit: usize,
+    ) -> StorageResult<Vec<PermissionRow>> {
+        validate_id(conversation_id)?;
+        validate_limit(limit)?;
+        let connection = self.connection()?;
+        let mut statement = connection.prepare(
+            "SELECT id, conversation_id, payload, created_at, expires_at, revoked_at FROM permissions WHERE conversation_id = ?1 ORDER BY created_at, id LIMIT ?2",
+        )?;
+        let permissions = collect_rows(
+            statement.query_map(params![conversation_id, (limit + 1) as i64], permission_row)?,
+        )?;
+        if permissions.len() > limit {
+            return Err(StorageError::PermissionHistoryLimitExceeded);
+        }
+        Ok(permissions)
     }
 
     pub fn active_permissions(
