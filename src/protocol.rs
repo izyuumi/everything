@@ -1,4 +1,6 @@
+use std::collections::HashSet;
 use std::fmt;
+use std::io::{self, Write};
 use std::num::NonZeroU64;
 use std::str::FromStr;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -9,6 +11,10 @@ use thiserror::Error;
 use uuid::Uuid;
 
 pub const CURRENT_SCHEMA_VERSION: u16 = 1;
+pub const MAX_SYNC_CURSORS: usize = 64;
+pub const MAX_SYNC_EVENTS: u16 = 256;
+pub const MAX_SYNC_REQUEST_BYTES: usize = 16 * 1_024;
+pub const MAX_SYNC_BATCH_BYTES: usize = 512 * 1_024;
 
 #[derive(Debug, Error)]
 pub enum ProtocolError {
@@ -32,6 +38,12 @@ pub enum ProtocolError {
     NonMonotonicTaskTimestamp,
     #[error("failed task requires a failure, and other task states must not contain one")]
     InvalidTaskFailure,
+    #[error("invalid sync request: {0}")]
+    InvalidSyncRequest(&'static str),
+    #[error("invalid sync batch: {0}")]
+    InvalidSyncBatch(&'static str),
+    #[error("serialized sync payload exceeds its {maximum}-byte limit")]
+    SyncSizeLimit { maximum: usize },
 }
 
 macro_rules! define_id {
@@ -492,5 +504,225 @@ impl CommandEnvelope {
             issued_at,
             payload,
         }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct SyncCursor {
+    pub conversation_id: ConversationId,
+    pub after_sequence: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "SyncRequestWire")]
+pub struct SyncRequest {
+    pub schema_version: SchemaVersion,
+    pub cursors: Vec<SyncCursor>,
+    pub max_events: u16,
+}
+
+impl SyncRequest {
+    pub fn new(cursors: Vec<SyncCursor>, max_events: u16) -> Result<Self, ProtocolError> {
+        let request = Self {
+            schema_version: SchemaVersion::CURRENT,
+            cursors,
+            max_events,
+        };
+        request.validate()?;
+        Ok(request)
+    }
+
+    pub fn validate(&self) -> Result<(), ProtocolError> {
+        if self.cursors.is_empty() || self.cursors.len() > MAX_SYNC_CURSORS {
+            return Err(ProtocolError::InvalidSyncRequest(
+                "cursor count must be between 1 and 64",
+            ));
+        }
+        if self.max_events == 0 || self.max_events > MAX_SYNC_EVENTS {
+            return Err(ProtocolError::InvalidSyncRequest(
+                "max_events must be between 1 and 256",
+            ));
+        }
+        let mut conversations = HashSet::with_capacity(self.cursors.len());
+        for cursor in &self.cursors {
+            if !conversations.insert(cursor.conversation_id) {
+                return Err(ProtocolError::InvalidSyncRequest(
+                    "conversation cursors must be unique",
+                ));
+            }
+        }
+        validate_sync_size(self, MAX_SYNC_REQUEST_BYTES)
+    }
+}
+
+#[derive(Deserialize)]
+struct SyncRequestWire {
+    schema_version: SchemaVersion,
+    cursors: Vec<SyncCursor>,
+    max_events: u16,
+}
+
+impl TryFrom<SyncRequestWire> for SyncRequest {
+    type Error = ProtocolError;
+
+    fn try_from(value: SyncRequestWire) -> Result<Self, Self::Error> {
+        let request = Self {
+            schema_version: value.schema_version,
+            cursors: value.cursors,
+            max_events: value.max_events,
+        };
+        request.validate()?;
+        Ok(request)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(try_from = "SyncBatchWire")]
+pub struct SyncBatch {
+    pub schema_version: SchemaVersion,
+    pub cursor: SyncCursor,
+    pub events: Vec<EventEnvelope>,
+    pub has_more: bool,
+}
+
+impl SyncBatch {
+    pub fn new(
+        cursor: SyncCursor,
+        events: Vec<EventEnvelope>,
+        has_more: bool,
+    ) -> Result<Self, ProtocolError> {
+        let batch = Self {
+            schema_version: SchemaVersion::CURRENT,
+            cursor,
+            events,
+            has_more,
+        };
+        batch.validate()?;
+        Ok(batch)
+    }
+
+    pub fn next_cursor(&self) -> SyncCursor {
+        SyncCursor {
+            conversation_id: self.cursor.conversation_id,
+            after_sequence: self
+                .events
+                .last()
+                .map_or(self.cursor.after_sequence, |event| event.sequence.get()),
+        }
+    }
+
+    pub fn validate(&self) -> Result<(), ProtocolError> {
+        if self.events.len() > usize::from(MAX_SYNC_EVENTS) {
+            return Err(ProtocolError::InvalidSyncBatch(
+                "batch must contain at most 256 events",
+            ));
+        }
+        if self.has_more && self.events.is_empty() {
+            return Err(ProtocolError::InvalidSyncBatch(
+                "a batch with more events available must make progress",
+            ));
+        }
+        let mut previous_sequence = self.cursor.after_sequence;
+        let mut event_ids = HashSet::with_capacity(self.events.len());
+        for event in &self.events {
+            if event.schema_version != self.schema_version {
+                return Err(ProtocolError::InvalidSyncBatch(
+                    "event schema version must match the batch",
+                ));
+            }
+            if event.conversation_id != self.cursor.conversation_id {
+                return Err(ProtocolError::InvalidSyncBatch(
+                    "events must belong to the cursor conversation",
+                ));
+            }
+            let expected = previous_sequence
+                .checked_add(1)
+                .ok_or(ProtocolError::EventSequenceExhausted)?;
+            if event.sequence.get() != expected {
+                return Err(ProtocolError::InvalidSyncBatch(
+                    "event sequences must be ordered and contiguous after the cursor",
+                ));
+            }
+            if !event_ids.insert(event.event_id) {
+                return Err(ProtocolError::InvalidSyncBatch(
+                    "event identifiers must be unique within the batch",
+                ));
+            }
+            previous_sequence = event.sequence.get();
+        }
+        validate_sync_size(self, MAX_SYNC_BATCH_BYTES)
+    }
+
+    pub fn validate_for(&self, request: &SyncRequest) -> Result<(), ProtocolError> {
+        request.validate()?;
+        self.validate()?;
+        if self.schema_version != request.schema_version {
+            return Err(ProtocolError::InvalidSyncBatch(
+                "batch schema version must match the request",
+            ));
+        }
+        if !request.cursors.contains(&self.cursor) {
+            return Err(ProtocolError::InvalidSyncBatch(
+                "batch cursor must match a requested cursor",
+            ));
+        }
+        if self.events.len() > usize::from(request.max_events) {
+            return Err(ProtocolError::InvalidSyncBatch(
+                "batch event count exceeds the requested maximum",
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Deserialize)]
+struct SyncBatchWire {
+    schema_version: SchemaVersion,
+    cursor: SyncCursor,
+    events: Vec<EventEnvelope>,
+    has_more: bool,
+}
+
+impl TryFrom<SyncBatchWire> for SyncBatch {
+    type Error = ProtocolError;
+
+    fn try_from(value: SyncBatchWire) -> Result<Self, Self::Error> {
+        let batch = Self {
+            schema_version: value.schema_version,
+            cursor: value.cursor,
+            events: value.events,
+            has_more: value.has_more,
+        };
+        batch.validate()?;
+        Ok(batch)
+    }
+}
+
+fn validate_sync_size(value: &impl Serialize, maximum: usize) -> Result<(), ProtocolError> {
+    let mut writer = SyncSizeLimiter {
+        written: 0,
+        maximum,
+    };
+    serde_json::to_writer(&mut writer, value).map_err(|_| ProtocolError::SyncSizeLimit { maximum })
+}
+
+struct SyncSizeLimiter {
+    written: usize,
+    maximum: usize,
+}
+
+impl Write for SyncSizeLimiter {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        let written = self
+            .written
+            .checked_add(bytes.len())
+            .filter(|written| *written <= self.maximum)
+            .ok_or_else(|| io::Error::other("sync payload size limit exceeded"))?;
+        self.written = written;
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
     }
 }
