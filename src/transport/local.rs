@@ -241,9 +241,7 @@ impl LocalCall {
 
 pub struct LocalServer {
     listener: UnixListener,
-    directory: StateDirectory,
-    _lock: File,
-    socket_metadata: rustix::fs::Stat,
+    ownership: EndpointOwnership,
     sender: mpsc::Sender<LocalCall>,
     options: LocalOptions,
     status: HostStatus,
@@ -255,12 +253,17 @@ impl LocalServer {
         options: LocalOptions,
     ) -> Result<(Self, mpsc::Receiver<LocalCall>), LocalError> {
         options.validate()?;
-        let directory = StateDirectory::open(state_directory.as_ref(), true)?;
-        let lock = directory.lock()?;
-        let socket_path = socket_path(&directory.path)?;
-        if directory.socket_metadata()?.is_some() {
-            match tokio::time::timeout(options.frame_timeout, UnixStream::connect(&socket_path))
-                .await
+        socket_path(state_directory.as_ref())?;
+        let state_directory = state_directory.as_ref().to_path_buf();
+        let prepared = tokio::task::spawn_blocking(move || PreparedBinding::open(state_directory))
+            .await
+            .map_err(|_| LocalError::Worker)??;
+        let remove_stale = if prepared.existing_socket.is_some() {
+            match tokio::time::timeout(
+                options.frame_timeout,
+                UnixStream::connect(socket_path(&prepared.ownership.directory.path)?),
+            )
+            .await
             {
                 Ok(Ok(_)) => return Err(ServiceError::AlreadyRunning.into()),
                 Ok(Err(error))
@@ -269,24 +272,21 @@ impl LocalServer {
                         io::ErrorKind::ConnectionRefused | io::ErrorKind::NotFound
                     ) =>
                 {
-                    directory.unlink_socket()?
+                    true
                 }
                 Ok(Err(error)) => return Err(error.into()),
                 Err(_) => return Err(LocalError::Timeout),
             }
-        }
-        let listener = UnixListener::bind(&socket_path)?;
-        if let Err(error) =
-            std::fs::set_permissions(&socket_path, std::fs::Permissions::from_mode(0o600))
-        {
-            if let Err(cleanup) = directory.unlink_socket() {
-                tracing::warn!(error = %cleanup, "could not remove socket after permission setup failed");
-            }
-            return Err(error.into());
-        }
-        let metadata = directory
-            .socket_metadata()?
-            .ok_or(LocalError::Protocol("bound socket disappeared"))?;
+        } else {
+            false
+        };
+        let PreparedEndpoint {
+            listener,
+            ownership,
+        } = tokio::task::spawn_blocking(move || prepared.bind(remove_stale))
+            .await
+            .map_err(|_| LocalError::Worker)??;
+        let listener = UnixListener::from_std(listener)?;
         let (sender, receiver) = mpsc::channel(LOCAL_COMMAND_CAPACITY);
         let status = HostStatus {
             process_id: std::process::id(),
@@ -297,9 +297,7 @@ impl LocalServer {
         Ok((
             Self {
                 listener,
-                directory,
-                _lock: lock,
-                socket_metadata: metadata,
+                ownership,
                 sender,
                 options,
                 status,
@@ -328,7 +326,7 @@ impl LocalServer {
                     let sender = self.sender.clone();
                     let options = self.options.clone();
                     let status = self.status.clone();
-                    let uid = self.directory.uid;
+                    let uid = self.ownership.directory.uid;
                     let token = cancellation.child_token();
                     workers.spawn(async move {
                         let _permit = permit;
@@ -348,23 +346,108 @@ impl LocalServer {
     }
 }
 
-impl Drop for LocalServer {
+struct EndpointOwnership {
+    directory: StateDirectory,
+    _lock: File,
+    socket_metadata: Option<rustix::fs::Stat>,
+}
+
+impl Drop for EndpointOwnership {
     fn drop(&mut self) {
-        match self.directory.socket_metadata() {
-            Ok(Some(metadata))
-                if metadata.st_dev == self.socket_metadata.st_dev
-                    && metadata.st_ino == self.socket_metadata.st_ino =>
+        use rustix::fs::{AtFlags, FileType};
+        let Some(expected) = &self.socket_metadata else {
+            return;
+        };
+        match rustix::fs::statat(&self.directory.file, "host.sock", AtFlags::SYMLINK_NOFOLLOW) {
+            Ok(metadata)
+                if FileType::from_raw_mode(metadata.st_mode) == FileType::Socket
+                    && metadata.st_dev == expected.st_dev
+                    && metadata.st_ino == expected.st_ino =>
             {
                 if let Err(error) = self.directory.unlink_socket() {
                     tracing::warn!(error = %error, "could not remove stopped local IPC socket");
                 }
             }
             Ok(_) => {}
+            Err(error) if error == rustix::io::Errno::NOENT => {}
             Err(error) => {
                 tracing::warn!(error = %error, "could not inspect stopped local IPC socket")
             }
         }
     }
+}
+
+struct PreparedBinding {
+    ownership: EndpointOwnership,
+    existing_socket: Option<rustix::fs::Stat>,
+}
+
+impl PreparedBinding {
+    fn open(path: PathBuf) -> Result<Self, LocalError> {
+        socket_path(&path)?;
+        let directory = StateDirectory::open(&path, true)?;
+        let lock = directory.lock()?;
+        let existing_socket = directory.socket_metadata()?;
+        Ok(Self {
+            ownership: EndpointOwnership {
+                directory,
+                _lock: lock,
+                socket_metadata: None,
+            },
+            existing_socket,
+        })
+    }
+
+    fn bind(mut self, remove_stale: bool) -> Result<PreparedEndpoint, LocalError> {
+        use rustix::fs::AtFlags;
+        let directory = &self.ownership.directory;
+        if remove_stale {
+            match (directory.socket_metadata()?, self.existing_socket.as_ref()) {
+                (Some(current), Some(previous))
+                    if current.st_dev == previous.st_dev && current.st_ino == previous.st_ino =>
+                {
+                    directory.unlink_socket()?
+                }
+                (None, _) => {}
+                _ => {
+                    return Err(ServiceError::UnsafePath(
+                        "socket changed during stale endpoint inspection",
+                    )
+                    .into());
+                }
+            }
+        }
+        let path = socket_path(&directory.path)?;
+        let listener = std::os::unix::net::UnixListener::bind(&path)?;
+        self.ownership.socket_metadata = Some(
+            rustix::fs::statat(&directory.file, "host.sock", AtFlags::SYMLINK_NOFOLLOW)
+                .map_err(ServiceError::from)?,
+        );
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
+        let metadata = directory
+            .socket_metadata()?
+            .ok_or(LocalError::Protocol("bound socket disappeared"))?;
+        if !self
+            .ownership
+            .socket_metadata
+            .as_ref()
+            .is_some_and(|expected| {
+                metadata.st_dev == expected.st_dev && metadata.st_ino == expected.st_ino
+            })
+        {
+            return Err(ServiceError::UnsafePath("bound socket changed during setup").into());
+        }
+        listener.set_nonblocking(true)?;
+        Ok(PreparedEndpoint {
+            listener,
+            ownership: self.ownership,
+        })
+    }
+}
+
+struct PreparedEndpoint {
+    listener: std::os::unix::net::UnixListener,
+    ownership: EndpointOwnership,
 }
 
 pub struct LocalClient {
@@ -387,11 +470,21 @@ impl LocalClient {
             return Err(LocalError::Cancelled);
         }
         request.validate()?;
-        let directory = StateDirectory::open(state_directory.as_ref(), false)?;
-        if directory.socket_metadata()?.is_none() {
-            return Err(io::Error::new(io::ErrorKind::NotFound, "host socket is absent").into());
-        }
+        socket_path(state_directory.as_ref())?;
+        let state_directory = state_directory.as_ref().to_path_buf();
         let operation = async {
+            let directory = tokio::task::spawn_blocking(move || {
+                let directory = StateDirectory::open(&state_directory, false)?;
+                if directory.socket_metadata()?.is_none() {
+                    return Err(LocalError::Io(io::Error::new(
+                        io::ErrorKind::NotFound,
+                        "host socket is absent",
+                    )));
+                }
+                Ok::<_, LocalError>(directory)
+            })
+            .await
+            .map_err(|_| LocalError::Worker)??;
             let mut stream = tokio::time::timeout(
                 self.options.frame_timeout,
                 UnixStream::connect(socket_path(&directory.path)?),
@@ -504,6 +597,21 @@ fn authenticate(stream: &UnixStream, uid: u32) -> Result<(), LocalError> {
 
 fn socket_path(directory: &Path) -> Result<PathBuf, LocalError> {
     use std::os::unix::ffi::OsStrExt;
+    if directory.as_os_str().as_bytes().len() > MAX_SOCKET_PATH_BYTES {
+        return Err(LocalError::Protocol(
+            "state directory exceeds the portable socket path limit",
+        ));
+    }
+    if !directory.is_absolute()
+        || directory == Path::new("/")
+        || directory
+            .components()
+            .any(|component| matches!(component, std::path::Component::ParentDir))
+    {
+        return Err(LocalError::Protocol(
+            "state directory must be an absolute nonroot path without parent traversal",
+        ));
+    }
     let path = directory.join("host.sock");
     if path.as_os_str().as_bytes().len() > MAX_SOCKET_PATH_BYTES {
         return Err(LocalError::Protocol(

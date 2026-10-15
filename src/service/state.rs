@@ -1,5 +1,6 @@
 use std::fs::File;
 use std::io::{self, Write};
+use std::os::unix::ffi::OsStrExt;
 use std::path::{Component, Path, PathBuf};
 
 use rustix::fs::{AtFlags, FileType, Mode, OFlags};
@@ -52,6 +53,11 @@ impl StateDirectory {
         create: bool,
         policy: DirectoryPolicy,
     ) -> Result<Self, ServiceError> {
+        if path.as_os_str().as_bytes().len() > 4_096 {
+            return Err(ServiceError::UnsafePath(
+                "directory path exceeds its byte limit",
+            ));
+        }
         if !path.is_absolute() || (path == Path::new("/") && !policy.accepts_root()) {
             return Err(ServiceError::UnsafePath(
                 "state directory must be an absolute nonroot path",

@@ -93,16 +93,8 @@ impl LaunchdService {
     pub async fn install(&self, cancellation: CancellationToken) -> Result<PathBuf, ServiceError> {
         #[cfg(target_os = "macos")]
         {
-            if cancellation.is_cancelled() {
-                return Err(ServiceError::Cancelled);
-            }
-            let service = self.clone();
-            let task = tokio::task::spawn_blocking(move || service.install_file());
-            tokio::select! {
-                biased;
-                _ = cancellation.cancelled() => Err(ServiceError::Cancelled),
-                result = task => result.map_err(|_| ServiceError::InvalidResponse("installer worker failed"))?,
-            }
+            self.filesystem(cancellation, |service| service.install_file())
+                .await
         }
         #[cfg(not(target_os = "macos"))]
         {
@@ -123,8 +115,12 @@ impl LaunchdService {
             if status.process_id.is_some() {
                 return Ok(());
             }
-            self.verify_executable()?;
-            super::state::StateDirectory::open(&self.state_directory, false)?;
+            self.filesystem(cancellation.clone(), |service| {
+                service.verify_executable()?;
+                super::state::StateDirectory::open(&service.state_directory, false)?;
+                Ok(())
+            })
+            .await?;
             if !status.loaded {
                 self.require_success(
                     "bootstrap",
@@ -180,13 +176,17 @@ impl LaunchdService {
         #[cfg(target_os = "macos")]
         {
             if enabled {
-                self.verify_executable()?;
-                if !self.installed_plist()? {
-                    return Err(ServiceError::UnsafePath(
-                        "service must be installed before enabling",
-                    ));
-                }
-                super::state::StateDirectory::open(&self.state_directory, false)?;
+                self.filesystem(cancellation.clone(), |service| {
+                    service.verify_executable()?;
+                    if !service.installed_plist()? {
+                        return Err(ServiceError::UnsafePath(
+                            "service must be installed before enabling",
+                        ));
+                    }
+                    super::state::StateDirectory::open(&service.state_directory, false)?;
+                    Ok(())
+                })
+                .await?;
             }
             let operation = if enabled { "enable" } else { "disable" };
             self.require_success(
@@ -209,7 +209,9 @@ impl LaunchdService {
     ) -> Result<ServiceStatus, ServiceError> {
         #[cfg(target_os = "macos")]
         {
-            let installed = self.installed_plist()?;
+            let installed = self
+                .filesystem(cancellation.clone(), |service| service.installed_plist())
+                .await?;
             let output =
                 run_launchctl(vec!["print".to_owned(), service_target()], cancellation).await?;
             if output.status.code() == Some(113) {
@@ -257,6 +259,28 @@ impl LaunchdService {
         {
             let _ = cancellation;
             Err(ServiceError::UnsupportedPlatform)
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    async fn filesystem<T, F>(
+        &self,
+        cancellation: CancellationToken,
+        operation: F,
+    ) -> Result<T, ServiceError>
+    where
+        T: Send + 'static,
+        F: FnOnce(Self) -> Result<T, ServiceError> + Send + 'static,
+    {
+        if cancellation.is_cancelled() {
+            return Err(ServiceError::Cancelled);
+        }
+        let service = self.clone();
+        let worker = tokio::task::spawn_blocking(move || operation(service));
+        tokio::select! {
+            biased;
+            _ = cancellation.cancelled() => Err(ServiceError::Cancelled),
+            result = worker => result.map_err(|_| ServiceError::InvalidResponse("filesystem worker failed"))?,
         }
     }
 
