@@ -11,7 +11,7 @@ Bootstrap #1 merged through [PR #33](https://github.com/izyuumi/everything/pull/
 | Issue | Objective | Prerequisites | State |
 | --- | --- | --- | --- |
 | [#1](https://github.com/izyuumi/everything/issues/1) | Bootstrap Rust workspace and CI | None | Merged (#33) |
-| [#2](https://github.com/izyuumi/everything/issues/2) | Define versioned domain and event contracts | None | In progress |
+| [#2](https://github.com/izyuumi/everything/issues/2) | Define versioned domain and event contracts | None | Implemented, review pending |
 | [#3](https://github.com/izyuumi/everything/issues/3) | Implement SQLite storage and migrations | None | In progress |
 | [#4](https://github.com/izyuumi/everything/issues/4) | Implement model-neutral provider types | None | In progress |
 | [#5](https://github.com/izyuumi/everything/issues/5) | Define Tool trait, registry, and argument validation | None | In progress |
