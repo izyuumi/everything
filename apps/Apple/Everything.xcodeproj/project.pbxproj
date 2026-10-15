@@ -1,0 +1,727 @@
+{
+    "archiveVersion" = "1";
+    "classes" = {
+    };
+    "objectVersion" = "56";
+    "objects" = {
+        "AD5EAE1DA3A8E6119F90EB1B" = {
+            "isa" = "PBXFileReference";
+            "lastKnownFileType" = "sourcecode.swift";
+            "path" = "EverythingMacApp.swift";
+            "sourceTree" = "<group>";
+        };
+        "3DA6ECFC4D0376F5102DFE70" = {
+            "isa" = "PBXBuildFile";
+            "fileRef" = "AD5EAE1DA3A8E6119F90EB1B";
+        };
+        "BA68F5D32E48B3CBF341D632" = {
+            "isa" = "PBXFileReference";
+            "lastKnownFileType" = "sourcecode.swift";
+            "path" = "HostModel.swift";
+            "sourceTree" = "<group>";
+        };
+        "F77D0168812FD33BC283078B" = {
+            "isa" = "PBXBuildFile";
+            "fileRef" = "BA68F5D32E48B3CBF341D632";
+        };
+        "8D895A41A4241F5A0E80D77C" = {
+            "isa" = "PBXFileReference";
+            "lastKnownFileType" = "sourcecode.swift";
+            "path" = "OwnerRecords.swift";
+            "sourceTree" = "<group>";
+        };
+        "5DD0C751C392C8F6847DCDF4" = {
+            "isa" = "PBXBuildFile";
+            "fileRef" = "8D895A41A4241F5A0E80D77C";
+        };
+        "7C5CDFEEFC4B839057387451" = {
+            "isa" = "PBXFileReference";
+            "lastKnownFileType" = "sourcecode.swift";
+            "path" = "MenuContent.swift";
+            "sourceTree" = "<group>";
+        };
+        "14E3FDC1451F2DCE6763CA98" = {
+            "isa" = "PBXBuildFile";
+            "fileRef" = "7C5CDFEEFC4B839057387451";
+        };
+        "D7C84BABB04E783E04F7D6EB" = {
+            "isa" = "PBXFileReference";
+            "lastKnownFileType" = "sourcecode.swift";
+            "path" = "TasksView.swift";
+            "sourceTree" = "<group>";
+        };
+        "7CA5E98DE69F2186DEA9BCC0" = {
+            "isa" = "PBXBuildFile";
+            "fileRef" = "D7C84BABB04E783E04F7D6EB";
+        };
+        "E4DEA7C2A88FA1DC5F002B17" = {
+            "isa" = "PBXFileReference";
+            "lastKnownFileType" = "sourcecode.swift";
+            "path" = "PermissionsView.swift";
+            "sourceTree" = "<group>";
+        };
+        "68B248F9B1B6FC26D9DD796C" = {
+            "isa" = "PBXBuildFile";
+            "fileRef" = "E4DEA7C2A88FA1DC5F002B17";
+        };
+        "0C033674B3E2048D89A933D7" = {
+            "isa" = "PBXFileReference";
+            "lastKnownFileType" = "sourcecode.swift";
+            "path" = "SettingsView.swift";
+            "sourceTree" = "<group>";
+        };
+        "F3589FE64633CD71BA5F075A" = {
+            "isa" = "PBXBuildFile";
+            "fileRef" = "0C033674B3E2048D89A933D7";
+        };
+        "0112514560F5BC5CF1ECEF39" = {
+            "isa" = "PBXGroup";
+            "children" = (
+                "AD5EAE1DA3A8E6119F90EB1B",
+                "BA68F5D32E48B3CBF341D632",
+                "8D895A41A4241F5A0E80D77C",
+                "7C5CDFEEFC4B839057387451",
+                "D7C84BABB04E783E04F7D6EB",
+                "E4DEA7C2A88FA1DC5F002B17",
+                "0C033674B3E2048D89A933D7",
+            );
+            "path" = "macOS";
+            "sourceTree" = "<group>";
+        };
+        "564022270727F08B2660CF3C" = {
+            "isa" = "PBXFileReference";
+            "lastKnownFileType" = "sourcecode.swift";
+            "path" = "JSONValue.swift";
+            "sourceTree" = "<group>";
+        };
+        "41E89F0FF41AC64FCC039931" = {
+            "isa" = "PBXBuildFile";
+            "fileRef" = "564022270727F08B2660CF3C";
+        };
+        "3F253FA2D68F6AD53B1097DE" = {
+            "isa" = "PBXFileReference";
+            "lastKnownFileType" = "sourcecode.swift";
+            "path" = "OwnerWire.swift";
+            "sourceTree" = "<group>";
+        };
+        "7DF0769529FE9CB53513AC4F" = {
+            "isa" = "PBXBuildFile";
+            "fileRef" = "3F253FA2D68F6AD53B1097DE";
+        };
+        "54DF90FCB032113F2D99638E" = {
+            "isa" = "PBXFileReference";
+            "lastKnownFileType" = "sourcecode.swift";
+            "path" = "OwnerIPCClient.swift";
+            "sourceTree" = "<group>";
+        };
+        "2AB3C33482D817B6FB63119E" = {
+            "isa" = "PBXBuildFile";
+            "fileRef" = "54DF90FCB032113F2D99638E";
+        };
+        "0032AA0FD9D3AE708ACA3405" = {
+            "isa" = "PBXGroup";
+            "children" = (
+                "564022270727F08B2660CF3C",
+                "3F253FA2D68F6AD53B1097DE",
+                "54DF90FCB032113F2D99638E",
+            );
+            "path" = "Shared/OwnerIPC";
+            "sourceTree" = "<group>";
+        };
+        "F54CD7E7026DFD0AE0A9ADAB" = {
+            "isa" = "PBXFileReference";
+            "explicitFileType" = "wrapper.application";
+            "includeInIndex" = "0";
+            "path" = "Everything.app";
+            "sourceTree" = "BUILT_PRODUCTS_DIR";
+        };
+        "0A3E27B8CA818264D75C8D81" = {
+            "isa" = "PBXGroup";
+            "children" = (
+                "F54CD7E7026DFD0AE0A9ADAB",
+                "D874DC1707B398C8AE095DE4",
+            );
+            "name" = "Products";
+            "sourceTree" = "<group>";
+        };
+        "0D6E4079E36703EBD37C0072" = {
+            "isa" = "PBXGroup";
+            "children" = (
+                "0112514560F5BC5CF1ECEF39",
+                "0032AA0FD9D3AE708ACA3405",
+                "0A3E27B8CA818264D75C8D81",
+                "ED1D339C2F7345DB0DD72BD9",
+                "4C553FB1BE251C19F491FFB4",
+                "5F967CF61D4A00DB208E1593",
+                "99B2612622859F92D7197CBF",
+            );
+            "sourceTree" = "<group>";
+        };
+        "F0E909F802C83B3A97E498F6" = {
+            "isa" = "PBXSourcesBuildPhase";
+            "buildActionMask" = "2147483647";
+            "files" = (
+                "3DA6ECFC4D0376F5102DFE70",
+                "F77D0168812FD33BC283078B",
+                "5DD0C751C392C8F6847DCDF4",
+                "14E3FDC1451F2DCE6763CA98",
+                "7CA5E98DE69F2186DEA9BCC0",
+                "68B248F9B1B6FC26D9DD796C",
+                "F3589FE64633CD71BA5F075A",
+                "41E89F0FF41AC64FCC039931",
+                "7DF0769529FE9CB53513AC4F",
+                "2AB3C33482D817B6FB63119E",
+            );
+            "runOnlyForDeploymentPostprocessing" = "0";
+        };
+        "EB388981DC5F3897A088C4A5" = {
+            "isa" = "PBXFrameworksBuildPhase";
+            "buildActionMask" = "2147483647";
+            "files" = (
+            );
+            "runOnlyForDeploymentPostprocessing" = "0";
+        };
+        "160EF3AF4FC8EEADC4D1D4B2" = {
+            "isa" = "PBXResourcesBuildPhase";
+            "buildActionMask" = "2147483647";
+            "files" = (
+            );
+            "runOnlyForDeploymentPostprocessing" = "0";
+        };
+        "80C3C563DE22265C253ED2D0" = {
+            "isa" = "XCBuildConfiguration";
+            "buildSettings" = {
+                "CLANG_ENABLE_MODULES" = "YES";
+                "SWIFT_VERSION" = "6.0";
+                "SWIFT_STRICT_CONCURRENCY" = "complete";
+                "MACOSX_DEPLOYMENT_TARGET" = "14.0";
+                "SDKROOT" = "macosx";
+                "CODE_SIGNING_ALLOWED" = "NO";
+                "CODE_SIGN_STYLE" = "Automatic";
+                "ENABLE_HARDENED_RUNTIME" = "YES";
+                "ENABLE_APP_SANDBOX" = "NO";
+                "PRODUCT_BUNDLE_IDENTIFIER" = "ai.everything.mac";
+                "PRODUCT_NAME" = "Everything";
+                "INFOPLIST_FILE" = "macOS/Info.plist";
+                "GENERATE_INFOPLIST_FILE" = "NO";
+                "SWIFT_EMIT_LOC_STRINGS" = "NO";
+                "ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS" = "NO";
+                "LD_RUNPATH_SEARCH_PATHS" = (
+                    "$(inherited)",
+                    "@executable_path/../Frameworks",
+                );
+                "SWIFT_OPTIMIZATION_LEVEL" = "-Onone";
+                "DEBUG_INFORMATION_FORMAT" = "dwarf";
+                "SWIFT_ACTIVE_COMPILATION_CONDITIONS" = "DEBUG";
+            };
+            "name" = "Debug";
+        };
+        "BBF4AB6D653A060DF70B6E3C" = {
+            "isa" = "XCBuildConfiguration";
+            "buildSettings" = {
+                "CLANG_ENABLE_MODULES" = "YES";
+                "SWIFT_VERSION" = "6.0";
+                "SWIFT_STRICT_CONCURRENCY" = "complete";
+                "MACOSX_DEPLOYMENT_TARGET" = "14.0";
+                "SDKROOT" = "macosx";
+                "CODE_SIGNING_ALLOWED" = "NO";
+                "CODE_SIGN_STYLE" = "Automatic";
+                "ENABLE_HARDENED_RUNTIME" = "YES";
+                "ENABLE_APP_SANDBOX" = "NO";
+                "PRODUCT_BUNDLE_IDENTIFIER" = "ai.everything.mac";
+                "PRODUCT_NAME" = "Everything";
+                "INFOPLIST_FILE" = "macOS/Info.plist";
+                "GENERATE_INFOPLIST_FILE" = "NO";
+                "SWIFT_EMIT_LOC_STRINGS" = "NO";
+                "ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS" = "NO";
+                "LD_RUNPATH_SEARCH_PATHS" = (
+                    "$(inherited)",
+                    "@executable_path/../Frameworks",
+                );
+                "SWIFT_OPTIMIZATION_LEVEL" = "-O";
+                "DEBUG_INFORMATION_FORMAT" = "dwarf-with-dsym";
+                "SWIFT_ACTIVE_COMPILATION_CONDITIONS" = "";
+            };
+            "name" = "Release";
+        };
+        "537FF59555BB6F2C331305E6" = {
+            "isa" = "XCConfigurationList";
+            "buildConfigurations" = (
+                "80C3C563DE22265C253ED2D0",
+                "BBF4AB6D653A060DF70B6E3C",
+            );
+            "defaultConfigurationIsVisible" = "0";
+            "defaultConfigurationName" = "Release";
+        };
+        "F69C7CCC36DDAE7DE87E7982" = {
+            "isa" = "PBXNativeTarget";
+            "buildConfigurationList" = "537FF59555BB6F2C331305E6";
+            "buildPhases" = (
+                "F0E909F802C83B3A97E498F6",
+                "EB388981DC5F3897A088C4A5",
+                "160EF3AF4FC8EEADC4D1D4B2",
+            );
+            "buildRules" = (
+            );
+            "dependencies" = (
+            );
+            "name" = "EverythingMac";
+            "productName" = "Everything";
+            "productReference" = "F54CD7E7026DFD0AE0A9ADAB";
+            "productType" = "com.apple.product-type.application";
+        };
+        "3CCE7051BAA1B8E65CDEECD3" = {
+            "isa" = "XCBuildConfiguration";
+            "buildSettings" = {
+                "ALWAYS_SEARCH_USER_PATHS" = "NO";
+                "CLANG_ENABLE_OBJC_ARC" = "YES";
+                "GCC_C_LANGUAGE_STANDARD" = "gnu17";
+                "GCC_WARN_INHIBIT_ALL_WARNINGS" = "NO";
+            };
+            "name" = "Debug";
+        };
+        "EB9B6A82A6FECD10C0E43155" = {
+            "isa" = "XCBuildConfiguration";
+            "buildSettings" = {
+                "ALWAYS_SEARCH_USER_PATHS" = "NO";
+                "CLANG_ENABLE_OBJC_ARC" = "YES";
+                "GCC_C_LANGUAGE_STANDARD" = "gnu17";
+                "GCC_WARN_INHIBIT_ALL_WARNINGS" = "NO";
+            };
+            "name" = "Release";
+        };
+        "1922B098E983995960BE56B0" = {
+            "isa" = "XCConfigurationList";
+            "buildConfigurations" = (
+                "3CCE7051BAA1B8E65CDEECD3",
+                "EB9B6A82A6FECD10C0E43155",
+            );
+            "defaultConfigurationIsVisible" = "0";
+            "defaultConfigurationName" = "Release";
+        };
+        "84D835BB9099B1B5407A8B2F" = {
+            "isa" = "PBXFileReference";
+            "lastKnownFileType" = "sourcecode.swift";
+            "path" = "EverythingIOSApp.swift";
+            "sourceTree" = "<group>";
+        };
+        "5E261835521521EFF9A9B808" = {
+            "isa" = "PBXBuildFile";
+            "fileRef" = "84D835BB9099B1B5407A8B2F";
+        };
+        "3B0AADE8A5CB41B404A02BBE" = {
+            "isa" = "PBXFileReference";
+            "lastKnownFileType" = "sourcecode.swift";
+            "path" = "AppModel.swift";
+            "sourceTree" = "<group>";
+        };
+        "E01232B11B55CB360EF340E3" = {
+            "isa" = "PBXBuildFile";
+            "fileRef" = "3B0AADE8A5CB41B404A02BBE";
+        };
+        "0897FBFF8BAAACAD70FC97D2" = {
+            "isa" = "PBXFileReference";
+            "lastKnownFileType" = "sourcecode.swift";
+            "path" = "RootView.swift";
+            "sourceTree" = "<group>";
+        };
+        "A1CA539A07D40CC28B5074A4" = {
+            "isa" = "PBXBuildFile";
+            "fileRef" = "0897FBFF8BAAACAD70FC97D2";
+        };
+        "6ABD270A05F2716680C9288D" = {
+            "isa" = "PBXFileReference";
+            "lastKnownFileType" = "sourcecode.swift";
+            "path" = "ChatView.swift";
+            "sourceTree" = "<group>";
+        };
+        "D68F990EB0EFCA2BA34AD0AA" = {
+            "isa" = "PBXBuildFile";
+            "fileRef" = "6ABD270A05F2716680C9288D";
+        };
+        "460C75D2069CECCFA37F46AA" = {
+            "isa" = "PBXFileReference";
+            "lastKnownFileType" = "sourcecode.swift";
+            "path" = "PairingView.swift";
+            "sourceTree" = "<group>";
+        };
+        "A466F904BA377A25B248BC6D" = {
+            "isa" = "PBXBuildFile";
+            "fileRef" = "460C75D2069CECCFA37F46AA";
+        };
+        "DB3CA5728EF5E4438EF80274" = {
+            "isa" = "PBXFileReference";
+            "lastKnownFileType" = "sourcecode.swift";
+            "path" = "QRScanner.swift";
+            "sourceTree" = "<group>";
+        };
+        "8F810D041DBCC92DEA9C6A3B" = {
+            "isa" = "PBXBuildFile";
+            "fileRef" = "DB3CA5728EF5E4438EF80274";
+        };
+        "A023B409344CC33CA7E46FF1" = {
+            "isa" = "PBXFileReference";
+            "lastKnownFileType" = "sourcecode.swift";
+            "path" = "SettingsView.swift";
+            "sourceTree" = "<group>";
+        };
+        "A582B9CFA19B590C9E2D75CD" = {
+            "isa" = "PBXBuildFile";
+            "fileRef" = "A023B409344CC33CA7E46FF1";
+        };
+        "51327B0574AFD65741A5344B" = {
+            "isa" = "PBXFileReference";
+            "lastKnownFileType" = "sourcecode.swift";
+            "path" = "Notifications.swift";
+            "sourceTree" = "<group>";
+        };
+        "36A442828052A64DC82D0BB1" = {
+            "isa" = "PBXBuildFile";
+            "fileRef" = "51327B0574AFD65741A5344B";
+        };
+        "ED1D339C2F7345DB0DD72BD9" = {
+            "isa" = "PBXGroup";
+            "children" = (
+                "84D835BB9099B1B5407A8B2F",
+                "3B0AADE8A5CB41B404A02BBE",
+                "0897FBFF8BAAACAD70FC97D2",
+                "6ABD270A05F2716680C9288D",
+                "460C75D2069CECCFA37F46AA",
+                "DB3CA5728EF5E4438EF80274",
+                "A023B409344CC33CA7E46FF1",
+                "51327B0574AFD65741A5344B",
+            );
+            "path" = "iOS";
+            "sourceTree" = "<group>";
+        };
+        "DBC527B988DB26C420FF77F1" = {
+            "isa" = "PBXFileReference";
+            "lastKnownFileType" = "sourcecode.swift";
+            "path" = "WireValue.swift";
+            "sourceTree" = "<group>";
+        };
+        "BC9C4D3F4733E89D1D353494" = {
+            "isa" = "PBXBuildFile";
+            "fileRef" = "DBC527B988DB26C420FF77F1";
+        };
+        "3AB2A7FBBC7E5595238F91DF" = {
+            "isa" = "PBXFileReference";
+            "lastKnownFileType" = "sourcecode.swift";
+            "path" = "WireRecords.swift";
+            "sourceTree" = "<group>";
+        };
+        "A3C1DDB56B41B158F81328D1" = {
+            "isa" = "PBXBuildFile";
+            "fileRef" = "3AB2A7FBBC7E5595238F91DF";
+        };
+        "1672D00E6A98F3AEC599F720" = {
+            "isa" = "PBXFileReference";
+            "lastKnownFileType" = "sourcecode.swift";
+            "path" = "DeviceIdentity.swift";
+            "sourceTree" = "<group>";
+        };
+        "2EA4B889D3243B10AA40A1D4" = {
+            "isa" = "PBXBuildFile";
+            "fileRef" = "1672D00E6A98F3AEC599F720";
+        };
+        "1016BFB55EA83224B544938D" = {
+            "isa" = "PBXFileReference";
+            "lastKnownFileType" = "sourcecode.swift";
+            "path" = "Pairing.swift";
+            "sourceTree" = "<group>";
+        };
+        "E69DF34A052D3EDAFC894B8F" = {
+            "isa" = "PBXBuildFile";
+            "fileRef" = "1016BFB55EA83224B544938D";
+        };
+        "8142C7C1729E8CFE99701500" = {
+            "isa" = "PBXFileReference";
+            "lastKnownFileType" = "sourcecode.swift";
+            "path" = "KeychainIdentity.swift";
+            "sourceTree" = "<group>";
+        };
+        "04FA6312BFF80F462445C913" = {
+            "isa" = "PBXBuildFile";
+            "fileRef" = "8142C7C1729E8CFE99701500";
+        };
+        "4C553FB1BE251C19F491FFB4" = {
+            "isa" = "PBXGroup";
+            "children" = (
+                "DBC527B988DB26C420FF77F1",
+                "3AB2A7FBBC7E5595238F91DF",
+                "1672D00E6A98F3AEC599F720",
+                "1016BFB55EA83224B544938D",
+                "8142C7C1729E8CFE99701500",
+            );
+            "path" = "Shared/Crypto";
+            "sourceTree" = "<group>";
+        };
+        "FC91B250339F3525D2DE5098" = {
+            "isa" = "PBXFileReference";
+            "lastKnownFileType" = "sourcecode.swift";
+            "path" = "RelayProtocol.swift";
+            "sourceTree" = "<group>";
+        };
+        "6EA9EDFFE07E0A188A4CFB0A" = {
+            "isa" = "PBXBuildFile";
+            "fileRef" = "FC91B250339F3525D2DE5098";
+        };
+        "40A364C4EBEA84355A022A4A" = {
+            "isa" = "PBXFileReference";
+            "lastKnownFileType" = "sourcecode.swift";
+            "path" = "ReplicaStore.swift";
+            "sourceTree" = "<group>";
+        };
+        "87A53524FEB5A5438A17F270" = {
+            "isa" = "PBXBuildFile";
+            "fileRef" = "40A364C4EBEA84355A022A4A";
+        };
+        "29BEE15A50FB2B57E6FF21BE" = {
+            "isa" = "PBXFileReference";
+            "lastKnownFileType" = "sourcecode.swift";
+            "path" = "ReplicaService.swift";
+            "sourceTree" = "<group>";
+        };
+        "7B2EEFDCE98202E283958730" = {
+            "isa" = "PBXBuildFile";
+            "fileRef" = "29BEE15A50FB2B57E6FF21BE";
+        };
+        "5F967CF61D4A00DB208E1593" = {
+            "isa" = "PBXGroup";
+            "children" = (
+                "FC91B250339F3525D2DE5098",
+                "40A364C4EBEA84355A022A4A",
+                "29BEE15A50FB2B57E6FF21BE",
+            );
+            "path" = "Shared/Relay";
+            "sourceTree" = "<group>";
+        };
+        "D874DC1707B398C8AE095DE4" = {
+            "isa" = "PBXFileReference";
+            "explicitFileType" = "wrapper.application";
+            "includeInIndex" = "0";
+            "path" = "Everything.app";
+            "sourceTree" = "BUILT_PRODUCTS_DIR";
+        };
+        "21912D85C83755776B86E6B9" = {
+            "isa" = "PBXSourcesBuildPhase";
+            "buildActionMask" = "2147483647";
+            "files" = (
+                "5E261835521521EFF9A9B808",
+                "E01232B11B55CB360EF340E3",
+                "A1CA539A07D40CC28B5074A4",
+                "D68F990EB0EFCA2BA34AD0AA",
+                "A466F904BA377A25B248BC6D",
+                "8F810D041DBCC92DEA9C6A3B",
+                "A582B9CFA19B590C9E2D75CD",
+                "36A442828052A64DC82D0BB1",
+                "BC9C4D3F4733E89D1D353494",
+                "A3C1DDB56B41B158F81328D1",
+                "2EA4B889D3243B10AA40A1D4",
+                "E69DF34A052D3EDAFC894B8F",
+                "04FA6312BFF80F462445C913",
+                "6EA9EDFFE07E0A188A4CFB0A",
+                "87A53524FEB5A5438A17F270",
+                "7B2EEFDCE98202E283958730",
+            );
+            "runOnlyForDeploymentPostprocessing" = "0";
+        };
+        "3B38C43243463B34043D02F5" = {
+            "isa" = "PBXFileReference";
+            "lastKnownFileType" = "wrapper.framework";
+            "path" = "System/Library/Frameworks/CryptoKit.framework";
+            "sourceTree" = "SDKROOT";
+        };
+        "458F6E4B336A87C4D854EA41" = {
+            "isa" = "PBXBuildFile";
+            "fileRef" = "3B38C43243463B34043D02F5";
+        };
+        "7F183F7745A92D9F985C7D13" = {
+            "isa" = "PBXFileReference";
+            "lastKnownFileType" = "wrapper.framework";
+            "path" = "System/Library/Frameworks/Security.framework";
+            "sourceTree" = "SDKROOT";
+        };
+        "7C49B69637318D0EE4F46A2E" = {
+            "isa" = "PBXBuildFile";
+            "fileRef" = "7F183F7745A92D9F985C7D13";
+        };
+        "EB218572D5D5CB376519120F" = {
+            "isa" = "PBXFileReference";
+            "lastKnownFileType" = "wrapper.framework";
+            "path" = "System/Library/Frameworks/AVFoundation.framework";
+            "sourceTree" = "SDKROOT";
+        };
+        "7D3F0EF79078919B57619133" = {
+            "isa" = "PBXBuildFile";
+            "fileRef" = "EB218572D5D5CB376519120F";
+        };
+        "AE7367B5C40517C695CAAB9E" = {
+            "isa" = "PBXFileReference";
+            "lastKnownFileType" = "wrapper.framework";
+            "path" = "System/Library/Frameworks/UserNotifications.framework";
+            "sourceTree" = "SDKROOT";
+        };
+        "8F0CDBE1BA1AB5EFA00BC78F" = {
+            "isa" = "PBXBuildFile";
+            "fileRef" = "AE7367B5C40517C695CAAB9E";
+        };
+        "51A715134E9C97F302083DD5" = {
+            "isa" = "PBXFileReference";
+            "lastKnownFileType" = "sourcecode.text-based-dylib-definition";
+            "path" = "usr/lib/libsqlite3.tbd";
+            "sourceTree" = "SDKROOT";
+        };
+        "ED08227BE81F1E1FDD79B4F3" = {
+            "isa" = "PBXBuildFile";
+            "fileRef" = "51A715134E9C97F302083DD5";
+        };
+        "99B2612622859F92D7197CBF" = {
+            "isa" = "PBXGroup";
+            "children" = (
+                "3B38C43243463B34043D02F5",
+                "7F183F7745A92D9F985C7D13",
+                "EB218572D5D5CB376519120F",
+                "AE7367B5C40517C695CAAB9E",
+                "51A715134E9C97F302083DD5",
+            );
+            "name" = "Frameworks";
+            "sourceTree" = "<group>";
+        };
+        "2CD6D7BCBA810B0E7F7C445A" = {
+            "isa" = "PBXFrameworksBuildPhase";
+            "buildActionMask" = "2147483647";
+            "files" = (
+                "458F6E4B336A87C4D854EA41",
+                "7C49B69637318D0EE4F46A2E",
+                "7D3F0EF79078919B57619133",
+                "8F0CDBE1BA1AB5EFA00BC78F",
+                "ED08227BE81F1E1FDD79B4F3",
+            );
+            "runOnlyForDeploymentPostprocessing" = "0";
+        };
+        "77CC031345BC7172C1AB381F" = {
+            "isa" = "PBXResourcesBuildPhase";
+            "buildActionMask" = "2147483647";
+            "files" = (
+            );
+            "runOnlyForDeploymentPostprocessing" = "0";
+        };
+        "01E38B0AD9D9CABADA1D613A" = {
+            "isa" = "XCBuildConfiguration";
+            "buildSettings" = {
+                "CLANG_ENABLE_MODULES" = "YES";
+                "SWIFT_VERSION" = "6.0";
+                "SWIFT_STRICT_CONCURRENCY" = "complete";
+                "IPHONEOS_DEPLOYMENT_TARGET" = "17.0";
+                "SDKROOT" = "iphoneos";
+                "SUPPORTED_PLATFORMS" = "iphoneos iphonesimulator";
+                "TARGETED_DEVICE_FAMILY" = "1,2";
+                "CODE_SIGNING_ALLOWED" = "NO";
+                "CODE_SIGN_STYLE" = "Automatic";
+                "PRODUCT_BUNDLE_IDENTIFIER" = "ai.everything.ios";
+                "PRODUCT_NAME" = "Everything";
+                "INFOPLIST_FILE" = "iOS/Info.plist";
+                "GENERATE_INFOPLIST_FILE" = "NO";
+                "MARKETING_VERSION" = "0.1.0";
+                "CURRENT_PROJECT_VERSION" = "1";
+                "SWIFT_EMIT_LOC_STRINGS" = "NO";
+                "LD_RUNPATH_SEARCH_PATHS" = (
+                    "$(inherited)",
+                    "@executable_path/Frameworks",
+                );
+                "SWIFT_OPTIMIZATION_LEVEL" = "-Onone";
+                "DEBUG_INFORMATION_FORMAT" = "dwarf";
+                "SWIFT_ACTIVE_COMPILATION_CONDITIONS" = "DEBUG";
+            };
+            "name" = "Debug";
+        };
+        "37CB873FB01FCE1213B2CD80" = {
+            "isa" = "XCBuildConfiguration";
+            "buildSettings" = {
+                "CLANG_ENABLE_MODULES" = "YES";
+                "SWIFT_VERSION" = "6.0";
+                "SWIFT_STRICT_CONCURRENCY" = "complete";
+                "IPHONEOS_DEPLOYMENT_TARGET" = "17.0";
+                "SDKROOT" = "iphoneos";
+                "SUPPORTED_PLATFORMS" = "iphoneos iphonesimulator";
+                "TARGETED_DEVICE_FAMILY" = "1,2";
+                "CODE_SIGNING_ALLOWED" = "NO";
+                "CODE_SIGN_STYLE" = "Automatic";
+                "PRODUCT_BUNDLE_IDENTIFIER" = "ai.everything.ios";
+                "PRODUCT_NAME" = "Everything";
+                "INFOPLIST_FILE" = "iOS/Info.plist";
+                "GENERATE_INFOPLIST_FILE" = "NO";
+                "MARKETING_VERSION" = "0.1.0";
+                "CURRENT_PROJECT_VERSION" = "1";
+                "SWIFT_EMIT_LOC_STRINGS" = "NO";
+                "LD_RUNPATH_SEARCH_PATHS" = (
+                    "$(inherited)",
+                    "@executable_path/Frameworks",
+                );
+                "SWIFT_OPTIMIZATION_LEVEL" = "-O";
+                "DEBUG_INFORMATION_FORMAT" = "dwarf-with-dsym";
+                "SWIFT_ACTIVE_COMPILATION_CONDITIONS" = "";
+            };
+            "name" = "Release";
+        };
+        "427C2AAD068E5BF3F8CD8B9E" = {
+            "isa" = "XCConfigurationList";
+            "buildConfigurations" = (
+                "01E38B0AD9D9CABADA1D613A",
+                "37CB873FB01FCE1213B2CD80",
+            );
+            "defaultConfigurationIsVisible" = "0";
+            "defaultConfigurationName" = "Release";
+        };
+        "0566276132F9903036CBD62B" = {
+            "isa" = "PBXNativeTarget";
+            "buildConfigurationList" = "427C2AAD068E5BF3F8CD8B9E";
+            "buildPhases" = (
+                "21912D85C83755776B86E6B9",
+                "2CD6D7BCBA810B0E7F7C445A",
+                "77CC031345BC7172C1AB381F",
+            );
+            "buildRules" = (
+            );
+            "dependencies" = (
+            );
+            "name" = "EverythingIOS";
+            "productName" = "Everything";
+            "productReference" = "D874DC1707B398C8AE095DE4";
+            "productType" = "com.apple.product-type.application";
+        };
+        "244210E48437B6556980A702" = {
+            "isa" = "PBXProject";
+            "attributes" = {
+                "BuildIndependentTargetsInParallel" = "YES";
+                "LastUpgradeCheck" = "1630";
+                "TargetAttributes" = {
+                    "F69C7CCC36DDAE7DE87E7982" = {
+                        "CreatedOnToolsVersion" = "16.3";
+                    };
+                    "0566276132F9903036CBD62B" = {
+                        "CreatedOnToolsVersion" = "16.3";
+                    };
+                };
+            };
+            "buildConfigurationList" = "1922B098E983995960BE56B0";
+            "compatibilityVersion" = "Xcode 14.0";
+            "developmentRegion" = "en";
+            "hasScannedForEncodings" = "0";
+            "knownRegions" = (
+                "en",
+                "Base",
+            );
+            "mainGroup" = "0D6E4079E36703EBD37C0072";
+            "productRefGroup" = "0A3E27B8CA818264D75C8D81";
+            "projectDirPath" = "";
+            "projectRoot" = "";
+            "targets" = (
+                "F69C7CCC36DDAE7DE87E7982",
+                "0566276132F9903036CBD62B",
+            );
+        };
+    };
+    "rootObject" = "244210E48437B6556980A702";
+}
