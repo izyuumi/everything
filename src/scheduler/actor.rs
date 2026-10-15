@@ -4,13 +4,13 @@ use std::sync::Arc;
 
 use serde::Serialize;
 use sha2::{Digest, Sha256};
-use tokio::sync::{mpsc, oneshot, watch};
+use tokio::sync::{Mutex, OwnedMutexGuard, mpsc, oneshot, watch};
 use tokio::task::{Id, JoinSet};
 use tokio_util::sync::CancellationToken;
 
 use crate::agent::{
-    Conversation, LoopStatus, PauseReason, TaskInput, TaskInputCommand, TaskInputReceipt,
-    TextCommand,
+    Conversation, LoopStatus, PauseReason, RemoteResultReceipt, TaskInput, TaskInputCommand,
+    TaskInputReceipt, TextCommand, VerifiedRemoteOutcome,
 };
 use crate::permissions::ExecutionMode;
 use crate::protocol::{
@@ -19,6 +19,9 @@ use crate::protocol::{
 };
 use crate::storage::{Store, ToolCallState};
 
+use super::remote::{
+    self, RemoteDispatchPermit, RemoteTaskAdmission, RemoteTaskBinding, RemoteTaskSnapshot,
+};
 use super::repository;
 use super::schedule_context::ScheduleCallerContext;
 use super::types::*;
@@ -35,12 +38,14 @@ pub(super) struct HandleInner {
     shutdown_grace: std::time::Duration,
     changed: watch::Sender<u64>,
     drained: watch::Receiver<Option<ShutdownReport>>,
+    remote_admission: Arc<Mutex<()>>,
 }
 
 #[derive(Clone, Debug, Serialize)]
 pub struct ShutdownReport {
     pub active_tasks: usize,
     pub broker_quarantined: bool,
+    pub unresolved_remote_tasks: usize,
 }
 
 type Reply = oneshot::Sender<Result<TaskSnapshot, SchedulerError>>;
@@ -68,7 +73,36 @@ enum Control {
         instruction: String,
         reply: oneshot::Sender<Result<TaskInputReceipt, SchedulerError>>,
     },
-    Cancel(TaskId, Reply),
+    Cancel(TaskId, OwnedMutexGuard<()>, Reply),
+    AdmitRemote {
+        authorization: Box<RemoteTaskAdmission>,
+        admission: OwnedMutexGuard<()>,
+        reply: Reply,
+    },
+    RemoteStatus(
+        TaskId,
+        oneshot::Sender<Result<RemoteTaskSnapshot, SchedulerError>>,
+    ),
+    RemoteResult {
+        task: TaskId,
+        outcome: Box<VerifiedRemoteOutcome>,
+        admission: OwnedMutexGuard<()>,
+        reply: oneshot::Sender<Result<RemoteResultReceipt, SchedulerError>>,
+    },
+    RemoteReceipt(
+        TaskId,
+        oneshot::Sender<Result<RemoteResultReceipt, SchedulerError>>,
+    ),
+    RemoteByBinding(
+        RemoteTaskBinding,
+        oneshot::Sender<Result<RemoteTaskSnapshot, SchedulerError>>,
+    ),
+    RemotePermit {
+        task: TaskId,
+        binding: RemoteTaskBinding,
+        admission: OwnedMutexGuard<()>,
+        reply: oneshot::Sender<Result<RemoteDispatchPermit, SchedulerError>>,
+    },
     RetireProviderUnavailable {
         task: TaskId,
         command: CommandId,
@@ -114,9 +148,10 @@ enum Control {
         caller: TaskId,
         workspace: PathBuf,
         target: TaskId,
+        admission: OwnedMutexGuard<()>,
         reply: Reply,
     },
-    Shutdown(oneshot::Sender<ShutdownReport>),
+    Shutdown(oneshot::Sender<ShutdownReport>, OwnedMutexGuard<()>),
 }
 
 impl Scheduler {
@@ -177,6 +212,7 @@ impl Scheduler {
                 shutdown_grace,
                 changed,
                 drained,
+                remote_admission: Arc::new(Mutex::new(())),
             }),
         })
     }
@@ -300,7 +336,108 @@ impl Scheduler {
     }
 
     pub async fn cancel(&self, task: TaskId) -> Result<TaskSnapshot, SchedulerError> {
-        self.request(|reply| Control::Cancel(task, reply)).await
+        let admission = Arc::clone(&self.inner.remote_admission).lock_owned().await;
+        self.request(|reply| Control::Cancel(task, admission, reply))
+            .await
+    }
+
+    pub async fn admit_remote(
+        &self,
+        authorization: RemoteTaskAdmission,
+    ) -> Result<TaskSnapshot, SchedulerError> {
+        let admission = Arc::clone(&self.inner.remote_admission).lock_owned().await;
+        self.request(|reply| Control::AdmitRemote {
+            authorization: Box::new(authorization),
+            admission,
+            reply,
+        })
+        .await
+    }
+
+    pub async fn remote_status(&self, task: TaskId) -> Result<RemoteTaskSnapshot, SchedulerError> {
+        let (reply, result) = oneshot::channel();
+        self.inner
+            .sender
+            .send(Control::RemoteStatus(task, reply))
+            .await
+            .map_err(|_| SchedulerError::Stopped)?;
+        result.await.map_err(|_| SchedulerError::Stopped)?
+    }
+
+    pub async fn remote_dispatch_permit(
+        &self,
+        task: TaskId,
+        binding: RemoteTaskBinding,
+    ) -> Result<RemoteDispatchPermit, SchedulerError> {
+        binding.validate()?;
+        let admission = Arc::clone(&self.inner.remote_admission).lock_owned().await;
+        let (reply, result) = oneshot::channel();
+        self.inner
+            .sender
+            .send(Control::RemotePermit {
+                task,
+                binding,
+                admission,
+                reply,
+            })
+            .await
+            .map_err(|_| SchedulerError::Stopped)?;
+        result.await.map_err(|_| {
+            SchedulerError::MutationUncertain(
+                "remote dispatch authorization response was lost".into(),
+            )
+        })?
+    }
+
+    pub async fn admit_remote_result(
+        &self,
+        task: TaskId,
+        outcome: VerifiedRemoteOutcome,
+    ) -> Result<RemoteResultReceipt, SchedulerError> {
+        let admission = Arc::clone(&self.inner.remote_admission).lock_owned().await;
+        let (reply, result) = oneshot::channel();
+        self.inner
+            .sender
+            .send(Control::RemoteResult {
+                task,
+                outcome: Box::new(outcome),
+                admission,
+                reply,
+            })
+            .await
+            .map_err(|_| SchedulerError::Stopped)?;
+        result.await.map_err(|_| {
+            SchedulerError::MutationUncertain(
+                "remote result response was lost; inspect the original receipt".into(),
+            )
+        })?
+    }
+
+    pub(crate) async fn remote_result_receipt(
+        &self,
+        task: TaskId,
+    ) -> Result<RemoteResultReceipt, SchedulerError> {
+        let (reply, result) = oneshot::channel();
+        self.inner
+            .sender
+            .send(Control::RemoteReceipt(task, reply))
+            .await
+            .map_err(|_| SchedulerError::Stopped)?;
+        result.await.map_err(|_| SchedulerError::Stopped)?
+    }
+
+    pub async fn remote_by_binding(
+        &self,
+        binding: RemoteTaskBinding,
+    ) -> Result<RemoteTaskSnapshot, SchedulerError> {
+        binding.validate()?;
+        let (reply, result) = oneshot::channel();
+        self.inner
+            .sender
+            .send(Control::RemoteByBinding(binding, reply))
+            .await
+            .map_err(|_| SchedulerError::Stopped)?;
+        result.await.map_err(|_| SchedulerError::Stopped)?
     }
 
     pub async fn retire_provider_unavailable(
@@ -369,10 +506,11 @@ impl Scheduler {
             return Ok(report);
         }
         let (reply, result) = oneshot::channel();
+        let admission = Arc::clone(&self.inner.remote_admission).lock_owned().await;
         if self
             .inner
             .sender
-            .send(Control::Shutdown(reply))
+            .send(Control::Shutdown(reply, admission))
             .await
             .is_err()
         {
@@ -476,10 +614,12 @@ impl Scheduler {
         workspace: PathBuf,
         target: TaskId,
     ) -> Result<TaskSnapshot, SchedulerError> {
+        let admission = Arc::clone(&self.inner.remote_admission).lock_owned().await;
         self.request(|reply| Control::ScopedCancel {
             caller,
             workspace,
             target,
+            admission,
             reply,
         })
         .await
@@ -505,6 +645,7 @@ struct Actor {
     receiver: mpsc::Receiver<Control>,
     queue: VecDeque<TaskId>,
     active: HashMap<TaskId, Active>,
+    remote_reserved: HashSet<TaskId>,
     workers: JoinSet<ExecutionOutcome>,
     retry_once: HashMap<TaskId, ResumeTarget>,
     wake_active: HashSet<TaskId>,
@@ -532,6 +673,7 @@ impl Actor {
             receiver,
             queue: VecDeque::new(),
             active: HashMap::new(),
+            remote_reserved: HashSet::new(),
             workers: JoinSet::new(),
             retry_once: HashMap::new(),
             wake_active: HashSet::new(),
@@ -555,6 +697,25 @@ impl Actor {
     }
 
     async fn recover(&mut self) -> Result<(), SchedulerError> {
+        for id in repository::remote_ids(&self.store())? {
+            let task = repository::load(&self.store(), id)?;
+            let saved = remote::snapshot(&task)?;
+            if self.services.agent.state_directory().is_none() {
+                return Err(SchedulerError::Invalid(
+                    "remote recovery requires a leased Agent",
+                ));
+            }
+            if let Some(result) = saved.result {
+                self.services
+                    .agent
+                    .restore_remote_result_receipt(
+                        task.definition.initial.conversation_id,
+                        saved.binding,
+                        result,
+                    )
+                    .await?;
+            }
+        }
         let tasks = repository::unfinished(&self.store(), self.limits.max_pending_tasks)?;
         for saved in tasks {
             let id = saved.definition.initial.id;
@@ -562,13 +723,21 @@ impl Actor {
             if task.checkpoint.task.status.is_terminal() {
                 continue;
             }
-            match repository::encode_checkpoint(&task.checkpoint) {
-                Err(SchedulerError::Capacity("task checkpoint bytes")) => {
-                    tracing::warn!(task_id=%id, "legacy scheduler checkpoint lacks reserved lifecycle and child delivery capacity; owner inspection is required before admission");
-                    continue;
+            if task.definition.remote.is_some() {
+                if self.services.agent.state_directory().is_none() {
+                    return Err(SchedulerError::Invalid(
+                        "remote recovery requires a leased Agent",
+                    ));
                 }
-                Err(error) => return Err(error),
-                Ok(_) => {}
+                self.remote_reserved.insert(id);
+                continue;
+            }
+            if matches!(
+                repository::encode_checkpoint(&task.checkpoint),
+                Err(SchedulerError::Capacity("task checkpoint bytes"))
+            ) {
+                tracing::warn!(task_id=%id, "legacy scheduler checkpoint lacks reserved child delivery capacity; owner inspection is required before admission");
+                continue;
             }
             let captured = self
                 .services
@@ -651,6 +820,7 @@ impl Actor {
                 let report = ShutdownReport {
                     active_tasks: 0,
                     broker_quarantined: self.services.broker.is_quarantined(),
+                    unresolved_remote_tasks: self.remote_reserved.len(),
                 };
                 self.drained.send_replace(Some(report.clone()));
                 for reply in self.shutdown.drain(..) {
@@ -661,7 +831,7 @@ impl Actor {
             tokio::select! {
                 control = self.receiver.recv(), if !self.controls_closed => {
                     match control {
-                        Some(control) => { let notify=!matches!(control,Control::Status(..)|Control::ScopedStatus{..}|Control::ScheduleContext{..}|Control::Active(..)); self.control(control).await; if notify{self.changed.send_modify(|revision| *revision = revision.wrapping_add(1));} },
+                        Some(control) => { let notify=!matches!(control,Control::Status(..)|Control::RemoteStatus(..)|Control::RemoteReceipt(..)|Control::RemoteByBinding(..)|Control::ScopedStatus{..}|Control::ScheduleContext{..}|Control::Active(..)); self.control(control).await; if notify{self.changed.send_modify(|revision| *revision = revision.wrapping_add(1));} },
                         None => {self.controls_closed=true; self.stop();},
                     }
                 }
@@ -703,7 +873,7 @@ impl Actor {
     }
 
     async fn control(&mut self, control: Control) {
-        if let Control::Shutdown(reply) = control {
+        if let Control::Shutdown(reply, _admission) = control {
             self.shutdown.push(reply);
             self.stop();
             return;
@@ -726,6 +896,63 @@ impl Actor {
             }
             Control::Status(id, reply) => {
                 let _ = reply.send(repository::load(&self.store(), id).map(|task| task.snapshot()));
+            }
+            Control::RemoteStatus(id, reply) => {
+                let _ = reply.send(
+                    repository::load(&self.store(), id).and_then(|task| remote::snapshot(&task)),
+                );
+            }
+            Control::RemoteByBinding(binding, reply) => {
+                let result = (|| {
+                    let id =
+                        repository::remote_id_by_delegation(&self.store(), binding.delegation_id)?;
+                    let saved = remote::snapshot(&repository::load(&self.store(), id)?)?;
+                    if saved.binding != binding {
+                        return Err(SchedulerError::Conflict(id));
+                    }
+                    Ok(saved)
+                })();
+                let _ = reply.send(result);
+            }
+            Control::RemoteReceipt(task, reply) => {
+                let result = self.remote_result_receipt(task).await;
+                let _ = reply.send(result);
+            }
+            Control::RemoteResult {
+                task,
+                outcome,
+                admission,
+                reply,
+            } => {
+                let result = self.admit_remote_result(task, *outcome, admission).await;
+                if matches!(result, Err(SchedulerError::MutationUncertain(_))) {
+                    self.stop();
+                }
+                let _ = reply.send(result);
+            }
+            Control::AdmitRemote {
+                authorization,
+                admission,
+                reply,
+            } => {
+                let result = if self.stopping {
+                    Err(SchedulerError::Stopped)
+                } else {
+                    self.admit_remote(*authorization, admission).await
+                };
+                if matches!(result, Err(SchedulerError::MutationUncertain(_))) {
+                    self.stop();
+                }
+                let _ = reply.send(result);
+            }
+            Control::RemotePermit {
+                task,
+                binding,
+                admission,
+                reply,
+            } => {
+                let result = self.remote_dispatch_permit(task, binding, admission).await;
+                let _ = reply.send(result);
             }
             Control::ScheduleContext {
                 caller,
@@ -813,7 +1040,7 @@ impl Actor {
                 };
                 let _ = reply.send(result);
             }
-            Control::Cancel(id, reply) => {
+            Control::Cancel(id, _admission, reply) => {
                 let result = self.cancel(id).await;
                 let _ = reply.send(result);
             }
@@ -891,6 +1118,7 @@ impl Actor {
                 caller,
                 workspace,
                 target,
+                admission: _admission,
                 reply,
             } => {
                 let authorized = self.validate_caller(caller, &workspace).and_then(|_| {
@@ -902,8 +1130,327 @@ impl Actor {
                 };
                 let _ = reply.send(result);
             }
-            Control::Shutdown(_) => {}
+            Control::Shutdown(..) => {}
         }
+    }
+
+    async fn admit_remote(
+        &mut self,
+        authorization: RemoteTaskAdmission,
+        admission: OwnedMutexGuard<()>,
+    ) -> Result<TaskSnapshot, SchedulerError> {
+        authorization.validate_owner(&self.store())?;
+        let submission = authorization.submission().clone();
+        if self.services.agent.state_directory().is_none() {
+            return Err(SchedulerError::Invalid(
+                "remote admission requires a leased Agent",
+            ));
+        }
+        let id = submission.task.task_id;
+        match repository::load(&self.store(), id) {
+            Ok(existing) => {
+                authorization.validate_task(&existing)?;
+                let saved = remote::snapshot(&existing)?;
+                if existing.definition.initial.conversation_id != submission.task.conversation_id
+                    || existing.definition.initial.originating_command_id
+                        != submission.task.command_id
+                    || existing.definition.initial.created_at != submission.task.accepted_at
+                    || repository::encode(&existing.definition.execution)?
+                        != repository::encode(&submission.task.execution)?
+                    || saved.binding != submission.binding
+                    || saved.approval != submission.approval
+                {
+                    return Err(SchedulerError::Conflict(id));
+                }
+                if let Some(result) = saved.result {
+                    self.services
+                        .agent
+                        .restore_remote_result_receipt(
+                            existing.definition.initial.conversation_id,
+                            saved.binding,
+                            result,
+                        )
+                        .await?;
+                }
+                if saved.phase != remote::RemoteTaskPhase::Settled {
+                    self.remote_reserved.insert(id);
+                }
+                return Ok(existing.snapshot());
+            }
+            Err(SchedulerError::NotFound(_)) => {}
+            Err(error) => return Err(error),
+        }
+        let conversation_id = submission.task.conversation_id;
+        let command = submission.task.command_id;
+        let conversation = self.services.agent.conversation(conversation_id).await?;
+        let task_instruction = instruction(&conversation, command)?;
+        if conversation.config != *authorization.configuration()
+            || task_instruction != authorization.instruction()
+        {
+            return Err(SchedulerError::Conflict(id));
+        }
+        authorization.validate_fresh(&self.store())?;
+        let mut initial = TaskRecord::new(
+            conversation_id,
+            None,
+            command,
+            task_instruction,
+            submission.task.accepted_at,
+        );
+        initial.id = id;
+        let mut task = initial_task(initial, conversation.config, submission.task.execution);
+        task.definition.remote = Some(remote::RemoteDefinition {
+            version: 1,
+            binding: submission.binding,
+            approval: submission.approval,
+        });
+        let definition = task
+            .definition
+            .remote
+            .as_ref()
+            .ok_or(SchedulerError::Invalid("remote definition is missing"))?;
+        remote::validate_definition(
+            definition,
+            &task.definition.execution,
+            &task.definition.configuration,
+        )?;
+        repository::check_remote_identity(&self.store(), &task)?;
+        if self.active.values().filter(|active| !active.child).count() + self.remote_reserved.len()
+            >= self.limits.max_primary_tasks
+        {
+            return Err(SchedulerError::Capacity("primary execution slots"));
+        }
+        if self.services.broker.is_quarantined() {
+            return Err(SchedulerError::OwnerDecision(id));
+        }
+        let now = UnixMillis::now()?;
+        if now.get() < definition.approval.approved_at.get()
+            || now.get() >= definition.approval.expires_at.get()
+            || submission.task.accepted_at.get() > definition.approval.approved_at.get()
+        {
+            return Err(SchedulerError::OwnerDecision(id));
+        }
+        task.definition.execution.authority(conversation_id, id)?;
+        for tool in task
+            .definition
+            .execution
+            .allowed_tools
+            .as_ref()
+            .ok_or(SchedulerError::Invalid("remote policy was not captured"))?
+        {
+            self.services.registry.descriptor(tool)?;
+        }
+        let _native = self
+            .services
+            .agent
+            .guard_unstarted_tools(conversation_id, command, id)
+            .await?;
+        let current = self.services.agent.conversation(conversation_id).await?;
+        if current.native_run().is_some()
+            || current.config != task.definition.configuration
+            || instruction(&current, command)? != task.definition.initial.instruction
+        {
+            return Err(SchedulerError::Conflict(id));
+        }
+        let fresh_now = UnixMillis::now()?;
+        if fresh_now.get() < now.get() || fresh_now.get() >= definition.approval.expires_at.get() {
+            return Err(SchedulerError::OwnerDecision(id));
+        }
+        let now = fresh_now;
+        task.checkpoint
+            .task
+            .transition(TaskStatus::Running, now, None)?;
+        task.checkpoint
+            .task
+            .transition(TaskStatus::WaitingForChildren, now, None)?;
+        task.state = crate::storage::TaskState::Waiting;
+        task.checkpoint.waiting = Some(WaitingReason::Remote {
+            phase: remote::RemoteTaskPhase::Reserved,
+        });
+        task.checkpoint.remote = Some(remote::RemoteCheckpoint {
+            charge: remote::RemoteBudgetCharge::from_limits(&task.definition.execution.limits)?,
+            phase: remote::RemoteTaskPhase::Reserved,
+            admitted_at: now,
+            last_dispatch_at: None,
+            result: None,
+        });
+        remote::validate_task(&task)?;
+        let resources = (
+            self.store(),
+            task,
+            authorization,
+            admission,
+            _native,
+            self.services.agent.clone(),
+        );
+        let max_pending = self.limits.max_pending_tasks;
+        let inserted = tokio::task::spawn_blocking(move || {
+            let resources = resources;
+            repository::insert_remote(&resources.0, &resources.1, max_pending, &resources.2)?;
+            repository::load(&resources.0, id).map(|task| task.snapshot())
+        })
+        .await
+        .map_err(|_| mutation_uncertain(SchedulerError::Worker))?
+        .map_err(|error| match error {
+            SchedulerError::Capacity(_)
+            | SchedulerError::Invalid(_)
+            | SchedulerError::Conflict(_)
+            | SchedulerError::OwnerDecision(_) => error,
+            _ => mutation_uncertain(error),
+        })?;
+        self.remote_reserved.insert(id);
+        Ok(inserted)
+    }
+
+    async fn remote_result_receipt(
+        &self,
+        id: TaskId,
+    ) -> Result<RemoteResultReceipt, SchedulerError> {
+        let task = repository::load(&self.store(), id)?;
+        let saved = remote::snapshot(&task)?;
+        let result = saved.result.ok_or(SchedulerError::OwnerDecision(id))?;
+        Ok(self
+            .services
+            .agent
+            .restore_remote_result_receipt(
+                task.definition.initial.conversation_id,
+                saved.binding,
+                result,
+            )
+            .await?)
+    }
+
+    async fn admit_remote_result(
+        &mut self,
+        id: TaskId,
+        outcome: VerifiedRemoteOutcome,
+        admission: OwnedMutexGuard<()>,
+    ) -> Result<RemoteResultReceipt, SchedulerError> {
+        outcome.validate_owner(&self.services.agent)?;
+        let task = repository::load(&self.store(), id)?;
+        let saved = remote::snapshot(&task)?;
+        if outcome.binding() != &saved.binding
+            || outcome.report().task_id != id
+            || outcome.report().command_id != task.checkpoint.active_command
+        {
+            return Err(SchedulerError::Conflict(id));
+        }
+        if let Some(result) = saved.result {
+            if !outcome.same_source(&result.report) {
+                return Err(SchedulerError::Conflict(id));
+            }
+            let _resources = (outcome, admission);
+            return self.remote_result_receipt(id).await;
+        }
+        if self.stopping {
+            return Err(SchedulerError::Stopped);
+        }
+        if !self.activated
+            || !self.remote_reserved.contains(&id)
+            || self.services.broker.is_quarantined()
+        {
+            return Err(SchedulerError::OwnerDecision(id));
+        }
+        outcome.validate_fresh_owner(&self.services.agent)?;
+        repository::authority(&self.store(), id)?;
+        let completion = remote::RemoteResultCommit::new(task, outcome, admission)?;
+        let receipt = self
+            .services
+            .agent
+            .commit_remote_result(completion)
+            .await
+            .map_err(|error| match error {
+                crate::agent::AgentError::Busy
+                | crate::agent::AgentError::NoPendingTurn
+                | crate::agent::AgentError::InvalidData(_)
+                | crate::agent::AgentError::CommandConflict(_)
+                | crate::agent::AgentError::ConfigurationMismatch => SchedulerError::Agent(error),
+                crate::agent::AgentError::Storage(
+                    crate::storage::StorageError::StateConflict { .. }
+                    | crate::storage::StorageError::StateRevisionConflict { .. }
+                    | crate::storage::StorageError::SequenceConflict { .. }
+                    | crate::storage::StorageError::CommandConflict(_),
+                ) => SchedulerError::Agent(error),
+                _ => mutation_uncertain(SchedulerError::Agent(error)),
+            })?;
+        if receipt.inspection().task_status.is_terminal() {
+            self.remote_reserved.remove(&id);
+        }
+        Ok(receipt)
+    }
+
+    async fn remote_dispatch_permit(
+        &mut self,
+        id: TaskId,
+        binding: RemoteTaskBinding,
+        admission: OwnedMutexGuard<()>,
+    ) -> Result<RemoteDispatchPermit, SchedulerError> {
+        if self.stopping {
+            return Err(SchedulerError::Stopped);
+        }
+        if self.services.agent.state_directory().is_none() {
+            return Err(SchedulerError::Invalid(
+                "remote dispatch requires a leased Agent",
+            ));
+        }
+        if !self.activated
+            || !self.remote_reserved.contains(&id)
+            || self.services.broker.is_quarantined()
+        {
+            return Err(SchedulerError::OwnerDecision(id));
+        }
+        let mut task = repository::load(&self.store(), id)?;
+        let saved = remote::snapshot(&task)?;
+        let now = UnixMillis::now()?;
+        if saved.binding != binding {
+            return Err(SchedulerError::Conflict(id));
+        }
+        if saved.phase != remote::RemoteTaskPhase::Reserved
+            || task.checkpoint.cancel_requested
+            || now.get() < saved.last_dispatch_at.unwrap_or(saved.admitted_at).get()
+            || now.get() >= saved.binding.deadline.get()
+        {
+            return Err(SchedulerError::OwnerDecision(id));
+        }
+        repository::authority(&self.store(), id)?;
+        let native = self
+            .services
+            .agent
+            .guard_unstarted_tools(
+                task.definition.initial.conversation_id,
+                task.checkpoint.active_command,
+                id,
+            )
+            .await?;
+        let conversation = self
+            .services
+            .agent
+            .conversation(task.definition.initial.conversation_id)
+            .await?;
+        if conversation.native_run().is_some()
+            || conversation.config != task.definition.configuration
+            || instruction(&conversation, task.checkpoint.active_command)?
+                != task.definition.initial.instruction
+        {
+            return Err(SchedulerError::Conflict(id));
+        }
+        let fresh_now = UnixMillis::now()?;
+        if fresh_now.get() < now.get() || fresh_now.get() >= saved.binding.deadline.get() {
+            return Err(SchedulerError::OwnerDecision(id));
+        }
+        task.checkpoint
+            .remote
+            .as_mut()
+            .ok_or(SchedulerError::Invalid("remote checkpoint is missing"))?
+            .last_dispatch_at = Some(fresh_now);
+        repository::save(&self.store(), &mut task, TaskStatus::WaitingForChildren)
+            .map_err(mutation_uncertain)?;
+        Ok(RemoteDispatchPermit::new(
+            remote::snapshot(&task)?,
+            admission,
+            Box::new(native),
+            self.services.agent.clone(),
+        ))
     }
 
     async fn enqueue(
@@ -1014,6 +1561,7 @@ impl Actor {
     ) -> Result<StoredTask, SchedulerError> {
         let task = repository::load(&self.store(), caller)?;
         if task.checkpoint.task.status != TaskStatus::Running
+            || task.definition.remote.is_some()
             || task.definition.execution.workspace_root != workspace
             || repository::cancelled_ancestor(&self.store(), caller)?
         {
@@ -1323,6 +1871,9 @@ impl Actor {
             ));
         }
         let task = repository::load(&self.store(), id)?;
+        if task.definition.remote.is_some() {
+            return Err(SchedulerError::OwnerDecision(id));
+        }
         let command = if let Some(original) = self.store().command_request(&delivery.to_string())? {
             let event = original
                 .events
@@ -1410,6 +1961,9 @@ impl Actor {
 
     async fn wake(&mut self, id: TaskId) -> Result<TaskSnapshot, SchedulerError> {
         let mut task = repository::load(&self.store(), id)?;
+        if task.definition.remote.is_some() {
+            return Err(SchedulerError::OwnerDecision(id));
+        }
         if task.checkpoint.task.status.is_terminal() {
             return Ok(task.snapshot());
         }
@@ -1494,6 +2048,9 @@ impl Actor {
         request: CommandId,
     ) -> Result<TaskSnapshot, SchedulerError> {
         let mut task = repository::load(&self.store(), id)?;
+        if task.definition.remote.is_some() {
+            return Err(SchedulerError::OwnerDecision(id));
+        }
         if let Some(audit) = task
             .checkpoint
             .resumes
@@ -1537,6 +2094,27 @@ impl Actor {
 
     async fn cancel(&mut self, id: TaskId) -> Result<TaskSnapshot, SchedulerError> {
         let mut task = repository::load(&self.store(), id)?;
+        if task.definition.remote.is_some() {
+            if task.checkpoint.task.status.is_terminal() {
+                return Ok(task.snapshot());
+            }
+            let remote = task
+                .checkpoint
+                .remote
+                .as_mut()
+                .ok_or(SchedulerError::Invalid("remote checkpoint is missing"))?;
+            if remote.phase != remote::RemoteTaskPhase::OutcomeUnknown {
+                remote.phase = remote::RemoteTaskPhase::CancellationRequested;
+            }
+            task.checkpoint.cancel_requested = true;
+            task.checkpoint.waiting = Some(WaitingReason::Remote {
+                phase: remote.phase,
+            });
+            task.checkpoint.diagnostic = Some("Remote cancellation requested; execution outcome remains unconfirmed and the original allowance remains charged".into());
+            repository::save(&self.store(), &mut task, TaskStatus::WaitingForChildren)
+                .map_err(mutation_uncertain)?;
+            return Ok(task.snapshot());
+        }
         if task.checkpoint.task.status.is_terminal() {
             return Ok(task.snapshot());
         }
@@ -1581,6 +2159,12 @@ impl Actor {
                 continue;
             }
             let mut task = repository::load(&self.store(), id)?;
+            if task.definition.remote.is_some() {
+                if remote::snapshot(&task)?.phase != remote::RemoteTaskPhase::Settled {
+                    self.remote_reserved.insert(id);
+                }
+                continue;
+            }
             if task.checkpoint.task.status.is_terminal() {
                 continue;
             }
@@ -1646,7 +2230,8 @@ impl Actor {
                 .active
                 .values()
                 .filter(|active| active.child == child)
-                .count();
+                .count()
+                + if child { 0 } else { self.remote_reserved.len() };
             let maximum = if child {
                 self.limits.max_subagents
             } else {
@@ -1939,6 +2524,7 @@ fn initial_task(
             initial: initial.clone(),
             configuration,
             execution,
+            remote: None,
         },
         checkpoint: TaskCheckpoint {
             scheduler_version: 1,
@@ -1952,6 +2538,7 @@ fn initial_task(
             resumes: Vec::new(),
             child_wait: None,
             provider_retirement: None,
+            remote: None,
         },
         state: crate::storage::TaskState::Queued,
     }

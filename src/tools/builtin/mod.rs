@@ -38,7 +38,25 @@ impl BuiltinTools {
         &self,
         registry: &mut ToolRegistry,
     ) -> Result<BTreeMap<String, ToolScopeRule>, ToolError> {
-        for (tool, _) in &self.registrations {
+        self.register_selected(registry, false)
+    }
+
+    pub fn register_workspace_into(
+        &self,
+        registry: &mut ToolRegistry,
+    ) -> Result<BTreeMap<String, ToolScopeRule>, ToolError> {
+        self.register_selected(registry, true)
+    }
+
+    fn register_selected(
+        &self,
+        registry: &mut ToolRegistry,
+        workspace_only: bool,
+    ) -> Result<BTreeMap<String, ToolScopeRule>, ToolError> {
+        let selected = self.registrations.iter().filter(|(_, scope)| {
+            !workspace_only || matches!(scope, ToolScopeRule::Filesystem { .. })
+        });
+        for (tool, _) in selected.clone() {
             if registry.descriptor(&tool.descriptor().name).is_ok() {
                 return Err(ToolError::DuplicateTool {
                     name: tool.descriptor().name.clone(),
@@ -46,7 +64,7 @@ impl BuiltinTools {
             }
         }
         let mut scopes = BTreeMap::new();
-        for (tool, scope) in &self.registrations {
+        for (tool, scope) in selected {
             registry.register(Arc::clone(tool))?;
             scopes.insert(tool.descriptor().name.clone(), scope.clone());
         }

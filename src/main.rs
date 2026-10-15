@@ -45,6 +45,7 @@ struct Arguments {
 #[derive(Subcommand)]
 enum Command {
     Serve(ServeArguments),
+    Worker(everything::worker::commands::WorkerArguments),
     Schedule(everything::scheduling::commands::ScheduleArguments),
     Owner(OwnerArguments),
     Service(everything::service::cli::ServiceArguments),
@@ -267,6 +268,12 @@ struct StatusArguments {
 #[derive(Debug, Error)]
 enum CliError {
     #[error(transparent)]
+    WorkerCommand(#[from] everything::worker::commands::WorkerCommandError),
+    #[error(
+        "worker commands require --state-dir or EVERYTHING_STATE_DIR pointing to dedicated worker state"
+    )]
+    WorkerStateDirectory,
+    #[error(transparent)]
     ScheduleCommand(#[from] everything::scheduling::commands::CommandError),
     #[error(transparent)]
     Host(#[from] everything::host::runtime::HostError),
@@ -341,6 +348,9 @@ async fn main() -> ExitCode {
 }
 
 async fn execute(arguments: Arguments, cancellation: CancellationToken) -> Result<(), CliError> {
+    if matches!(&arguments.command, Command::Worker(_)) && arguments.state_dir.is_none() {
+        return Err(CliError::WorkerStateDirectory);
+    }
     let state_dir = arguments
         .state_dir
         .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".everything")))
@@ -349,6 +359,12 @@ async fn execute(arguments: Arguments, cancellation: CancellationToken) -> Resul
         return Err(AgentError::Cancelled.into());
     }
     let command = match arguments.command {
+        Command::Worker(arguments) => {
+            return write_json(
+                everything::worker::commands::run(arguments, state_dir, cancellation).await?,
+            )
+            .await;
+        }
         Command::Serve(arguments) => {
             return everything::host::runtime::HostService::start_with_mcp_session_bootstrap(
                 &state_dir,

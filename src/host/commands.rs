@@ -28,6 +28,9 @@ pub(super) enum EffectiveCommand {
     Turn {
         execution: ExecutionPolicy,
     },
+    RemoteInitialize {
+        admission: Box<super::worker_control::WorkerAdmissionSnapshot>,
+    },
     Control,
 }
 
@@ -210,6 +213,38 @@ impl HostInner {
     }
 
     async fn apply(self: &Arc<Self>, command_id: CommandId) -> Result<bool, HostError> {
+        let inspected = self
+            .blocking(move |host| Ok(host.inbox.record(command_id)?))
+            .await?;
+        if let Some(record) = inspected
+            && matches!(record.phase, CommandPhase::Accepted | CommandPhase::Applied)
+            && let Some(options) = record.effective_options.clone()
+            && let EffectiveCommand::RemoteInitialize { admission } =
+                serde_json::from_value::<EffectiveCommand>(options)?
+        {
+            if self.draining.load(std::sync::atomic::Ordering::Acquire) {
+                return Ok(false);
+            }
+            match self.recover_worker_admission(record, *admission).await {
+                Ok(_) => return Ok(true),
+                Err(error) if retryable_application(&error) => return Ok(false),
+                Err(error @ HostError::WorkerUnadmitted) => {
+                    let failure = public_failure(&error);
+                    self.blocking(move |host| {
+                        Ok(host.inbox.finish(
+                            command_id,
+                            true,
+                            &serde_json::to_value(failure)?,
+                            UnixMillis::now()?,
+                        )?)
+                    })
+                    .await?;
+                    self.receipt_changed();
+                    return Ok(true);
+                }
+                Err(error) => return Err(error),
+            }
+        }
         let _mutation = self.mutation.lock().await;
         if self.draining.load(std::sync::atomic::Ordering::Acquire) {
             return Ok(false);
@@ -701,6 +736,7 @@ fn retryable_application(error: &HostError) -> bool {
         error,
         HostError::Agent(AgentError::Busy | AgentError::PendingTurn(_))
             | HostError::Draining
+            | HostError::WorkerRecoveryUnavailable
             | HostError::Inbox(InboxError::Capacity)
             | HostError::Scheduler(
                 SchedulerError::Capacity(_)

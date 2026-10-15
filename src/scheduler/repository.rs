@@ -29,6 +29,70 @@ pub(super) fn has_running_operations(store: &Store, id: TaskId) -> Result<bool, 
     )?)
 }
 
+pub(super) fn check_remote_identity(
+    store: &Store,
+    candidate: &StoredTask,
+) -> Result<(), SchedulerError> {
+    let proposed = candidate
+        .definition
+        .remote
+        .as_ref()
+        .ok_or(SchedulerError::Invalid("remote definition is missing"))?;
+    let connection = store.connection()?;
+    let mut statement = connection.prepare("SELECT id FROM tasks WHERE json_extract(input,'$.scheduler_version')=1 AND json_type(input,'$.remote')='object' ORDER BY id LIMIT ?1")?;
+    let ids = statement
+        .query_map([MAX_RETAINED_TASKS + 1], |row| row.get::<_, String>(0))?
+        .collect::<Result<Vec<_>, _>>()?;
+    drop(statement);
+    drop(connection);
+    if ids.len() as i64 > MAX_RETAINED_TASKS {
+        return Err(SchedulerError::Capacity("retained remote identities"));
+    }
+    for id in ids {
+        let existing = load(store, id.parse()?)?;
+        let original = existing
+            .definition
+            .remote
+            .as_ref()
+            .ok_or(SchedulerError::Invalid("remote definition is missing"))?;
+        let original_commands = [
+            original.approval.command_id,
+            existing.definition.initial.originating_command_id,
+        ];
+        let proposed_commands = [
+            proposed.approval.command_id,
+            candidate.definition.initial.originating_command_id,
+        ];
+        let binding = &original.binding;
+        let proposed_binding = &proposed.binding;
+        if existing.definition.initial.conversation_id
+            == candidate.definition.initial.conversation_id
+            || original_commands
+                .iter()
+                .any(|command| proposed_commands.contains(command))
+            || binding.delegation_id == proposed_binding.delegation_id
+            || binding.attempt_id == proposed_binding.attempt_id
+            || binding.worker_task_id == proposed_binding.worker_task_id
+            || binding.worker_conversation_id == proposed_binding.worker_conversation_id
+            || [
+                binding.worker_create_command_id,
+                binding.worker_input_command_id,
+            ]
+            .iter()
+            .any(|command| {
+                [
+                    proposed_binding.worker_create_command_id,
+                    proposed_binding.worker_input_command_id,
+                ]
+                .contains(command)
+            })
+        {
+            return Err(SchedulerError::Conflict(candidate.definition.initial.id));
+        }
+    }
+    Ok(())
+}
+
 pub(super) fn has_unknown_operations(store: &Store, id: TaskId) -> Result<bool, SchedulerError> {
     Ok(store.connection()?.query_row(
         "SELECT EXISTS(SELECT 1 FROM tool_calls WHERE task_id=?1 AND state='unknown')",
@@ -97,10 +161,76 @@ pub(super) fn check_child_depth(store: &Store, id: TaskId) -> Result<(), Schedul
 }
 
 pub(super) fn load(store: &Store, id: TaskId) -> Result<StoredTask, SchedulerError> {
+    let sizes: Option<(i64, i64)> = store.connection()?.query_row(
+        "SELECT length(CAST(input AS BLOB)),length(CAST(checkpoint AS BLOB)) FROM tasks WHERE id=?1",
+        [id.to_string()],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    ).optional()?;
+    if sizes.is_some_and(|(input, checkpoint)| {
+        input > MAX_TASK_BYTES as i64 || checkpoint > MAX_TASK_BYTES as i64
+    }) {
+        return Err(SchedulerError::Capacity("stored task bytes"));
+    }
     let row = store
         .task(&id.to_string())?
         .ok_or(SchedulerError::NotFound(id))?;
     decode(row)
+}
+
+pub(super) fn row(task: &StoredTask) -> Result<TaskRow, SchedulerError> {
+    let initial = &task.definition.initial;
+    Ok(TaskRow {
+        id: initial.id.to_string(),
+        conversation_id: initial.conversation_id.to_string(),
+        parent_task_id: initial.parent_task_id.map(|id| id.to_string()),
+        state: task.state,
+        input: encode(&task.definition)?,
+        checkpoint: encode_checkpoint(&task.checkpoint)?,
+        created_at: timestamp(initial.created_at)?,
+        updated_at: timestamp(task.checkpoint.task.updated_at)?,
+    })
+}
+
+pub(super) fn remote_ids(store: &Store) -> Result<Vec<TaskId>, SchedulerError> {
+    let connection = store.connection()?;
+    let mut statement = connection.prepare("SELECT id FROM tasks WHERE json_extract(input,'$.scheduler_version')=1 AND json_type(input,'$.remote')='object' ORDER BY id LIMIT ?1")?;
+    let ids = statement
+        .query_map([MAX_RETAINED_TASKS + 1], |row| row.get::<_, String>(0))?
+        .collect::<Result<Vec<_>, _>>()?;
+    if ids.len() as i64 > MAX_RETAINED_TASKS {
+        return Err(SchedulerError::Capacity("retained remote tasks"));
+    }
+    ids.into_iter()
+        .map(|id| id.parse().map_err(SchedulerError::from))
+        .collect()
+}
+
+pub(super) fn remote_id_by_delegation(
+    store: &Store,
+    delegation: uuid::Uuid,
+) -> Result<TaskId, SchedulerError> {
+    let connection = store.connection()?;
+    let mut statement = connection.prepare("SELECT length(CAST(id AS BLOB)),id FROM tasks WHERE json_extract(input,'$.scheduler_version')=1 AND json_type(input,'$.remote')='object' AND json_extract(input,'$.remote.binding.delegation_id') COLLATE NOCASE IN (?1,?2,?3,?4) LIMIT 2")?;
+    let mut rows = statement.query([
+        delegation.hyphenated().to_string(),
+        delegation.simple().to_string(),
+        delegation.braced().to_string(),
+        delegation.urn().to_string(),
+    ])?;
+    let mut found = None;
+    while let Some(row) = rows.next()? {
+        if row.get::<_, i64>(0)? != 36 {
+            return Err(SchedulerError::Invalid(
+                "stored remote task identifier length",
+            ));
+        }
+        let id: TaskId = row.get::<_, String>(1)?.parse()?;
+        if found.is_some() {
+            return Err(SchedulerError::Conflict(id));
+        }
+        found = Some(id);
+    }
+    found.ok_or(SchedulerError::RemoteBindingNotFound(delegation))
 }
 
 pub(super) fn active_in_conversation(
@@ -178,11 +308,13 @@ fn decode(row: TaskRow) -> Result<StoredTask, SchedulerError> {
             "task checkpoint identity or bounds are invalid",
         ));
     }
-    Ok(StoredTask {
+    let task = StoredTask {
         definition,
         checkpoint,
         state: row.state,
-    })
+    };
+    super::remote::validate_task(&task)?;
+    Ok(task)
 }
 
 pub(super) fn insert(
@@ -190,11 +322,33 @@ pub(super) fn insert(
     task: &StoredTask,
     max_pending: usize,
 ) -> Result<bool, SchedulerError> {
+    insert_task(store, task, max_pending, None)
+}
+
+pub(super) fn insert_remote(
+    store: &Store,
+    task: &StoredTask,
+    max_pending: usize,
+    authorization: &super::remote::RemoteTaskAdmission,
+) -> Result<bool, SchedulerError> {
+    authorization.validate_task(task)?;
+    insert_task(store, task, max_pending, Some(authorization))
+}
+
+fn insert_task(
+    store: &Store,
+    task: &StoredTask,
+    max_pending: usize,
+    authorization: Option<&super::remote::RemoteTaskAdmission>,
+) -> Result<bool, SchedulerError> {
     let input = encode(&task.definition)?;
     let checkpoint = encode_checkpoint(&task.checkpoint)?;
     let mut connection = store.connection()?;
     let transaction =
         connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    if let Some(authorization) = authorization {
+        authorization.validate_fresh(store)?;
+    }
     let existing: Option<String> = transaction
         .query_row(
             "SELECT input FROM tasks WHERE id=?1",
@@ -217,7 +371,10 @@ pub(super) fn insert(
         return Err(SchedulerError::Capacity("retained or pending tasks"));
     }
     let initial = &task.definition.initial;
-    transaction.execute("INSERT INTO tasks(id,conversation_id,parent_task_id,state,input,checkpoint,created_at,updated_at) VALUES (?1,?2,?3,'queued',?4,?5,?6,?6)",params![initial.id.to_string(),initial.conversation_id.to_string(),initial.parent_task_id.map(|id|id.to_string()),serde_json::to_string(&input)?,serde_json::to_string(&checkpoint)?,timestamp(initial.created_at)?])?;
+    transaction.execute("INSERT INTO tasks(id,conversation_id,parent_task_id,state,input,checkpoint,created_at,updated_at) VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",params![initial.id.to_string(),initial.conversation_id.to_string(),initial.parent_task_id.map(|id|id.to_string()),task.state.as_str(),serde_json::to_string(&input)?,serde_json::to_string(&checkpoint)?,timestamp(initial.created_at)?,timestamp(task.checkpoint.task.updated_at)?])?;
+    if let Some(authorization) = authorization {
+        authorization.validate_fresh(store)?;
+    }
     transaction.commit()?;
     Ok(true)
 }
