@@ -386,10 +386,19 @@ impl ContextBuilder {
         fixed_bytes: usize,
         tool_count: usize,
     ) -> Result<(usize, Option<CompactionRecord>, Option<Message>, usize), ContextError> {
+        let pending_round = history
+            .iter()
+            .rposition(|entry| entry.message.role == MessageRole::Assistant)
+            .filter(|index| contains_tool_calls(&history[*index].message));
         for group in std::iter::once(None).chain(analysis.groups.iter().map(Some)) {
             let start = group.map_or(0, |group| group.end);
             if start < minimum_start {
                 continue;
+            }
+            if pending_round.is_some_and(|round_start| start > round_start) {
+                return Err(ContextError::ContinuationRequiredForToolRound {
+                    reason: ContinuationDisposition::ClearedByCompaction,
+                });
             }
             if start == history.len() && !history.is_empty() {
                 break;
@@ -797,12 +806,20 @@ fn clear_continuation(
 ) -> Result<ContinuationDisposition, ContextError> {
     if request
         .messages
-        .last()
-        .is_some_and(|message| message.role == MessageRole::Tool)
+        .iter()
+        .rfind(|message| message.role == MessageRole::Assistant)
+        .is_some_and(contains_tool_calls)
     {
         return Err(ContextError::ContinuationRequiredForToolRound { reason });
     }
     Ok(reason)
+}
+
+fn contains_tool_calls(message: &Message) -> bool {
+    message
+        .content
+        .iter()
+        .any(|block| matches!(block, ContentBlock::ToolCall(_)))
 }
 
 fn check_input_bytes(bytes: usize) -> Result<(), ContextError> {
