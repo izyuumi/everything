@@ -8,7 +8,7 @@ Foundation issues #1–#9, permissions #11, relay #13, context #16, and embeddin
 
 The CLI still exposes help only; native inference is not yet wired to it. No live remote model requests have been made. EmbeddingGemma 2 produced finite normalized vectors and relevant-document rankings locally at 128, 256, 512, and 768 dimensions; the backend is not yet merged. Disposable checks covered storage rollback/dedup/restart/revocation, wiki CRUD/reindex/confinement, Rust crypto/replay/sync, approval nonescalation/expiry/revocation, context compaction/grouping/budget/continuation, and embedding contract validation/fingerprints. These observations are not automated coverage or a security audit.
 
-Rust 1.99.0 is installed. Apple SDKs and Mac hardware are unavailable locally; GitHub macOS CI supplies Rust build checks. Swift interoperability, live model behavior, and native Mac embedding benchmarks remain unverified. Normal GitHub merge enforcement and passing CI are required.
+Rust 1.99.0 is installed. Apple SDKs and Mac hardware are unavailable locally; GitHub macOS CI supplies Rust build checks. Swift interoperability, live model behavior, and native Mac embedding measurements are recorded in the benchmark document; Swift interoperability remains unverified. Normal GitHub merge enforcement and passing CI are required.
 
 ## Dependency graph and ownership
 
@@ -25,7 +25,7 @@ Rust 1.99.0 is installed. Apple SDKs and Mac hardware are unavailable locally; G
 | [#9](https://github.com/izyuumi/everything/issues/9) | Implement OpenAI native Responses adapter | #4 | Merged (#41); live API unverified |
 | [#10](https://github.com/izyuumi/everything/issues/10) | Build persistent CLI conversation loop | #2, #3, #4, #8 | In progress; atomic storage prerequisite merged (#44) |
 | [#11](https://github.com/izyuumi/everything/issues/11) | Implement permission policy and persistent grants | #2, #3, #5 | Merged (#43) |
-| [#12](https://github.com/izyuumi/everything/issues/12) | Implement local EmbeddingGemma 2 inference spike | #31 | Actual native inference, release benchmark and cancellation verified on Linux; integration/Mac validation pending |
+| [#12](https://github.com/izyuumi/everything/issues/12) | Implement local EmbeddingGemma 2 inference spike | #31 | Actual native inference and release benchmarks verified on Linux/macOS; integration validation |
 | [#13](https://github.com/izyuumi/everything/issues/13) | Implement E2EE relay transport server | #7 | Merged (#45) |
 | [#14](https://github.com/izyuumi/everything/issues/14) | Implement Tool Broker execution journal | #3, #5, #11 | Implemented; native loop integration remains #23 |
 | [#15](https://github.com/izyuumi/everything/issues/15) | Implement shell and filesystem tools | #14 | Backlog |

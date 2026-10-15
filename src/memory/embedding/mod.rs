@@ -6,6 +6,9 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 use tokio_util::sync::CancellationToken;
 
+#[cfg(feature = "local-embeddings")]
+pub mod embeddinggemma2;
+
 const MAX_DIMENSIONS: usize = 65_536;
 const MAX_INPUT_BYTES: usize = 1024 * 1024;
 const MAX_TITLE_BYTES: usize = 4_096;
