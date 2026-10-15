@@ -480,6 +480,66 @@ impl Authorizer {
         Ok(ApprovalView { request, status })
     }
 
+    pub fn approval_for_operation(
+        &self,
+        conversation_id: &str,
+        operation_id: &str,
+        now: i64,
+    ) -> Result<Option<ApprovalView>, PermissionError> {
+        validate_identifier(conversation_id)?;
+        validate_identifier(operation_id)?;
+        validate_time(now)?;
+        let id = approval_id_for_operation(conversation_id, operation_id)?;
+        let Some(row) = self.store.permission(&id)? else {
+            if let Some(orphan) = self.store.permission(&resolution_id(&id))? {
+                return Err(PermissionError::MalformedRecord(orphan.id));
+            }
+            return Ok(None);
+        };
+        let request = decode_request(&row)?;
+        if request.scope.conversation_id != conversation_id
+            || request.scope.operation_id != operation_id
+        {
+            return Err(PermissionError::MalformedRecord(row.id));
+        }
+        let status = self.status_for_request(&request, now)?;
+        Ok(Some(ApprovalView { request, status }))
+    }
+
+    pub fn approvals(
+        &self,
+        conversation_id: &str,
+        now: i64,
+    ) -> Result<Vec<ApprovalView>, PermissionError> {
+        validate_identifier(conversation_id)?;
+        validate_time(now)?;
+        let rows = self
+            .store
+            .permission_history(conversation_id, SNAPSHOT_LIMIT)?;
+        let index: BTreeMap<_, _> = rows.iter().map(|row| (row.id.as_str(), row)).collect();
+        let mut requests = Vec::new();
+        for row in &rows {
+            match decode_record(row)?.record {
+                StoredRecord::Approval { .. } => requests.push(decode_request(row)?),
+                StoredRecord::Resolution { approval_id, .. } => {
+                    let original = index
+                        .get(approval_id.as_str())
+                        .ok_or_else(|| PermissionError::MalformedRecord(row.id.clone()))?;
+                    let request = decode_request(original)?;
+                    decode_resolution(row, &request)?;
+                }
+            }
+        }
+        requests
+            .into_iter()
+            .map(|request| {
+                let resolution = index.get(resolution_id(&request.id).as_str()).copied();
+                let status = status_for_resolution(&request, resolution, now)?;
+                Ok(ApprovalView { request, status })
+            })
+            .collect()
+    }
+
     pub fn pending_approvals(
         &self,
         conversation_id: &str,
@@ -627,28 +687,8 @@ impl Authorizer {
         request: &ApprovalRequest,
         now: i64,
     ) -> Result<ApprovalStatus, PermissionError> {
-        let Some(row) = self.store.permission(&resolution_id(&request.id))? else {
-            return Ok(if now >= request.expires_at {
-                ApprovalStatus::Expired
-            } else {
-                ApprovalStatus::Pending
-            });
-        };
-        let resolution = decode_resolution(&row, request)?;
-        if row.revoked_at.is_some() {
-            return Ok(ApprovalStatus::Revoked);
-        }
-        if resolution.choice == ApprovalChoice::Deny {
-            return Ok(ApprovalStatus::Denied);
-        }
-        let expires_at = resolution.expires_at.unwrap_or(request.expires_at);
-        if now < row.created_at || now >= expires_at {
-            return Ok(ApprovalStatus::Expired);
-        }
-        Ok(ApprovalStatus::Approved {
-            grant_id: row.id,
-            expires_at,
-        })
+        let row = self.store.permission(&resolution_id(&request.id))?;
+        status_for_resolution(request, row.as_ref(), now)
     }
 
     fn decision_for_request(
@@ -668,6 +708,35 @@ impl Authorizer {
             ApprovalStatus::Expired => deny("approval or scoped grant expired"),
         })
     }
+}
+
+fn status_for_resolution(
+    request: &ApprovalRequest,
+    row: Option<&PermissionRow>,
+    now: i64,
+) -> Result<ApprovalStatus, PermissionError> {
+    let Some(row) = row else {
+        return Ok(if now >= request.expires_at {
+            ApprovalStatus::Expired
+        } else {
+            ApprovalStatus::Pending
+        });
+    };
+    let resolution = decode_resolution(row, request)?;
+    if row.revoked_at.is_some() {
+        return Ok(ApprovalStatus::Revoked);
+    }
+    if resolution.choice == ApprovalChoice::Deny {
+        return Ok(ApprovalStatus::Denied);
+    }
+    let expires_at = resolution.expires_at.unwrap_or(request.expires_at);
+    if now < row.created_at || now >= expires_at {
+        return Ok(ApprovalStatus::Expired);
+    }
+    Ok(ApprovalStatus::Approved {
+        grant_id: row.id.clone(),
+        expires_at,
+    })
 }
 
 enum ModeDecision {
@@ -1040,9 +1109,16 @@ fn request_row(request: &ApprovalRequest) -> Result<PermissionRow, PermissionErr
 }
 
 fn approval_id(scope: &AuthorizationScope) -> Result<String, PermissionError> {
+    approval_id_for_operation(&scope.conversation_id, &scope.operation_id)
+}
+
+fn approval_id_for_operation(
+    conversation_id: &str,
+    operation_id: &str,
+) -> Result<String, PermissionError> {
     Ok(format!(
         "approval:{}",
-        digest(&(scope.conversation_id.as_str(), scope.operation_id.as_str()))?
+        digest(&(conversation_id, operation_id))?
     ))
 }
 

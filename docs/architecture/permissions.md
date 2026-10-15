@@ -37,6 +37,16 @@ Approved grants permit the original exact operation only. They cannot approve an
 
 Permission rows contain a versioned, tagged approval or resolution record with strict field decoding. Unknown versions, unknown kinds, inconsistent scope digests, malformed records, and active snapshot exhaustion return errors; the broker must fail closed. The active snapshot is limited to 1000 records and the storage read-byte budget. Native row expiration matches request/grant expiration, so historical decisions stop consuming that active budget while remaining durably queryable. There is no wildcard grant or model-generated grant path.
 
+## Owner history and command recovery
+
+`Store::permission_history(conversation_id, limit)` reads every permission status for exactly that conversation in creation-time/ID order. It includes expired, revoked and resolved rows, excludes global/other-conversation rows, and accepts limits 1–1000. The query fetches at most limit+1 rows through the existing 16-MiB aggregate read guard. Overflow returns `PermissionHistoryLimitExceeded` or `ReadBudgetExceeded`; a shortened page is never presented as complete history.
+
+`Authorizer::approvals(conversation_id, now)` validates the bounded historical snapshot, including every original request/resolution relationship, and returns original exact `ApprovalRequest` scopes with current `ApprovalStatus` values. It includes pending, approved, denied, revoked and expired requests. Unsupported/malformed historical records or orphan decisions fail closed. The snapshot limit counts request and decision rows together, so a large retained history can explicitly exceed this inspection bound.
+
+`approval_for_operation(conversation_id, operation_id, now)` performs an exact internal lookup for owner permission-command crash recovery without reading the retained history. It derives no public grant capability: it returns the matching original `ApprovalView`, `None` for an unknown operation, or an error for malformed/mismatched records. Exact lookup remains available after history exceeds 1000 rows. Callers preserve the original scope and immutable resolution when replaying an owner command; they never regenerate IDs or widen a grant.
+
+These APIs inspect owner-visible state. They do not authorize execution or bypass the active policy snapshot, and the existing `approval`, `pending_approvals`, resolution, grant revocation and broker reauthorization behavior remains unchanged. History calls run on a blocking worker like other synchronous policy/store APIs. Permission arguments remain private local data and must not be logged or sent to optional services without explicit authorization.
+
 ## Execution and filesystem boundaries
 
 An allow decision is a policy observation at the supplied time, not a persistent execution capability or operating-system sandbox. The broker must recheck authorization immediately before changing the durable journal from pending to running and invoking a tool, including after approval waits or exclusive-execution queue waits. A revocation racing an already-running operation cannot undo an external effect. Host cancellation and tool cleanup must handle running work explicitly; never replay an unknown tool outcome automatically.
