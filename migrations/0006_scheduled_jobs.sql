@@ -41,7 +41,7 @@ CREATE TABLE scheduled_runs (
 ) STRICT;
 CREATE UNIQUE INDEX scheduled_runs_occurrence ON scheduled_runs(job_id, generation, scheduled_for) WHERE trigger = 'scheduled';
 CREATE INDEX scheduled_runs_history ON scheduled_runs(job_id, claimed_at DESC, occurrence_id DESC);
-CREATE INDEX scheduled_runs_active ON scheduled_runs(job_id, state) WHERE state IN ('claimed', 'running');
+CREATE INDEX scheduled_runs_overlap ON scheduled_runs(job_id, state) WHERE state IN ('claimed', 'running', 'unknown');
 CREATE TRIGGER scheduling_run_identity BEFORE UPDATE OF occurrence_id, job_id, generation, definition, scheduled_for, trigger, manual_command_id, initial_task_id, claim_digest, claimed_at ON scheduled_runs BEGIN
     SELECT RAISE(ABORT, 'scheduled occurrence identity and definition are immutable');
 END;
