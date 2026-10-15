@@ -103,7 +103,8 @@ impl Scheduler {
         let shutdown_grace = limits.shutdown_grace;
         tokio::task::spawn_blocking(move || {
             runtime.block_on(async move {
-                let mut actor = Actor::new(services, limits, receiver, actor_changed, drained_sender);
+                let mut actor =
+                    Actor::new(services, limits, receiver, actor_changed, drained_sender);
                 match actor.recover().await {
                     Ok(()) => {
                         if ready.send(Ok(())).is_ok() {
