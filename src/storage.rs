@@ -10,12 +10,13 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 use thiserror::Error;
 
-const SCHEMA_VERSION: i64 = 4;
+const SCHEMA_VERSION: i64 = 5;
 const MAX_JSON_BYTES: usize = 1_048_576;
 const MAX_APPEND_EVENTS: usize = 256;
 const MAX_STATE_BYTES: usize = 8 * MAX_JSON_BYTES;
 const MAX_PAGE_SIZE: usize = 1_000;
 const MAX_PAGE_BYTES: usize = 16 * MAX_JSON_BYTES;
+const MAX_CHECKPOINT_COMMANDS: i64 = 100_000;
 
 #[derive(Debug, Error)]
 pub enum StorageError {
@@ -41,6 +42,8 @@ pub enum StorageError {
     SequenceConflict { expected: u64, actual: u64 },
     #[error("conversation state revision conflict: expected {expected}, found {actual}")]
     StateRevisionConflict { expected: u64, actual: u64 },
+    #[error("private checkpoint journal reached its {MAX_CHECKPOINT_COMMANDS}-entry limit")]
+    CheckpointJournalFull,
     #[error("command {0} was previously used for a different request")]
     CommandConflict(String),
     #[error("{entity} {id} changed state or cannot make the requested transition")]
@@ -325,6 +328,10 @@ impl Store {
         }
         if version < 4 {
             transaction.execute_batch(include_str!("../migrations/0004_device_transport.sql"))?;
+        }
+        if version < 5 {
+            transaction
+                .execute_batch(include_str!("../migrations/0005_private_checkpoints.sql"))?;
             transaction.pragma_update(None, "user_version", SCHEMA_VERSION)?;
         }
         transaction.commit()?;
@@ -454,6 +461,124 @@ impl Store {
         self.append_internal(request, Some(state))
     }
 
+    pub fn checkpoint_conversation_state(
+        &self,
+        conversation_id: &str,
+        expected_sequence: u64,
+        command_id: &str,
+        update: &ConversationStateUpdate,
+    ) -> StorageResult<ConversationStateRow> {
+        validate_id(conversation_id)?;
+        validate_id(command_id)?;
+        validate_sequence(expected_sequence)?;
+        validate_sequence(update.expected_revision)?;
+        let payload = encode_json_with_limit(&update.payload, MAX_STATE_BYTES)?;
+        let revision = update
+            .expected_revision
+            .checked_add(1)
+            .filter(|value| *value <= i64::MAX as u64)
+            .ok_or_else(|| {
+                StorageError::InvalidInput("conversation state revision exhausted".into())
+            })?;
+        let mut hash = Sha256::new();
+        hash.update(b"everything.conversation.private-checkpoint.v1\0");
+        hash.update(serde_json::to_vec(&(
+            conversation_id,
+            expected_sequence,
+            update,
+        ))?);
+        let digest = format!("{:x}", hash.finalize());
+        let mut connection = self.connection()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let append_exists: bool = transaction.query_row(
+            "SELECT EXISTS(SELECT 1 FROM commands WHERE id=?1)",
+            [command_id],
+            |row| row.get(0),
+        )?;
+        if append_exists {
+            return Err(StorageError::CommandConflict(command_id.into()));
+        }
+        let original: Option<(String,u64,u64,String,u64,i64)> = transaction.query_row(
+            "SELECT conversation_id,expected_sequence,expected_revision,request_digest,revision,updated_at FROM conversation_checkpoint_commands WHERE command_id=?1", [command_id],
+            |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?,row.get(4)?,row.get(5)?)),
+        ).optional()?;
+        if let Some((
+            original_conversation,
+            original_sequence,
+            original_revision,
+            original_digest,
+            committed_revision,
+            updated_at,
+        )) = original
+        {
+            if original_conversation != conversation_id
+                || original_sequence != expected_sequence
+                || original_revision != update.expected_revision
+                || original_digest != digest
+            {
+                return Err(StorageError::CommandConflict(command_id.into()));
+            }
+            return Ok(ConversationStateRow {
+                conversation_id: conversation_id.into(),
+                revision: committed_revision,
+                payload: update.payload.clone(),
+                updated_at,
+            });
+        }
+        let (actual_sequence, conversation_updated_at): (u64, i64) = transaction
+            .query_row(
+                "SELECT last_sequence,updated_at FROM conversations WHERE id=?1",
+                [conversation_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?
+            .ok_or_else(|| missing("conversation", conversation_id))?;
+        if actual_sequence != expected_sequence {
+            return Err(StorageError::SequenceConflict {
+                expected: expected_sequence,
+                actual: actual_sequence,
+            });
+        }
+        let current: Option<(u64, i64)> = transaction
+            .query_row(
+                "SELECT revision,updated_at FROM conversation_states WHERE conversation_id=?1",
+                [conversation_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        let actual_revision = current.map_or(0, |(revision, _)| revision);
+        if actual_revision != update.expected_revision {
+            return Err(StorageError::StateRevisionConflict {
+                expected: update.expected_revision,
+                actual: actual_revision,
+            });
+        }
+        let count: i64 = transaction.query_row(
+            "SELECT count(*) FROM conversation_checkpoint_commands",
+            [],
+            |row| row.get(0),
+        )?;
+        if count >= MAX_CHECKPOINT_COMMANDS {
+            return Err(StorageError::CheckpointJournalFull);
+        }
+        let updated_at = conversation_updated_at.max(current.map_or(0, |(_, timestamp)| timestamp));
+        transaction.execute(
+            "INSERT INTO conversation_states(conversation_id,revision,payload,updated_at) VALUES (?1,?2,?3,?4) ON CONFLICT(conversation_id) DO UPDATE SET revision=excluded.revision,payload=excluded.payload,updated_at=excluded.updated_at",
+            params![conversation_id,revision,payload,updated_at],
+        )?;
+        transaction.execute(
+            "INSERT INTO conversation_checkpoint_commands(command_id,conversation_id,expected_sequence,expected_revision,request_digest,revision,updated_at) VALUES (?1,?2,?3,?4,?5,?6,?7)",
+            params![command_id,conversation_id,expected_sequence,update.expected_revision,digest,revision,updated_at],
+        )?;
+        transaction.commit()?;
+        Ok(ConversationStateRow {
+            conversation_id: conversation_id.into(),
+            revision,
+            payload: update.payload.clone(),
+            updated_at,
+        })
+    }
+
     fn append_internal(
         &self,
         request: &AppendRequest,
@@ -496,6 +621,14 @@ impl Store {
             .transpose()?;
         let mut connection = self.connection()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let checkpoint_exists: bool = transaction.query_row(
+            "SELECT EXISTS(SELECT 1 FROM conversation_checkpoint_commands WHERE command_id=?1)",
+            [&request.command_id],
+            |row| row.get(0),
+        )?;
+        if checkpoint_exists {
+            return Err(StorageError::CommandConflict(request.command_id.clone()));
+        }
         let previous: Option<(String, String, u64, u64, Option<String>)> = transaction
             .query_row(
                 "SELECT conversation_id, request, first_sequence, last_sequence, state_digest FROM commands WHERE id = ?1",
