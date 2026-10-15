@@ -87,7 +87,7 @@ fn notification_in(
         .outcome
         .as_ref()
         .ok_or(ScheduleError::RunStateConflict(run.occurrence_id))?;
-    let identity=connection.query_row("SELECT a.task_id,a.conversation_id,length(a.task_id),length(a.conversation_id) FROM scheduled_attempts a JOIN tasks t ON t.id=a.task_id AND t.conversation_id=a.conversation_id WHERE a.occurrence_id=?1 ORDER BY attempt_number DESC LIMIT 1",[run.occurrence_id.to_string()],|row|{
+    let identity=connection.query_row("SELECT a.task_id,a.conversation_id,length(a.task_id),length(a.conversation_id) FROM scheduled_attempts a JOIN tasks t ON t.id=a.task_id AND t.conversation_id=a.conversation_id WHERE a.occurrence_id=?1 AND a.attempt_number=(SELECT max(attempt_number) FROM scheduled_attempts WHERE occurrence_id=?1) LIMIT 1",[run.occurrence_id.to_string()],|row|{
         if row.get::<_,usize>(2)?!=36 || row.get::<_,usize>(3)?!=36 {return Err(rusqlite::Error::InvalidQuery);}
         Ok((row.get::<_,String>(0)?,row.get::<_,String>(1)?))
     }).optional()?;
