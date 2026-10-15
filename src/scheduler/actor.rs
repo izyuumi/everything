@@ -458,9 +458,19 @@ impl Actor {
     async fn run(&mut self) {
         loop {
             if self.activated && !self.stopping {
-                if let Err(error) = self.dispatch().await {
-                    tracing::error!(error = %error, "scheduler dispatch stopped");
-                    self.stop();
+                match self.dispatch().await {
+                    Ok(true) => {
+                        self.changed
+                            .send_modify(|revision| *revision = revision.wrapping_add(1));
+                        if !self.queue.is_empty() {
+                            continue;
+                        }
+                    }
+                    Ok(false) => {}
+                    Err(error) => {
+                        tracing::error!(error = %error, "scheduler dispatch stopped");
+                        self.stop();
+                    }
                 }
             }
             if self.stopping && self.workers.is_empty() {
@@ -1030,7 +1040,8 @@ impl Actor {
         admitted.map_err(mutation_uncertain)
     }
 
-    async fn dispatch(&mut self) -> Result<(), SchedulerError> {
+    async fn dispatch(&mut self) -> Result<bool, SchedulerError> {
+        let mut progress = false;
         let rounds = self.queue.len();
         for _ in 0..rounds {
             let Some(id) = self.queue.pop_front() else {
@@ -1053,6 +1064,7 @@ impl Actor {
             }
             repair_handoff(&self.store(), &mut task, &conversation)?;
             if worker::is_completed(&conversation, &task) {
+                progress = true;
                 self.finish(ExecutionOutcome {
                     task_id: id,
                     stop: worker::completed(&conversation, task.checkpoint.active_command),
@@ -1061,6 +1073,7 @@ impl Actor {
                 continue;
             }
             if repository::cancelled_ancestor(&self.store(), id)? {
+                progress = true;
                 task.checkpoint.cancel_requested = true;
                 let uncertainty = native_waiting(&conversation, &task).filter(|reason| {
                     matches!(
@@ -1105,6 +1118,7 @@ impl Actor {
                 continue;
             }
             if let Err(error) = repository::authority(&self.store(), id) {
+                progress = true;
                 task.checkpoint.waiting = Some(WaitingReason::Interrupted);
                 task.checkpoint.diagnostic = Some(diagnostic(&error.to_string()));
                 save_waiting(&self.store(), &mut task)?;
@@ -1118,11 +1132,13 @@ impl Actor {
                 if resume.is_none()
                     && !matches!(reason, WaitingReason::Approval | WaitingReason::InFlight)
                 {
+                    progress = true;
                     task.checkpoint.waiting = Some(reason);
                     save_waiting(&self.store(), &mut task)?;
                     continue;
                 }
             }
+            progress = true;
             task.checkpoint.waiting = None;
             repository::save(&self.store(), &mut task, TaskStatus::Running)?;
             let cancellation = CancellationToken::new();
@@ -1141,7 +1157,7 @@ impl Actor {
                 },
             );
         }
-        Ok(())
+        Ok(progress)
     }
 
     async fn finish(&mut self, outcome: ExecutionOutcome) -> Result<(), SchedulerError> {
