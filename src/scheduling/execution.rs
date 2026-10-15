@@ -216,6 +216,13 @@ impl ScheduleRepository {
         ensure_budget(&run, &usage)?;
         Ok(usage)
     }
+    pub(super) fn terminal_journal_unknown(&self, task: TaskId) -> ScheduleResult<bool> {
+        Ok(self.store.connection()?.query_row(
+            "SELECT EXISTS(SELECT 1 FROM tool_calls WHERE task_id=?1 AND state IN ('running','unknown'))",
+            [task.to_string()],
+            |row| row.get(0),
+        )?)
+    }
     pub(super) fn execution_ready(&self) -> ScheduleResult<()> {
         self.store.connection()?.query_row(
             "SELECT attempts FROM scheduling_execution_usage WHERE singleton=1",

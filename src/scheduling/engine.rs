@@ -7,7 +7,7 @@ use thiserror::Error;
 use tokio::sync::{Notify, Semaphore, watch};
 use tokio_util::sync::CancellationToken;
 
-use crate::agent::{Agent, TextCommand};
+use crate::agent::{Agent, LoopStatus, NativeRunInfo, PauseReason, TextCommand};
 use crate::protocol::{TaskStatus, UnixMillis};
 use crate::scheduler::{Scheduler, SchedulerError, TaskSnapshot, TaskSubmission, WaitingReason};
 use crate::tools::ToolRegistry;
@@ -524,16 +524,47 @@ impl Actor {
                 return Ok(());
             }
         }
-        let outcome=match snapshot.task.status {
-            TaskStatus::Completed=>Some(RunOutcome::Succeeded {summary:outcome_preview(snapshot.last_output.as_deref().unwrap_or_default())}),
-            TaskStatus::Cancelled=>Some(RunOutcome::Cancelled {reason:"native scheduled task cancelled".into()}),
-            TaskStatus::Failed if uncertain(snapshot.waiting.as_ref())=>Some(RunOutcome::Unknown {reason:"native scheduled task ended with uncertain effects; owner reconciliation required".into()}),
-            TaskStatus::Failed=>Some(RunOutcome::Failed {code:"native_task_failed".into(),message:outcome_preview(snapshot.diagnostic.as_deref().unwrap_or("native scheduled task failed"))}),
-            _=>None,
-        };
-        if let Some(outcome) = outcome {
+        if snapshot.task.status.is_terminal() {
             let conversation = self.agent.conversation(attempt.conversation_id).await?;
-            let usage = native_usage(&attempt, conversation.native_run().as_ref())?;
+            let native = conversation.native_run();
+            let usage = native_usage(&attempt, native.as_ref())?;
+            let task_id = attempt.task_id;
+            let journal_unknown = self
+                .work(move |repository, _| Ok(repository.terminal_journal_unknown(task_id)?))
+                .await?;
+            let outcome = if uncertain(snapshot.waiting.as_ref())
+                || native.as_ref().is_some_and(native_outcome_unknown)
+                || journal_unknown
+            {
+                RunOutcome::Unknown {
+                    reason: "native scheduled task ended with uncertain effects; owner reconciliation required".into(),
+                }
+            } else {
+                match snapshot.task.status {
+                    TaskStatus::Completed => RunOutcome::Succeeded {
+                        summary: outcome_preview(
+                            snapshot.last_output.as_deref().unwrap_or_default(),
+                        ),
+                    },
+                    TaskStatus::Cancelled => RunOutcome::Cancelled {
+                        reason: "native scheduled task cancelled".into(),
+                    },
+                    TaskStatus::Failed => RunOutcome::Failed {
+                        code: "native_task_failed".into(),
+                        message: outcome_preview(
+                            snapshot
+                                .diagnostic
+                                .as_deref()
+                                .unwrap_or("native scheduled task failed"),
+                        ),
+                    },
+                    _ => {
+                        return Err(
+                            ScheduleError::Invalid("unsupported terminal task status").into()
+                        );
+                    }
+                }
+            };
             self.work(move |repository, _| {
                 Ok(repository.settle_attempt(
                     &attempt,
@@ -684,6 +715,20 @@ fn outcome_preview(value: &str) -> String {
         end -= 1;
     }
     value[..end].replace('\0', " ")
+}
+
+fn native_outcome_unknown(run: &NativeRunInfo) -> bool {
+    matches!(
+        run.status,
+        LoopStatus::ProviderInFlight { .. }
+            | LoopStatus::ExecutingTools
+            | LoopStatus::Paused {
+                reason: PauseReason::ReconciliationRequired { .. }
+                    | PauseReason::BrokerRejected { .. }
+                    | PauseReason::OperationInFlight { .. }
+                    | PauseReason::ChildOutcomeUnknown { .. }
+            }
+    )
 }
 
 fn uncertain(reason: Option<&WaitingReason>) -> bool {
