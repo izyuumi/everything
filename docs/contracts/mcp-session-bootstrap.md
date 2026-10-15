@@ -24,3 +24,28 @@ Dropping the async caller cancels its derived token. A blocking filesystem opera
 Raw secrets never belong in settings, durable commands, events, logs, CLI arguments or the binding file. A running owner `StoreMcp(session)` cannot reconnect an MCP process that started before the value existed; the host must report the explicit startup requirement. Existing pre-start `CredentialVault::apply(StoreMcp)` and native credential flows remain available. Process-local session values disappear on exit, so the operator must explicitly supply the startup binding file and environment again on restart. Existing managed launchd arguments do not automatically carry a binding file or arrange those source environment values. Installing or restarting that service is not proof that session bootstrap is configured; native persistent credentials are a separate explicit option.
 
 Automated assertions remain deferred to [#32](https://github.com/izyuumi/everything/issues/32). Static and disposable runtime observations are recorded with the implementation handoff. The leaf alone does not verify the real ServeArgs/HostService bootstrap ordering, running owner IPC rejection, reconnect behavior, native keyring availability or model inference.
+
+## Headless host entry point
+
+`everything --state-dir STATE serve --mcp-credential-environment-file BINDINGS.json` invokes `HostService::start_with_mcp_session_bootstrap(state, Some(path), cancellation)`. The host acquires its state lease and captures actual settings, installs the validated session batch into its one CredentialVault, then starts MCP discovery using that same vault. The default `serve` and `HostService::start` provide no binding file. A failed plan rejects startup before spawning any configured MCP child. Running owner `StoreMcp` for session storage returns an explicit invalid-operation error directing this startup path; it no longer reports an unusable Applied result. Removing a stored entry cannot recall an environment value already copied into a child.
+
+An operator obtains the exact non-secret binding from the configured server's environment reference and complete approved manifest. A metadata-only example is:
+
+```json
+{
+  "bindings": [
+    {
+      "binding": {
+        "server_id": "configured-server",
+        "manifest_fingerprint": "REPLACE_WITH_EXACT_APPROVED_64_CHARACTER_FINGERPRINT",
+        "variable": "SERVER_TOKEN",
+        "reference": "REPLACE_WITH_CONFIGURED_REFERENCE_UUID",
+        "storage": "session"
+      },
+      "source_environment_variable": "EVERYTHING_CONFIGURED_SERVER_TOKEN"
+    }
+  ]
+}
+```
+
+The replacement strings describe required existing metadata; this example is not an accepted server configuration. Supply the source value through the explicitly launched process environment, never by editing this JSON. Launch with an owner-controlled file mode such as0600. Restart requires the same deliberate setup or a separately selected native credential reference. Native keyring behavior, Apple service provisioning and successful inference are not established by source integration.

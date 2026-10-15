@@ -87,3 +87,9 @@ A cancelled or uncertain pending conversation is preserved for inspection. Later
 Reuse that request ID and exact payload after an ambiguous response. The operation refuses any evidence of prior application, task admission, control semantics or incomplete initialization. It records an immutable rejection and frees pending capacity. For a paired-device command, its sender can receive the rejection reason/operator through normal encrypted result delivery. There is no automatic discard or implicit retry under a fresh identity.
 
 When a new admission reaches inbox capacity, the host makes one automatic attempt to compact terminal payloads older than seven days, then retries the same reservation. Command identity, origin and replay digests remain permanent. Pending commands, recent terminal payloads and outstanding paired-device replies are retained. This can release the retained-payload budget; it does not remove the pending-command or identity limits.
+
+## Startup MCP session credentials
+
+Use `serve --mcp-credential-environment-file PATH` to bootstrap explicit process-local MCP session references before server discovery. The file contains exact existing authorized binding metadata and source environment names, with no values. Read [the bootstrap contract](../contracts/mcp-session-bootstrap.md) for format, bounds, authorization and restart semantics. A running owner `StoreMcp(session)` is rejected because the existing MCP catalog is fixed at startup. Persistent native references are a separate explicit option. Managed launchd installation does not provision the binding file or source values.
+
+Scheduling uses the running host through [schedule commands](scheduling-cli.md); it never starts another scheduler or takes over host lifetime.
