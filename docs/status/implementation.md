@@ -4,19 +4,19 @@ Assessment date: 2026-10-15. The initial main branch contained only LICENSE and 
 
 ## Current integration
 
-Bootstrap and agent-oriented documentation are in progress under #1. No runtime functionality is yet implemented. Rust 1.99.0 is installed in the Linux development environment. Apple SDKs and hardware are unavailable here. GitHub branch-protection inspection returns HTTP 403; required checks and normal merge enforcement remain authoritative.
+Bootstrap #1 merged through [PR #33](https://github.com/izyuumi/everything/pull/33), with Linux/macOS CI passing. Both binaries expose help. No runtime functionality is yet implemented. Independent contracts #2–#7 are in progress in isolated worktrees. Rust 1.99.0 is installed in the Linux development environment. Apple SDKs and hardware are unavailable here. GitHub branch-protection inspection returns HTTP 403; required checks and normal merge enforcement remain authoritative.
 
 ## Dependency graph and ownership
 
 | Issue | Objective | Prerequisites | State |
 | --- | --- | --- | --- |
-| [#1](https://github.com/izyuumi/everything/issues/1) | Bootstrap Rust workspace and CI | None | Backlog |
-| [#2](https://github.com/izyuumi/everything/issues/2) | Define versioned domain and event contracts | None | Backlog |
-| [#3](https://github.com/izyuumi/everything/issues/3) | Implement SQLite storage and migrations | None | Backlog |
-| [#4](https://github.com/izyuumi/everything/issues/4) | Implement model-neutral provider types | None | Backlog |
-| [#5](https://github.com/izyuumi/everything/issues/5) | Define Tool trait, registry, and argument validation | None | Backlog |
-| [#6](https://github.com/izyuumi/everything/issues/6) | Implement Markdown wiki parser and FTS5 index | None | Backlog |
-| [#7](https://github.com/izyuumi/everything/issues/7) | Define relay protocol and crypto test vectors | None | Backlog |
+| [#1](https://github.com/izyuumi/everything/issues/1) | Bootstrap Rust workspace and CI | None | Merged (#33) |
+| [#2](https://github.com/izyuumi/everything/issues/2) | Define versioned domain and event contracts | None | In progress |
+| [#3](https://github.com/izyuumi/everything/issues/3) | Implement SQLite storage and migrations | None | In progress |
+| [#4](https://github.com/izyuumi/everything/issues/4) | Implement model-neutral provider types | None | In progress |
+| [#5](https://github.com/izyuumi/everything/issues/5) | Define Tool trait, registry, and argument validation | None | In progress |
+| [#6](https://github.com/izyuumi/everything/issues/6) | Implement Markdown wiki parser and FTS5 index | None | In progress |
+| [#7](https://github.com/izyuumi/everything/issues/7) | Define relay protocol and crypto test vectors | None | In progress |
 | [#8](https://github.com/izyuumi/everything/issues/8) | Implement Anthropic native Messages adapter | #4 | Backlog |
 | [#9](https://github.com/izyuumi/everything/issues/9) | Implement OpenAI native Responses adapter | #4 | Backlog |
 | [#10](https://github.com/izyuumi/everything/issues/10) | Build persistent CLI conversation loop | #2, #3, #4, #8 | Backlog |
