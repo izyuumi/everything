@@ -19,7 +19,8 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - run: python -m pip install --only-binary=:all: onnxruntime==1.31.0
+      - run: |
+          python -m pip install --only-binary=:all: onnxruntime==1.31.0
       - name: Provision pinned public model artifacts
         env:
           MODEL_ROOT: ${{ runner.temp }}/embeddinggemma2
