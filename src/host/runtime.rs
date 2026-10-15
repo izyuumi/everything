@@ -622,7 +622,9 @@ pub(super) fn public_failure(error: &HostError) -> LocalFailure {
             LocalFailureCode::Busy,
             "host command or task capacity is exhausted",
         ),
-        HostError::Invalid(message) => (LocalFailureCode::InvalidRequest, *message),
+        HostError::Invalid(message) | HostError::Inbox(InboxError::Invalid(message)) => {
+            (LocalFailureCode::InvalidRequest, *message)
+        }
         HostError::Inbox(InboxError::Conflict(_))
         | HostError::Settings(SettingsError::Conflict) => (
             LocalFailureCode::InvalidRequest,

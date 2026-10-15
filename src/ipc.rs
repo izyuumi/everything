@@ -167,6 +167,12 @@ pub enum ApprovalLookup {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum OwnerOperation {
+    DiscardUnapplied {
+        command_id: CommandId,
+        expected_accepted_at: UnixMillis,
+        operator: String,
+        reason: String,
+    },
     ReplaceSettings {
         expected_revision: u64,
         settings: crate::host::settings::HostSettings,
@@ -211,6 +217,17 @@ pub enum OwnerOperation {
 impl OwnerOperation {
     pub fn validate(&self) -> Result<(), &'static str> {
         match self {
+            Self::DiscardUnapplied {
+                expected_accepted_at,
+                operator,
+                reason,
+                ..
+            } => crate::host::inbox::UnappliedDiscard::validate_metadata(
+                *expected_accepted_at,
+                operator,
+                reason,
+            )
+            .map_err(|_| "invalid unapplied command discard"),
             Self::ResumeInterrupted {
                 expected_revision,
                 expected_status,
@@ -504,6 +521,9 @@ pub struct TaskExecutionMetadata {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum OwnerOperationResult {
+    Command {
+        receipt: CommandReceipt,
+    },
     Applied,
     Settings {
         settings: crate::host::settings::HostSettings,
@@ -526,6 +546,18 @@ pub enum OwnerOperationResult {
 impl OwnerOperationResult {
     pub fn validate_for(&self, operation: &OwnerOperation) -> Result<(), &'static str> {
         let valid = match (operation, self) {
+            (
+                OwnerOperation::DiscardUnapplied {
+                    command_id,
+                    expected_accepted_at,
+                    ..
+                },
+                Self::Command { receipt },
+            ) => {
+                receipt.command_id == *command_id
+                    && receipt.accepted_at == *expected_accepted_at
+                    && receipt.phase == crate::host::inbox::CommandPhase::Rejected
+            }
             (
                 OwnerOperation::AcknowledgeCleanup { .. } | OwnerOperation::ReconcileDrained,
                 Self::ToolRecovery { .. },

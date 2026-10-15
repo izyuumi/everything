@@ -238,6 +238,32 @@ impl HostInner {
             self.ensure_accepting()?;
         }
         match operation {
+            OwnerOperation::DiscardUnapplied {
+                command_id,
+                expected_accepted_at,
+                operator,
+                reason,
+            } => {
+                let _mutation = self.mutation.lock().await;
+                self.ensure_accepting()?;
+                let discard = super::inbox::UnappliedDiscard {
+                    command_id,
+                    expected_accepted_at,
+                    request_id,
+                    operator,
+                    reason,
+                };
+                let record = self
+                    .blocking(move |host| {
+                        Ok(host.inbox.discard_unapplied(&discard, UnixMillis::now()?)?)
+                    })
+                    .await?;
+                self.changed.notify_one();
+                self.receipt_changed();
+                Ok(OwnerOperationResult::Command {
+                    receipt: super::runtime::command_receipt(record),
+                })
+            }
             OwnerOperation::AcknowledgeCleanup {
                 operation_id,
                 original_result_digest,

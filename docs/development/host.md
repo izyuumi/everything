@@ -67,3 +67,13 @@ Cancelling an uncertain task does not erase its native pending turn or manufactu
 On shutdown, query `runtime` and `tool_recovery` while the host drains. If the broker reports unresolved cleanup, the process deliberately keeps its state lease and owner socket. After owned workers stop, the host obtains an all-admission broker quiescence proof and conservatively converts stranded Running entries to Unknown. It keeps owner IPC available while a busy broker drains. Explicit `reconcile_drained` performs the same bounded classification without retrying effects. An `acknowledge_cleanup` operation supplies the exact returned operation ID and result digest plus the responsible operator and an actual inspection note. Acknowledgement is an explicit operator assertion; the host never generates it automatically. New execution remains disabled until the drained process exits and is intentionally restarted.
 
 Deferred automated CLI, lifecycle, replay, recovery and platform checks are tracked in [#32](https://github.com/izyuumi/everything/issues/32).
+
+## Discard an unstarted queued command
+
+A cancelled or uncertain pending conversation is preserved for inspection. Later queued commands can be explicitly discarded without clearing that original native state. Read the known submission ID with the `command` query, then use the original acceptance timestamp and a unique request ID:
+
+```json
+{"kind":"operation","request_id":"UNIQUE_REQUEST_UUID","operation":{"kind":"discard_unapplied","command_id":"QUEUED_COMMAND_UUID","expected_accepted_at":1792091546149,"operator":"local-owner","reason":"This queued request is no longer needed."}}
+```
+
+Reuse that request ID and exact payload after an ambiguous response. The operation refuses any evidence of prior application, task admission, control semantics or incomplete initialization. It records an immutable rejection and frees pending capacity. For a paired-device command, its sender can receive the rejection reason/operator through normal encrypted result delivery. There is no automatic discard or implicit retry under a fresh identity.
