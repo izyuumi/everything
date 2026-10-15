@@ -34,6 +34,8 @@ pub struct LoopLimits {
     pub max_parallel_calls: usize,
     pub max_selected_tools: usize,
     pub max_charged_tokens: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_reserved_output_tokens: Option<u64>,
     pub max_duration_ms: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub absolute_deadline: Option<UnixMillis>,
@@ -48,6 +50,7 @@ impl Default for LoopLimits {
             max_parallel_calls: 8,
             max_selected_tools: 64,
             max_charged_tokens: 1_000_000,
+            max_reserved_output_tokens: None,
             max_duration_ms: 3_600_000,
             absolute_deadline: None,
         }
@@ -201,6 +204,8 @@ struct NativeTurn {
     last_observed_wall_ms: u64,
     deadline_ms: u64,
     attempts: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    reserved_output_tokens: Option<u64>,
     tool_calls: u32,
     charged_tokens: u64,
     reported_input_tokens: u64,
@@ -283,6 +288,17 @@ impl NativeCheckpoint {
                 .ok_or(AgentError::InvalidData("native turn has no command"))?;
             turn.definition.limits.validate()?;
             ContextBuilder::new(turn.definition.budget.clone())?;
+            let reserved_output_tokens = output_reservation(turn)?;
+            if turn
+                .definition
+                .limits
+                .max_reserved_output_tokens
+                .is_some_and(|limit| reserved_output_tokens > limit)
+            {
+                return Err(AgentError::InvalidData(
+                    "native output reservation exceeds its limit",
+                ));
+            }
             if let LoopStatus::Paused {
                 reason: PauseReason::WaitingForEvents { wait_id },
             } = &turn.status
@@ -524,7 +540,9 @@ impl Agent {
                     if built.request.continuation.is_none() { state.context.binding = None; checkpoint.continuation = None; }
                     let turn = state.turn.as_mut().ok_or(AgentError::NoPendingTurn)?;
                     turn.last_observed_wall_ms = observed_floor(turn).max(UnixMillis::now()?.get());
+                    let reserved_output_tokens = output_reservation(turn)?.checked_add(request_output_reservation(turn, &built)?).ok_or(AgentError::ResourceLimit("output reservation accounting"))?;
                     turn.attempts += 1;
+                    turn.reserved_output_tokens = Some(reserved_output_tokens);
                     turn.charged_tokens = turn.charged_tokens.checked_add(reservation(&built)).ok_or(AgentError::ResourceLimit("token accounting"))?;
                     turn.status = LoopStatus::ProviderInFlight { attempt_id };
                     if !agent.save_native(&mut conversation, checkpoint, Vec::new(), Arc::clone(&admission)).await? { continue; }
@@ -622,6 +640,8 @@ pub struct NativeRunInfo {
     pub model_attempts: u32,
     pub tool_calls: u32,
     pub charged_tokens: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reserved_output_tokens: Option<u64>,
     pub reported_input_tokens: u64,
     pub reported_output_tokens: u64,
     pub deadline_ms: u64,
@@ -764,10 +784,11 @@ fn prepare_native(
             }
         }
     };
-    if let Some(turn) = &checkpoint.turn {
+    if let Some(turn) = &mut checkpoint.turn {
         if turn.definition_digest != digest {
             return Err(AgentError::ConfigurationMismatch);
         }
+        turn.reserved_output_tokens = Some(output_reservation(turn)?);
     } else {
         let command_id = conversation
             .checkpoint
@@ -787,6 +808,7 @@ fn prepare_native(
             last_observed_wall_ms: now,
             deadline_ms,
             attempts: 0,
+            reserved_output_tokens: Some(0),
             tool_calls: 0,
             charged_tokens: 0,
             reported_input_tokens: 0,
@@ -906,6 +928,34 @@ fn reservation(built: &BuiltContext) -> u64 {
         .saturating_add(u64::from(built.usage.reserved_output_tokens))
 }
 
+fn reconstructed_output_reservation(turn: &NativeTurn) -> Option<u64> {
+    u64::from(turn.attempts).checked_mul(u64::from(turn.definition.budget.reserved_output_tokens))
+}
+
+fn output_reservation(turn: &NativeTurn) -> Result<u64, AgentError> {
+    let expected = reconstructed_output_reservation(turn)
+        .ok_or(AgentError::ResourceLimit("output reservation accounting"))?;
+    if turn
+        .reserved_output_tokens
+        .is_some_and(|reserved| reserved != expected)
+    {
+        return Err(AgentError::InvalidData(
+            "native output reservation does not match attempts",
+        ));
+    }
+    Ok(expected)
+}
+
+fn request_output_reservation(turn: &NativeTurn, built: &BuiltContext) -> Result<u64, AgentError> {
+    let captured = turn.definition.budget.reserved_output_tokens;
+    if built.request.max_output_tokens != Some(captured)
+        || built.usage.reserved_output_tokens != captured
+    {
+        return Err(AgentError::ConfigurationMismatch);
+    }
+    Ok(u64::from(captured))
+}
+
 fn effective_deadline(started_at_ms: u64, limits: &LoopLimits) -> Result<u64, AgentError> {
     let relative = started_at_ms
         .checked_add(limits.max_duration_ms)
@@ -926,14 +976,22 @@ fn next_attempt_limit(
         .as_ref()
         .ok_or(AgentError::NoPendingTurn)?;
     let now = UnixMillis::now()?.get();
+    let output_total = output_reservation(turn)?
+        .checked_add(request_output_reservation(turn, built)?)
+        .ok_or(AgentError::ResourceLimit("output reservation accounting"))?;
     Ok(if !clock_allows(turn, now, stream_deadline) {
         Some(PauseReason::DurationLimit)
     } else if turn.attempts >= turn.definition.limits.max_model_attempts {
         Some(PauseReason::ModelAttemptLimit)
     } else if turn
-        .charged_tokens
-        .checked_add(reservation(built))
-        .is_none_or(|total| total > turn.definition.limits.max_charged_tokens)
+        .definition
+        .limits
+        .max_reserved_output_tokens
+        .is_some_and(|limit| output_total > limit)
+        || turn
+            .charged_tokens
+            .checked_add(reservation(built))
+            .is_none_or(|total| total > turn.definition.limits.max_charged_tokens)
     {
         Some(PauseReason::TokenLimit)
     } else {
@@ -1732,6 +1790,9 @@ fn run_info(turn: &NativeTurn) -> NativeRunInfo {
         model_attempts: turn.attempts,
         tool_calls: turn.tool_calls,
         charged_tokens: turn.charged_tokens,
+        reserved_output_tokens: turn
+            .reserved_output_tokens
+            .or_else(|| reconstructed_output_reservation(turn)),
         reported_input_tokens: turn.reported_input_tokens,
         reported_output_tokens: turn.reported_output_tokens,
         deadline_ms: turn.deadline_ms,
