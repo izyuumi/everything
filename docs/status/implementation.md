@@ -4,7 +4,7 @@ Assessment date: 2026-10-15. The initial main branch contained only LICENSE and 
 
 ## Current integration
 
-Foundation issues #1–#9, permissions #11, relay #13, context #16, and embedding contracts #31 are merged through PRs #33–#46 after Linux/macOS CI. Atomic private conversation checkpoints and coherent snapshots are integrated for #10. This branch adds immutable owner cleanup attestations for #14 so an unknown side effect cannot lose its recovery quarantine on restart. Background service #18 has a validated library awaiting CLI integration. Persistent chat #10, the Tool Broker #14, selector #17/#20, device synchronization #22, and wiki consolidation #26 are active isolated workstreams.
+Foundation issues #1–#9, permissions #11, relay #13, context #16, and embedding contracts #31 are merged through PRs #33–#46 after Linux/macOS CI. Atomic private conversation checkpoints and coherent snapshots are integrated for #10. This branch adds immutable owner cleanup attestations for #14 so an unknown side effect cannot lose its recovery quarantine on restart. Background service #18 has a merged library (#48) awaiting CLI integration. Persistent chat #10, the Tool Broker #14, selector #17/#20, device synchronization #22, and wiki consolidation #26 are active isolated workstreams.
 
 The CLI still exposes help only; native inference is not yet wired to it. No live remote model requests have been made. EmbeddingGemma 2 produced finite normalized vectors and relevant-document rankings locally at 128, 256, 512, and 768 dimensions; the backend is not yet merged. Disposable checks covered storage rollback/dedup/restart/revocation, wiki CRUD/reindex/confinement, Rust crypto/replay/sync, approval nonescalation/expiry/revocation, context compaction/grouping/budget/continuation, and embedding contract validation/fingerprints. These observations are not automated coverage or a security audit.
 
@@ -27,11 +27,11 @@ Rust 1.99.0 is installed. Apple SDKs and Mac hardware are unavailable locally; G
 | [#11](https://github.com/izyuumi/everything/issues/11) | Implement permission policy and persistent grants | #2, #3, #5 | Merged (#43) |
 | [#12](https://github.com/izyuumi/everything/issues/12) | Implement local EmbeddingGemma 2 inference spike | #31 | Actual native inference, release benchmark and cancellation verified on Linux; integration/Mac validation pending |
 | [#13](https://github.com/izyuumi/everything/issues/13) | Implement E2EE relay transport server | #7 | Merged (#45) |
-| [#14](https://github.com/izyuumi/everything/issues/14) | Implement Tool Broker execution journal | #3, #5, #11 | In progress |
+| [#14](https://github.com/izyuumi/everything/issues/14) | Implement Tool Broker execution journal | #3, #5, #11 | Implemented; native loop integration remains #23 |
 | [#15](https://github.com/izyuumi/everything/issues/15) | Implement shell and filesystem tools | #14 | Backlog |
 | [#16](https://github.com/izyuumi/everything/issues/16) | Implement context builder and compaction | #2, #3, #4, #6 | Merged (#46) |
 | [#17](https://github.com/izyuumi/everything/issues/17) | Implement local tool discovery and optional Jev selector | #5, #11, #16 | In progress; shared implementation |
-| [#18](https://github.com/izyuumi/everything/issues/18) | Implement native macOS background host service | #1, #2, #3 | Library validated; CLI integration pending |
+| [#18](https://github.com/izyuumi/everything/issues/18) | Implement native macOS background host service | #1, #2, #3 | Library merged (#48); CLI integration pending |
 | [#19](https://github.com/izyuumi/everything/issues/19) | Implement MCP client tool adapter | #5, #14 | Backlog |
 | [#20](https://github.com/izyuumi/everything/issues/20) | Implement local tool discovery and optional Jev selector | #5, #11, #16 | In progress; shared implementation |
 | [#21](https://github.com/izyuumi/everything/issues/21) | Implement sqlite-vec hybrid retrieval and index switching | #6, #12, #31 | Backlog |
