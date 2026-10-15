@@ -503,6 +503,7 @@ fn uncertain(reason: Option<&WaitingReason>) -> bool {
         reason,
         Some(
             WaitingReason::ProviderUncertain { .. }
+                | WaitingReason::ChildOutcomeUnknown { .. }
                 | WaitingReason::InFlight
                 | WaitingReason::Reconciliation
         )

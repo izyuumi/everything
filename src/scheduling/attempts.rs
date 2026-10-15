@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use crate::agent::LoopLimits;
 use crate::context::ContextBudget;
 use crate::protocol::{CommandId, ConversationId, TaskId, UnixMillis};
-use crate::scheduler::ExecutionPolicy;
+use crate::scheduler::{ExecutionPolicy, SCHEDULER_TOOL_NAMES};
 use crate::tools::ToolRegistry;
 
 use super::{
@@ -16,8 +16,6 @@ use super::{
 
 const MAX_POLICY_BYTES: usize = 32_768;
 const MAX_ATTEMPT_BYTES: i64 = 64 * 1_048_576;
-pub const FILTERED_RUNTIME_TOOLS: [&str; 4] =
-    ["spawn_agent", "send_agent", "agent_status", "cancel_agent"];
 
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -123,7 +121,7 @@ pub(super) fn capture_policy(
         .permissions
         .allowed_tools
         .iter()
-        .filter(|name| !FILTERED_RUNTIME_TOOLS.contains(&name.as_str()))
+        .filter(|name| !SCHEDULER_TOOL_NAMES.contains(&name.as_str()))
         .cloned()
         .collect();
     let tools = target.budget.max_tool_calls > 0 && !allowed.is_empty();
@@ -176,7 +174,7 @@ fn validate_policy(run: &ScheduledRun, policy: &ExecutionPolicy) -> ScheduleResu
         || !allowed.is_subset(&target.permissions.allowed_tools)
         || allowed
             .iter()
-            .any(|name| FILTERED_RUNTIME_TOOLS.contains(&name.as_str()))
+            .any(|name| SCHEDULER_TOOL_NAMES.contains(&name.as_str()))
         || policy.limits.max_model_attempts > max_requests
         || policy.limits.max_tool_calls > u32::from(target.budget.max_tool_calls)
         || policy.limits.max_duration_ms > target.budget.timeout_ms
