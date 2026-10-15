@@ -13,7 +13,7 @@ use crate::context::{
     ContinuationBinding, HistoryEntry, MemoryExcerpt, TaskContext,
 };
 use crate::permissions::{ApprovalRequest, ExecutionMode};
-use crate::protocol::{OperationId, TaskId, ToolCall, ToolResult};
+use crate::protocol::{OperationId, PermissionInspection, TaskId, ToolCall, ToolResult};
 use crate::storage::{TaskState, ToolCallState};
 use crate::tools::{
     ToolRegistry,
@@ -1626,6 +1626,7 @@ impl Agent {
                 continue;
             };
             let registry = Arc::clone(&setup.registry);
+            let conversation_id = conversation.info.id;
             let (checkpoint, payloads, emitted, stop) = blocking(move || {
                 let mut emitted = Vec::new();
                 let mut stop_request = false;
@@ -1701,11 +1702,38 @@ impl Agent {
                             ));
                         }
                         let operation_id = OperationId::try_from(*call.call.id.as_uuid())?;
+                        if approval.scope.task_id != task_id.to_string()
+                            || approval.scope.operation_id != operation_id.to_string()
+                            || approval.scope.conversation_id != conversation_id.to_string()
+                            || approval.scope.tool_name != call.call.name
+                        {
+                            return Err(AgentError::InvalidData("broker approval scope changed"));
+                        }
+                        let inspection = PermissionInspection {
+                            approval_id: approval.id.clone(),
+                            workspace_root: approval.scope.workspace_root.clone(),
+                            mode: approval.scope.mode,
+                            capabilities: approval.scope.capabilities.clone(),
+                            targets: approval.scope.targets.clone(),
+                            arguments_json: serde_json::to_string(&approval.arguments)
+                                .map_err(|_| AgentError::InvalidData("approval arguments cannot be encoded"))?,
+                            arguments_digest: approval.scope.arguments_digest.clone(),
+                            requested_at: UnixMillis::try_from(u64::try_from(approval.requested_at).map_err(|_| AgentError::InvalidData("negative approval time"))?)?,
+                            expires_at: UnixMillis::try_from(u64::try_from(approval.expires_at).map_err(|_| AgentError::InvalidData("negative approval expiry"))?)?,
+                        };
+                        let inspection = match inspection.validate() {
+                            Ok(()) => Some(Box::new(inspection)),
+                            Err(_) => {
+                                tracing::warn!("approval inspection exceeds its public bounds; inspect the exact request on the host");
+                                None
+                            }
+                        };
                         payloads.push(ConversationEvent::PermissionRequested {
                             task_id,
                             operation_id,
                             tool_call_id: call.call.id,
                             tool_name: call.call.name.clone(),
+                            inspection,
                         });
                         emitted.push(TurnEvent::AwaitingPermission {
                             call_id: call.call.id,
