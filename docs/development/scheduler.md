@@ -1,0 +1,11 @@
+# Scheduler development
+
+Create real disposable Store/Agent/ToolBroker instances, register task controls before the final registry and Authorizer, start the scheduler, retain its tool binding, subscribe before querying, then activate. A provider factory must bind each saved ConversationConfig to its actual native provider and current authorized credential source. Keep secrets out of captured policy and task records.
+
+Use scheduler methods for its TaskRows; direct lifecycle writes break the actor's admission/recovery contract. Host inbox application may durably accept Agent commands before enqueue and replay the same IDs after a crash. It must not create a second task queue or persist a reusable uncertain-provider retry option.
+
+Validate Rust1.88 formatting, workspace/all-target compilation, strict Clippy, release compilation and focused disposable native-runtime observations. No automated tests or fake successful inference are introduced at this stage. Record unavailable successful provider inference honestly and retain deferred concurrency/crash/permission automated coverage in #32.
+
+A disposable walkthrough with the real OpenAI adapter and a private failure-only HTTP endpoint observed root plus three simultaneous child requests, responsive status, all four task controls, scope/mode rejection, durable queued steering, restart without another request and one owner-authorized retry with duplicate-audit suppression. SQLite integrity and private directory/marker ownership were inspected. No successful inference was simulated or verified. The known interruption continuation path is statically reviewed; a successful live provider/tool round remains unavailable without credentials.
+
+A separate disposable fault walkthrough verified reserved exact/case-variant path rejection, normal child writes, search exclusion, an injected SQLite insert abort after workspace/conversation creation becoming durable Unknown/quarantine, inspected owner cleanup acknowledgment, immutable Unknown replay with no new task/request, and corrupt-child isolation across restart. SQLite integrity passed. These observations ran on Linux; APFS alias behavior and positive known-interruption continuation remain unverified.

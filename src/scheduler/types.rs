@@ -45,6 +45,8 @@ pub enum SchedulerError {
     Conflict(TaskId),
     #[error("task not found: {0}")]
     NotFound(TaskId),
+    #[error("task is owned by another runtime path: {0}")]
+    NotOwned(TaskId),
     #[error("task is terminal: {0}")]
     Terminal(TaskId),
     #[error("task is outside the caller's descendant scope")]
@@ -53,12 +55,18 @@ pub enum SchedulerError {
     Capacity(&'static str),
     #[error("scheduler is stopped")]
     Stopped,
+    #[error(
+        "scheduler shutdown is still draining owned workers; retain host ownership and retry shutdown"
+    )]
+    ShutdownPending,
     #[error("task needs an explicit owner decision: {0}")]
     OwnerDecision(TaskId),
     #[error("provider construction failed: {0}")]
     Provider(String),
     #[error("scheduler worker failed")]
     Worker,
+    #[error("native task mutation outcome is uncertain: {0}")]
+    MutationUncertain(String),
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -77,10 +85,24 @@ impl ExecutionPolicy {
         self.limits.validate()?;
         ContextBuilder::new(self.budget.clone())?;
         if !self.workspace_root.is_absolute()
-            || self.workspace_root.to_str().is_none_or(|path| path.len() > 4096 || path.chars().any(char::is_control))
-            || self.allowed_tools.as_ref().is_some_and(|names| names.len() > 1000 || names.iter().any(|name| name.is_empty() || name.len() > 128 || !name.bytes().all(|byte|byte.is_ascii_alphanumeric() || matches!(byte,b'_'|b'-'|b'.'))))
+            || self
+                .workspace_root
+                .to_str()
+                .is_none_or(|path| path.len() > 4096 || path.chars().any(char::is_control))
+            || self.allowed_tools.as_ref().is_some_and(|names| {
+                names.len() > 1000
+                    || names.iter().any(|name| {
+                        name.is_empty()
+                            || name.len() > 128
+                            || !name.bytes().all(|byte| {
+                                byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.')
+                            })
+                    })
+            })
         {
-            return Err(SchedulerError::Invalid("invalid execution workspace or tool allowlist"));
+            return Err(SchedulerError::Invalid(
+                "invalid execution workspace or tool allowlist",
+            ));
         }
         Ok(())
     }
@@ -94,28 +116,57 @@ impl ExecutionPolicy {
         let mut captured = self.clone();
         captured.workspace_root = workspace_root;
         let allowed = if self.tools_enabled {
-            registry.descriptors().filter(|tool|self.allowed_tools.as_ref().is_none_or(|names|names.contains(&tool.name))).map(|tool|tool.name.clone()).collect()
+            registry
+                .descriptors()
+                .filter(|tool| {
+                    self.allowed_tools
+                        .as_ref()
+                        .is_none_or(|names| names.contains(&tool.name))
+                })
+                .map(|tool| tool.name.clone())
+                .collect()
         } else {
             BTreeSet::new()
         };
         captured.allowed_tools = Some(allowed);
-        if !self.tools_enabled { captured.limits.max_tool_calls = 0; }
+        if !self.tools_enabled {
+            captured.limits.max_tool_calls = 0;
+        }
         captured.validate()?;
         Ok(captured)
     }
 
-    pub(super) fn authority(&self, conversation_id: ConversationId, task_id: TaskId) -> Result<ExecutionAuthority, SchedulerError> {
+    pub(super) fn authority(
+        &self,
+        conversation_id: ConversationId,
+        task_id: TaskId,
+    ) -> Result<ExecutionAuthority, SchedulerError> {
         self.validate()?;
-        let allowed = self.allowed_tools.clone().ok_or(SchedulerError::Invalid("execution policy was not captured"))?;
-        let authority = ExecutionAuthority::new(conversation_id.to_string(),task_id.to_string(),self.workspace_root.clone(),self.mode)?.restrict_tools(allowed)?;
-        if authority.workspace_root() != self.workspace_root { return Err(SchedulerError::Conflict(task_id)); }
+        let allowed = self
+            .allowed_tools
+            .clone()
+            .ok_or(SchedulerError::Invalid("execution policy was not captured"))?;
+        let authority = ExecutionAuthority::new(
+            conversation_id.to_string(),
+            task_id.to_string(),
+            self.workspace_root.clone(),
+            self.mode,
+        )?
+        .restrict_tools(allowed)?;
+        if authority.workspace_root() != self.workspace_root {
+            return Err(SchedulerError::Conflict(task_id));
+        }
         Ok(authority)
     }
 }
 
 #[async_trait]
 pub trait TaskProviderFactory: Send + Sync {
-    async fn create(&self, configuration: &ConversationConfig, cancellation: CancellationToken) -> Result<Arc<dyn ModelProvider>, SchedulerError>;
+    async fn create(
+        &self,
+        configuration: &ConversationConfig,
+        cancellation: CancellationToken,
+    ) -> Result<Arc<dyn ModelProvider>, SchedulerError>;
 }
 
 #[derive(Clone)]
@@ -143,13 +194,22 @@ pub struct SchedulerLimits {
 
 impl Default for SchedulerLimits {
     fn default() -> Self {
-        Self { max_primary_tasks:1,max_subagents:3,max_pending_tasks:128,shutdown_grace:Duration::from_secs(10) }
+        Self {
+            max_primary_tasks: 1,
+            max_subagents: 3,
+            max_pending_tasks: 128,
+            shutdown_grace: Duration::from_secs(10),
+        }
     }
 }
 
 impl SchedulerLimits {
     pub(super) fn validate(&self) -> Result<(), SchedulerError> {
-        if !(1..=4).contains(&self.max_primary_tasks) || !(1..=3).contains(&self.max_subagents) || !(1..=256).contains(&self.max_pending_tasks) || !(Duration::from_millis(1)..=Duration::from_secs(60)).contains(&self.shutdown_grace) {
+        if !(1..=4).contains(&self.max_primary_tasks)
+            || !(1..=3).contains(&self.max_subagents)
+            || !(1..=256).contains(&self.max_pending_tasks)
+            || !(Duration::from_millis(1)..=Duration::from_secs(60)).contains(&self.shutdown_grace)
+        {
             return Err(SchedulerError::Invalid("invalid scheduler limits"));
         }
         Ok(())
@@ -167,7 +227,7 @@ pub struct TaskSubmission {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(tag="reason",rename_all="snake_case")]
+#[serde(tag = "reason", rename_all = "snake_case")]
 pub enum WaitingReason {
     Approval,
     ProviderUncertain { attempt_id: CommandId },
@@ -212,7 +272,53 @@ pub(super) struct QueuedMessage {
 #[serde(deny_unknown_fields)]
 pub(super) struct ResumeAudit {
     pub request_id: CommandId,
-    pub expected_attempt: CommandId,
+    pub target: ResumeTarget,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub(super) enum ResumeTarget {
+    ProviderAttempt {
+        attempt_id: CommandId,
+    },
+    KnownInterruption {
+        command_id: CommandId,
+        checkpoint_revision: u64,
+        status: LoopStatus,
+    },
+}
+
+impl ResumeTarget {
+    pub fn matches(&self, conversation: &crate::agent::Conversation, task: &StoredTask) -> bool {
+        conversation.native_run().is_some_and(|run| {
+            run.task_id == task.definition.initial.id
+                && run.command_id == task.checkpoint.active_command
+                && match self {
+                    Self::ProviderAttempt { attempt_id } => {
+                        run.status
+                            == LoopStatus::ProviderInFlight {
+                                attempt_id: *attempt_id,
+                            }
+                    }
+                    Self::KnownInterruption {
+                        command_id,
+                        checkpoint_revision,
+                        status,
+                    } => {
+                        *command_id == run.command_id
+                            && *checkpoint_revision == conversation.info.checkpoint_revision
+                            && *status == run.status
+                            && matches!(
+                                status,
+                                LoopStatus::Paused {
+                                    reason: crate::agent::PauseReason::Cancellation
+                                        | crate::agent::PauseReason::InterruptedTool
+                                }
+                            )
+                    }
+                }
+        })
+    }
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -238,12 +344,22 @@ pub(super) struct StoredTask {
 
 impl StoredTask {
     pub fn snapshot(&self) -> TaskSnapshot {
-        TaskSnapshot { task:self.checkpoint.task.clone(),active_command_id:self.checkpoint.active_command,queued_messages:self.checkpoint.queued.len(),cancel_requested:self.checkpoint.cancel_requested,waiting:self.checkpoint.waiting.clone(),last_output:self.checkpoint.last_output.clone(),diagnostic:self.checkpoint.diagnostic.clone() }
+        TaskSnapshot {
+            task: self.checkpoint.task.clone(),
+            active_command_id: self.checkpoint.active_command,
+            queued_messages: self.checkpoint.queued.len(),
+            cancel_requested: self.checkpoint.cancel_requested,
+            waiting: self.checkpoint.waiting.clone(),
+            last_output: self.checkpoint.last_output.clone(),
+            diagnostic: self.checkpoint.diagnostic.clone(),
+        }
     }
 }
 
-pub(super) fn timestamp(now: UnixMillis) -> Result<i64,SchedulerError> {
-    i64::try_from(now.get()).map_err(|_|SchedulerError::Invalid("timestamp overflow"))
+pub(super) fn timestamp(now: UnixMillis) -> Result<i64, SchedulerError> {
+    i64::try_from(now.get()).map_err(|_| SchedulerError::Invalid("timestamp overflow"))
 }
 
-pub(super) fn store(services: &SchedulerServices) -> Store { services.agent.store() }
+pub(super) fn store(services: &SchedulerServices) -> Store {
+    services.agent.store()
+}

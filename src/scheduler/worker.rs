@@ -14,7 +14,9 @@ use crate::selector::{DiscoveryBinding, SEARCH_TOOLS_NAME};
 use crate::tools::ToolDescriptor;
 
 use super::repository;
-use super::types::{SchedulerError, SchedulerServices, StoredTask, WaitingReason, store};
+use super::types::{
+    ResumeTarget, SchedulerError, SchedulerServices, StoredTask, WaitingReason, store,
+};
 
 const MAX_OUTPUT_BYTES: usize = 8_192;
 const MAX_DIAGNOSTIC_BYTES: usize = 2_048;
@@ -44,10 +46,12 @@ pub(super) async fn execute(
     services: Arc<SchedulerServices>,
     task: StoredTask,
     cancellation: CancellationToken,
-    retry_uncertain: bool,
+    resume: Option<ResumeTarget>,
+    changed: tokio::sync::watch::Sender<u64>,
 ) -> ExecutionOutcome {
     let task_id = task.definition.initial.id;
-    let stop = run(&services, &task, &cancellation, retry_uncertain).await;
+    let stop = run(&services, &task, &cancellation, resume, &changed).await;
+    changed.send_modify(|revision| *revision = revision.wrapping_add(1));
     ExecutionOutcome { task_id, stop }
 }
 
@@ -55,7 +59,8 @@ async fn run(
     services: &Arc<SchedulerServices>,
     task: &StoredTask,
     cancellation: &CancellationToken,
-    retry_uncertain: bool,
+    resume: Option<ResumeTarget>,
+    changed: &tokio::sync::watch::Sender<u64>,
 ) -> ExecutionStop {
     let conversation_id = task.definition.initial.conversation_id;
     let command_id = task.checkpoint.active_command;
@@ -75,6 +80,16 @@ async fn run(
     if cancellation.is_cancelled() {
         return saved_stop(&conversation, task, true, None);
     }
+    if resume
+        .as_ref()
+        .is_some_and(|target| !target.matches(&conversation, task))
+    {
+        return waiting(
+            WaitingReason::Interrupted,
+            "owner resume no longer matches the exact native boundary",
+        );
+    }
+    let retry_uncertain = resume.is_some();
 
     let preparation = {
         let services = Arc::clone(services);
@@ -113,6 +128,18 @@ async fn run(
     };
 
     drop(conversation);
+    if let Some(target) = &resume {
+        match services.agent.conversation(conversation_id).await {
+            Ok(current) if target.matches(&current, task) => {}
+            Ok(_) => {
+                return waiting(
+                    WaitingReason::Interrupted,
+                    "native boundary changed during provider construction; owner review required",
+                );
+            }
+            Err(error) => return waiting(WaitingReason::Interrupted, error.to_string()),
+        }
+    }
     let execution_cancellation = cancellation.child_token();
     let stream = services
         .agent
@@ -129,6 +156,7 @@ async fn run(
     match stream {
         Ok(mut stream) => {
             while let Some(event) = stream.next().await {
+                changed.send_modify(|revision| *revision = revision.wrapping_add(1));
                 match event {
                     Ok(TurnEvent::RunCompleted { run }) => {
                         if run.command_id == command_id
@@ -188,6 +216,9 @@ fn prepare(
     conversation: &Conversation,
     retry_uncertain: bool,
 ) -> Result<(ToolRunSetup, Option<DiscoveryBinding>), SchedulerError> {
+    if repository::cancelled_ancestor(&store(services), task.definition.initial.id)? {
+        return Err(SchedulerError::Invalid("task or an ancestor was cancelled"));
+    }
     let authority = repository::authority(&store(services), task.definition.initial.id)?;
     let policy = &task.definition.execution;
     let discovery = if policy.tools_enabled && authority.permits_tool(SEARCH_TOOLS_NAME) {
@@ -309,16 +340,31 @@ fn definition(descriptor: &ToolDescriptor) -> ToolDefinition {
     }
 }
 
-fn is_completed(conversation: &Conversation, task: &StoredTask) -> bool {
+pub(super) fn is_completed(conversation: &Conversation, task: &StoredTask) -> bool {
     conversation.info.pending_command_id.is_none()
         && conversation.native_run().is_some_and(|run| {
             run.command_id == task.checkpoint.active_command
                 && run.task_id == task.definition.initial.id
                 && run.status == LoopStatus::Completed
         })
+        && conversation
+            .messages
+            .iter()
+            .rev()
+            .find(|entry| {
+                entry.causation_id == Some(task.checkpoint.active_command)
+                    && entry.message.role == MessageRole::Assistant
+            })
+            .is_some_and(|entry| {
+                !entry
+                    .message
+                    .content
+                    .iter()
+                    .any(|content| matches!(content, MessageContent::ToolCall(_)))
+            })
 }
 
-fn completed(conversation: &Conversation, command_id: CommandId) -> ExecutionStop {
+pub(super) fn completed(conversation: &Conversation, command_id: CommandId) -> ExecutionStop {
     let mut output = String::new();
     if let Some(message) = conversation.messages.iter().rfind(|entry| {
         entry.causation_id == Some(command_id) && entry.message.role == MessageRole::Assistant

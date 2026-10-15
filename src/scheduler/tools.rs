@@ -230,10 +230,20 @@ impl Tool for SchedulerTool {
                 scheduler.tool_cancel(caller, workspace, target).await
             }
         };
-        Ok(match result {
-            Ok(snapshot) => snapshot_output(snapshot),
-            Err(error) => error_output(&error.to_string()),
-        })
+        match result {
+            Ok(snapshot) => Ok(snapshot_output(snapshot)),
+            Err(error)
+                if !matches!(self.operation, ControlOperation::Status)
+                    && matches!(error, SchedulerError::MutationUncertain(_)) =>
+            {
+                Err(ToolError::EffectsUnknown {
+                    name: name.clone(),
+                    message: bounded(&error.to_string(), 2048),
+                    cleanup_completed: false,
+                })
+            }
+            Err(error) => Ok(error_output(&error.to_string())),
+        }
     }
 }
 
@@ -365,14 +375,21 @@ fn snapshot_output(snapshot: TaskSnapshot) -> ToolOutput {
     };
     let mut writer = ResponseWriter { bytes: Vec::new() };
     if serde_json::to_writer(&mut writer, &compact).is_err() {
-        return error_output("task control completed but its snapshot exceeded the response bound");
+        return applied_receipt(&compact);
     }
     match serde_json::from_slice(&writer.bytes) {
         Ok(content) => ToolOutput {
             content,
             is_error: false,
         },
-        Err(_) => error_output("task control completed but its snapshot could not be encoded"),
+        Err(_) => applied_receipt(&compact),
+    }
+}
+
+fn applied_receipt(snapshot: &CompactSnapshot<'_>) -> ToolOutput {
+    ToolOutput {
+        content: json!({"task_id":snapshot.task_id,"status":snapshot.status,"active_command_id":snapshot.active_command_id,"snapshot_truncated":true}),
+        is_error: false,
     }
 }
 
