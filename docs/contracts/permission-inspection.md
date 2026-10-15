@@ -1,0 +1,9 @@
+# Replicated permission inspection
+
+`PermissionRequested` carries optional `inspection` from the actual broker approval. The native emitter verifies its task, conversation, operation and tool identity against the persisted native call before appending the event. Older events omit this field.
+
+`PermissionInspection` contains the approval ID, absolute workspace root, execution mode, required capabilities, target paths, exact serialized `arguments_json`, its lowercase SHA-256 `arguments_digest`, and requested/expiry timestamps. The digest covers the UTF-8 bytes of `arguments_json`, so clients can verify and display the complete saved arguments without reproducing another language's JSON number formatting. This metadata grants no authority. The host authorizer still checks the original exact operation and current decision at execution time.
+
+Deserialization validates the metadata and its digest. The serialized inspection is at most 32 KiB; argument JSON is at most 16 KiB; workspace and each target are at most 4096 bytes; at most 64 capabilities and targets are accepted. IDs, capability values, control characters, JSON syntax, digest shape and strictly increasing expiry are validated. Oversized original approvals remain available through the owner host inspection API; their replicated event omits inspection. Clients must disable Allow when inspection is absent, invalid, expired or does not match the selected operation. Deny and host inspection remain available.
+
+The protocol execution mode type is re-exported from `permissions`, preserving the existing Rust import path and serialized values. The public event contains only inspection data. Approval decisions and task lifecycle convergence are separate work in #73. Runtime event emission and encrypted client integration require focused verification; Apple platform behavior remains unverified. Automated coverage is deferred to #32.
