@@ -1,6 +1,7 @@
 pub mod agent;
 pub mod context;
 pub mod crypto;
+pub mod devices;
 pub mod memory;
 pub mod model;
 pub mod permissions;

@@ -37,10 +37,12 @@ zeroize = "1"
 reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
 eventsource-stream = "0.2"
 async-stream = "0.3"
-futures-util = "0.3"
+futures-util = { version = "0.3", features = ["sink"] }
 bytes = "1"
 rustix = { version = "1", features = ["fs", "process"] }
 fs2 = "0.4"
 plist = "1.8"
 tracing = "0.1"
 url = "2"
+qrcode = { version = "0.14", default-features = false, features = ["svg"] }
+tokio-tungstenite = { version = "0.29", features = ["rustls-tls-webpki-roots"] }
