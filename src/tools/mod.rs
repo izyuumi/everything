@@ -1,5 +1,6 @@
 pub mod broker;
 pub mod builtin;
+pub mod mcp;
 mod registry;
 
 use std::path::{Path, PathBuf};

@@ -527,10 +527,10 @@ fn prepare_request(
         })
     };
     let mut system = Vec::new();
-    if let Some(text) = request.instructions {
-        if !text.is_empty() {
-            system.push(NativeBlock::Text { text });
-        }
+    if let Some(text) = request.instructions
+        && !text.is_empty()
+    {
+        system.push(NativeBlock::Text { text });
     }
     let mut messages: Vec<NativeMessage> = Vec::new();
     let mut pending_calls = HashSet::new();
@@ -545,10 +545,10 @@ fn prepare_request(
                 ));
             }
             for block in message.content {
-                if let ContentBlock::Text(text) = block {
-                    if !text.is_empty() {
-                        system.push(NativeBlock::Text { text });
-                    }
+                if let ContentBlock::Text(text) = block
+                    && !text.is_empty()
+                {
+                    system.push(NativeBlock::Text { text });
                 }
             }
             continue;
@@ -1067,18 +1067,18 @@ impl ResponseState {
             .get_mut(index as usize)
             .filter(|block| !block.completed)
             .ok_or_else(|| protocol("Anthropic completed an absent or completed content block"))?;
-        if let NativeBlock::ToolUse { input, .. } = &mut block.native {
-            if !block.arguments.is_empty() {
-                *input = serde_json::from_str(&block.arguments)
-                    .map_err(|_| protocol("Anthropic returned malformed tool argument JSON"))?;
-            }
+        if let NativeBlock::ToolUse { input, .. } = &mut block.native
+            && !block.arguments.is_empty()
+        {
+            *input = serde_json::from_str(&block.arguments)
+                .map_err(|_| protocol("Anthropic returned malformed tool argument JSON"))?;
         }
-        if let NativeBlock::Thinking { signature, .. } = &block.native {
-            if signature.is_empty() {
-                return Err(protocol(
-                    "Anthropic thinking block has no continuation signature",
-                ));
-            }
+        if let NativeBlock::Thinking { signature, .. } = &block.native
+            && signature.is_empty()
+        {
+            return Err(protocol(
+                "Anthropic thinking block has no continuation signature",
+            ));
         }
         let model_block = model_block(&block.native, &self.tool_names)?;
         block.completed = true;
