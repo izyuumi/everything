@@ -4,9 +4,11 @@ Assessment date: 2026-10-15. The initial main branch contained only LICENSE and 
 
 ## Current integration
 
-Bootstrap #1, domain contracts #2, provider contracts #4, and tool contracts #5 are merged through PRs #33–#36 after Linux/macOS build CI. Storage #3, wiki #6, and crypto/sync contracts #7 have passed local formatting, compilation, strict Clippy and release builds and are in focused PR integration. Native adapters #8/#9 are in progress against merged provider contracts. No native agent loop or provider inference is yet connected to the CLI; both binaries expose help only.
+Bootstrap #1, domain #2, storage #3, provider contracts #4, tool contracts #5, wiki #6, crypto/sync #7 and native Anthropic adapter #8 are merged through PRs #33–#40 after Linux/macOS CI. Native OpenAI #9 is under PR #41. Permissions #11, context #16 and generic embedding profiles #31 have passed local validation and independent review and await focused integration. The #10 prerequisite adds atomic private conversation checkpoints so messages and provider continuation cannot diverge on restart. Background service #18 and blind relay #13 are being implemented against merged contracts.
 
-Disposable manual checks covered storage atomicity/dedup/restart/revocation, wiki CRUD/search/rebuild/path confinement, and Rust pairing/encryption/replay/tamper/expiry. These are focused observations, not automated coverage or a security audit. Rust 1.99.0 is available here. Apple SDKs, Mac hardware benchmarks, Swift interoperability and live model credentials are unavailable. Branch-protection inspection returns HTTP403; merges respect normal GitHub enforcement and passing CI.
+The CLI still exposes help only; native inference is not yet wired to it. No live model requests have been made. Disposable checks covered storage rollback/dedup/restart/revocation, wiki CRUD/reindex/confinement, Rust crypto/replay/sync, approval nonescalation/expiry/revocation, context compaction/grouping/budget/continuation, and embedding contract validation/fingerprints. These observations are not automated coverage or a security audit.
+
+Rust 1.99.0 is installed. Apple SDKs and Mac hardware are unavailable locally; GitHub macOS CI supplies Rust build checks. Swift interoperability, live model behavior, and native Mac embedding benchmarks remain unverified. Normal GitHub merge enforcement and passing CI are required.
 
 ## Dependency graph and ownership
 
@@ -14,22 +16,22 @@ Disposable manual checks covered storage atomicity/dedup/restart/revocation, wik
 | --- | --- | --- | --- |
 | [#1](https://github.com/izyuumi/everything/issues/1) | Bootstrap Rust workspace and CI | None | Merged (#33) |
 | [#2](https://github.com/izyuumi/everything/issues/2) | Define versioned domain and event contracts | None | Merged (#34) |
-| [#3](https://github.com/izyuumi/everything/issues/3) | Implement SQLite storage and migrations | None | Implemented, PR #37 validation |
+| [#3](https://github.com/izyuumi/everything/issues/3) | Implement SQLite storage and migrations | None | Merged (#37) |
 | [#4](https://github.com/izyuumi/everything/issues/4) | Implement model-neutral provider types | None | Merged (#35) |
 | [#5](https://github.com/izyuumi/everything/issues/5) | Define Tool trait, registry, and argument validation | None | Merged (#36) |
-| [#6](https://github.com/izyuumi/everything/issues/6) | Implement Markdown wiki parser and FTS5 index | None | Implemented, PR #38 validation |
-| [#7](https://github.com/izyuumi/everything/issues/7) | Define relay protocol and crypto test vectors | None | Implemented, integration review |
-| [#8](https://github.com/izyuumi/everything/issues/8) | Implement Anthropic native Messages adapter | #4 | In progress |
-| [#9](https://github.com/izyuumi/everything/issues/9) | Implement OpenAI native Responses adapter | #4 | In progress |
-| [#10](https://github.com/izyuumi/everything/issues/10) | Build persistent CLI conversation loop | #2, #3, #4, #8 | Backlog |
-| [#11](https://github.com/izyuumi/everything/issues/11) | Implement permission policy and persistent grants | #2, #3, #5 | Backlog |
-| [#12](https://github.com/izyuumi/everything/issues/12) | Implement local EmbeddingGemma 2 inference spike | #31 | Backlog |
-| [#13](https://github.com/izyuumi/everything/issues/13) | Implement E2EE relay transport server | #7 | Backlog |
+| [#6](https://github.com/izyuumi/everything/issues/6) | Implement Markdown wiki parser and FTS5 index | None | Merged (#38) |
+| [#7](https://github.com/izyuumi/everything/issues/7) | Define relay protocol and crypto test vectors | None | Merged (#39) |
+| [#8](https://github.com/izyuumi/everything/issues/8) | Implement Anthropic native Messages adapter | #4 | Merged (#40); live API unverified |
+| [#9](https://github.com/izyuumi/everything/issues/9) | Implement OpenAI native Responses adapter | #4 | Implemented, PR #41 validation |
+| [#10](https://github.com/izyuumi/everything/issues/10) | Build persistent CLI conversation loop | #2, #3, #4, #8 | Atomic checkpoint prerequisite in integration |
+| [#11](https://github.com/izyuumi/everything/issues/11) | Implement permission policy and persistent grants | #2, #3, #5 | Implemented, reviewed; integration pending |
+| [#12](https://github.com/izyuumi/everything/issues/12) | Implement local EmbeddingGemma 2 inference spike | #31 | Blocked on #31 integration |
+| [#13](https://github.com/izyuumi/everything/issues/13) | Implement E2EE relay transport server | #7 | In progress |
 | [#14](https://github.com/izyuumi/everything/issues/14) | Implement Tool Broker execution journal | #3, #5, #11 | Backlog |
 | [#15](https://github.com/izyuumi/everything/issues/15) | Implement shell and filesystem tools | #14 | Backlog |
-| [#16](https://github.com/izyuumi/everything/issues/16) | Implement context builder and compaction | #2, #3, #4, #6 | Backlog |
+| [#16](https://github.com/izyuumi/everything/issues/16) | Implement context builder and compaction | #2, #3, #4, #6 | Implemented, reviewed; integration pending |
 | [#17](https://github.com/izyuumi/everything/issues/17) | Implement local tool discovery and optional Jev selector | #5, #11, #16 | Backlog |
-| [#18](https://github.com/izyuumi/everything/issues/18) | Implement native macOS background host service | #1, #2, #3 | Backlog |
+| [#18](https://github.com/izyuumi/everything/issues/18) | Implement native macOS background host service | #1, #2, #3 | In progress |
 | [#19](https://github.com/izyuumi/everything/issues/19) | Implement MCP client tool adapter | #5, #14 | Backlog |
 | [#20](https://github.com/izyuumi/everything/issues/20) | Implement local tool discovery and optional Jev selector | #5, #11, #16 | Backlog |
 | [#21](https://github.com/izyuumi/everything/issues/21) | Implement sqlite-vec hybrid retrieval and index switching | #6, #12, #31 | Backlog |
@@ -42,7 +44,7 @@ Disposable manual checks covered storage atomicity/dedup/restart/revocation, wik
 | [#28](https://github.com/izyuumi/everything/issues/28) | Build native iOS E2EE chat client | #13, #22, #25 | Backlog |
 | [#29](https://github.com/izyuumi/everything/issues/29) | Implement optional scoped cloud worker delegation | #24, #25 | Backlog |
 | [#30](https://github.com/izyuumi/everything/issues/30) | META: Dependency roadmap for parallel agent implementation | None | Backlog |
-| [#31](https://github.com/izyuumi/everything/issues/31) | Define generic embedding contract and index fingerprints | #1, #6 | Backlog |
+| [#31](https://github.com/izyuumi/everything/issues/31) | Define generic embedding contract and index fingerprints | #1, #6 | Implemented, reviewed; integration pending |
 
 #17 and #20 specify the same selector scope and will share one focused implementation, with both issues explicitly reconciled. #31 owns the embedding contract. The roadmap's waves are scheduling guidance; explicit prerequisites take precedence (for example #19 requires #14).
 
