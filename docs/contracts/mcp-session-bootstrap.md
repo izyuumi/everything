@@ -49,3 +49,5 @@ An operator obtains the exact non-secret binding from the configured server's en
 ```
 
 The replacement strings describe required existing metadata; this example is not an accepted server configuration. Supply the source value through the explicitly launched process environment, never by editing this JSON. Launch with an owner-controlled file mode such as0600. Restart requires the same deliberate setup or a separately selected native credential reference. Native keyring behavior, Apple service provisioning and successful inference are not established by source integration.
+
+Fresh focused schema9 verification exercised the actual ServeArgs/HostService ordering and running owner route across nine successful generations and nineteen sanitized rejections, without a model request. Explicit restart restored the real upstream catalog; no-file restart retained CredentialUnavailable. The [composition contract](host-composition.md) records the artifact, persisted-marker, network, native-store and platform limits.
