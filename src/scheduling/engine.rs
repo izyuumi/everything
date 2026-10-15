@@ -273,6 +273,7 @@ impl Actor {
             .work(move |repository, _| Ok(repository.due_excluding(now, &excluded, BATCH)?))
             .await?;
         let full = jobs.len() == BATCH;
+        let mut progressed = false;
         for job in jobs {
             if self.stop.is_cancelled() {
                 return Err(EngineError::Cancelled);
@@ -287,18 +288,21 @@ impl Actor {
                 .await;
             match result {
                 Ok(run) if !run.state.is_terminal() => {
+                    progressed = true;
                     if let Err(error) = self.process_run(run).await {
                         self.block(id, &error);
                     }
                 }
-                Ok(_) => {}
+                Ok(_) => {
+                    progressed = true;
+                }
                 Err(EngineError::Schedule(
                     ScheduleError::RevisionConflict { .. } | ScheduleError::NotDue,
                 )) => {}
                 Err(error) => self.block(id, &error),
             }
         }
-        if full {
+        if full || progressed {
             return Ok(Duration::from_millis(20));
         }
         let next = self
