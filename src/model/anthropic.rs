@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::fmt;
+use std::io::{self, Write};
 use std::net::IpAddr;
 use std::time::Duration;
 
@@ -195,16 +196,31 @@ impl ModelProvider for AnthropicProvider {
         if cancellation.is_cancelled() {
             return Err(ModelError::Cancelled);
         }
-        request.validate()?;
-        let prepared = prepare_request(request, &self.config)?;
-        let (body, tool_names, continuation, assistant_index) = prepared;
-        let body = serde_json::to_vec(&body)
-            .map_err(|_| invalid("request", "could not encode Anthropic request"))?;
-        if body.len() > MAX_REQUEST_BYTES {
-            return Err(invalid(
-                "request",
-                "native Anthropic request exceeds 32 MiB",
-            ));
+        let config = PreparationConfig {
+            default_max_output_tokens: self.config.default_max_output_tokens,
+            thinking_budget_tokens: self.config.thinking_budget_tokens,
+        };
+        let runtime = tokio::runtime::Handle::try_current()
+            .map_err(|_| transport("Anthropic requests require a Tokio runtime"))?;
+        let preparation = runtime.spawn_blocking(move || {
+            request.validate()?;
+            let (body, names, continuation, index) = prepare_request(request, config)?;
+            let mut encoded = BoundedRequestBody(Vec::new());
+            serde_json::to_writer(&mut encoded, &body).map_err(|_| {
+                invalid(
+                    "request",
+                    "native Anthropic request exceeds 32 MiB or cannot be encoded",
+                )
+            })?;
+            Ok::<_, ModelError>((encoded.0, names, continuation, index))
+        });
+        let (body, tool_names, continuation, assistant_index) = tokio::select! {
+            biased;
+            _ = cancellation.cancelled() => return Err(ModelError::Cancelled),
+            prepared = preparation => prepared.map_err(|_| transport("Anthropic request preparation failed"))??,
+        };
+        if cancellation.is_cancelled() {
+            return Err(ModelError::Cancelled);
         }
         let send = self
             .client
@@ -365,9 +381,30 @@ struct OpaquePlacement {
 
 type PreparedRequest = (NativeRequest, HashMap<String, String>, Continuation, usize);
 
+struct PreparationConfig {
+    default_max_output_tokens: u32,
+    thinking_budget_tokens: Option<u32>,
+}
+
+struct BoundedRequestBody(Vec<u8>);
+
+impl Write for BoundedRequestBody {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        if bytes.len() > MAX_REQUEST_BYTES.saturating_sub(self.0.len()) {
+            return Err(io::Error::other("native Anthropic request exceeds 32 MiB"));
+        }
+        self.0.extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
 fn prepare_request(
     request: ModelRequest,
-    config: &AnthropicConfig,
+    config: PreparationConfig,
 ) -> Result<PreparedRequest, ModelError> {
     if request
         .temperature
