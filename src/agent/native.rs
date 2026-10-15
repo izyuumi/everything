@@ -629,7 +629,12 @@ fn prepare_definition(
         return Err(AgentError::ConfigurationMismatch);
     }
     ensure_task(store, authority.task_id(), authority.conversation_id())?;
-    if let Some(native) = &conversation.checkpoint.native {
+    if let Some(native) = conversation
+        .checkpoint
+        .native
+        .as_ref()
+        .filter(|native| native.turn.is_some())
+    {
         for saved in &native.context.tools {
             if !definition_matches(&setup.registry, saved)? || !authority.permits_tool(&saved.name)
             {
