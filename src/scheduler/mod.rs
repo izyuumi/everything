@@ -11,3 +11,10 @@ pub use types::{
     DiscoveryServices, ExecutionPolicy, SchedulerError, SchedulerLimits, SchedulerServices,
     TaskProviderFactory, TaskSnapshot, TaskSubmission, WaitingReason,
 };
+
+pub fn task_snapshot(
+    store: &crate::storage::Store,
+    task: crate::protocol::TaskId,
+) -> Result<TaskSnapshot, SchedulerError> {
+    repository::load(store, task).map(|task| task.snapshot())
+}

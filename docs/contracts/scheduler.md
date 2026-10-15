@@ -10,6 +10,8 @@
 
 Queue admission is not completed inference. `status(task_id)` also reads terminal rows. `active_in_conversation(conversation_id)` returns the one nonterminal task or None; foreign foreground ownership returns NotOwned and inconsistent multiple owners fail closed. The host must query under its mutation gate before accepting a different user command, deferring inbox application until the previous task settles even when Agent.pending has already cleared. Same-command replay remains allowed. TaskSnapshot includes immutable TaskRecord identity, current status, active command, pending-message count, cancellation flag, waiting reason, and bounded last output/diagnostic. Root submissions accept caller-reserved UUIDs; scheduled or remote adapters must reserve their own immutable intent before calling Agent or enqueue and replay those same identities after uncertainty.
 
+`scheduler::task_snapshot(&Store, task_id)` reads the same validated durable snapshot without a live scheduler actor, including after shutdown. It performs synchronous SQLite work; asynchronous hosts must call it on a bounded blocking worker while retaining their state lease. It does not admit, wake, mutate or execute a task.
+
 ## Execution and wakeup
 
 At most four configured primary tasks and three configured subagents run; defaults are one primary and three subagents. All nested descendants share the same global subagent allowance. Each activation uses the actual Agent::run_tools kernel and its per-conversation admission, with the same shared broker. A worker marks no TaskRows itself. The serialized control actor persists Running before dispatch and drains the full stream before recording an outcome. Only matching durable final native state completes a task.
