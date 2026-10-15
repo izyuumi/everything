@@ -8,7 +8,7 @@ Read [AGENTS.md](../AGENTS.md), then [implementation status](status/implementati
 
 ## Contracts
 
-[Events](contracts/events.md) · [Providers](contracts/providers.md) · [Tools](contracts/tools.md) · [Storage](contracts/storage.md) · [Embeddings](contracts/embeddings.md)
+[Events](contracts/events.md) · [Providers](contracts/providers.md) · [Tools](contracts/tools.md) · [Storage](contracts/storage.md) · [Embeddings](contracts/embeddings.md) · [Context](contracts/context.md)
 
 ## Development
 
