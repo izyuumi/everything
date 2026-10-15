@@ -4,11 +4,11 @@ Assessment date: 2026-10-15. The initial main branch contained only LICENSE and 
 
 ## Current integration
 
-Foundation issues #1–#11, relay #13, Tool Broker #14, context #16, and embedding contracts #31 are merged through PRs #33–#57 after Linux/macOS CI. The CLI supports durable text conversations and explicit recovery of pending turns. Background service #18 has a validated library awaiting CLI integration. This branch integrates durable wiki maintenance #26. Local embedding #12, discovery #17/#20, device synchronization #22, the native tool loop #23, built-in tools #15, and MCP #19 have isolated implementation workstreams.
+Foundation issues #1–#11, relay #13, Tool Broker #14, context #16, and embedding contracts #31 are merged through PRs #33–#57 after Linux/macOS CI. The CLI supports durable text conversations and explicit recovery of pending turns. Background service #18 has a validated library awaiting CLI integration. This branch integrates durable wiki maintenance #26. Local embedding #12 is merged in PR #49. Discovery #17/#20, device synchronization #22, the native tool loop #23, built-in tools #15, and MCP #19 have isolated implementation workstreams.
 
-No live remote model requests have been made. EmbeddingGemma 2 produced finite normalized vectors and relevant-document rankings locally at all four dimensions; its backend and native macOS measurements have been inspected and await integration. Disposable manual checks covered storage rollback/dedup/restart, wiki CRUD/consolidation/provenance/prepared-write recovery, crypto/replay/sync, permission restrictions, broker approval/replay/quarantine, context budgets and native local embedding cancellation. These observations are not automated coverage or a security audit.
+No live remote model requests have been made. EmbeddingGemma 2 produced finite normalized vectors and relevant-document rankings locally at all four dimensions; its native backend is merged, and Linux/macOS measurements have been inspected. Disposable manual checks covered storage rollback/dedup/restart, wiki CRUD/consolidation/provenance/prepared-write recovery, crypto/replay/sync, permission restrictions, broker approval/replay/quarantine, context budgets and native local embedding cancellation. These observations are not automated coverage or a security audit.
 
-Rust 1.99.0 is installed. Apple SDKs and Mac hardware are unavailable locally; GitHub macOS CI supplies Rust build checks. Swift interoperability and live model behavior remain unverified. Normal GitHub merge enforcement and passing CI are required.
+Rust 1.99.0 is installed. Apple SDKs and Mac hardware are unavailable locally; GitHub macOS CI supplies Rust builds and native embedding measurements. Swift interoperability and live model behavior remain unverified. Normal GitHub merge enforcement and passing CI are required.
 
 ## Dependency graph and ownership
 
@@ -25,7 +25,7 @@ Rust 1.99.0 is installed. Apple SDKs and Mac hardware are unavailable locally; G
 | [#9](https://github.com/izyuumi/everything/issues/9) | Implement OpenAI native Responses adapter | #4 | Merged (#41); live API unverified |
 | [#10](https://github.com/izyuumi/everything/issues/10) | Build persistent CLI conversation loop | #2, #3, #4, #8 | Merged (#57); live provider success unverified |
 | [#11](https://github.com/izyuumi/everything/issues/11) | Implement permission policy and persistent grants | #2, #3, #5 | Merged (#43) |
-| [#12](https://github.com/izyuumi/everything/issues/12) | Implement local EmbeddingGemma 2 inference spike | #31 | Actual native inference, release benchmark and cancellation verified on Linux; integration/Mac validation pending |
+| [#12](https://github.com/izyuumi/everything/issues/12) | Implement local EmbeddingGemma 2 inference spike | #31 | Actual native inference and release benchmarks verified on Linux/macOS; integration validation |
 | [#13](https://github.com/izyuumi/everything/issues/13) | Implement E2EE relay transport server | #7 | Merged (#45) |
 | [#14](https://github.com/izyuumi/everything/issues/14) | Implement Tool Broker execution journal | #3, #5, #11 | Implemented; native loop integration remains #23 |
 | [#15](https://github.com/izyuumi/everything/issues/15) | Implement shell and filesystem tools | #14 | In progress; disposable runtime checks and independent review |
