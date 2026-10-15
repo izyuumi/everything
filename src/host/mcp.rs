@@ -369,6 +369,11 @@ impl McpService {
         agent: Agent,
         cancellation: CancellationToken,
     ) -> Result<Self, McpServiceError> {
+        if agent.state_directory().is_none() {
+            return Err(McpServiceError::Configuration(
+                "a leased Agent is required for MCP host ownership",
+            ));
+        }
         settings.validate()?;
         let host = McpHost::new(settings.servers.len().max(1))
             .map_err(|_| McpServiceError::Configuration("invalid process admission limit"))?;

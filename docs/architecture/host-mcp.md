@@ -22,7 +22,7 @@ Configuration changes require a host restart in this initial composition. Replac
 
 ## Cancellation and cleanup
 
-The lifecycle worker retains an Agent clone, including its state lease when opened by the host. Cancelling the supplied token or dropping the final service handle requests actual session shutdown. Dropping a `ready`, `register` or `shutdown` caller future does not release the lifecycle worker's ownership. A caller that keeps a service handle remains responsible for explicitly cancelling or shutting it down.
+Construction requires an Agent opened with a state lease; a bare `Agent::from_store` is rejected before startup. The lifecycle worker retains that Agent clone and state lease. Cancelling the supplied token or dropping the final service handle requests actual session shutdown. Dropping a `ready`, `register` or `shutdown` caller future does not release the lifecycle worker's ownership. A caller that keeps a service handle remains responsible for explicitly cancelling or shutting it down.
 
 `shutdown` requests cancellation and waits up to 25 seconds for a confirmed result. `ShutdownPending` means cleanup continues under the retained owner; it is not a clean stop. Shutdown awaits at most sixteen independent session cleanups concurrently. Actual failed session shutdowns remain visible and are retried once per second. The worker releases its Agent only after every started session reports confirmed cleanup.
 
