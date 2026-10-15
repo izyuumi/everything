@@ -132,7 +132,7 @@ The first example uses the native official OpenAI endpoint. CRUD performs no mod
         "instructions": "You are Everything, a helpful assistant.",
         "endpoint": {
           "kind": "loopback",
-          "url": "http://127.0.0.1:9"
+          "url": "http://127.0.0.1:9/"
         },
         "max_output_tokens": 256,
         "temperature": null
@@ -172,7 +172,7 @@ The first example uses the native official OpenAI endpoint. CRUD performs no mod
 
 ## Bounds and validation
 
-Draft input is at most256KiB and must be a regular file, opened without following a final symlink. Nonblocking open rejects FIFO/device/directory input without waiting for a writer. A bounded read also catches growth past the limit. File reading and typed JSON validation run off Tokio workers; unknown fields and credential-bearing additions are rejected. The existing definition validator checks cron syntax, IANA timezones, absolute workspace syntax, native model configuration, budgets and policies. Host Controls and Authorizer remain authoritative for permissions, actual tool availability and mutation admission.
+Draft input is at most256KiB and must be a regular file, opened without following a final symlink. Nonblocking open and descriptor metadata reject FIFO/device/directory input without waiting for a writer. A bounded read also catches growth past the limit. File reading and typed JSON validation run off Tokio workers; strict draft and configuration fields reject unknown additions. Credentials are configured through the separate owner credential route. The existing definition validator checks cron syntax, IANA timezones, absolute workspace syntax, native model configuration, budgets and policies. Host Controls and Authorizer remain authoritative for permissions, actual tool availability and mutation admission.
 
 Canonical definitions are bounded to128KiB. Names are1–256bytes without controls; instructions1–32768bytes without NUL. Intervals range from1second through366days. Cron accepts five/six printable ASCII fields, no year, with explicit IANA timezone. Model/tool/output/time ceilings are cumulative across captured attempts; per-response output cannot exceed the occurrence ceiling. Default policies skip overlap and missed runs. Acknowledgement and manually claiming an occurrence do not grant execution permission or model credentials.
 
