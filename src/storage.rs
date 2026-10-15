@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 use thiserror::Error;
 
-const SCHEMA_VERSION: i64 = 2;
+const SCHEMA_VERSION: i64 = 3;
 const MAX_JSON_BYTES: usize = 1_048_576;
 const MAX_APPEND_EVENTS: usize = 256;
 const MAX_STATE_BYTES: usize = 8 * MAX_JSON_BYTES;
@@ -44,6 +44,10 @@ pub enum StorageError {
     StateConflict { entity: &'static str, id: String },
     #[error("tool call {0} was previously reserved for different execution inputs")]
     ToolCallConflict(String),
+    #[error(
+        "cleanup attestation for tool call {0} conflicts with its immutable journal or an existing attestation"
+    )]
+    ToolCleanupConflict(String),
     #[error("device {0} is revoked")]
     RevokedDevice(String),
 }
@@ -229,6 +233,22 @@ pub struct ToolCallReservation {
     pub call: ToolCallRow,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ToolCleanupAttestation {
+    pub operation_id: String,
+    pub original_result_digest: String,
+    pub operator: String,
+    pub note: String,
+    pub attested_at: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ToolCleanupStatus {
+    pub operation_id: String,
+    pub original_result_digest: String,
+    pub attestation: Option<ToolCleanupAttestation>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct PermissionRow {
     pub id: String,
@@ -290,6 +310,9 @@ impl Store {
         }
         if version < 2 {
             transaction.execute_batch(include_str!("../migrations/0002_conversation_state.sql"))?;
+        }
+        if version < 3 {
+            transaction.execute_batch(include_str!("../migrations/0003_tool_cleanup.sql"))?;
             transaction.pragma_update(None, "user_version", SCHEMA_VERSION)?;
         }
         transaction.commit()?;
@@ -804,6 +827,81 @@ impl Store {
         )?)
     }
 
+    pub fn tool_calls_after_id(
+        &self,
+        state: ToolCallState,
+        after_id: Option<&str>,
+        limit: usize,
+    ) -> StorageResult<Vec<ToolCallRow>> {
+        validate_optional_id(after_id)?;
+        validate_limit(limit)?;
+        let connection = self.connection()?;
+        let mut statement = connection.prepare(
+            "SELECT id, conversation_id, task_id, tool_name, state, request, result, created_at, updated_at FROM tool_calls WHERE state = ?1 AND (?2 IS NULL OR id > ?2) ORDER BY id LIMIT ?3",
+        )?;
+        collect_rows(statement.query_map(
+            params![state.as_str(), after_id, limit as i64],
+            tool_call_row,
+        )?)
+    }
+
+    pub fn tool_cleanup_status(&self, operation_id: &str) -> StorageResult<ToolCleanupStatus> {
+        validate_id(operation_id)?;
+        let mut connection = self.connection()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Deferred)?;
+        let (original_result_digest, _) = unknown_result_digest(&transaction, operation_id)?;
+        let attestation = read_cleanup_attestation(&transaction, operation_id)?;
+        transaction.commit()?;
+        Ok(ToolCleanupStatus {
+            operation_id: operation_id.into(),
+            original_result_digest,
+            attestation,
+        })
+    }
+
+    pub fn attest_tool_cleanup(
+        &self,
+        attestation: &ToolCleanupAttestation,
+    ) -> StorageResult<ToolCleanupAttestation> {
+        validate_id(&attestation.operation_id)?;
+        validate_text(&attestation.operator, "operator", 256)?;
+        validate_text(&attestation.note, "cleanup note", 8_192)?;
+        validate_time(attestation.attested_at)?;
+        if attestation.original_result_digest.len() != 64
+            || !attestation
+                .original_result_digest
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        {
+            return invalid("cleanup result digest must be lowercase SHA-256 hexadecimal");
+        }
+        let mut connection = self.connection()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let (actual_digest, updated_at) =
+            unknown_result_digest(&transaction, &attestation.operation_id)?;
+        if actual_digest != attestation.original_result_digest
+            || attestation.attested_at < updated_at
+        {
+            return Err(StorageError::ToolCleanupConflict(
+                attestation.operation_id.clone(),
+            ));
+        }
+        if let Some(existing) = read_cleanup_attestation(&transaction, &attestation.operation_id)? {
+            if existing != *attestation {
+                return Err(StorageError::ToolCleanupConflict(
+                    attestation.operation_id.clone(),
+                ));
+            }
+            return Ok(existing);
+        }
+        transaction.execute(
+            "INSERT INTO tool_cleanup_attestations(operation_id, original_result_digest, operator, note, attested_at) VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![attestation.operation_id, attestation.original_result_digest, attestation.operator, attestation.note, attestation.attested_at],
+        )?;
+        transaction.commit()?;
+        Ok(attestation.clone())
+    }
+
     pub fn transition_tool_call(
         &self,
         id: &str,
@@ -1128,6 +1226,44 @@ fn outbox_row(row: &Row<'_>) -> rusqlite::Result<OutboxRow> {
         attempts: row.get(5)?,
         delivered_at: row.get(6)?,
     })
+}
+
+fn unknown_result_digest(
+    connection: &Connection,
+    operation_id: &str,
+) -> StorageResult<(String, i64)> {
+    let row: Option<(String, Option<String>, i64)> = connection
+        .query_row(
+            "SELECT state, result, updated_at FROM tool_calls WHERE id = ?1",
+            [operation_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .optional()?;
+    let (state, result, updated_at) = row.ok_or_else(|| missing("tool call", operation_id))?;
+    if state != "unknown" {
+        return Err(state_conflict("tool call", operation_id));
+    }
+    let mut hash = Sha256::new();
+    hash.update(b"everything.tool-call.unknown-result.v1\0");
+    match result {
+        Some(result) => {
+            hash.update([1]);
+            hash.update(result.as_bytes());
+        }
+        None => hash.update([0]),
+    }
+    Ok((format!("{:x}", hash.finalize()), updated_at))
+}
+
+fn read_cleanup_attestation(
+    connection: &Connection,
+    operation_id: &str,
+) -> StorageResult<Option<ToolCleanupAttestation>> {
+    Ok(connection.query_row(
+        "SELECT operation_id, original_result_digest, operator, note, attested_at FROM tool_cleanup_attestations WHERE operation_id = ?1",
+        [operation_id],
+        |row| Ok(ToolCleanupAttestation { operation_id: row.get(0)?, original_result_digest: row.get(1)?, operator: row.get(2)?, note: row.get(3)?, attested_at: row.get(4)? }),
+    ).optional()?)
 }
 
 fn require_related_task(
