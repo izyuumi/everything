@@ -20,7 +20,7 @@ uuid = { version = "1", features = ["serde", "v4"] }
 async-trait = "0.1"
 futures-core = "0.3"
 tokio-util = { version = "0.7", features = ["rt"] }
-tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "time", "sync"] }
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "time", "sync", "net", "io-util", "process", "signal", "io-std"] }
 jsonschema = { version = "0.58", default-features = false }
 rusqlite = { version = "0.37", features = ["bundled"] }
 pulldown-cmark = "0.13"
@@ -39,4 +39,8 @@ eventsource-stream = "0.2"
 async-stream = "0.3"
 futures-util = "0.3"
 bytes = "1"
+rustix = { version = "1", features = ["fs", "process"] }
+fs2 = "0.4"
+plist = "1.8"
+tracing = "0.1"
 url = "2"

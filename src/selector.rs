@@ -576,6 +576,7 @@ impl Tool for SearchTools {
         Ok(ToolOutput {
             content: serde_json::to_value(selection)
                 .map_err(|_| discovery_error("local discovery serialization failed"))?,
+            is_error: false,
         })
     }
 }

@@ -4,7 +4,7 @@ Assessment date: 2026-10-15. The initial main branch contained only LICENSE and 
 
 ## Current integration
 
-Foundation issues #1–#9, permissions #11, and embedding contracts #31 are merged through PRs #33–#44 after Linux/macOS CI. PR #44 also adds atomic private conversation checkpoints and coherent snapshots for #10 and corrects the aggregate storage read-page guard. Context #16 is implemented and reviewed in this branch. The blind relay #13 is under PR #45. Background service #18 has a validated library awaiting CLI integration. Persistent chat #10 and the Tool Broker #14 are active isolated workstreams.
+Foundation issues #1–#9, permissions #11, relay #13, context #16, and embedding contracts #31 are merged through PRs #33–#46 after Linux/macOS CI. Atomic private conversation checkpoints and coherent snapshots are integrated for #10. This branch adds immutable owner cleanup attestations for #14 so an unknown side effect cannot lose its recovery quarantine on restart. Background service #18 has a merged library (#48) awaiting CLI integration. Persistent chat #10, the Tool Broker #14, selector #17/#20, device synchronization #22, and wiki consolidation #26 are active isolated workstreams.
 
 The CLI still exposes help only; native inference is not yet wired to it. No live remote model requests have been made. EmbeddingGemma 2 produced finite normalized vectors and relevant-document rankings locally at 128, 256, 512, and 768 dimensions; the backend is not yet merged. Disposable checks covered storage rollback/dedup/restart/revocation, wiki CRUD/reindex/confinement, Rust crypto/replay/sync, approval nonescalation/expiry/revocation, context compaction/grouping/budget/continuation, and embedding contract validation/fingerprints. These observations are not automated coverage or a security audit.
 
@@ -25,21 +25,21 @@ Rust 1.99.0 is installed. Apple SDKs and Mac hardware are unavailable locally; G
 | [#9](https://github.com/izyuumi/everything/issues/9) | Implement OpenAI native Responses adapter | #4 | Merged (#41); live API unverified |
 | [#10](https://github.com/izyuumi/everything/issues/10) | Build persistent CLI conversation loop | #2, #3, #4, #8 | In progress; atomic storage prerequisite merged (#44) |
 | [#11](https://github.com/izyuumi/everything/issues/11) | Implement permission policy and persistent grants | #2, #3, #5 | Merged (#43) |
-| [#12](https://github.com/izyuumi/everything/issues/12) | Implement local EmbeddingGemma 2 inference spike | #31 | Actual native ONNX inference verified; benchmark/cancellation validation in progress |
-| [#13](https://github.com/izyuumi/everything/issues/13) | Implement E2EE relay transport server | #7 | Implemented; PR #45 CI |
-| [#14](https://github.com/izyuumi/everything/issues/14) | Implement Tool Broker execution journal | #3, #5, #11 | In progress |
+| [#12](https://github.com/izyuumi/everything/issues/12) | Implement local EmbeddingGemma 2 inference spike | #31 | Actual native inference, release benchmark and cancellation verified on Linux; integration/Mac validation pending |
+| [#13](https://github.com/izyuumi/everything/issues/13) | Implement E2EE relay transport server | #7 | Merged (#45) |
+| [#14](https://github.com/izyuumi/everything/issues/14) | Implement Tool Broker execution journal | #3, #5, #11 | Implemented; native loop integration remains #23 |
 | [#15](https://github.com/izyuumi/everything/issues/15) | Implement shell and filesystem tools | #14 | Backlog |
-| [#16](https://github.com/izyuumi/everything/issues/16) | Implement context builder and compaction | #2, #3, #4, #6 | Implemented, reviewed; integration pending |
-| [#17](https://github.com/izyuumi/everything/issues/17) | Implement local tool discovery and optional Jev selector | #5, #11, #16 | Backlog |
-| [#18](https://github.com/izyuumi/everything/issues/18) | Implement native macOS background host service | #1, #2, #3 | Library validated; CLI integration pending |
+| [#16](https://github.com/izyuumi/everything/issues/16) | Implement context builder and compaction | #2, #3, #4, #6 | Merged (#46) |
+| [#17](https://github.com/izyuumi/everything/issues/17) | Implement local tool discovery and optional Jev selector | #5, #11, #16 | In progress; shared implementation |
+| [#18](https://github.com/izyuumi/everything/issues/18) | Implement native macOS background host service | #1, #2, #3 | Library merged (#48); CLI integration pending |
 | [#19](https://github.com/izyuumi/everything/issues/19) | Implement MCP client tool adapter | #5, #14 | Backlog |
-| [#20](https://github.com/izyuumi/everything/issues/20) | Implement local tool discovery and optional Jev selector | #5, #11, #16 | Backlog |
+| [#20](https://github.com/izyuumi/everything/issues/20) | Implement local tool discovery and optional Jev selector | #5, #11, #16 | In progress; shared implementation |
 | [#21](https://github.com/izyuumi/everything/issues/21) | Implement sqlite-vec hybrid retrieval and index switching | #6, #12, #31 | Backlog |
-| [#22](https://github.com/izyuumi/everything/issues/22) | Implement device pairing and client sync | #2, #3, #7, #13 | Backlog |
+| [#22](https://github.com/izyuumi/everything/issues/22) | Implement device pairing and client sync | #2, #3, #7, #13 | In progress |
 | [#23](https://github.com/izyuumi/everything/issues/23) | Implement multi-tool agent loop | #8, #9, #10, #14 | Backlog |
 | [#24](https://github.com/izyuumi/everything/issues/24) | Implement task scheduler and concurrent subagents | #3, #14, #23 | Backlog |
 | [#25](https://github.com/izyuumi/everything/issues/25) | Implement steering and autonomous continuation | #23, #24 | Backlog |
-| [#26](https://github.com/izyuumi/everything/issues/26) | Implement wiki consolidation and lint jobs | #6, #16 | Backlog |
+| [#26](https://github.com/izyuumi/everything/issues/26) | Implement wiki consolidation and lint jobs | #6, #16 | In progress |
 | [#27](https://github.com/izyuumi/everything/issues/27) | Build optional SwiftUI menu bar client | #18, #25 | Backlog |
 | [#28](https://github.com/izyuumi/everything/issues/28) | Build native iOS E2EE chat client | #13, #22, #25 | Backlog |
 | [#29](https://github.com/izyuumi/everything/issues/29) | Implement optional scoped cloud worker delegation | #24, #25 | Backlog |
