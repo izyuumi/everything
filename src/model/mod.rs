@@ -1,4 +1,5 @@
 pub mod anthropic;
+pub mod openai;
 pub mod types;
 
 use std::pin::Pin;
