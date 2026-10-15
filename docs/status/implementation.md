@@ -16,14 +16,14 @@ Rust 1.99.0 is installed. Apple SDKs and Mac hardware are unavailable locally; G
 | --- | --- | --- | --- |
 | [#1](https://github.com/izyuumi/everything/issues/1) | Bootstrap Rust workspace and CI | None | Merged (#33) |
 | [#2](https://github.com/izyuumi/everything/issues/2) | Define versioned domain and event contracts | None | Merged (#34) |
-| [#3](https://github.com/izyuumi/everything/issues/3) | Implement SQLite storage and migrations | None | Merged (#37) |
+| [#3](https://github.com/izyuumi/everything/issues/3) | Implement SQLite storage and migrations | None | Read-page guard corrected; follow-up validation |
 | [#4](https://github.com/izyuumi/everything/issues/4) | Implement model-neutral provider types | None | Merged (#35) |
 | [#5](https://github.com/izyuumi/everything/issues/5) | Define Tool trait, registry, and argument validation | None | Merged (#36) |
 | [#6](https://github.com/izyuumi/everything/issues/6) | Implement Markdown wiki parser and FTS5 index | None | Merged (#38) |
 | [#7](https://github.com/izyuumi/everything/issues/7) | Define relay protocol and crypto test vectors | None | Merged (#39) |
 | [#8](https://github.com/izyuumi/everything/issues/8) | Implement Anthropic native Messages adapter | #4 | Merged (#40); live API unverified |
 | [#9](https://github.com/izyuumi/everything/issues/9) | Implement OpenAI native Responses adapter | #4 | Implemented, PR #41 validation |
-| [#10](https://github.com/izyuumi/everything/issues/10) | Build persistent CLI conversation loop | #2, #3, #4, #8 | Atomic checkpoint prerequisite in integration |
+| [#10](https://github.com/izyuumi/everything/issues/10) | Build persistent CLI conversation loop | #2, #3, #4, #8 | Atomic checkpoint and coherent snapshots implemented; integration pending |
 | [#11](https://github.com/izyuumi/everything/issues/11) | Implement permission policy and persistent grants | #2, #3, #5 | Implemented, reviewed; integration pending |
 | [#12](https://github.com/izyuumi/everything/issues/12) | Implement local EmbeddingGemma 2 inference spike | #31 | Blocked on #31 integration |
 | [#13](https://github.com/izyuumi/everything/issues/13) | Implement E2EE relay transport server | #7 | In progress |
