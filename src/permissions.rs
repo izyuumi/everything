@@ -45,13 +45,7 @@ pub enum PermissionError {
     GrantNotFound(String),
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ExecutionMode {
-    ReadOnly,
-    TrustedWorkspace,
-    FullHost,
-}
+pub use crate::protocol::ExecutionMode;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExecutionAuthority {
