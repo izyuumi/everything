@@ -413,12 +413,13 @@ impl Embedder for EmbeddingGemma2 {
         .map_err(|error| native(error.into()))?;
         let attention_mask = Tensor::from_array(([1, tokens.len()], vec![1_i64; tokens.len()]))
             .map_err(|error| native(error.into()))?;
-        let image_features = Tensor::from_array(([0, 512], Vec::<f32>::new()))
-            .map_err(|error| native(error.into()))?;
-        let video_features = Tensor::from_array(([0, 512], Vec::<f32>::new()))
-            .map_err(|error| native(error.into()))?;
-        let audio_features = Tensor::from_array(([0, 512], Vec::<f32>::new()))
-            .map_err(|error| native(error.into()))?;
+        let allocator = ort::memory::Allocator::default();
+        let image_features =
+            Tensor::<f32>::new(&allocator, [0_usize, 512]).map_err(|error| native(error.into()))?;
+        let video_features =
+            Tensor::<f32>::new(&allocator, [0_usize, 512]).map_err(|error| native(error.into()))?;
+        let audio_features =
+            Tensor::<f32>::new(&allocator, [0_usize, 512]).map_err(|error| native(error.into()))?;
         let options = RunOptions::new().map_err(|error| native(error.into()))?;
         let mut session = self
             .inner
