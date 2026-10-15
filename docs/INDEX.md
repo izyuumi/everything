@@ -12,7 +12,7 @@ Read [AGENTS.md](../AGENTS.md), then [implementation status](status/implementati
 
 ## Development
 
-[Setup](development/setup.md) · [CLI](development/cli.md) · [Conventions](development/conventions.md) · [Workflows](development/workflows.md) · [Validation](development/validation.md)
+[Setup](development/setup.md) · [CLI](development/cli.md) · [Conventions](development/conventions.md) · [Workflows](development/workflows.md) · [Backlog synchronization](development/backlog-sync.md) · [Validation](development/validation.md)
 
 ## Decisions
 
