@@ -101,6 +101,8 @@ pub enum PauseReason {
     ReconciliationRequired { operation_id: String },
     BrokerRejected { operation_id: String },
     InvalidModelResponse,
+    WaitingForEvents { wait_id: CommandId },
+    ChildOutcomeUnknown { child_task_id: TaskId },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -237,6 +239,10 @@ enum CallPhase {
 }
 
 impl NativeCheckpoint {
+    pub(super) fn has_turn(&self) -> bool {
+        self.turn.is_some()
+    }
+
     pub(super) fn status(&self) -> LoopStatus {
         self.turn
             .as_ref()
@@ -267,12 +273,22 @@ impl NativeCheckpoint {
             definition.validate()?;
         }
         if let Some(turn) = &self.turn {
+            checkpoint.inputs.validate_task(turn.definition.task_id)?;
             let pending = checkpoint
                 .pending
                 .as_ref()
                 .ok_or(AgentError::InvalidData("native turn has no command"))?;
             turn.definition.limits.validate()?;
             ContextBuilder::new(turn.definition.budget.clone())?;
+            if let LoopStatus::Paused {
+                reason: PauseReason::WaitingForEvents { wait_id },
+            } = &turn.status
+                && (checkpoint.inputs.wait_id() != Some(*wait_id) || turn.round.is_some())
+            {
+                return Err(AgentError::InvalidData(
+                    "native child wait does not match its inbox",
+                ));
+            }
             if turn.command_id != pending.command.command_id
                 || definition_digest(&turn.definition)? != turn.definition_digest
                 || turn.deadline_ms
@@ -419,7 +435,9 @@ impl Agent {
                 Arc::clone(&admission),
             )
             .await?;
-        } else if conversation.checkpoint.native.is_some() {
+        } else if conversation.checkpoint.native.is_some()
+            || conversation.checkpoint.inputs.has_pending()
+        {
             return Err(AgentError::NativeSetupRequired);
         }
         let agent = self.clone();
@@ -431,6 +449,9 @@ impl Agent {
             loop {
                 if child.is_cancelled() { Err(AgentError::Cancelled)?; }
                 if let Some(setup) = &setup {
+                    if let Some(reason) = agent.consume_native_inputs(&mut conversation, Arc::clone(&admission)).await? {
+                        yield TurnEvent::Paused { reason }; break;
+                    }
                     let status = native(&conversation)?.turn.as_ref().ok_or(AgentError::NoPendingTurn)?.status.clone();
                     match status {
                         LoopStatus::ProviderInFlight { .. } if setup.provider_resume != ProviderResume::RetryUncertain => {
@@ -488,7 +509,7 @@ impl Agent {
                     turn.attempts += 1;
                     turn.charged_tokens = turn.charged_tokens.checked_add(reservation(&built)).ok_or(AgentError::ResourceLimit("token accounting"))?;
                     turn.status = LoopStatus::ProviderInFlight { attempt_id };
-                    agent.save_native(&mut conversation, checkpoint, Vec::new(), Arc::clone(&admission)).await?;
+                    if !agent.save_native(&mut conversation, checkpoint, Vec::new(), Arc::clone(&admission)).await? { continue; }
                     yield TurnEvent::ContextBuilt { usage: built.usage.clone(), citations: built.citations.clone(), omitted_memory: built.omitted_memory.clone(), continuation: built.continuation.clone() };
                     yield TurnEvent::ModelAttemptStarted { attempt_id };
                     Prepared::Context { built: Box::new(built), request }
@@ -909,32 +930,155 @@ impl Agent {
     async fn save_native(
         &self,
         conversation: &mut Conversation,
-        mut checkpoint: Checkpoint,
+        checkpoint: Checkpoint,
         payloads: Vec<ConversationEvent>,
         admission: Admission,
+    ) -> Result<bool, AgentError> {
+        self.save_native_events(
+            conversation,
+            checkpoint,
+            payloads
+                .into_iter()
+                .map(|payload| (None, payload))
+                .collect(),
+            admission,
+        )
+        .await
+    }
+
+    async fn refresh_native_controls(
+        &self,
+        conversation: &mut Conversation,
+        admission: Admission,
     ) -> Result<(), AgentError> {
+        let write = self.write_gate(conversation.info.id)?.lock_owned().await;
         let owner = self.clone();
-        let id = conversation.info.id;
-        let command = checkpoint
-            .pending
-            .as_ref()
-            .map(|pending| pending.command.command_id)
-            .or_else(|| {
-                checkpoint
-                    .last_turn
-                    .as_ref()
-                    .map(|summary| summary.command_id)
-            })
-            .ok_or(AgentError::NoPendingTurn)?;
-        let expected_sequence = conversation.info.last_sequence;
-        let expected_revision = conversation.info.checkpoint_revision;
-        let (checkpoint, head, revision, messages) = blocking(move || {
+        let captured = conversation.clone();
+        *conversation = blocking(move || {
+            let _write = write;
             let _admission = admission;
-            let mut sequence = expected_sequence;
+            let current = load_conversation(&owner.store, captured.info.id)?;
+            let mut proposed = captured.checkpoint.clone();
+            steering::merge_controls(&captured, &current, &mut proposed)?;
+            Ok(current)
+        })
+        .await?;
+        Ok(())
+    }
+
+    async fn consume_native_inputs(
+        &self,
+        conversation: &mut Conversation,
+        admission: Admission,
+    ) -> Result<Option<PauseReason>, AgentError> {
+        self.refresh_native_controls(conversation, Arc::clone(&admission))
+            .await?;
+        let status = native(conversation)?.status();
+        if !matches!(
+            status,
+            LoopStatus::Ready
+                | LoopStatus::Paused {
+                    reason: PauseReason::WaitingForEvents { .. }
+                }
+        ) {
+            return Ok(None);
+        }
+        if native(conversation)?
+            .turn
+            .as_ref()
+            .is_some_and(|turn| turn.round.is_some())
+        {
+            return Err(AgentError::InvalidData(
+                "task inputs cannot split an unresolved tool round",
+            ));
+        }
+        if !conversation.checkpoint.inputs.has_pending() {
+            return Ok(match status {
+                LoopStatus::Paused {
+                    reason: PauseReason::WaitingForEvents { wait_id },
+                } => Some(PauseReason::WaitingForEvents { wait_id }),
+                _ => None,
+            });
+        }
+        let mut checkpoint = conversation.checkpoint.clone();
+        let consumed = checkpoint.inputs.consume()?;
+        let reason = consumed
+            .unknown_child
+            .map(|child_task_id| PauseReason::ChildOutcomeUnknown { child_task_id })
+            .or_else(|| {
+                consumed
+                    .wait_id
+                    .map(|wait_id| PauseReason::WaitingForEvents { wait_id })
+            });
+        turn_mut(&mut checkpoint)?.status = reason
+            .clone()
+            .map_or(LoopStatus::Ready, |reason| LoopStatus::Paused { reason });
+        self.save_native_events(conversation, checkpoint, consumed.events, admission)
+            .await?;
+        Ok(reason)
+    }
+
+    async fn save_native_events(
+        &self,
+        conversation: &mut Conversation,
+        mut checkpoint: Checkpoint,
+        payloads: Vec<(Option<CommandId>, ConversationEvent)>,
+        admission: Admission,
+    ) -> Result<bool, AgentError> {
+        let write = self.write_gate(conversation.info.id)?.lock_owned().await;
+        let owner = self.clone();
+        let captured = conversation.clone();
+        let (saved, committed) = blocking(move || {
+            let _admission = admission;
+            let _write = write;
+            let mut current = load_conversation(&owner.store, captured.info.id)?;
+            steering::merge_controls(&captured, &current, &mut checkpoint)?;
+            let proposed_status = checkpoint.native.as_ref().map(NativeCheckpoint::status);
+            if checkpoint.inputs.has_pending()
+                && matches!(proposed_status, Some(LoopStatus::ProviderInFlight { .. }))
+                && matches!(
+                    captured
+                        .checkpoint
+                        .native
+                        .as_ref()
+                        .map(NativeCheckpoint::status),
+                    Some(LoopStatus::Ready)
+                )
+            {
+                return Ok((current, false));
+            }
+            if matches!(proposed_status, Some(LoopStatus::Completed))
+                && checkpoint.pending.is_some()
+            {
+                let native = checkpoint
+                    .native
+                    .as_mut()
+                    .ok_or(AgentError::NativeSetupRequired)?;
+                let turn = native.turn.as_mut().ok_or(AgentError::NoPendingTurn)?;
+                if checkpoint.inputs.has_pending() {
+                    turn.status = LoopStatus::Ready;
+                } else {
+                    native.last_run = Some(run_info(turn));
+                    native.turn = None;
+                    checkpoint.pending = None;
+                }
+            }
+            let command = checkpoint
+                .pending
+                .as_ref()
+                .map(|pending| pending.command.command_id)
+                .or_else(|| {
+                    checkpoint
+                        .last_turn
+                        .as_ref()
+                        .map(|summary| summary.command_id)
+                })
+                .ok_or(AgentError::NoPendingTurn)?;
+            let mut sequence = current.info.last_sequence;
+            let expected_revision = current.info.checkpoint_revision;
             let mut rows = Vec::new();
-            let mut messages = Vec::new();
             let now = UnixMillis::now()?;
-            for payload in payloads {
+            for (causation, payload) in payloads {
                 sequence = next_sequence(sequence)?;
                 if let ConversationEvent::MessageAppended { .. } = &payload {
                     checkpoint.message_head = sequence;
@@ -943,11 +1087,17 @@ impl Agent {
                         .checked_add(1)
                         .ok_or(AgentError::ResourceLimit("message count"))?;
                 }
-                let row = event_input(id, sequence, command, now, payload)?;
+                let row = event_input(
+                    current.info.id,
+                    sequence,
+                    causation.unwrap_or(command),
+                    now,
+                    payload,
+                )?;
                 let event: EventEnvelope = serde_json::from_value(row.payload.clone())
                     .map_err(|_| AgentError::InvalidData("new event encoding changed"))?;
                 if let ConversationEvent::MessageAppended { message } = event.payload {
-                    messages.push(RecordedMessage {
+                    current.messages.push(RecordedMessage {
                         event_id: event.event_id,
                         sequence: event.sequence,
                         causation_id: event.causation_id,
@@ -965,8 +1115,8 @@ impl Agent {
                 owner
                     .store
                     .checkpoint_conversation_state(
-                        &id.to_string(),
-                        expected_sequence,
+                        &current.info.id.to_string(),
+                        current.info.last_sequence,
                         &journal_command,
                         &update,
                     )?
@@ -974,9 +1124,9 @@ impl Agent {
             } else {
                 owner.store.append_with_state(
                     &AppendRequest {
-                        conversation_id: id.to_string(),
+                        conversation_id: current.info.id.to_string(),
                         command_id: journal_command,
-                        expected_sequence,
+                        expected_sequence: current.info.last_sequence,
                         events: rows,
                     },
                     &update,
@@ -985,20 +1135,20 @@ impl Agent {
                     .checked_add(1)
                     .ok_or(AgentError::ResourceLimit("checkpoint revision"))?
             };
-            Ok((checkpoint, sequence, revision, messages))
+            current.info.last_sequence = sequence;
+            current.info.checkpoint_revision = revision;
+            current.info.message_count = checkpoint.message_count;
+            current.info.pending_command_id = checkpoint
+                .pending
+                .as_ref()
+                .map(|pending| pending.command.command_id);
+            current.info.native_status = checkpoint.native.as_ref().map(NativeCheckpoint::status);
+            current.checkpoint = checkpoint;
+            Ok((current, true))
         })
         .await?;
-        conversation.info.last_sequence = head;
-        conversation.info.checkpoint_revision = revision;
-        conversation.info.message_count = checkpoint.message_count;
-        conversation.info.pending_command_id = checkpoint
-            .pending
-            .as_ref()
-            .map(|pending| pending.command.command_id);
-        conversation.info.native_status = checkpoint.native.as_ref().map(NativeCheckpoint::status);
-        conversation.messages.extend(messages);
-        conversation.checkpoint = checkpoint;
-        Ok(())
+        *conversation = saved;
+        Ok(committed)
     }
 }
 
@@ -1084,9 +1234,6 @@ impl Agent {
             turn.tool_calls += count_u32;
             if calls.is_empty() {
                 turn.status = LoopStatus::Completed;
-                native.last_run = Some(run_info(turn));
-                native.turn = None;
-                checkpoint.pending = None;
             } else {
                 turn.round = Some(Round { assistant_message_id: message.id, calls });
                 turn.status = if turn.charged_tokens > turn.definition.limits.max_charged_tokens {
@@ -1095,13 +1242,18 @@ impl Agent {
             }
             checkpoint.last_turn = Some(summary);
             checkpoint.continuation = response.continuation;
-            if let Some(run) = &native.last_run
-                && checkpoint.pending.is_none() { events.push(TurnEvent::RunCompleted { run: run.clone() }); }
             Ok((captured, checkpoint, payloads, events))
         }).await?;
         conversation = captured;
         self.save_native(&mut conversation, checkpoint, payloads, admission)
             .await?;
+        let mut events = events;
+        if conversation.checkpoint.pending.is_none() {
+            let run = conversation
+                .native_run()
+                .ok_or(AgentError::NativeSetupRequired)?;
+            events.push(TurnEvent::RunCompleted { run });
+        }
         Ok((conversation, events))
     }
 
