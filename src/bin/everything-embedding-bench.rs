@@ -194,7 +194,7 @@ struct RuntimeReport {
 struct ModelReport {
     model: String,
     revision: String,
-    source_revision: &'static str,
+    source_reference_revision: &'static str,
     onnx_revision: &'static str,
     artifact_fingerprint: String,
     load_ms: f64,
@@ -366,7 +366,7 @@ fn measure(
     let model_report = ModelReport {
         model: model.profile().spec().model().to_owned(),
         revision: model.profile().spec().revision().to_owned(),
-        source_revision: SOURCE_MODEL_REVISION,
+        source_reference_revision: SOURCE_MODEL_REVISION,
         onnx_revision: ONNX_MODEL_REVISION,
         artifact_fingerprint: model.artifact_fingerprint().to_owned(),
         load_ms: milliseconds(load_started.elapsed()),

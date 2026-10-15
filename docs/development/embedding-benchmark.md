@@ -25,7 +25,7 @@ Ctrl-C or the overall deadline cancels the backend token, waits for worker clean
 
 ## Report semantics
 
-The versioned JSON report records the public input corpus, runtime-library digest and information, pinned source/export revisions, artifact and dimension-specific profile fingerprints, configuration, operating system and architecture, initialization and model-load times, and elapsed benchmark time. The operating-system file cache is uncontrolled. A new process creates a fresh model session but does not establish a cold disk-cache measurement.
+The versioned JSON report records the public input corpus, runtime-library digest and information, the declared upstream source reference and pinned ONNX export revision, artifact and dimension-specific profile fingerprints, configuration, operating system and architecture, initialization and model-load times, and elapsed benchmark time. The operating-system file cache is uncontrolled. A new process creates a fresh model session but does not establish a cold disk-cache measurement.
 
 Each dimension records every measured query/document latency, finiteness observation, vector dimension, and f64-accumulated L2 norm. Profile compatibility, shape, finite values, and declared normalization are validated through the existing embedding contract. Query and document latency summaries include minimum, mean, median, nearest-rank p95, and maximum. Warmup inference is timed separately and excluded from measured samples. With the defaults, each dimension has 12 query and 24 document samples; these are small observational samples rather than a statistically powered performance study.
 
@@ -66,6 +66,27 @@ The macOS `maximum resident set size` measurement is in bytes; GNU time's Linux 
 
 No Apple hardware or Apple runtime measurements are available from the Linux development environment. A Linux result must not be presented as a macOS RAM or latency result.
 
+## Observed Linux run
+
+On 2026-10-15, a release build completed the full default public workload on Linux x86_64 with an AMD EPYC 9V74 processor. The environment exposed five logical processors with a four-CPU cgroup quota. Inference used two threads, 2048 tokens, three repetitions, one query/document warmup pair per dimension, and a 300-second overall deadline. Other repository work shared the machine; CPU contention and the operating-system file cache were uncontrolled. These measurements describe this run and do not establish dedicated-machine performance.
+
+The process performed 144 measured inferences and eight warmup inferences. ONNX Runtime initialization took 258.193 ms, model loading took 10,690.221 ms, and the JSON report covered 121,384.318 ms. An independent Python standard-library `subprocess`/`resource.getrusage(RUSAGE_CHILDREN)` measurement of the single executable observed 122.689 seconds of wall time, 50.906 seconds of user CPU time, and 0.881 seconds of system CPU time. Python was only the external measurement wrapper; the executable performed all tokenization and inference in Rust and ONNX Runtime.
+
+| Dimensions | Query median / p95 (ms) | Document median / p95 (ms) | Maximum L2 norm error |
+| --- | --- | --- | --- |
+| 128 | 374.167 / 755.996 | 707.764 / 1187.810 | 1.890e-8 |
+| 256 | 408.333 / 674.947 | 718.896 / 1058.230 | 1.140e-8 |
+| 512 | 516.014 / 967.975 | 1026.841 / 1400.151 | 9.326e-9 |
+| 768 | 484.571 / 721.974 | 919.962 / 1130.379 | 2.420e-8 |
+
+All measured vectors were finite. Across every dimension and repetition, precision@1, recall@3, and reciprocal rank were 1.0; precision@3 was 2/3. This result applies only to the eight-document authored corpus above. Each dimension had 12 measured queries and 24 measured documents.
+
+The internal Linux peak was 709,427,200 bytes, approximately 676.56 MiB. The independent child-process peak was 692,412 KiB, approximately 676.18 MiB. Linux accounting interfaces can differ slightly; neither figure is an Apple memory observation. `/usr/bin/time` was unavailable in this environment, so the independent observation used `getrusage` instead.
+
+The artifact fingerprint was `b77a8268c326f5b88a9d6fd6d0bcc29317cd27001ca1bf27864405421c816449`, the ONNX export revision was `daa72c51243991dfcaf9f9137d2c573d8f7790c0`, and the ONNX Runtime 1.31.0 library SHA-256 was `21901b1b02233484b80888c16f4f5473742f796bf5528d5d0c4073dbe9802001`. The upstream source reference is metadata rather than certification that the third-party ONNX conversion used that exact source commit.
+
+The release run exited successfully with empty stderr. A separate invocation with a one-second overall deadline exited unsuccessfully after 1.074 seconds, reported the deadline on stderr, and emitted no partial stdout. This focused observation does not establish cancellation behavior at every stage of native session loading or inference.
+
 ## Validation
 
 Validate feature wiring and the benchmark with formatting, feature-enabled compilation, strict Clippy, and a release build. These checks do not require a model load:
@@ -76,5 +97,7 @@ cargo check --workspace --all-targets --features local-embeddings --locked
 cargo clippy --workspace --all-targets --features local-embeddings --locked -- -D warnings
 cargo build --workspace --release --features local-embeddings --locked
 ```
+
+Formatting, feature-enabled checking, strict Clippy, and the release build passed locally for the implementation used in the observed run. macOS compilation, runtime-library compatibility, native RSS, and latency require their own supported-platform validation.
 
 Automated inference, numerical-parity, cancellation, percentile-calculation, and ranking assertions remain deferred in [#32](https://github.com/izyuumi/everything/issues/32). No tests, mock embedders, fixtures, or benchmark framework are introduced. The binary and its fixed public measurement workload are the runnable benchmark itself.
