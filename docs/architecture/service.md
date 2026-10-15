@@ -21,7 +21,7 @@ Program arguments are exactly the executable followed by `--state-dir`, the stat
 - `install(cancellation)` writes the plist through an exclusive private temporary file and atomically renames it. Existing targets must be owned, single-link regular files. It does not stop or replace a running host.
 - `set_enabled(enabled, cancellation)` invokes `launchctl enable` or `disable` for the current user's service target. Disabling controls future launch eligibility; stop a current job separately when desired.
 - `start(cancellation)` is idempotent for a running job, bootstraps an unloaded installed job, and kickstarts it without force-killing an existing process.
-- `stop(cancellation)` boots out the fixed user service target and is idempotent for an unloaded job; unsafe on-disk configuration cannot prevent stopping that target. The installed plist remains available for subsequent login or explicit start.
+- `stop(cancellation)` boots out the fixed user service target and is idempotent for an unloaded job; unsafe on-disk configuration cannot prevent stopping that target. Missing-job exit codes 3 and 113 are treated as already stopped; other failures propagate. The installed plist remains available for subsequent login or explicit start.
 - `status(cancellation)` inspects the installed file and runs `launchctl print`. A documented missing-service exit code yields an unloaded status; other launchctl failures remain errors.
 
 Operations target `gui/<current uid>/com.everything.host` and require the user's launchd login domain. There is no root installation, system LaunchDaemon, or privileged helper. A CLI can manage the user agent headlessly within that login session. Another graphical application is never required to stay open.

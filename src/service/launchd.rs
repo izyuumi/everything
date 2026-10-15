@@ -156,7 +156,7 @@ impl LaunchdService {
         {
             let output =
                 run_launchctl(vec!["bootout".to_owned(), service_target()], cancellation).await?;
-            if output.status.success() || output.status.code() == Some(113) {
+            if output.status.success() || matches!(output.status.code(), Some(3 | 113)) {
                 Ok(())
             } else {
                 Err(ServiceError::Launchctl {
