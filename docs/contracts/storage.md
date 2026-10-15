@@ -4,7 +4,7 @@
 
 ## Initialization and migrations
 
-`Store::open(path)` opens or creates a database at an existing parent directory. Startup enables foreign keys, WAL, full synchronous durability, and a five-second busy timeout before applying pending versioned migrations in one immediate transaction. Fresh databases apply `0001_initial.sql` and `0002_conversation_state.sql`; version-one databases apply only the latter. The current schema version is SQLite `user_version = 2`; newer databases are rejected. `open_in_memory` uses the same migration and constraints, with SQLite's in-memory journal mode because WAL is unavailable for memory databases. There is no backup or restore API.
+`Store::open(path)` opens or creates a database at an existing parent directory. Startup enables foreign keys, WAL, full synchronous durability, and a five-second busy timeout before applying pending versioned migrations in one immediate transaction. Fresh databases apply migrations through `0003_tool_cleanup.sql`; existing databases apply only their remaining migrations. The current schema version is SQLite `user_version = 3`; newer databases are rejected. `open_in_memory` uses the same migration and constraints, with SQLite's in-memory journal mode because WAL is unavailable for memory databases. There is no backup or restore API.
 
 The schema contains conversations, ordered events, command deduplication records, tasks, tool calls, permission grants, devices, and encrypted outbox envelopes. All tables use SQLite STRICT typing. Foreign keys reject dangling references. Parent tasks must exist and may belong to another conversation so child agents can isolate their histories. Associated tool calls must belong to their task's conversation. The scheduler owns parent authority inheritance and child lifecycle enforcement. IDs are nonempty strings of at most 256 bytes without control characters; domain UUID interpretation belongs to `protocol`. JSON payloads are opaque to storage and limited to 1 MiB each. All timestamps are nonnegative Unix milliseconds. Callers own access control and semantic validation of opaque data.
 
@@ -49,6 +49,14 @@ Allowed task transitions are queued → running/failed/cancelled, running → qu
 `tool_call` and `tool_calls` read journal entries. `transition_tool_call` atomically compares state, rejects backward timestamps, and persists terminal results. Pending → running/failed/cancelled/denied and running → succeeded/failed/cancelled/unknown are allowed. Running requires no result; every terminal state requires a JSON result. Failed and denied outcomes remain queryable. `unknown` is terminal and prevents automatic retry after an indeterminate external effect.
 
 `mark_running_tool_calls_unknown(result, timestamp)` is an explicit startup recovery operation. It marks every in-flight operation unknown with a supplied diagnostic result and preserves monotonic row timestamps. Invoke it only before starting execution workers, never concurrently with live operations. It does not execute or repeat tools.
+
+## Unknown-outcome cleanup audit
+
+`tool_calls_after_id(state, after_id, limit)` provides keyset pagination in ascending operation ID order with the existing row-count and aggregate-byte bounds. Startup quarantine can inspect every unknown operation without treating a full first page as the end of the journal.
+
+`tool_cleanup_status(operation_id)` requires an existing unknown tool call and coherently returns its immutable result digest plus an optional `ToolCleanupAttestation`. The digest is SHA-256 over namespace bytes `everything.tool-call.unknown-result.v1` followed by NUL, then byte one and the exact persisted result JSON bytes. A missing SQL result uses byte zero instead. This preserves identity for unknown legacy formats without rewriting or interpreting them.
+
+`attest_tool_cleanup(&ToolCleanupAttestation { operation_id, original_result_digest, operator, note, attested_at })` checks unknown state, current result digest, and an attestation time at or after the journal's update time in one immediate transaction. The separate audit row is immutable: an exact retry returns the original row, while a changed digest or attestation returns `ToolCleanupConflict`. It never modifies the tool result, reopens the operation, or authorizes retry. The broker exposes this only through a host-owner cleanup review API, which may clear a cleanup quarantine while preserving uncertainty about the original effect. Operator and note fields are bounded and cannot contain control characters. Disposable manual inspection verified keyset page order, initial digest lookup, immutable attestation creation, exact replay, changed-note rejection, and unchanged unknown journal contents.
 
 ## Permissions, devices, and delivery
 
