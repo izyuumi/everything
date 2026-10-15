@@ -64,7 +64,7 @@ On macOS, collect native process memory with the platform command:
 
 The macOS `maximum resident set size` measurement is in bytes; GNU time's Linux maximum RSS is in KiB. Retain the raw platform output alongside the JSON and record the Mac model, memory capacity, architecture, runtime library, thread count, power mode, and competing workload. JSON on macOS marks its internal RSS observation unavailable and points to this external measurement. A measurement includes one process and one shared model session, rather than four simultaneous model copies.
 
-No Apple hardware or Apple runtime measurements are available from the Linux development environment. A Linux result must not be presented as a macOS RAM or latency result.
+The Linux development environment cannot measure native macOS performance. The separately observed GitHub macOS run below provides supported-platform measurements.
 
 ## Observed Linux run
 
@@ -87,6 +87,21 @@ The artifact fingerprint was `b77a8268c326f5b88a9d6fd6d0bcc29317cd27001ca1bf2786
 
 The release run exited successfully with empty stderr. A separate invocation with a one-second overall deadline exited unsuccessfully after 1.074 seconds, reported the deadline on stderr, and emitted no partial stdout. This focused observation does not establish cancellation behavior at every stage of native session loading or inference.
 
+## Observed macOS run
+
+On 2026-10-15, [GitHub Actions run 38769609299](https://github.com/izyuumi/everything/actions/runs/38769609299) completed real inference at commit `4e212b1dfc7e7507a47e200090e1f2663aed4c97` on a macOS aarch64 hosted runner. Hardware reported `VirtualMac2,1`, 15,032,385,536 bytes of memory and five CPUs. This is a virtual hosted Mac measurement; physical hardware, power mode and competing workloads were not controlled. Configuration was two threads, 2048 tokens, three repetitions, one warmup pair per dimension and a 600-second overall deadline.
+
+The process completed 144 measured inferences and eight warmup inferences. Runtime initialization took 127.112 ms, model loading took 5,039.464 ms and elapsed benchmark time was 19,067.901 ms. Native `/usr/bin/time -l` reported maximum resident size 990,969,856 bytes (945.0625 MiB). Runtime-library SHA-256 was `ff52828ce7c6dd1aea99a5e9f5da9e2786e3d03e467fbf8b6893a4b624334920`; the model artifact fingerprint and ONNX revision matched the Linux run.
+
+| Dimensions | Query median / p95 (ms) | Document median / p95 (ms) | Maximum L2 norm error |
+| --- | --- | --- | --- |
+| 128 | 58.742 / 98.472 | 120.177 / 135.527 | 1.476e-08 |
+| 256 | 53.512 / 71.791 | 119.543 / 145.838 | 1.007e-08 |
+| 512 | 49.345 / 65.913 | 104.160 / 127.556 | 9.726e-09 |
+| 768 | 50.559 / 61.182 | 98.972 / 117.695 | 2.968e-08 |
+
+All vectors were finite. Each dimension had precision@1, recall@3 and reciprocal rank 1.0, and precision@3 2/3, on the same tiny authored corpus. These are limited observations rather than broad retrieval accuracy or controlled cross-platform comparisons. The workflow publishes its raw report/process output as an artifact and a summary through a GitHub check run. The development proxy could not download the Azure-backed artifact, so the coordinator inspected the GitHub check-run measurements directly.
+
 ## Validation
 
 Validate feature wiring and the benchmark with formatting, feature-enabled compilation, strict Clippy, and a release build. These checks do not require a model load:
@@ -98,6 +113,6 @@ cargo clippy --workspace --all-targets --features local-embeddings --locked -- -
 cargo build --workspace --release --features local-embeddings --locked
 ```
 
-Formatting, feature-enabled checking, strict Clippy, and the release build passed locally for the implementation used in the observed run. macOS compilation, runtime-library compatibility, native RSS, and latency require their own supported-platform validation.
+Formatting, feature-enabled checking, strict Clippy, and the release build passed locally for the implementation used in the observed run. Linux/macOS optional-feature builds and the native macOS benchmark also passed in GitHub Actions. Production Apple client behavior and broad performance remain outside these observations.
 
 Automated inference, numerical-parity, cancellation, percentile-calculation, and ranking assertions remain deferred in [#32](https://github.com/izyuumi/everything/issues/32). No tests, mock embedders, fixtures, or benchmark framework are introduced. The binary and its fixed public measurement workload are the runnable benchmark itself.

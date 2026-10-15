@@ -1,8 +1,12 @@
+pub mod agent;
+pub mod context;
 pub mod crypto;
 pub mod memory;
 pub mod model;
 pub mod permissions;
 pub mod protocol;
 pub mod relay_protocol;
+pub mod service;
 pub mod storage;
 pub mod tools;
+pub mod transport;

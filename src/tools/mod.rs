@@ -1,3 +1,4 @@
+pub mod broker;
 mod registry;
 
 use std::path::{Path, PathBuf};
@@ -106,6 +107,8 @@ impl ToolExecutionContext {
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct ToolOutput {
     pub content: Value,
+    #[serde(default)]
+    pub is_error: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -141,6 +144,14 @@ pub enum ToolError {
     Cancelled { request_id: String },
     #[error("tool {name} failed: {message}")]
     Execution { name: String, message: String },
+    #[error("tool {name} failed without side effects: {message}")]
+    FailedWithoutSideEffects { name: String, message: String },
+    #[error("tool {name} has unknown effects: {message}")]
+    EffectsUnknown {
+        name: String,
+        message: String,
+        cleanup_completed: bool,
+    },
     #[error("tool validation worker failed: {message}")]
     ValidationWorker { message: String },
 }
