@@ -33,7 +33,7 @@ pub const SCHEDULE_CONTROL_NAMES: &[&str] = &[
 ];
 
 pub const MAX_CONTROL_REPLY_BYTES: usize = 1024 * 1024;
-const MAX_AGENT_REPLY_BYTES: usize = 65_536;
+const MAX_AGENT_REPLY_BYTES: usize = 28 * 1_024;
 const MAX_CONCURRENT: u32 = 4;
 const MAX_PAGE_SIZE: usize = 100;
 
@@ -416,7 +416,7 @@ impl ScheduleControls {
                         validate_draft(&job)?;
                         let old = required_job(repository, job.id)?;
                         check_revision(old.revision, expected_revision)?;
-                        scope.authorize(&old.definition.target, authorizer)?;
+                        scope.authorize_existing(&old.definition.target, authorizer)?;
                         scope.authorize(&job.definition.target, authorizer)?;
                         let next = next_run(&job, Some(&old), now, token)?;
                         PreparedMutation::Update(ScheduledJobEdit {
@@ -430,7 +430,7 @@ impl ScheduleControls {
                     } => {
                         let job = required_job(repository, job_id)?;
                         check_revision(job.revision, expected_revision)?;
-                        scope.authorize(&job.definition.target, authorizer)?;
+                        scope.authorize_existing(&job.definition.target, authorizer)?;
                         PreparedMutation::Disable {
                             job,
                             expected_revision,
@@ -442,7 +442,7 @@ impl ScheduleControls {
                     } => {
                         let job = required_job(repository, job_id)?;
                         check_revision(job.revision, expected_revision)?;
-                        scope.authorize(&job.definition.target, authorizer)?;
+                        scope.authorize_existing(&job.definition.target, authorizer)?;
                         PreparedMutation::Delete {
                             job_id,
                             expected_revision,
@@ -450,11 +450,12 @@ impl ScheduleControls {
                     }
                     ScheduleMutation::Run { claim } => {
                         let job = required_job(repository, claim.job_id)?;
-                        scope.authorize(&job.definition.target, authorizer)?;
                         if let Some(run) = repository.run(claim.occurrence_id)? {
-                            scope.authorize(&run.definition.target, authorizer)?;
+                            scope.authorize_existing(&job.definition.target, authorizer)?;
+                            scope.authorize_existing(&run.definition.target, authorizer)?;
                         } else {
                             check_revision(job.revision, claim.expected_revision)?;
+                            scope.authorize(&job.definition.target, authorizer)?;
                         }
                         PreparedMutation::Run(claim)
                     }
@@ -619,6 +620,17 @@ impl Scope {
             return Err(ControlError::Cancelled);
         }
         Ok(())
+    }
+
+    fn authorize_existing(
+        &self,
+        target: &ScheduledTarget,
+        authorizer: &Authorizer,
+    ) -> Result<(), ControlError> {
+        match self {
+            Self::Owner(_) => Ok(()),
+            Self::Agent(_) => self.authorize(target, authorizer),
+        }
     }
 
     fn authorize(

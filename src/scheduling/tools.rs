@@ -25,7 +25,7 @@ use super::{
 };
 
 const MAX_ARGUMENT_BYTES: usize = 65_536;
-const MAX_TOOL_REPLY_BYTES: usize = 65_536;
+const MAX_TOOL_REPLY_BYTES: usize = 28 * 1_024;
 
 pub struct ScheduleTools {
     binding: Mutex<Option<Binding>>,
