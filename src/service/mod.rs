@@ -1,3 +1,4 @@
+pub mod cli;
 mod launchd;
 #[cfg(unix)]
 pub(crate) mod state;
