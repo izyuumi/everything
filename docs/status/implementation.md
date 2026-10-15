@@ -30,10 +30,10 @@ Rust 1.99.0 is installed. Apple SDKs and Mac hardware are unavailable locally; G
 | [#14](https://github.com/izyuumi/everything/issues/14) | Implement Tool Broker execution journal | #3, #5, #11 | Implemented; native loop integration remains #23 |
 | [#15](https://github.com/izyuumi/everything/issues/15) | Implement shell and filesystem tools | #14 | In progress; disposable runtime checks and independent review |
 | [#16](https://github.com/izyuumi/everything/issues/16) | Implement context builder and compaction | #2, #3, #4, #6 | Merged (#46) |
-| [#17](https://github.com/izyuumi/everything/issues/17) | Implement offline permission-aware tool discovery | #5, #11, #16 | Integration work split per latest issue |
+| [#17](https://github.com/izyuumi/everything/issues/17) | Implement offline permission-aware tool discovery | #5, #11, #16 | Merged (#61); offline discovery |
 | [#18](https://github.com/izyuumi/everything/issues/18) | Implement native macOS background host service | #1, #2, #3 | Library merged (#48); CLI integration pending |
 | [#19](https://github.com/izyuumi/everything/issues/19) | Implement MCP client tool adapter | #5, #14 | In progress; official native SDK and stdio transport |
-| [#20](https://github.com/izyuumi/everything/issues/20) | Implement configurable System One classification | #5, #11, #16, #17 | Redirected after edited requirements |
+| [#20](https://github.com/izyuumi/everything/issues/20) | Implement configurable System One classification | #5, #11, #16, #17 | In progress; generic configurable adapter after merged #17 |
 | [#21](https://github.com/izyuumi/everything/issues/21) | Implement sqlite-vec hybrid retrieval and index switching | #6, #12, #31 | Backlog |
 | [#22](https://github.com/izyuumi/everything/issues/22) | Implement device pairing and client sync | #2, #3, #7, #13 | In progress |
 | [#23](https://github.com/izyuumi/everything/issues/23) | Implement multi-tool agent loop | #8, #9, #10, #14 | In progress; private model-attempt checkpoint prerequisite |

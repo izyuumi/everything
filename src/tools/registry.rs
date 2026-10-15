@@ -17,7 +17,7 @@ struct RegisteredTool {
     validator: Validator,
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct ToolRegistry {
     tools: BTreeMap<String, Arc<RegisteredTool>>,
 }
@@ -74,6 +74,10 @@ impl ToolRegistry {
 
     pub fn descriptor(&self, name: &str) -> Result<&ToolDescriptor, ToolError> {
         Ok(&self.get(name)?.descriptor)
+    }
+
+    pub fn descriptors(&self) -> impl Iterator<Item = &ToolDescriptor> {
+        self.tools.values().map(|entry| &entry.descriptor)
     }
 
     pub fn validate(&self, name: &str, arguments: &Value) -> Result<(), ToolError> {
