@@ -16,6 +16,8 @@ ToolRunSetup contains a scoped TaskToolBroker, the actual shared ToolRegistry, T
 
 The native checkpoint saves the definition and its digest. An active resume must preserve that definition, authority, task ID, registered definitions, and limits. `ToolRunSetup::resume(scoped_broker,registry,&conversation,policy)` reconstructs the saved context inputs; it still validates the current registry and authority before execution. `Conversation::native_run()` returns active or last completed NativeRunInfo, including command/task IDs, workspace, mode, allowed tool names, status, attempt/call counts, conservative charged tokens, reported usage, and deadline. Match its command ID before using prior-run metadata for a new command.
 
+Saved catalog and authority checks bind an active turn. A later accepted command starts with its newly selected permitted tools; it need not keep historical tools advertised. The raw historical messages and provider continuation are preserved.
+
 A legacy conversation with provider continuation cannot enter tool/context mode. Native history and opaque state must preserve their exact structure; a caller cannot reset them to overcome a pending tool round. Compaction is delegated to ContextBuilder, preserving raw history and required continuation rules.
 
 ## States and effects
