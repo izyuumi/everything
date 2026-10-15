@@ -332,8 +332,34 @@ impl HostService {
         }));
         let mut cleanup_changed = inner.receipts.subscribe();
         let mut calls_open = true;
+        let mut quiescence = None;
+        let mut quiescence_proved = false;
         loop {
-            if inner.workers_drained.load(Ordering::Acquire) {
+            if inner.workers_drained.load(Ordering::Acquire)
+                && !quiescence_proved
+                && quiescence.is_none()
+            {
+                let host = inner.clone();
+                quiescence = Some(tokio::spawn(async move {
+                    loop {
+                        let outcome = {
+                            let _recovery = host.recovery.lock().await;
+                            host.broker.recover_after_drain().await
+                        };
+                        match outcome {
+                            Ok(report) => return report,
+                            Err(BrokerError::RecoveryBusy) => tracing::warn!(
+                                "broker supervisors still own admissions; host retains state ownership"
+                            ),
+                            Err(_) => tracing::error!(
+                                "broker quiescence inspection failed; host retains state ownership"
+                            ),
+                        }
+                        tokio::time::sleep(Duration::from_secs(1)).await;
+                    }
+                }));
+            }
+            if quiescence_proved {
                 let _recovery = inner.recovery.lock().await;
                 let report = inner.broker.recovery_report().await;
                 let running = inner
@@ -350,6 +376,16 @@ impl HostService {
                 }
             }
             tokio::select! {
+                joined = async { quiescence.as_mut().ok_or(HostError::Worker)?.await.map_err(|_| HostError::Worker) }, if quiescence.is_some() => {
+                    quiescence.take();
+                    match joined {
+                        Ok(_) => quiescence_proved = true,
+                        Err(error) => {
+                            if result.is_ok() { result = Err(error); }
+                            tracing::error!("broker quiescence worker failed; state ownership retained");
+                        }
+                    }
+                }
                 joined = async { shutdown.as_mut().ok_or(HostError::Worker)?.await.map_err(|_| HostError::Worker)? }, if shutdown.is_some() => {
                     shutdown.take();
                     match joined {

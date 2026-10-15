@@ -240,6 +240,8 @@ impl HostInner {
                 Ok(OwnerOperationResult::ToolRecovery { report })
             }
             OwnerOperation::Credential { operation } => {
+                let _mutation = self.mutation.lock().await;
+                self.ensure_accepting()?;
                 self.credentials.apply(operation).await?;
                 Ok(OwnerOperationResult::Applied)
             }
