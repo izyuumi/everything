@@ -17,7 +17,7 @@ struct RegisteredTool {
     validator: Validator,
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct ToolRegistry {
     tools: BTreeMap<String, Arc<RegisteredTool>>,
 }
