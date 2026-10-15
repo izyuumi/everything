@@ -8,7 +8,7 @@ Read [AGENTS.md](../AGENTS.md), then [implementation status](status/implementati
 
 ## Contracts
 
-[Events](contracts/events.md) · [Agent kernel](contracts/agent.md) · [Scheduler](contracts/scheduler.md) · [Device sync](contracts/device-sync.md) · [Providers](contracts/providers.md) · [Tools](contracts/tools.md) · [MCP](contracts/mcp.md) · [Built-ins](contracts/builtin-tools.md) · [Discovery](contracts/selector.md) · [System One](contracts/system-one.md) · [Native credentials](contracts/credentials.md) · [Broker](contracts/broker.md) · [Storage](contracts/storage.md) · [Schedule storage](contracts/scheduling-storage.md) · [Host inbox](contracts/host-inbox.md) · [Owner IPC](contracts/owner-ipc.md) · [Wiki maintenance](contracts/consolidation.md) · [Embeddings](contracts/embeddings.md) · [Hybrid retrieval](contracts/hybrid.md) · [Local IPC](contracts/local-ipc.md) · [Context](contracts/context.md)
+[Events](contracts/events.md) · [Agent kernel](contracts/agent.md) · [Scheduler](contracts/scheduler.md) · [Steering inputs](contracts/steering.md) · [Device sync](contracts/device-sync.md) · [Providers](contracts/providers.md) · [Tools](contracts/tools.md) · [MCP](contracts/mcp.md) · [Built-ins](contracts/builtin-tools.md) · [Discovery](contracts/selector.md) · [System One](contracts/system-one.md) · [Native credentials](contracts/credentials.md) · [Broker](contracts/broker.md) · [Storage](contracts/storage.md) · [Schedule storage](contracts/scheduling-storage.md) · [Host inbox](contracts/host-inbox.md) · [Owner IPC](contracts/owner-ipc.md) · [Wiki maintenance](contracts/consolidation.md) · [Embeddings](contracts/embeddings.md) · [Hybrid retrieval](contracts/hybrid.md) · [Local IPC](contracts/local-ipc.md) · [Context](contracts/context.md)
 
 ## Development
 
@@ -16,4 +16,4 @@ Read [AGENTS.md](../AGENTS.md), then [implementation status](status/implementati
 
 ## Decisions
 
-[ADR-0001: Host authority and local-first boundaries](decisions/ADR-0001-host-authority.md) · [ADR-0002: Local EmbeddingGemma 2 ONNX](decisions/ADR-0002-local-embeddinggemma2-onnx.md) · [ADR-0003: Native MCP SDK](decisions/ADR-0003-native-mcp-sdk.md) · [ADR-0004: Scoped SQLite vector index](decisions/ADR-0004-scoped-sqlite-vector-index.md)
+[ADR-0001: Host authority and local-first boundaries](decisions/ADR-0001-host-authority.md) · [ADR-0002: Local EmbeddingGemma 2 ONNX](decisions/ADR-0002-local-embeddinggemma2-onnx.md) · [ADR-0003: Native MCP SDK](decisions/ADR-0003-native-mcp-sdk.md) · [ADR-0004: Scoped SQLite vector index](decisions/ADR-0004-scoped-sqlite-vector-index.md) · [ADR-0006: Steering checkpoints](decisions/ADR-0006-steering-checkpoints.md)

@@ -38,7 +38,7 @@ Rust 1.99.0 and the supported Rust 1.88.0 compiler are installed. Apple SDKs and
 | [#22](https://github.com/izyuumi/everything/issues/22) | Implement device pairing and client sync | #2, #3, #7, #13 | Reviewed local integration; real relay/restart/revocation passed; Actions billing blocks merge |
 | [#23](https://github.com/izyuumi/everything/issues/23) | Implement multi-tool agent loop | #8, #9, #10, #14 | Reviewed local integration; actual Rust 1.88 checks, strict Clippy, all-feature release and CLI recovery observations passed; Actions billing blocks merge |
 | [#24](https://github.com/izyuumi/everything/issues/24) | Implement task scheduler and concurrent subagents | #3, #14, #23 | Reviewed concurrent scheduler integrated locally; owner and combined Rust 1.88 checks, strict Clippy and release passed; actual failure-only concurrency/restart and uncertain-mutation quarantine observed; focused PR preparation |
-| [#25](https://github.com/izyuumi/everything/issues/25) | Implement steering and autonomous continuation | #23, #24 | Backlog |
+| [#25](https://github.com/izyuumi/everything/issues/25) | Implement steering and autonomous continuation | #23, #24 | Agent input primitive reviewed, integrated and manually checked locally; scheduler wait, child delivery and host steering composition in progress |
 | [#26](https://github.com/izyuumi/everything/issues/26) | Implement wiki consolidation and lint jobs | #6, #16 | Reviewed local integration; required GitHub checks blocked by account billing |
 | [#27](https://github.com/izyuumi/everything/issues/27) | Build optional SwiftUI menu bar client | #18, #25 | Backlog |
 | [#28](https://github.com/izyuumi/everything/issues/28) | Build native iOS E2EE chat client | #13, #22, #25 | Backlog |
@@ -46,7 +46,7 @@ Rust 1.99.0 and the supported Rust 1.88.0 compiler are installed. Apple SDKs and
 | [#30](https://github.com/izyuumi/everything/issues/30) | META: Dependency roadmap for parallel agent implementation | None | Backlog |
 | [#31](https://github.com/izyuumi/everything/issues/31) | Define generic embedding contract and index fingerprints | #1, #6 | Merged (#42) |
 | [#50](https://github.com/izyuumi/everything/issues/50) | Persist scheduled jobs and immutable run history | #2, #3, #10; migration order after #22/private checkpoints | Reviewed local integration; actual schema 3→6, claims/races/restart and full static/release validation passed; Actions billing blocks merge |
-| [#51](https://github.com/izyuumi/everything/issues/51) | Calculate timezone-aware occurrences and dispatch due work | #24, #50 | DST/clock/admission preparation complete; implementation waits for stable #24 |
+| [#51](https://github.com/izyuumi/everything/issues/51) | Calculate timezone-aware occurrences and dispatch due work | #24, #50 | Engine and durable first-attempt source implemented; calendar and actual native dispatch/restart walkthrough passed; final integration gate pending |
 | [#52](https://github.com/izyuumi/everything/issues/52) | Enforce isolated scheduled execution and run policies | #24, #25, #50, #51 | Backlog |
 | [#53](https://github.com/izyuumi/everything/issues/53) | Add schedule CLI and native tool controls | #5, #11, #50, #51, #52 | Backlog |
 | [#54](https://github.com/izyuumi/everything/issues/54) | Deliver schedule status and encrypted client notifications | #22, #27, #28, #52, #53 | Backlog |
