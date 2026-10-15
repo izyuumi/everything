@@ -4,11 +4,11 @@ Read [AGENTS.md](../AGENTS.md), then [implementation status](status/implementati
 
 ## Architecture
 
-[Overview](architecture/overview.md) · [Runtime](architecture/runtime.md) · [Agents](architecture/agents.md) · [Models](architecture/models.md) · [Tools](architecture/tools.md) · [Permissions](architecture/permissions.md) · [Context](architecture/context.md) · [Memory](architecture/memory.md) · [Transport](architecture/transport.md) · [Service](architecture/service.md) · [Security](architecture/security.md)
+[Overview](architecture/overview.md) · [Runtime](architecture/runtime.md) · [Agents](architecture/agents.md) · [Models](architecture/models.md) · [Tools](architecture/tools.md) · [Permissions](architecture/permissions.md) · [Context](architecture/context.md) · [Memory](architecture/memory.md) · [Transport](architecture/transport.md) · [Relay](architecture/relay.md) · [Service](architecture/service.md) · [Security](architecture/security.md)
 
 ## Contracts
 
-[Events](contracts/events.md) · [Providers](contracts/providers.md) · [Tools](contracts/tools.md) · [Storage](contracts/storage.md) · [Embeddings](contracts/embeddings.md) · [Local IPC](contracts/local-ipc.md)
+[Events](contracts/events.md) · [Providers](contracts/providers.md) · [Tools](contracts/tools.md) · [Storage](contracts/storage.md) · [Embeddings](contracts/embeddings.md) · [Local IPC](contracts/local-ipc.md) · [Context](contracts/context.md)
 
 ## Development
 
