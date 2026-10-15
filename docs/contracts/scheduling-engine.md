@@ -28,4 +28,12 @@ The engine uses Agent's actual exact-ID conversation and command acceptance, the
 
 The same isolated history is retained on restart. Provider configuration is the occurrence's immutable capture; the host factory resolves credentials for that destination. No automatic paid retry or owner approval is issued. Optional conversation result delivery and full run policies remain #52 work.
 
-Validation is pending the complete integration walkthrough. Automated calendar, admission, crash, clock, quota and concurrency coverage is deferred to #32.
+## Local validation
+
+Rust 1.88 formatting, workspace all-target checking, strict Clippy and release builds passed with default features and all features. These checks used the actual local prerequisite stack with schemas 4–7 and temporary coordinator-owned schema-8 registration; they do not establish a main merge or successful GitHub Actions checks.
+
+A disposable calendar driver exercised once and anchored intervals, checked overflow, leap day, POSIX Sunday aliases and day-of-month/day-of-week OR behavior, inclusive and fractional millisecond boundaries, New York gaps/folds, Lord Howe half-hour transitions, Troll two-hour transitions, Apia's date-line gap, and reverse latest selection within a second fold. Cancellation and impossible/out-of-range calendars produced explicit errors. One cancellation requested during a nonpreemptible library call completed after that call; the cooperative budget is not a hard interruption guarantee.
+
+A disposable driver used the actual Store, Agent, Scheduler, Tool Broker and native OpenAI adapter with a refused literal-loopback HTTP endpoint. It observed inactive startup, timed admission, immutable first-attempt task/conversation identity, conservative output allocation, absolute deadline preservation, engine restart and a clean full Agent/Store/Broker/Scheduler reopen preserving identities without another provider attempt, capacity diagnostics and recovery using the original reservation, terminal Unknown after uncertain native work, atomic missed-once and collapsed-interval handling, edit wakes, disabled idle behavior, recording timestamp rollback without claim-time/deadline extension, and SQLite schema/integrity checks. The native request failed locally; no successful inference was simulated or verified.
+
+Operating-system clock changes, forced process crashes at every admission boundary, complete retained-quota exhaustion, Apple runtime behavior, successful model inference and the later #52 retry/delivery policies remain unverified. Automated calendar, admission, crash, clock, quota and concurrency coverage is deferred to [#32](https://github.com/izyuumi/everything/issues/32).
