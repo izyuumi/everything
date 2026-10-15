@@ -1,6 +1,6 @@
 # Tool discovery
 
-Issues [#17](https://github.com/izyuumi/everything/issues/17) and [#20](https://github.com/izyuumi/everything/issues/20) describe one implementation in `src/selector.rs`. `ToolSelector` uses the actual registry descriptors and permission authorizer. It filters denied candidates before local keyword ranking or any optional external ranking. Names receive a larger keyword weight than descriptions. Ties use ascending tool names. An empty query browses permitted tools.
+Issue [#17](https://github.com/izyuumi/everything/issues/17) implements offline discovery in `src/selector.rs`. `ToolSelector` uses the actual registry descriptors and permission authorizer. It filters denied candidates before local keyword ranking or any optional external ranking. Names receive a larger keyword weight than descriptions. Ties use ascending tool names. An empty query browses permitted tools.
 
 Selected definitions carry `available` or `requires_approval` metadata. Approval-required definitions explicitly describe that requirement; selection never grants permission or executes a tool. The Tool Broker must validate the exact arguments and obtain operation approval independently. Every successful selection includes the native `search_tools` definition so the model can search again when initial ranking misses a tool. An inherited allowlist must permit discovery; the selector rejects a task whose allowlist excludes `search_tools`.
 
@@ -8,14 +8,4 @@ The `SearchTools` implementation performs local discovery only. The host binds a
 
 To construct the host registry without reference cycles, build and clone the base tool registry first. Create its discovery authorizer and `ToolSelector`, register the resulting `SearchTools` into the final registry, and construct the broker authorizer with an additional `LocalReadOnly` scope for `search_tools`. Both authorizers use the same trusted scope registrations for base tools. The broker owns execution, including discovery calls; a registry clone shares implementations and compiled schemas rather than copying them. Runtime task binding and passing discovered definitions to subsequent model requests belong to the native agent integration.
 
-## Optional Jev selection
-
-Jev is an optional relevance ranking client for the native [TypeSafe API](https://docs.typesafe.ai/api). It is independent of model inference and introduces no external model gateway. Local selection is sufficient on its own. `SearchTools` never calls Jev.
-
-The host first prepares a `JevDisclosure`. Its inspectable payload contains the task query and permitted candidate names and descriptions. Tool argument schemas, tool results, credentials, wiki pages and conversation history are absent unless a host itself puts such data into the query. The destination is fixed HTTPS, redirects are disabled, and the credential header is sensitive. Up to 254 candidates plus a none option fit the service's choice limit; larger catalogs use the locally ranked shortlist and remain searchable locally.
-
-The host must show the exact destination and payload and receive explicit user approval before calling `approve_external_disclosure`. This trusted host method creates a non-deserializable, single-use approved disclosure valid for at most five minutes. A configured API key alone does not authorize a disclosure. The library does not infer approval from configuration, model instructions, tool calls, or elapsed time. Native clients must implement that consent interaction before enabling this optional path.
-
-The ranking request has a 3-second connection deadline and 10-second total HTTP deadline. Transport failures, unsuccessful status codes, oversized responses and invalid probability distributions produce local fallback with a diagnostic. Cancellation stops the operation. Approval-required candidates retain their execution policy after ranking. No remote result can introduce another tool name. The [selector contract](../contracts/selector.md) lists bounds and interfaces.
-
-Live Jev requests have not been verified because no approved disclosure or service credential was supplied. Automated selector, consent, HTTP failure and binding lifecycle coverage is deferred to [#32](https://github.com/izyuumi/everything/issues/32). No external request was sent during implementation.
+Optional external System One classification is a separate dependent issue [#20](https://github.com/izyuumi/everything/issues/20). This module performs no classification requests. Automated verification is deferred to [#32](https://github.com/izyuumi/everything/issues/32).
