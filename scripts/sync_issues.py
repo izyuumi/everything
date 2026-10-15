@@ -90,8 +90,9 @@ def main():
         coordination = json.loads(arguments.coordination.read_text())
         for number, assignment in coordination.get("assignments", {}).items():
             if number in snapshots:
-                assignment.setdefault("assigned_requirement_digest", snapshots[number]["requirement_digest"])
-                assignment.setdefault("assigned_comment_digest", digest(snapshots[number]["comments"]))
+                original = previous.get("coordination", {}).get("assignments", {}).get(number, {})
+                assignment.setdefault("assigned_requirement_digest", original.get("assigned_requirement_digest", snapshots[number]["requirement_digest"]))
+                assignment.setdefault("assigned_comment_digest", original.get("assigned_comment_digest", digest(snapshots[number]["comments"])))
     pending = {str(change["number"]): change for change in previous.get("pending_changes", previous.get("changes", []))}
     for number in arguments.acknowledge:
         pending.pop(str(number), None)
