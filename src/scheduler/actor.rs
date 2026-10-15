@@ -20,6 +20,7 @@ use crate::protocol::{
 use crate::storage::{Store, ToolCallState};
 
 use super::repository;
+use super::schedule_context::ScheduleCallerContext;
 use super::types::*;
 use super::worker::{self, ExecutionOutcome, ExecutionStop};
 use super::workspace;
@@ -48,6 +49,13 @@ enum Control {
     Activate(oneshot::Sender<Result<(), SchedulerError>>),
     Enqueue(TaskSubmission, Reply),
     Status(TaskId, Reply),
+    ScheduleContext {
+        caller: TaskId,
+        workspace: PathBuf,
+        operation: CommandId,
+        tool_name: String,
+        reply: oneshot::Sender<Result<ScheduleCallerContext, SchedulerError>>,
+    },
     Active(
         ConversationId,
         oneshot::Sender<Result<Option<TaskSnapshot>, SchedulerError>>,
@@ -200,6 +208,38 @@ impl Scheduler {
 
     pub async fn status(&self, task: TaskId) -> Result<TaskSnapshot, SchedulerError> {
         self.request(|reply| Control::Status(task, reply)).await
+    }
+
+    pub async fn schedule_context(
+        &self,
+        caller: TaskId,
+        workspace: PathBuf,
+        operation: CommandId,
+        tool_name: String,
+    ) -> Result<ScheduleCallerContext, SchedulerError> {
+        if tool_name.is_empty()
+            || tool_name.len() > 128
+            || tool_name.chars().any(char::is_control)
+            || !workspace.is_absolute()
+            || workspace
+                .to_str()
+                .is_none_or(|path| path.len() > 4096 || path.chars().any(char::is_control))
+        {
+            return Err(SchedulerError::Invalid("invalid scheduling tool context"));
+        }
+        let (reply, result) = oneshot::channel();
+        self.inner
+            .sender
+            .send(Control::ScheduleContext {
+                caller,
+                workspace,
+                operation,
+                tool_name,
+                reply,
+            })
+            .await
+            .map_err(|_| SchedulerError::Stopped)?;
+        result.await.map_err(|_| SchedulerError::Stopped)?
     }
 
     pub async fn active_in_conversation(
@@ -452,6 +492,12 @@ struct Active {
     join: Id,
 }
 
+impl Drop for Active {
+    fn drop(&mut self) {
+        self.cancellation.cancel();
+    }
+}
+
 struct Actor {
     services: Arc<SchedulerServices>,
     preparation: Option<Arc<dyn TaskPreparation>>,
@@ -615,7 +661,7 @@ impl Actor {
             tokio::select! {
                 control = self.receiver.recv(), if !self.controls_closed => {
                     match control {
-                        Some(control) => { let notify=!matches!(control,Control::Status(..)|Control::ScopedStatus{..}|Control::Active(..)); self.control(control).await; if notify{self.changed.send_modify(|revision| *revision = revision.wrapping_add(1));} },
+                        Some(control) => { let notify=!matches!(control,Control::Status(..)|Control::ScopedStatus{..}|Control::ScheduleContext{..}|Control::Active(..)); self.control(control).await; if notify{self.changed.send_modify(|revision| *revision = revision.wrapping_add(1));} },
                         None => {self.controls_closed=true; self.stop();},
                     }
                 }
@@ -680,6 +726,49 @@ impl Actor {
             }
             Control::Status(id, reply) => {
                 let _ = reply.send(repository::load(&self.store(), id).map(|task| task.snapshot()));
+            }
+            Control::ScheduleContext {
+                caller,
+                workspace,
+                operation,
+                tool_name,
+                reply,
+            } => {
+                let result = (|| {
+                    if self.stopping {
+                        return Err(SchedulerError::Stopped);
+                    }
+                    let task = self.validate_caller(caller, &workspace)?;
+                    self.operation_time(caller, operation, &tool_name)?;
+                    let recorded = self
+                        .store()
+                        .tool_call(&operation.to_string())?
+                        .ok_or(SchedulerError::OutsideScope)?;
+                    if recorded.state != ToolCallState::Running
+                        || recorded.task_id.as_deref() != Some(caller.to_string().as_str())
+                        || recorded.conversation_id
+                            != task.definition.initial.conversation_id.to_string()
+                        || recorded.tool_name != tool_name
+                    {
+                        return Err(SchedulerError::OutsideScope);
+                    }
+                    let active = self
+                        .active
+                        .get(&caller)
+                        .ok_or(SchedulerError::OutsideScope)?;
+                    if active.cancellation.is_cancelled() {
+                        return Err(SchedulerError::OutsideScope);
+                    }
+                    Ok(ScheduleCallerContext::new(
+                        task.definition.configuration,
+                        repository::authority(&self.store(), caller)?,
+                        task.checkpoint.active_command,
+                        operation,
+                        tool_name,
+                        active.cancellation.child_token(),
+                    ))
+                })();
+                let _ = reply.send(result);
             }
             Control::ScopedStatus {
                 caller,
