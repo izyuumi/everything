@@ -1,9 +1,11 @@
 mod foreground;
 mod native;
+mod steering;
 
 pub use native::{
     LoopLimits, LoopStatus, NativeRunInfo, PauseReason, ProviderResume, ToolRunSetup,
 };
+pub use steering::{TaskInput, TaskInputCommand, TaskInputReceipt, TaskInputState};
 
 use std::collections::{BTreeMap, HashMap};
 use std::io::{self, Write};
@@ -323,6 +325,8 @@ struct Checkpoint {
     last_turn: Option<TurnSummary>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     native: Option<native::NativeCheckpoint>,
+    #[serde(default, skip_serializing_if = "steering::InputInbox::is_empty")]
+    inputs: steering::InputInbox,
 }
 
 #[derive(Clone)]
@@ -330,6 +334,7 @@ pub struct Agent {
     store: Store,
     execution: Arc<AdmissionMutex<HashMap<ConversationId, Weak<Mutex<()>>>>>,
     acceptance: Arc<Mutex<()>>,
+    writes: Arc<AdmissionMutex<HashMap<ConversationId, Weak<Mutex<()>>>>>,
     #[cfg(unix)]
     _foreground: Option<Arc<crate::service::StateLease>>,
 }
@@ -344,6 +349,7 @@ impl Agent {
             store,
             execution: Arc::new(AdmissionMutex::new(HashMap::new())),
             acceptance: Arc::new(Mutex::new(())),
+            writes: Arc::new(AdmissionMutex::new(HashMap::new())),
             #[cfg(unix)]
             _foreground: None,
         }
@@ -382,11 +388,13 @@ impl Agent {
         config: ConversationConfig,
     ) -> Result<Conversation, AgentError> {
         let acceptance = self.acceptance.clone().lock_owned().await;
+        let write = self.write_gate(id)?.lock_owned().await;
         let host = self.clone();
         let store = self.store.clone();
         blocking(move || {
             let _host = host;
             let _acceptance = acceptance;
+            let _write = write;
             config.validate()?;
             if title.trim().is_empty() || title.len() > 4_096 || title.contains('\0') {
                 return Err(AgentError::InvalidData("title requires 1 to 4096 bytes without NUL"));
@@ -417,7 +425,7 @@ impl Agent {
             }
             let checkpoint = Checkpoint {
                 version: CHECKPOINT_VERSION, config, message_head: 0, message_count: 0,
-                pending: None, continuation: None, last_turn: None, native: None,
+                pending: None, continuation: None, last_turn: None, native: None, inputs: Default::default(),
             };
             let event = event_input(id, 1, command_id, now, ConversationEvent::ConversationCreated { title: Some(title) })?;
             store.append_with_state(
@@ -462,11 +470,13 @@ impl Agent {
 
     pub async fn accept_text(&self, command: TextCommand) -> Result<TextAcceptance, AgentError> {
         let acceptance = self.acceptance.clone().lock_owned().await;
+        let write = self.write_gate(command.conversation_id)?.lock_owned().await;
         let host = self.clone();
         let store = self.store.clone();
         blocking(move || {
             let _host = host;
             let _acceptance = acceptance;
+            let _write = write;
             command.validate()?;
             let conversation = load_conversation(&store, command.conversation_id)?;
             if let Some(original) = store.command_request(&command.command_id.to_string())? {
@@ -614,11 +624,13 @@ impl Agent {
         cancellation: CancellationToken,
         admission: Arc<tokio::sync::OwnedMutexGuard<()>>,
     ) -> Result<(ConversationMessage, TurnSummary), AgentError> {
+        let write = self.write_gate(conversation.info.id)?.lock_owned().await;
         let host = self.clone();
         let store = self.store.clone();
         blocking(move || {
             let _host = host;
             let _admission = admission;
+            let _write = write;
             if cancellation.is_cancelled() {
                 return Err(AgentError::Cancelled);
             }
@@ -761,6 +773,7 @@ fn load_conversation(store: &Store, id: ConversationId) -> Result<Conversation, 
             return Err(AgentError::ResourceLimit("history bytes"));
         }
         let event = decode_event(&row, id)?;
+        checkpoint.inputs.validate_event(&event)?;
         match event.payload {
             ConversationEvent::ConversationCreated { .. } => {
                 if saw_creation || row.sequence != 1 {
@@ -820,6 +833,14 @@ fn load_conversation(store: &Store, id: ConversationId) -> Result<Conversation, 
     if let Some(native) = &checkpoint.native {
         native.validate(&checkpoint, &messages)?;
     }
+    checkpoint.inputs.validate_target(
+        id,
+        checkpoint
+            .pending
+            .as_ref()
+            .map(|pending| pending.command.command_id),
+        head,
+    )?;
     let info = info(snapshot.conversation, state.revision, &checkpoint, id)?;
     Ok(Conversation {
         config: checkpoint.config.clone(),
@@ -842,6 +863,7 @@ fn decode_checkpoint(value: serde_json::Value) -> Result<Checkpoint, AgentError>
     }
     checkpoint.version = CHECKPOINT_VERSION;
     checkpoint.config.validate()?;
+    checkpoint.inputs.validate()?;
     if let Some(continuation) = &checkpoint.continuation {
         continuation.validate()?;
         if continuation.provider() != checkpoint.config.provider.id() {
@@ -1033,6 +1055,8 @@ fn event_kind(event: &ConversationEvent) -> &'static str {
         ConversationEvent::PermissionRequested { .. } => "permission_requested",
         ConversationEvent::PermissionDecided { .. } => "permission_decided",
         ConversationEvent::SteeringReceived { .. } => "steering_received",
+        ConversationEvent::TaskWaitRequested { .. } => "task_wait_requested",
+        ConversationEvent::SubagentFinished { .. } => "subagent_finished",
     }
 }
 

@@ -10,6 +10,8 @@
 
 The injected provider's ID must match the immutable conversation provider. The trusted host must additionally construct it from the exact saved model endpoint and credential policy. The trait does not expose a trustworthy endpoint attestation; provider ID equality alone is insufficient.
 
+Agent::accept_task_input delivers bounded steering, explicit child waits and terminal child inputs to the same active native command. Acceptance and consumption are separately durable, and exact acceptance replay retains its original event sequence. See [the steering contract](steering.md) for trusted caller validation, checkpoint merge rules, safe consumption and uncertainty stops.
+
 ## Native setup
 
 ToolRunSetup contains a scoped TaskToolBroker, the actual shared ToolRegistry, TaskContext, ContextBudget, memory excerpts with provenance, initial selected ToolDefinitions, LoopLimits, and ProviderResume policy. The referenced task must already be Running in the same conversation. Its broker authority supplies the canonical workspace, execution mode, task identity, and inherited allowlist. The caller must not create separate brokers per task.

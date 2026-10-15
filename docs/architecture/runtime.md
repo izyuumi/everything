@@ -10,6 +10,8 @@ The host runs one native Rust agent kernel with persistent text conversations an
 
 Filesystem bootstrap, SQLite operations, history conversion, request/context construction, schema validation, and bounded serialization run on blocking workers. Owned network and tool futures run asynchronously. Blocking durable operations retain host ownership and admission even if their awaiting caller is dropped. Linux and macOS are the initial foreground platforms; unsupported platforms return an explicit error.
 
+`src/agent/steering.rs` owns the typed persistent input queue, exact acceptance replay, child-wait state and strict control-only merge validation. It has no dependency on Host or Scheduler. A short per-conversation write gate protects checkpoint commits while the existing execution gate retains one native loop per conversation. Steering and child input consumption preserve immutable task inputs and original budget accounting; see [the steering contract](../contracts/steering.md).
+
 ## Accepted commands and durable history
 
 `TextCommand` contains the complete foreground command identity: conversation, command UUID, and exact text. Acceptance checks its original durable user event and causation before inference. Exact pending replay returns the prior acceptance; exact completed replay returns its saved assistant response. Changed text or conversation under the same command ID is rejected. External device `CommandEnvelope` identity belongs to the host command processor and is not synthesized from this narrower command.
