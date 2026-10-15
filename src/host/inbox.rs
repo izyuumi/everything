@@ -421,7 +421,7 @@ impl HostInbox {
     }
 
     pub fn archive(&self, now: UnixMillis) -> Result<usize, InboxError> {
-        Ok(self.store.connection()?.execute("UPDATE host_commands SET original=NULL,effective_options=NULL,applied_receipt=NULL,terminal_result=NULL WHERE phase IN ('completed','rejected') AND updated_at < ?1 AND original IS NOT NULL",[now.get().saturating_sub(RETENTION_MS as u64) as i64])?)
+        Ok(self.store.connection()?.execute("UPDATE host_commands SET original=NULL,effective_options=NULL,applied_receipt=NULL,terminal_result=NULL WHERE phase IN ('completed','rejected') AND updated_at < ?1 AND original IS NOT NULL AND NOT EXISTS (SELECT 1 FROM remote_commands WHERE remote_commands.command_id=host_commands.command_id AND remote_commands.state='pending')",[now.get().saturating_sub(RETENTION_MS as u64) as i64])?)
     }
 }
 

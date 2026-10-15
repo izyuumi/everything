@@ -95,6 +95,9 @@ pub enum OwnerQuery {
     },
     Settings,
     Identity,
+    Runtime,
+    ToolRecovery,
+    Transport,
     Devices {
         limit: usize,
     },
@@ -145,11 +148,42 @@ pub enum OwnerOperation {
         task_id: TaskId,
         expected_attempt: CommandId,
     },
+    ResumeInterrupted {
+        task_id: TaskId,
+        expected_command: CommandId,
+        expected_revision: u64,
+        expected_status: crate::agent::LoopStatus,
+    },
+    AcknowledgeCleanup {
+        operation_id: String,
+        original_result_digest: String,
+        operator: String,
+        note: String,
+    },
+    ReconcileDrained,
 }
 
 impl OwnerOperation {
     pub fn validate(&self) -> Result<(), &'static str> {
         match self {
+            Self::ResumeInterrupted {
+                expected_revision,
+                expected_status,
+                ..
+            } if *expected_revision == 0
+                || *expected_revision > i64::MAX as u64
+                || !matches!(
+                    expected_status,
+                    crate::agent::LoopStatus::Paused {
+                        reason: crate::agent::PauseReason::Cancellation
+                            | crate::agent::PauseReason::InterruptedTool,
+                    }
+                ) =>
+            {
+                Err(
+                    "known interruption resume requires its exact supported phase and checkpoint revision",
+                )
+            }
             Self::BeginPairing { lifetime_ms }
                 if *lifetime_ms == 0 || *lifetime_ms > crate::crypto::MAX_PAIRING_LIFETIME_MS =>
             {
@@ -204,6 +238,10 @@ pub enum OwnerQueryResult {
     },
     Task {
         task: crate::protocol::TaskRecord,
+        execution: TaskExecutionMetadata,
+    },
+    LegacyForeground {
+        task: crate::protocol::TaskRecord,
     },
     Approvals {
         approvals: Vec<crate::permissions::ApprovalRequest>,
@@ -214,6 +252,17 @@ pub enum OwnerQueryResult {
     Identity {
         keys: crate::crypto::DevicePublicKeys,
         fingerprint: String,
+    },
+    Transport {
+        relay: RelayStatus,
+    },
+    Runtime {
+        state: HostRuntimeState,
+    },
+    ToolRecovery {
+        report: crate::tools::broker::RecoveryReport,
+        running_operations: Vec<String>,
+        more_running: bool,
     },
     Devices {
         devices: Vec<crate::storage::DeviceRow>,
@@ -231,6 +280,7 @@ pub struct ConversationSummary {
     pub model: String,
     pub endpoint: crate::agent::ProviderEndpoint,
     pub last_sequence: u64,
+    pub checkpoint_revision: u64,
     pub message_count: usize,
     pub pending_command_id: Option<CommandId>,
     pub native_status: Option<crate::agent::LoopStatus>,
@@ -245,6 +295,7 @@ impl From<crate::agent::ConversationInfo> for ConversationSummary {
             model: information.model,
             endpoint: information.endpoint,
             last_sequence: information.last_sequence,
+            checkpoint_revision: information.checkpoint_revision,
             message_count: information.message_count,
             pending_command_id: information.pending_command_id,
             native_status: information.native_status,
@@ -274,7 +325,10 @@ impl OwnerQueryResult {
                         .iter()
                         .all(|task| conversation_id.is_none_or(|id| task.conversation_id == id))
             }
-            (OwnerQuery::Task { task_id }, Self::Task { task }) => task.id == *task_id,
+            (
+                OwnerQuery::Task { task_id },
+                Self::Task { task, .. } | Self::LegacyForeground { task },
+            ) => task.id == *task_id,
             (OwnerQuery::Approvals { conversation_id }, Self::Approvals { approvals }) => {
                 approvals.len() <= 256
                     && approvals.iter().all(|approval| {
@@ -282,6 +336,14 @@ impl OwnerQueryResult {
                     })
             }
             (OwnerQuery::Settings, Self::Settings { .. }) => true,
+            (OwnerQuery::Transport, Self::Transport { .. }) => true,
+            (OwnerQuery::Runtime, Self::Runtime { .. }) => true,
+            (
+                OwnerQuery::ToolRecovery,
+                Self::ToolRecovery {
+                    running_operations, ..
+                },
+            ) => running_operations.len() <= 128,
             (OwnerQuery::Identity, Self::Identity { keys, fingerprint }) => {
                 keys.validate().is_ok() && keys.fingerprint() == *fingerprint
             }
@@ -299,6 +361,30 @@ impl OwnerQueryResult {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct RelayStatus {
+    pub origin: Option<crate::relay_protocol::RelayOrigin>,
+    pub connection: RelayConnectionState,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct HostRuntimeState {
+    pub draining: bool,
+    pub workers_drained: bool,
+    pub broker_quarantined: bool,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RelayConnectionState {
+    Disabled,
+    Stopped,
+    Connecting,
+    Connected,
+    Retrying,
+    Failed,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct CommandReceipt {
     pub command_id: CommandId,
     pub conversation_id: ConversationId,
@@ -310,11 +396,21 @@ pub struct CommandReceipt {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct TaskExecutionMetadata {
+    pub active_command_id: CommandId,
+    pub queued_messages: usize,
+    pub cancel_requested: bool,
+    pub waiting: Option<crate::scheduler::WaitingReason>,
+    pub diagnostic: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum OwnerOperationResult {
     Applied,
     Settings {
         settings: crate::host::settings::HostSettings,
+        restart_required: bool,
     },
     PairingInvitation {
         pairing_id: crate::protocol::MessageId,
@@ -325,16 +421,23 @@ pub enum OwnerOperationResult {
     PairingApproved {
         acceptance: crate::crypto::PairingAcceptance,
     },
+    ToolRecovery {
+        report: crate::tools::broker::RecoveryReport,
+    },
 }
 
 impl OwnerOperationResult {
     pub fn validate_for(&self, operation: &OwnerOperation) -> Result<(), &'static str> {
         let valid = match (operation, self) {
             (
+                OwnerOperation::AcknowledgeCleanup { .. } | OwnerOperation::ReconcileDrained,
+                Self::ToolRecovery { .. },
+            ) => true,
+            (
                 OwnerOperation::ReplaceSettings {
                     expected_revision, ..
                 },
-                Self::Settings { settings },
+                Self::Settings { settings, .. },
             ) => expected_revision.checked_add(1) == Some(settings.revision),
             (OwnerOperation::BeginPairing { .. }, Self::PairingInvitation { fingerprint, .. }) => {
                 fingerprint.len() == 71
@@ -353,6 +456,7 @@ impl OwnerOperationResult {
                 | OwnerOperation::RetryProvider { .. },
                 Self::Applied,
             ) => true,
+            (OwnerOperation::ResumeInterrupted { .. }, Self::Applied) => true,
             _ => false,
         };
         if !valid {

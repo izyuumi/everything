@@ -13,8 +13,9 @@ use crate::protocol::{
     UnixMillis,
 };
 use crate::storage::{
-    DeviceRow, OutboxRow, RemoteCommandCompletion, RemoteCommandRow, RemoteCommandState,
-    StorageError, Store, TransportInboxRow, TransportOutboxInsert, TransportPruneReport,
+    DeviceRow, OutboxRow, RemoteCommandCompletion, RemoteCommandCursor, RemoteCommandRow,
+    RemoteCommandState, StorageError, Store, TransportInboxCursor, TransportInboxRow,
+    TransportOutboxInsert, TransportPruneReport,
 };
 use qrcode::{QrCode, render::svg};
 use serde::{Deserialize, Serialize};
@@ -220,6 +221,18 @@ pub enum ReceivedOperation {
         sender: crate::protocol::DeviceId,
         reason: &'static str,
     },
+}
+
+pub struct DeviceInboxPage {
+    pub scanned: usize,
+    pub operations: Vec<ReceivedOperation>,
+    pub next_cursor: Option<TransportInboxCursor>,
+}
+
+pub struct DeviceCommandsPage {
+    pub scanned: usize,
+    pub commands: Vec<ReceivedCommand>,
+    pub next_cursor: Option<RemoteCommandCursor>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -577,12 +590,36 @@ impl DeviceEndpoint {
     }
 
     pub fn pending_commands(&self, limit: usize) -> Result<Vec<ReceivedCommand>, DeviceError> {
+        Ok(self.pending_commands_after(None, limit)?.commands)
+    }
+
+    pub fn pending_commands_after(
+        &self,
+        cursor: Option<&RemoteCommandCursor>,
+        limit: usize,
+    ) -> Result<DeviceCommandsPage, DeviceError> {
         self.ensure_active()?;
         if self.inner.role != EndpointRole::Host {
             return Err(DeviceError::AccessDenied);
         }
-        let rows = self.inner.store.pending_remote_commands(limit)?;
-        rows.into_iter()
+        let mut page_size = limit;
+        let rows = loop {
+            match self
+                .inner
+                .store
+                .pending_remote_commands_after(cursor, page_size)
+            {
+                Err(StorageError::ReadBudgetExceeded) if page_size > 1 => page_size /= 2,
+                result => break result?,
+            }
+        };
+        let scanned = rows.len();
+        let next_cursor = rows.last().map(|row| RemoteCommandCursor {
+            received_at: row.received_at,
+            command_id: row.command_id.clone(),
+        });
+        let commands = rows
+            .into_iter()
             .map(|row| {
                 let original = row.request.ok_or(DeviceError::Invalid(
                     "pending remote command lost its original request",
@@ -600,7 +637,12 @@ impl DeviceEndpoint {
                     previous_result: row.result,
                 })
             })
-            .collect()
+            .collect::<Result<Vec<_>, DeviceError>>()?;
+        Ok(DeviceCommandsPage {
+            scanned,
+            commands,
+            next_cursor,
+        })
     }
 
     pub fn process_inbox(
@@ -608,14 +650,32 @@ impl DeviceEndpoint {
         now: UnixMillis,
         limit: usize,
     ) -> Result<Vec<ReceivedOperation>, DeviceError> {
+        Ok(self.process_inbox_after(now, None, limit)?.operations)
+    }
+
+    pub fn process_inbox_after(
+        &self,
+        now: UnixMillis,
+        cursor: Option<&TransportInboxCursor>,
+        limit: usize,
+    ) -> Result<DeviceInboxPage, DeviceError> {
         self.ensure_active()?;
         let mut page_size = limit;
         let rows = loop {
-            match self.inner.store.pending_transport_inbox(page_size) {
+            match self
+                .inner
+                .store
+                .pending_transport_inbox_after(cursor, page_size)
+            {
                 Err(StorageError::ReadBudgetExceeded) if page_size > 1 => page_size /= 2,
                 result => break result?,
             }
         };
+        let scanned = rows.len();
+        let next_cursor = rows.last().map(|row| TransportInboxCursor {
+            received_at: row.received_at,
+            message_id: row.message_id.clone(),
+        });
         let mut operations = Vec::new();
         for row in rows {
             let sender = row.sender.parse()?;
@@ -697,7 +757,11 @@ impl DeviceEndpoint {
                 Err(error) => return Err(error),
             }
         }
-        Ok(operations)
+        Ok(DeviceInboxPage {
+            scanned,
+            operations,
+            next_cursor,
+        })
     }
 
     pub fn acknowledge_command_result(&self, message_id: MessageId) -> Result<(), DeviceError> {
@@ -874,11 +938,16 @@ impl DeviceEndpoint {
         }
     }
 
-    fn build_sync_batch(
+    pub fn build_sync_batch(
         &self,
         cursor: SyncCursor,
         max_events: u16,
     ) -> Result<SyncBatch, DeviceError> {
+        self.ensure_active()?;
+        if self.inner.role != EndpointRole::Host {
+            return Err(DeviceError::AccessDenied);
+        }
+        SyncRequest::new(vec![cursor], max_events)?;
         let conversation = self
             .inner
             .store

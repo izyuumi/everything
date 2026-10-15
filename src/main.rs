@@ -44,10 +44,39 @@ struct Arguments {
 
 #[derive(Subcommand)]
 enum Command {
+    Serve,
+    Owner(OwnerArguments),
     Service(everything::service::cli::ServiceArguments),
     Init(InitArguments),
     Chat(ChatArguments),
     Status(StatusArguments),
+}
+
+enum AgentCommand {
+    Init(InitArguments),
+    Chat(ChatArguments),
+    Status(StatusArguments),
+}
+
+#[derive(Args)]
+struct OwnerArguments {
+    #[arg(long, value_name = "PATH")]
+    request_file: PathBuf,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+enum OwnerInput {
+    CredentialEnvironment {
+        binding: everything::host::settings::ModelCredentialReference,
+    },
+    Query {
+        query: everything::ipc::OwnerQuery,
+    },
+    Operation {
+        operation: Box<everything::ipc::OwnerOperation>,
+        request_id: Option<CommandId>,
+    },
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -228,6 +257,12 @@ struct StatusArguments {
 #[derive(Debug, Error)]
 enum CliError {
     #[error(transparent)]
+    Host(#[from] everything::host::runtime::HostError),
+    #[error(transparent)]
+    HostClient(#[from] everything::host::client::HostClientError),
+    #[error("invalid owner JSON input; use a bounded query or operation object")]
+    OwnerInput,
+    #[error(transparent)]
     Service(#[from] everything::service::ServiceError),
     #[error(transparent)]
     Agent(#[from] AgentError),
@@ -301,13 +336,34 @@ async fn execute(arguments: Arguments, cancellation: CancellationToken) -> Resul
     if cancellation.is_cancelled() {
         return Err(AgentError::Cancelled.into());
     }
-    match arguments.command {
-        Command::Service(arguments) => {
-            write_json(everything::service::cli::manage(arguments, state_dir, cancellation).await?)
+    let command = match arguments.command {
+        Command::Serve => {
+            return everything::host::runtime::HostService::start(&state_dir)
+                .await?
+                .run(cancellation)
                 .await
+                .map_err(CliError::from);
         }
-        Command::Init(arguments) => {
-            let agent = Agent::open(state_dir).await?;
+        Command::Owner(arguments) => return owner_cli(state_dir, arguments, cancellation).await,
+        Command::Service(arguments) => {
+            return write_json(
+                everything::service::cli::manage(arguments, state_dir, cancellation).await?,
+            )
+            .await;
+        }
+        Command::Init(arguments) => AgentCommand::Init(arguments),
+        Command::Status(arguments) => AgentCommand::Status(arguments),
+        Command::Chat(arguments) => AgentCommand::Chat(arguments),
+    };
+    let agent = match Agent::open(&state_dir).await {
+        Ok(agent) => agent,
+        Err(AgentError::Service(everything::service::ServiceError::AlreadyRunning)) => {
+            return proxy_cli(state_dir, command, cancellation).await;
+        }
+        Err(error) => return Err(error.into()),
+    };
+    match command {
+        AgentCommand::Init(arguments) => {
             let conversation = agent
                 .create_conversation(
                     arguments.conversation.unwrap_or_default(),
@@ -318,33 +374,556 @@ async fn execute(arguments: Arguments, cancellation: CancellationToken) -> Resul
                 .await?;
             write_json(conversation.info).await
         }
-        Command::Status(arguments) => {
-            let agent = Agent::open(state_dir).await?;
-            match arguments.conversation {
-                Some(id) => {
-                    let conversation = agent.conversation(id).await?;
-                    if arguments.history {
-                        #[derive(Serialize)]
-                        struct Status {
-                            conversation: everything::agent::ConversationInfo,
-                            messages: Vec<everything::agent::RecordedMessage>,
-                        }
-                        write_json(Status {
-                            conversation: conversation.info,
-                            messages: conversation.messages,
-                        })
-                        .await
-                    } else {
-                        write_json(conversation.info).await
+        AgentCommand::Status(arguments) => match arguments.conversation {
+            Some(id) => {
+                let conversation = agent.conversation(id).await?;
+                if arguments.history {
+                    #[derive(Serialize)]
+                    struct Status {
+                        conversation: everything::agent::ConversationInfo,
+                        messages: Vec<everything::agent::RecordedMessage>,
                     }
+                    write_json(Status {
+                        conversation: conversation.info,
+                        messages: conversation.messages,
+                    })
+                    .await
+                } else {
+                    write_json(conversation.info).await
                 }
-                None => write_json(agent.conversations(arguments.limit).await?).await,
             }
+            None => write_json(agent.conversations(arguments.limit).await?).await,
+        },
+        AgentCommand::Chat(arguments) => chat(agent, arguments, cancellation).await,
+    }
+}
+
+async fn owner_cli(
+    state: PathBuf,
+    arguments: OwnerArguments,
+    cancellation: CancellationToken,
+) -> Result<(), CliError> {
+    let input = tokio::task::spawn_blocking(move || {
+        let file = std::fs::File::from(
+            rustix::fs::open(
+                arguments.request_file,
+                rustix::fs::OFlags::RDONLY
+                    | rustix::fs::OFlags::NONBLOCK
+                    | rustix::fs::OFlags::CLOEXEC,
+                rustix::fs::Mode::empty(),
+            )
+            .map_err(io::Error::from)?,
+        );
+        let metadata = file.metadata()?;
+        if !metadata.is_file() || metadata.len() > 1_048_576 {
+            return Err(CliError::OwnerInput);
         }
-        Command::Chat(arguments) => {
-            chat(Agent::open(state_dir).await?, arguments, cancellation).await
+        let mut bytes = Zeroizing::new(Vec::new());
+        file.take(1_048_577).read_to_end(&mut bytes)?;
+        if bytes.len() > 1_048_576 {
+            return Err(CliError::OwnerInput);
+        }
+        serde_json::from_slice::<OwnerInput>(&bytes).map_err(|_| CliError::OwnerInput)
+    })
+    .await
+    .map_err(|_| CliError::Worker)??;
+    let client = everything::host::client::HostClient::new(state)?;
+    match input {
+        OwnerInput::CredentialEnvironment { binding } => {
+            let variable = match binding.provider {
+                ProviderKind::Anthropic => "ANTHROPIC_API_KEY",
+                ProviderKind::OpenAi => "OPENAI_API_KEY",
+            };
+            let value = std::env::var(variable).map_err(|_| CliError::Credential(variable))?;
+            let secret = everything::host::credentials::SecretTransfer::new(value)
+                .map_err(|_| CliError::Credential(variable))?;
+            write_json(
+                client
+                    .operate(
+                        everything::ipc::OwnerOperation::Credential {
+                            operation: everything::host::credentials::CredentialOperation::Store {
+                                binding,
+                                secret,
+                            },
+                        },
+                        CommandId::new(),
+                        cancellation,
+                    )
+                    .await?,
+            )
+            .await
+        }
+        OwnerInput::Query { query } => write_json(client.query(query, cancellation).await?).await,
+        OwnerInput::Operation {
+            operation,
+            request_id,
+        } => {
+            let request_id = request_id.unwrap_or_default();
+            eprintln!("owner request {request_id}; reuse this ID for an explicit retry");
+            write_json(client.operate(*operation, request_id, cancellation).await?).await
         }
     }
+}
+
+async fn proxy_cli(
+    state: PathBuf,
+    command: AgentCommand,
+    cancellation: CancellationToken,
+) -> Result<(), CliError> {
+    use everything::ipc::{OwnerCommand, OwnerQuery, OwnerQueryResult};
+    let client = everything::host::client::HostClient::new(state)?;
+    match command {
+        AgentCommand::Init(arguments) => {
+            let conversation_id = arguments.conversation.unwrap_or_default();
+            let command_id = arguments.command_id.unwrap_or_default();
+            eprintln!("conversation {conversation_id} initialization command {command_id}");
+            client
+                .submit(
+                    OwnerCommand::Initialize {
+                        conversation_id,
+                        command_id,
+                        title: arguments.title,
+                        configuration: arguments.model.create()?,
+                    },
+                    cancellation.clone(),
+                )
+                .await?;
+            match client
+                .query(OwnerQuery::Conversation { conversation_id }, cancellation)
+                .await?
+            {
+                OwnerQueryResult::Conversation { information, .. } => write_json(information).await,
+                _ => Err(CliError::OwnerInput),
+            }
+        }
+        AgentCommand::Status(arguments) => match arguments.conversation {
+            None => match client
+                .query(
+                    OwnerQuery::Conversations {
+                        limit: arguments.limit,
+                    },
+                    cancellation,
+                )
+                .await?
+            {
+                OwnerQueryResult::Conversations { conversations } => {
+                    write_json(conversations).await
+                }
+                _ => Err(CliError::OwnerInput),
+            },
+            Some(conversation_id) => {
+                let result = client
+                    .query(
+                        OwnerQuery::Conversation { conversation_id },
+                        cancellation.clone(),
+                    )
+                    .await?;
+                let OwnerQueryResult::Conversation { information, .. } = result else {
+                    return Err(CliError::OwnerInput);
+                };
+                if arguments.history {
+                    let messages = proxy_messages(
+                        &client,
+                        conversation_id,
+                        information.last_sequence,
+                        cancellation,
+                    )
+                    .await?;
+                    write_json(serde_json::json!({"conversation":information,"messages":messages}))
+                        .await
+                } else {
+                    write_json(information).await
+                }
+            }
+        },
+        AgentCommand::Chat(arguments) => proxy_chat(&client, arguments, cancellation).await,
+    }
+}
+
+async fn proxy_messages(
+    client: &everything::host::client::HostClient,
+    conversation_id: ConversationId,
+    through: u64,
+    cancellation: CancellationToken,
+) -> Result<Vec<everything::agent::RecordedMessage>, CliError> {
+    use everything::protocol::{ConversationEvent, SyncCursor, SyncRequest};
+    use everything::transport::local::{LocalRequestPayload, LocalResponsePayload};
+    let mut cursor = SyncCursor {
+        conversation_id,
+        after_sequence: 0,
+    };
+    let mut messages = Vec::new();
+    let mut bytes = 0_usize;
+    let mut count = 0_usize;
+    while cursor.after_sequence < through {
+        let response = client
+            .request(
+                LocalRequestPayload::Synchronize {
+                    request: SyncRequest::new(vec![cursor], 256).map_err(AgentError::from)?,
+                },
+                cancellation.clone(),
+            )
+            .await?;
+        let LocalResponsePayload::Synchronized { batch } = response else {
+            return Err(CliError::OwnerInput);
+        };
+        if batch.events.is_empty() {
+            return Err(CliError::OwnerInput);
+        }
+        cursor = batch.next_cursor();
+        for event in batch
+            .events
+            .into_iter()
+            .take_while(|event| event.sequence.get() <= through)
+        {
+            bytes = bytes.saturating_add(
+                serde_json::to_vec(&event)
+                    .map_err(|_| CliError::Serialization)?
+                    .len(),
+            );
+            count += 1;
+            if bytes > 64 * 1024 * 1024 || count > 65_536 {
+                return Err(AgentError::ResourceLimit("CLI history").into());
+            }
+            if let ConversationEvent::MessageAppended { message } = event.payload {
+                messages.push(everything::agent::RecordedMessage {
+                    event_id: event.event_id,
+                    sequence: event.sequence,
+                    causation_id: event.causation_id,
+                    message,
+                });
+            }
+        }
+    }
+    Ok(messages)
+}
+
+async fn proxy_chat(
+    client: &everything::host::client::HostClient,
+    arguments: ChatArguments,
+    cancellation: CancellationToken,
+) -> Result<(), CliError> {
+    use everything::ipc::{
+        OwnerCommand, OwnerOperation, OwnerQuery, OwnerQueryResult, RequestedRunOptions,
+    };
+    use everything::protocol::{TaskId, UnixMillis};
+    let text = match (arguments.message, arguments.message_file) {
+        (Some(message), None) => Some(message),
+        (None, Some(path)) => Some(read_message(path).await?),
+        _ => None,
+    };
+    let (conversation_id, mut information) = match arguments.conversation {
+        Some(conversation_id) => match client
+            .query(
+                OwnerQuery::Conversation { conversation_id },
+                cancellation.clone(),
+            )
+            .await?
+        {
+            OwnerQueryResult::Conversation {
+                information,
+                configuration,
+            } => {
+                arguments.model.check(&configuration)?;
+                (conversation_id, information)
+            }
+            _ => return Err(CliError::OwnerInput),
+        },
+        None => {
+            let conversation_id = ConversationId::new();
+            let command_id = CommandId::new();
+            eprintln!("conversation {conversation_id} initialization command {command_id}");
+            client
+                .submit(
+                    OwnerCommand::Initialize {
+                        conversation_id,
+                        command_id,
+                        title: arguments.title.unwrap_or_else(|| {
+                            text.as_deref()
+                                .unwrap_or("New conversation")
+                                .chars()
+                                .take(80)
+                                .collect()
+                        }),
+                        configuration: arguments.model.create()?,
+                    },
+                    cancellation.clone(),
+                )
+                .await?;
+            let OwnerQueryResult::Conversation { information, .. } = client
+                .query(
+                    OwnerQuery::Conversation { conversation_id },
+                    cancellation.clone(),
+                )
+                .await?
+            else {
+                return Err(CliError::OwnerInput);
+            };
+            (conversation_id, information)
+        }
+    };
+    let command_id = if arguments.resume {
+        let command_id = information
+            .pending_command_id
+            .ok_or(AgentError::NoPendingTurn)?;
+        if arguments.command_id.is_some_and(|id| id != command_id) {
+            return Err(AgentError::CommandConflict(command_id).into());
+        }
+        if arguments.tools.workspace.is_some()
+            || arguments.tools.execution_mode.is_some()
+            || arguments.tools.context_tokens.is_some()
+            || arguments.tools.max_model_attempts.is_some()
+            || arguments.tools.max_tool_calls.is_some()
+            || arguments.tools.max_charged_tokens.is_some()
+            || arguments.tools.max_duration_seconds.is_some()
+        {
+            return Err(CliError::ToolOptions(
+                "host resumes use the captured execution policy; omit all workspace, mode and budget overrides",
+            ));
+        }
+        let task_id = TaskId::try_from(*command_id.as_uuid()).map_err(AgentError::from)?;
+        if let Some((id, decision)) = arguments
+            .tools
+            .approve
+            .map(|id| (id, everything::protocol::PermissionDecision::Allow))
+            .or_else(|| {
+                arguments
+                    .tools
+                    .deny
+                    .map(|id| (id, everything::protocol::PermissionDecision::Deny))
+            })
+        {
+            let OwnerQueryResult::Approvals { approvals } = client
+                .query(
+                    OwnerQuery::Approvals { conversation_id },
+                    cancellation.clone(),
+                )
+                .await?
+            else {
+                return Err(CliError::OwnerInput);
+            };
+            let approval = approvals
+                .into_iter()
+                .find(|approval| approval.id == id && approval.scope.task_id == task_id.to_string())
+                .ok_or(CliError::ToolOptions(
+                    "approval does not belong to this pending task",
+                ))?;
+            let operation_id = approval
+                .scope
+                .operation_id
+                .parse()
+                .map_err(AgentError::from)?;
+            let command = everything::protocol::CommandEnvelope::new(
+                conversation_id,
+                None,
+                UnixMillis::now().map_err(AgentError::from)?,
+                everything::protocol::Command::ResolvePermission {
+                    operation_id,
+                    decision,
+                },
+            );
+            client.submit_domain(command, cancellation.clone()).await?;
+        } else {
+            let operation = if arguments.tools.retry_uncertain {
+                match information.native_status.clone() {
+                    Some(LoopStatus::ProviderInFlight { attempt_id }) => {
+                        OwnerOperation::RetryProvider {
+                            task_id,
+                            expected_attempt: attempt_id,
+                        }
+                    }
+                    Some(
+                        status @ LoopStatus::Paused {
+                            reason:
+                                everything::agent::PauseReason::Cancellation
+                                | everything::agent::PauseReason::InterruptedTool,
+                        },
+                    ) => OwnerOperation::ResumeInterrupted {
+                        task_id,
+                        expected_command: command_id,
+                        expected_revision: information.checkpoint_revision,
+                        expected_status: status,
+                    },
+                    _ => {
+                        return Err(CliError::ToolOptions(
+                            "no exact uncertain provider attempt or known interruption is available for this explicit retry",
+                        ));
+                    }
+                }
+            } else {
+                OwnerOperation::WakeTask { task_id }
+            };
+            let request_id = CommandId::new();
+            eprintln!(
+                "explicit resume request {request_id}; reuse this ID through owner IPC if its outcome is ambiguous"
+            );
+            client
+                .operate(operation, request_id, cancellation.clone())
+                .await?;
+        }
+        command_id
+    } else {
+        let command_id = arguments.command_id.unwrap_or_default();
+        eprintln!(
+            "conversation {conversation_id} command {command_id}; closing this CLI leaves admitted work in the host"
+        );
+        let workspace = arguments
+            .tools
+            .workspace
+            .map(|path| {
+                if path.is_absolute() {
+                    Ok(path)
+                } else {
+                    std::env::current_dir().map(|current| current.join(path))
+                }
+            })
+            .transpose()?;
+        let receipt = client
+            .submit(
+                OwnerCommand::Text {
+                    command: TextCommand {
+                        conversation_id,
+                        command_id,
+                        text: text.ok_or(CliError::Required("--message or --message-file"))?,
+                    },
+                    options: RequestedRunOptions {
+                        workspace,
+                        execution_mode: arguments.tools.execution_mode.map(Into::into),
+                        tools: Some(arguments.tools.tools),
+                        context_tokens: arguments.tools.context_tokens,
+                        max_model_attempts: arguments.tools.max_model_attempts,
+                        max_tool_calls: arguments.tools.max_tool_calls,
+                        max_charged_tokens: arguments.tools.max_charged_tokens,
+                        max_duration_seconds: arguments.tools.max_duration_seconds,
+                    },
+                },
+                cancellation.clone(),
+            )
+            .await?;
+        if receipt
+            .applied
+            .as_ref()
+            .is_none_or(|receipt| receipt.task_id.is_none())
+        {
+            let OwnerQueryResult::Conversation { information, .. } = client
+                .query(
+                    OwnerQuery::Conversation { conversation_id },
+                    cancellation.clone(),
+                )
+                .await?
+            else {
+                return Err(CliError::OwnerInput);
+            };
+            return proxy_reply(
+                client,
+                conversation_id,
+                command_id,
+                information.last_sequence,
+                cancellation,
+            )
+            .await;
+        }
+        command_id
+    };
+    let task_id = TaskId::try_from(*command_id.as_uuid()).map_err(AgentError::from)?;
+    loop {
+        match client
+            .query(OwnerQuery::Task { task_id }, cancellation.clone())
+            .await?
+        {
+            OwnerQueryResult::Task { task, .. }
+                if task.status == everything::protocol::TaskStatus::Completed =>
+            {
+                let OwnerQueryResult::Conversation { information, .. } = client
+                    .query(
+                        OwnerQuery::Conversation { conversation_id },
+                        cancellation.clone(),
+                    )
+                    .await?
+                else {
+                    return Err(CliError::OwnerInput);
+                };
+                return proxy_reply(
+                    client,
+                    conversation_id,
+                    command_id,
+                    information.last_sequence,
+                    cancellation,
+                )
+                .await;
+            }
+            OwnerQueryResult::Task { task, .. }
+                if matches!(
+                    task.status,
+                    everything::protocol::TaskStatus::Queued
+                        | everything::protocol::TaskStatus::Running
+                ) => {}
+            OwnerQueryResult::Task { task, .. } => {
+                eprintln!(
+                    "host task {task_id} stopped at {:?}; inspect owner task/approval metadata before an explicit resume",
+                    task.status
+                );
+                return Err(CliError::ToolPaused);
+            }
+            OwnerQueryResult::LegacyForeground { .. } => {
+                return Err(CliError::ToolOptions(
+                    "stop the host and explicitly settle this legacy foreground task",
+                ));
+            }
+            _ => return Err(CliError::OwnerInput),
+        }
+        let OwnerQueryResult::Conversation {
+            information: current,
+            ..
+        } = client
+            .query(
+                OwnerQuery::Conversation { conversation_id },
+                cancellation.clone(),
+            )
+            .await?
+        else {
+            return Err(CliError::OwnerInput);
+        };
+        information = current;
+        client
+            .request(
+                everything::transport::local::LocalRequestPayload::Wait {
+                    request: everything::ipc::ConversationWait {
+                        conversation_id,
+                        after_sequence: information.last_sequence,
+                        timeout_ms: 1000,
+                    },
+                },
+                cancellation.clone(),
+            )
+            .await?;
+    }
+}
+
+async fn proxy_reply(
+    client: &everything::host::client::HostClient,
+    conversation_id: ConversationId,
+    command_id: CommandId,
+    through: u64,
+    cancellation: CancellationToken,
+) -> Result<(), CliError> {
+    let messages = proxy_messages(client, conversation_id, through, cancellation).await?;
+    let response = messages
+        .into_iter()
+        .rev()
+        .find(|message| {
+            message.causation_id == Some(command_id)
+                && message.message.role == everything::protocol::MessageRole::Assistant
+                && !message
+                    .message
+                    .content
+                    .iter()
+                    .any(|content| matches!(content, MessageContent::ToolCall(_)))
+        })
+        .ok_or(CliError::ToolOptions(
+            "no committed final assistant response is available",
+        ))?;
+    print_message(&response.message).await
 }
 
 async fn chat(
