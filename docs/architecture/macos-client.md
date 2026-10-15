@@ -1,6 +1,6 @@
 # Native macOS menu bar client
 
-The optional `EverythingMac` application uses SwiftUI `MenuBarExtra` and the native Settings scene on macOS 14 or newer. It contains no agent loop, database connection or provider adapter. The Rust host remains authoritative and owns task execution independently of this application.
+The optional `EverythingMac` application uses SwiftUI `MenuBarExtra` and the native Settings scene on macOS 14 or newer. The focused Xcode project contains one macOS application target and ten Swift sources. It contains no agent loop, database connection or provider adapter. The Rust host remains authoritative and owns task execution independently of this application.
 
 ## Responsibilities
 
@@ -9,7 +9,7 @@ The optional `EverythingMac` application uses SwiftUI `MenuBarExtra` and the nat
 - `TasksView` inspects actual task metadata and offers cancellation and ordinary wake. A wake does not grant uncertain provider retry or tool cleanup authority. Legacy foreground ownership remains explicit.
 - `PermissionsView` reads bounded pending summaries for a selected conversation, loads exact scope and arguments separately, and rechecks that immutable request before submitting an operation decision. It uses the exact operation UUID and conversation, including spawned tasks; it does not derive task identity from a command UUID.
 - `SettingsView` edits workspace, execution mode, tool enablement and context budget. The complete original settings object is retained, and the existing revision is required when saving. Other fields and credential references remain intact. Credentials and other advanced settings use the CLI.
-- `Shared/OwnerIPC` contains bounded JSON values, local owner request records and a CLI-backed IPC client. It is not included in the iOS target and does not implement encrypted replica transport.
+- `Shared/OwnerIPC` contains bounded JSON values, local owner request records and a CLI-backed IPC client. It does not implement encrypted replica transport.
 
 ## Owner IPC bridge
 
