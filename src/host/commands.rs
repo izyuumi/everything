@@ -380,6 +380,24 @@ impl HostInner {
                 }
             }
             (InboxInput::Domain(command), EffectiveCommand::Control) => match &command.payload {
+                Command::SteerTask {
+                    task_id,
+                    instruction,
+                } => {
+                    let task = self.scheduler.status(*task_id).await?;
+                    if task.task.conversation_id != record.conversation_id {
+                        return Err(HostError::Invalid("task belongs to another conversation"));
+                    }
+                    self.scheduler
+                        .steer(
+                            *task_id,
+                            record.command_id,
+                            record.accepted_at,
+                            instruction.clone(),
+                        )
+                        .await?;
+                    receipt.task_id = Some(*task_id);
+                }
                 Command::CancelTask { task_id } => {
                     let task = self.scheduler.status(*task_id).await?;
                     if task.task.conversation_id != record.conversation_id {
@@ -544,9 +562,17 @@ impl HostInner {
                 } => Err(HostError::Invalid(
                     "child task creation uses the native scoped scheduler tools",
                 )),
-                Command::SteerTask { .. } => Err(HostError::Invalid(
-                    "active steering requires the explicit steering contract",
-                )),
+                Command::SteerTask { instruction, .. } => {
+                    if instruction.trim().is_empty()
+                        || instruction.len() > 32_768
+                        || instruction.contains('\0')
+                    {
+                        return Err(HostError::Invalid(
+                            "steering requires 1 to 32768 UTF-8 bytes without NUL",
+                        ));
+                    }
+                    Ok(EffectiveCommand::Control)
+                }
                 Command::CancelTask { .. } | Command::ResolvePermission { .. } => {
                     Ok(EffectiveCommand::Control)
                 }
@@ -673,6 +699,7 @@ fn retryable_application(error: &HostError) -> bool {
                 SchedulerError::Capacity(_)
                     | SchedulerError::OwnerDecision(_)
                     | SchedulerError::Stopped
+                    | SchedulerError::MutationUncertain(_)
             )
     )
 }
