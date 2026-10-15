@@ -5,6 +5,7 @@ edition = "2024"
 rust-version = "1.85"
 license = "Apache-2.0"
 description = "Local-first native AI agent host"
+default-run = "everything"
 
 [workspace]
 members = ["relay"]
@@ -44,3 +45,24 @@ fs2 = "0.4"
 plist = "1.8"
 tracing = "0.1"
 url = "2"
+
+[features]
+default = []
+local-embeddings = ["dep:ort", "dep:tokenizers"]
+
+[dependencies.ort]
+version = "=2.0.0-rc.10"
+default-features = false
+features = ["std", "load-dynamic"]
+optional = true
+
+[[bin]]
+name = "everything-embedding-bench"
+path = "src/bin/everything-embedding-bench.rs"
+required-features = ["local-embeddings"]
+
+[dependencies.tokenizers]
+version = "=0.22.2"
+default-features = false
+features = ["fancy-regex"]
+optional = true
