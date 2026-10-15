@@ -279,6 +279,35 @@ impl HostInner {
             self.ensure_accepting()?;
         }
         match operation {
+            OwnerOperation::Schedule { mutation } => {
+                let _mutation = self.mutation.lock().await;
+                self.ensure_accepting()?;
+                let inspected = mutation.clone();
+                let authority = self
+                    .blocking(move |host| {
+                        Ok(owner_schedule_authority(host, &inspected, request_id)?)
+                    })
+                    .await?;
+                Ok(OwnerOperationResult::Schedule {
+                    result: self
+                        .schedule_controls
+                        .mutate_as_owner(mutation, authority, cancellation)
+                        .await?,
+                })
+            }
+            OwnerOperation::AcknowledgeScheduledUnknown { request } => {
+                let _mutation = self.mutation.lock().await;
+                let acknowledgement = self
+                    .blocking(move |host| {
+                        crate::scheduling::ScheduleRepository::new(host.agent.store())
+                            .acknowledge_unknown_as_owner(&request)
+                            .map_err(crate::scheduling::controls::ControlError::from)
+                            .map_err(HostError::from)
+                    })
+                    .await?;
+                self.schedule_engine.wake();
+                Ok(OwnerOperationResult::ScheduledUnknownAcknowledged { acknowledgement })
+            }
             OwnerOperation::PrepareSelection { command } => {
                 Ok(OwnerOperationResult::SelectionPrepared {
                     preparation: Box::new(self.prepare_selection(command, cancellation).await?),
@@ -356,35 +385,6 @@ impl HostInner {
                     )
                     .await?;
                 Ok(OwnerOperationResult::EmbeddingsRebuilt { report })
-            }
-            OwnerOperation::Schedule { mutation } => {
-                let _mutation = self.mutation.lock().await;
-                self.ensure_accepting()?;
-                let inspected = mutation.clone();
-                let authority = self
-                    .blocking(move |host| {
-                        Ok(owner_schedule_authority(host, &inspected, request_id)?)
-                    })
-                    .await?;
-                Ok(OwnerOperationResult::Schedule {
-                    result: self
-                        .schedule_controls
-                        .mutate_as_owner(mutation, authority, cancellation)
-                        .await?,
-                })
-            }
-            OwnerOperation::AcknowledgeScheduledUnknown { request } => {
-                let _mutation = self.mutation.lock().await;
-                let acknowledgement = self
-                    .blocking(move |host| {
-                        crate::scheduling::ScheduleRepository::new(host.agent.store())
-                            .acknowledge_unknown_as_owner(&request)
-                            .map_err(crate::scheduling::controls::ControlError::from)
-                            .map_err(HostError::from)
-                    })
-                    .await?;
-                self.schedule_engine.wake();
-                Ok(OwnerOperationResult::ScheduledUnknownAcknowledged { acknowledgement })
             }
             OwnerOperation::DiscardUnapplied {
                 command_id,
