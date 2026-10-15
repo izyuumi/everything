@@ -486,7 +486,14 @@ impl Store {
         let mut connection = self.connection()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         if let Some(parent) = &task.parent_task_id {
-            require_related_task(&transaction, parent, &task.conversation_id)?;
+            let exists: bool = transaction.query_row(
+                "SELECT EXISTS (SELECT 1 FROM tasks WHERE id = ?1)",
+                [parent],
+                |row| row.get(0),
+            )?;
+            if !exists {
+                return Err(missing("task", parent));
+            }
         }
         transaction.execute(
             "INSERT INTO tasks(id, conversation_id, parent_task_id, state, input, checkpoint, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
@@ -691,6 +698,14 @@ impl Store {
             params![permission.id, permission.conversation_id, encode_json(&permission.payload)?, permission.created_at, permission.expires_at],
         )?;
         Ok(())
+    }
+
+    pub fn permission(&self, id: &str) -> StorageResult<Option<PermissionRow>> {
+        validate_id(id)?;
+        Ok(self.connection()?.query_row(
+            "SELECT id, conversation_id, payload, created_at, expires_at, revoked_at FROM permissions WHERE id = ?1",
+            [id], permission_row,
+        ).optional()?)
     }
 
     pub fn active_permissions(
@@ -966,7 +981,7 @@ fn require_related_task(
         .optional()?;
     match found {
         Some(found) if found == conversation_id => Ok(()),
-        Some(_) => invalid("related tasks and tool calls must belong to the same conversation"),
+        Some(_) => invalid("tool calls must belong to their task's conversation"),
         None => Err(missing("task", task_id)),
     }
 }

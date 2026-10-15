@@ -4,7 +4,7 @@ Read [AGENTS.md](../AGENTS.md), then [implementation status](status/implementati
 
 ## Architecture
 
-[Overview](architecture/overview.md) · [Runtime](architecture/runtime.md) · [Agents](architecture/agents.md) · [Models](architecture/models.md) · [Tools](architecture/tools.md) · [Context](architecture/context.md) · [Memory](architecture/memory.md) · [Transport](architecture/transport.md) · [Security](architecture/security.md)
+[Overview](architecture/overview.md) · [Runtime](architecture/runtime.md) · [Agents](architecture/agents.md) · [Models](architecture/models.md) · [Tools](architecture/tools.md) · [Permissions](architecture/permissions.md) · [Context](architecture/context.md) · [Memory](architecture/memory.md) · [Transport](architecture/transport.md) · [Security](architecture/security.md)
 
 ## Contracts
 
