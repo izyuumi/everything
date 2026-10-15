@@ -658,19 +658,18 @@ impl DeviceEndpoint {
                     });
                 }
                 Err(DeviceError::Storage(StorageError::SyncGap { .. })) => {
-                    if let EndpointRole::Replica { authoritative_host } = self.inner.role {
-                        if let Ok(packet) = serde_json::from_slice::<DevicePacket>(&row.payload) {
-                            if let DevicePayload::SyncBatch { batch } = packet.payload {
-                                let cursor = SyncCursor {
-                                    conversation_id: batch.cursor.conversation_id,
-                                    after_sequence: self.inner.store.replica_cursor(
-                                        &authoritative_host.to_string(),
-                                        &batch.cursor.conversation_id.to_string(),
-                                    )?,
-                                };
-                                self.request_sync(authoritative_host, cursor, 256, now)?;
-                            }
-                        }
+                    if let EndpointRole::Replica { authoritative_host } = self.inner.role
+                        && let Ok(packet) = serde_json::from_slice::<DevicePacket>(&row.payload)
+                        && let DevicePayload::SyncBatch { batch } = packet.payload
+                    {
+                        let cursor = SyncCursor {
+                            conversation_id: batch.cursor.conversation_id,
+                            after_sequence: self.inner.store.replica_cursor(
+                                &authoritative_host.to_string(),
+                                &batch.cursor.conversation_id.to_string(),
+                            )?,
+                        };
+                        self.request_sync(authoritative_host, cursor, 256, now)?;
                     }
                     self.reject(&row, "sync_gap_requested")?;
                     operations.push(ReceivedOperation::Rejected {
