@@ -70,7 +70,8 @@ pub struct HistoryEntry {
     pub message: Message,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct MemoryExcerpt {
     pub chunk_id: String,
     pub title: String,

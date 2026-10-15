@@ -20,7 +20,7 @@ use tokio_util::sync::CancellationToken;
 
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
-enum EffectiveCommand {
+pub(super) enum EffectiveCommand {
     Initialize {
         configuration: ConversationConfig,
         title: String,
@@ -512,7 +512,7 @@ impl HostInner {
         })
     }
 
-    async fn capture_command(
+    pub(super) async fn capture_command(
         self: &Arc<Self>,
         input: &InboxInput,
     ) -> Result<EffectiveCommand, HostError> {

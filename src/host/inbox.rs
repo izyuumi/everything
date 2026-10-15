@@ -83,7 +83,7 @@ impl InboxInput {
         }
     }
 
-    fn validate_original(&self, original: &Value) -> Result<(), InboxError> {
+    pub(super) fn validate_original(&self, original: &Value) -> Result<(), InboxError> {
         let matches = match self {
             Self::Domain(command) => serde_json::from_value::<CommandEnvelope>(original.clone())
                 .is_ok_and(|decoded| decoded == *command),

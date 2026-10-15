@@ -44,7 +44,7 @@ struct Arguments {
 
 #[derive(Subcommand)]
 enum Command {
-    Serve,
+    Serve(ServeArguments),
     Schedule(everything::scheduling::commands::ScheduleArguments),
     Owner(OwnerArguments),
     Service(everything::service::cli::ServiceArguments),
@@ -57,6 +57,12 @@ enum AgentCommand {
     Init(InitArguments),
     Chat(ChatArguments),
     Status(StatusArguments),
+}
+
+#[derive(Args)]
+struct ServeArguments {
+    #[arg(long, value_name = "PATH")]
+    mcp_credential_environment_file: Option<PathBuf>,
 }
 
 #[derive(Args)]
@@ -343,12 +349,16 @@ async fn execute(arguments: Arguments, cancellation: CancellationToken) -> Resul
         return Err(AgentError::Cancelled.into());
     }
     let command = match arguments.command {
-        Command::Serve => {
-            return everything::host::runtime::HostService::start(&state_dir)
-                .await?
-                .run(cancellation)
-                .await
-                .map_err(CliError::from);
+        Command::Serve(arguments) => {
+            return everything::host::runtime::HostService::start_with_mcp_session_bootstrap(
+                &state_dir,
+                arguments.mcp_credential_environment_file,
+                cancellation.clone(),
+            )
+            .await?
+            .run(cancellation)
+            .await
+            .map_err(CliError::from);
         }
         Command::Schedule(arguments) => {
             return write_json(

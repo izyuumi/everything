@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
@@ -70,7 +70,17 @@ pub enum HostError {
     #[error(transparent)]
     Permission(#[from] crate::permissions::PermissionError),
     #[error(transparent)]
+    Memory(#[from] super::memory::MemoryError),
+    #[error(transparent)]
+    Consolidation(#[from] crate::memory::consolidate::ConsolidationError),
+    #[error(transparent)]
+    Mcp(#[from] super::mcp::McpServiceError),
+    #[error(transparent)]
+    Selection(#[from] super::selection::SelectionPreflightError),
+    #[error(transparent)]
     Credential(#[from] crate::credentials::CredentialError),
+    #[error(transparent)]
+    McpSessionBootstrap(#[from] super::credentials::McpSessionBootstrapError),
     #[error(transparent)]
     Json(#[from] serde_json::Error),
     #[error(transparent)]
@@ -122,6 +132,7 @@ pub(super) struct HostInner {
     pub(super) schedule_engine: crate::scheduling::engine::ScheduleEngine,
     pub(super) schedule_controls: Arc<ScheduleControls>,
     pub(super) broker: ToolBroker,
+    pub(super) composition: Arc<super::composition::Composition>,
     pub(super) changed: Notify,
     pub(super) mutation: Mutex<()>,
     pub(super) relay_origin: Option<crate::relay_protocol::RelayOrigin>,
@@ -145,37 +156,72 @@ enum HostWorker {
 
 impl HostService {
     pub async fn start(state_directory: impl AsRef<Path>) -> Result<Self, HostError> {
+        Self::start_with_mcp_session_bootstrap(state_directory, None, CancellationToken::new())
+            .await
+    }
+
+    pub async fn start_with_mcp_session_bootstrap(
+        state_directory: impl AsRef<Path>,
+        binding_file: Option<PathBuf>,
+        cancellation: CancellationToken,
+    ) -> Result<Self, HostError> {
         LocalServer::validate_state_path(state_directory.as_ref())?;
         let lease = StateLease::acquire(state_directory).await?;
         let prepared_lease = Arc::clone(&lease);
-        let (
-            agent,
-            settings,
-            devices,
-            registry,
-            authorizer,
-            discovery,
-            task_tools,
-            schedule_tools,
-            relay_origin,
-        ) = tokio::task::spawn_blocking(move || {
-            let database = prepared_lease.validate_database()?;
-            let store =
-                Store::open_validated(prepared_lease.path().join("everything.sqlite3"), database)?;
-            let directory =
-                cap_std::fs::Dir::from_std_file(prepared_lease.directory.file.try_clone()?);
-            let identity = crate::devices::load_or_create_identity_in(&directory)?;
-            let devices = DeviceEndpoint::new(store.clone(), identity, EndpointRole::Host)?;
-            let settings = SettingsRepository::open(Arc::clone(&prepared_lease))?;
-            let relay_origin = settings.snapshot()?.relay_origin;
-            let agent = Agent::from_leased_store(store.clone(), prepared_lease);
-            let mut registry = ToolRegistry::new();
-            let mut scopes =
-                BuiltinTools::new(BuiltinConfig::default())?.register_into(&mut registry)?;
-            let task_tools = SchedulerTools::new();
-            scopes.extend(task_tools.register_into(&mut registry)?);
-            let schedule_tools = ScheduleTools::new();
-            scopes.extend(schedule_tools.register_into(&mut registry)?);
+        let (agent, settings, devices, registry, mut scopes, task_tools, schedule_tools, effective) =
+            tokio::task::spawn_blocking(move || {
+                let database = prepared_lease.validate_database()?;
+                let store = Store::open_validated(
+                    prepared_lease.path().join("everything.sqlite3"),
+                    database,
+                )?;
+                let directory =
+                    cap_std::fs::Dir::from_std_file(prepared_lease.directory.file.try_clone()?);
+                let identity = crate::devices::load_or_create_identity_in(&directory)?;
+                let devices = DeviceEndpoint::new(store.clone(), identity, EndpointRole::Host)?;
+                let settings = SettingsRepository::open(Arc::clone(&prepared_lease))?;
+                let effective = settings.snapshot()?;
+                let agent = Agent::from_leased_store(store, prepared_lease);
+                let mut registry = ToolRegistry::new();
+                let mut scopes =
+                    BuiltinTools::new(BuiltinConfig::default())?.register_into(&mut registry)?;
+                let task_tools = SchedulerTools::new();
+                scopes.extend(task_tools.register_into(&mut registry)?);
+                let schedule_tools = ScheduleTools::new();
+                scopes.extend(schedule_tools.register_into(&mut registry)?);
+                Ok::<_, HostError>((
+                    agent,
+                    settings,
+                    devices,
+                    registry,
+                    scopes,
+                    task_tools,
+                    schedule_tools,
+                    effective,
+                ))
+            })
+            .await
+            .map_err(|_| HostError::Worker)??;
+        let credentials = CredentialVault::from_environment();
+        if let Some(path) = binding_file {
+            credentials
+                .bootstrap_mcp_session_from_file(path, effective.mcp.clone(), cancellation.clone())
+                .await?;
+        }
+        if cancellation.is_cancelled() {
+            return Err(crate::credentials::CredentialError::Cancelled.into());
+        }
+        let mcp = super::mcp::McpService::start(
+            effective.mcp.clone(),
+            Arc::new(credentials.clone()),
+            agent.clone(),
+            CancellationToken::new(),
+        )?;
+        let (registry, mcp_scopes) = mcp.register(registry).await?;
+        scopes.extend(mcp_scopes);
+        let store = agent.store();
+        let (registry, authorizer, discovery) = tokio::task::spawn_blocking(move || {
+            let mut registry = registry;
             let catalog_authorizer = Arc::new(Authorizer::new(
                 store.clone(),
                 Arc::new(registry.clone()),
@@ -187,21 +233,40 @@ impl HostService {
             scopes.insert(SEARCH_TOOLS_NAME.into(), ToolScopeRule::LocalReadOnly);
             let registry = Arc::new(registry);
             let authorizer = Arc::new(Authorizer::new(store, registry.clone(), scopes)?);
-            Ok::<_, HostError>((
-                agent,
-                settings,
-                devices,
-                registry,
-                authorizer,
-                DiscoveryServices { selector, search },
-                task_tools,
-                schedule_tools,
-                relay_origin,
-            ))
+            Ok::<_, HostError>((registry, authorizer, DiscoveryServices { selector, search }))
         })
         .await
         .map_err(|_| HostError::Worker)??;
-        let credentials = CredentialVault::from_environment();
+        let providers = Arc::new(HostProviderFactory::new(
+            settings.clone(),
+            credentials.clone(),
+        ));
+        let memory = super::memory::MemoryService::open(
+            agent.clone(),
+            effective.memory.clone(),
+            Some(providers.clone()),
+            CancellationToken::new(),
+        )
+        .await?;
+        let catalog = super::selection::SelectionCatalog::from_registry(&registry)?;
+        let selection = super::selection::SelectionPreflight::new(
+            agent.clone(),
+            discovery.selector.clone(),
+            &effective.selection,
+            credentials.native_store(),
+            catalog.clone(),
+            Duration::from_secs(300),
+        )?;
+        let relay_origin = effective.relay_origin.clone();
+        let composition = Arc::new(super::composition::Composition::new(
+            memory,
+            mcp,
+            selection,
+            catalog,
+            effective,
+            HostInbox::new(agent.store()),
+            agent.clone(),
+        ));
         let broker = ToolBroker::start(
             agent.store(),
             registry.clone(),
@@ -216,18 +281,16 @@ impl HostService {
         )
         .await?;
         let (server, calls) = LocalServer::bind_with_lease(lease, LocalOptions::default()).await?;
-        let scheduler = Scheduler::start(
+        let scheduler = Scheduler::start_with_preparation(
             SchedulerServices {
                 agent: agent.clone(),
                 registry: registry.clone(),
                 broker: broker.clone(),
-                providers: Arc::new(HostProviderFactory::new(
-                    settings.clone(),
-                    credentials.clone(),
-                )),
+                providers,
                 discovery: Some(discovery),
             },
             SchedulerLimits::default(),
+            composition.clone(),
         )
         .await?;
         let scheduler_binding = match task_tools.bind(&scheduler) {
@@ -286,6 +349,7 @@ impl HostService {
             schedule_engine,
             schedule_controls,
             broker,
+            composition,
             changed: Notify::new(),
             mutation: Mutex::new(()),
             relay_origin,
@@ -430,10 +494,24 @@ impl HostService {
         {
             let _mutation = inner.mutation.lock().await;
             inner.draining.store(true, Ordering::Release);
+            inner.composition.close();
             inner.schedule_controls.close();
         }
         inner.receipt_changed();
         work_stop.cancel();
+        let service_owner = inner.clone();
+        let mut service_work = Some(tokio::spawn(async move {
+            loop {
+                match service_owner.composition.stop_work().await {
+                    Ok(()) => return,
+                    Err(_) => tracing::error!(
+                        "memory or selection cleanup remains unconfirmed; state ownership retained"
+                    ),
+                }
+                tokio::time::sleep(Duration::from_secs(1)).await;
+            }
+        }));
+        let mut service_work_stopped = false;
         let scheduler_owner = inner.clone();
         let mut shutdown = Some(tokio::spawn(async move {
             loop {
@@ -468,6 +546,8 @@ impl HostService {
         let mut calls_open = true;
         let mut quiescence = None;
         let mut quiescence_proved = false;
+        let mut composition_shutdown = None;
+        let mut composition_stopped = false;
         loop {
             if inner.workers_drained.load(Ordering::Acquire)
                 && !quiescence_proved
@@ -500,9 +580,27 @@ impl HostService {
                     .blocking(|host| global_running(&host.agent.store()))
                     .await;
                 if matches!((&report,&running), (Ok(report),Ok(false)) if report.running_count == 0 && report.unresolved_count == 0 && report.requirements.is_empty())
-                    && inner.publication.borrow().stopped
                 {
-                    break;
+                    if composition_stopped
+                        && service_work_stopped
+                        && inner.publication.borrow().stopped
+                    {
+                        break;
+                    }
+                    if service_work_stopped && composition_shutdown.is_none() {
+                        let host = inner.clone();
+                        composition_shutdown = Some(tokio::spawn(async move {
+                            loop {
+                                match host.composition.finish_mcp().await {
+                                    Ok(()) => return,
+                                    Err(_) => tracing::error!(
+                                        "host service cleanup remains unconfirmed; owner inspection stays available"
+                                    ),
+                                }
+                                tokio::time::sleep(Duration::from_secs(1)).await;
+                            }
+                        }));
+                    }
                 }
                 if report.is_err() || running.is_err() {
                     tracing::error!(
@@ -511,6 +609,20 @@ impl HostService {
                 }
             }
             tokio::select! {
+                joined = async { service_work.as_mut().ok_or(HostError::Worker)?.await.map_err(|_| HostError::Worker) }, if service_work.is_some() => {
+                    service_work.take();
+                    match joined {
+                        Ok(()) => service_work_stopped = true,
+                        Err(error) => { if result.is_ok() { result = Err(error); } }
+                    }
+                }
+                joined = async { composition_shutdown.as_mut().ok_or(HostError::Worker)?.await.map_err(|_| HostError::Worker) }, if composition_shutdown.is_some() => {
+                    composition_shutdown.take();
+                    match joined {
+                        Ok(()) => composition_stopped = true,
+                        Err(error) => { if result.is_ok() { result = Err(error); } }
+                    }
+                }
                 joined = async { quiescence.as_mut().ok_or(HostError::Worker)?.await.map_err(|_| HostError::Worker) }, if quiescence.is_some() => {
                     quiescence.take();
                     match joined {
@@ -756,7 +868,10 @@ impl HostInner {
 
 pub(super) fn public_failure(error: &HostError) -> LocalFailure {
     let (code, message) = match error {
-        HostError::Local(LocalError::Cancelled) => (
+        HostError::Local(LocalError::Cancelled)
+        | HostError::Memory(super::memory::MemoryError::Cancelled)
+        | HostError::Consolidation(crate::memory::consolidate::ConsolidationError::Cancelled)
+        | HostError::Selection(super::selection::SelectionPreflightError::Cancelled) => (
             LocalFailureCode::Cancelled,
             "operation was cancelled; inspect durable state before retrying a mutation",
         ),
