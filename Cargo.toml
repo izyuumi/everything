@@ -8,6 +8,7 @@ description = "Local-first native AI agent host"
 
 [workspace]
 members = ["relay"]
+default-members = [".", "relay"]
 resolver = "3"
 
 [dependencies]
