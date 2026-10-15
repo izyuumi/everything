@@ -8,11 +8,11 @@ Read [AGENTS.md](../AGENTS.md), then [implementation status](status/implementati
 
 ## Contracts
 
-[Events](contracts/events.md) · [Agent kernel](contracts/agent.md) · [Device sync](contracts/device-sync.md) · [Providers](contracts/providers.md) · [Tools](contracts/tools.md) · [MCP](contracts/mcp.md) · [Built-ins](contracts/builtin-tools.md) · [Discovery](contracts/selector.md) · [Broker](contracts/broker.md) · [Storage](contracts/storage.md) · [Wiki maintenance](contracts/consolidation.md) · [Embeddings](contracts/embeddings.md) · [Local IPC](contracts/local-ipc.md) · [Context](contracts/context.md)
+[Events](contracts/events.md) · [Agent kernel](contracts/agent.md) · [Scheduler](contracts/scheduler.md) · [Device sync](contracts/device-sync.md) · [Providers](contracts/providers.md) · [Tools](contracts/tools.md) · [MCP](contracts/mcp.md) · [Built-ins](contracts/builtin-tools.md) · [Discovery](contracts/selector.md) · [Broker](contracts/broker.md) · [Storage](contracts/storage.md) · [Wiki maintenance](contracts/consolidation.md) · [Embeddings](contracts/embeddings.md) · [Local IPC](contracts/local-ipc.md) · [Context](contracts/context.md)
 
 ## Development
 
-[Setup](development/setup.md) · [CLI](development/cli.md) · [Conventions](development/conventions.md) · [Workflows](development/workflows.md) · [Backlog synchronization](development/backlog-sync.md) · [Validation](development/validation.md) · [Embedding benchmark](development/embedding-benchmark.md)
+[Setup](development/setup.md) · [CLI](development/cli.md) · [Conventions](development/conventions.md) · [Workflows](development/workflows.md) · [Backlog synchronization](development/backlog-sync.md) · [Validation](development/validation.md) · [Embedding benchmark](development/embedding-benchmark.md) · [Scheduler](development/scheduler.md)
 
 ## Decisions
 
