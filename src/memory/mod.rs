@@ -5,3 +5,6 @@ pub mod wiki;
 pub use index::{SearchHit, SyncReport, WikiIndex};
 pub use wiki::{Provenance, Wiki, WikiChunk, WikiError, WikiLimits, WikiLink, WikiPage};
 pub mod consolidate;
+pub mod search;
+#[cfg(feature = "local-embeddings")]
+pub mod vector;
