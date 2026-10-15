@@ -10,6 +10,7 @@ use super::types::*;
 
 const MAX_TASK_BYTES: usize = 786_432;
 const MAX_RETAINED_TASKS: i64 = 4096;
+pub(super) const CHILD_DELIVERY_METADATA_BYTES: usize = 1024;
 
 pub(super) fn check_capacity(store: &Store, max_pending: usize) -> Result<(), SchedulerError> {
     let connection = store.connection()?;
@@ -45,7 +46,20 @@ pub(super) fn encode(value: &impl Serialize) -> Result<Value, SchedulerError> {
 }
 
 pub(super) fn encode_checkpoint(checkpoint: &TaskCheckpoint) -> Result<Value, SchedulerError> {
-    let encoded = serde_json::to_vec(checkpoint)?;
+    let bytes = serde_json::to_vec(checkpoint)?;
+    let remaining = checkpoint
+        .child_wait
+        .as_ref()
+        .filter(|_| !checkpoint.cancel_requested)
+        .map_or(0, |wait| {
+            wait.children
+                .iter()
+                .filter(|child| child.delivery.is_none())
+                .count()
+        });
+    let delivery_reserve = remaining
+        .checked_mul(CHILD_DELIVERY_METADATA_BYTES)
+        .ok_or(SchedulerError::Capacity("task checkpoint bytes"))?;
     let status_bytes = serde_json::to_vec(&checkpoint.last_output)?
         .len()
         .saturating_add(serde_json::to_vec(&checkpoint.diagnostic)?.len())
@@ -53,19 +67,22 @@ pub(super) fn encode_checkpoint(checkpoint: &TaskCheckpoint) -> Result<Value, Sc
         .saturating_add(serde_json::to_vec(&checkpoint.task.failure)?.len())
         .saturating_add(serde_json::to_vec(&checkpoint.task.status)?.len())
         .saturating_add(serde_json::to_vec(&checkpoint.task.updated_at)?.len());
-    let reserve = if checkpoint.task.status.is_terminal() {
+    let status_reserve = if checkpoint.task.status.is_terminal() {
         0
     } else {
         81_920_usize.saturating_sub(status_bytes)
     };
-    if encoded
+    let reserve = delivery_reserve
+        .checked_add(status_reserve)
+        .ok_or(SchedulerError::Capacity("task checkpoint bytes"))?;
+    if bytes
         .len()
         .checked_add(reserve)
-        .is_none_or(|length| length > MAX_TASK_BYTES)
+        .is_none_or(|size| size > MAX_TASK_BYTES)
     {
         return Err(SchedulerError::Capacity("task checkpoint bytes"));
     }
-    Ok(serde_json::from_slice(&encoded)?)
+    Ok(serde_json::from_slice(&bytes)?)
 }
 
 pub(super) fn check_child_depth(store: &Store, id: TaskId) -> Result<(), SchedulerError> {
@@ -115,6 +132,14 @@ fn decode(row: TaskRow) -> Result<StoredTask, SchedulerError> {
     let checkpoint: TaskCheckpoint = serde_json::from_value(row.checkpoint)?;
     definition.configuration.validate()?;
     definition.execution.validate()?;
+    if let Some(wait) = &checkpoint.child_wait {
+        super::inputs::validate_wait(wait)?;
+        if wait.active_command_id != checkpoint.active_command {
+            return Err(SchedulerError::Invalid(
+                "child wait targets a different command",
+            ));
+        }
+    }
     let initial = &definition.initial;
     let current = &checkpoint.task;
     if definition.scheduler_version != 1
