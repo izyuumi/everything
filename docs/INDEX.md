@@ -4,11 +4,11 @@ Read [AGENTS.md](../AGENTS.md), then [implementation status](status/implementati
 
 ## Architecture
 
-[Overview](architecture/overview.md) · [Runtime](architecture/runtime.md) · [Agents](architecture/agents.md) · [Models](architecture/models.md) · [Tools](architecture/tools.md) · [Discovery](architecture/selector.md) · [Permissions](architecture/permissions.md) · [Broker](architecture/broker.md) · [Context](architecture/context.md) · [Memory](architecture/memory.md) · [EmbeddingGemma 2](architecture/embeddinggemma2.md) · [Transport](architecture/transport.md) · [Relay](architecture/relay.md) · [Service](architecture/service.md) · [Security](architecture/security.md)
+[Overview](architecture/overview.md) · [Runtime](architecture/runtime.md) · [Agents](architecture/agents.md) · [Models](architecture/models.md) · [Tools](architecture/tools.md) · [MCP](architecture/mcp.md) · [Discovery](architecture/selector.md) · [Permissions](architecture/permissions.md) · [Broker](architecture/broker.md) · [Context](architecture/context.md) · [Memory](architecture/memory.md) · [EmbeddingGemma 2](architecture/embeddinggemma2.md) · [Transport](architecture/transport.md) · [Relay](architecture/relay.md) · [Service](architecture/service.md) · [Security](architecture/security.md)
 
 ## Contracts
 
-[Events](contracts/events.md) · [Providers](contracts/providers.md) · [Tools](contracts/tools.md) · [Discovery](contracts/selector.md) · [Broker](contracts/broker.md) · [Storage](contracts/storage.md) · [Embeddings](contracts/embeddings.md) · [Local IPC](contracts/local-ipc.md) · [Context](contracts/context.md)
+[Events](contracts/events.md) · [Providers](contracts/providers.md) · [Tools](contracts/tools.md) · [MCP](contracts/mcp.md) · [Discovery](contracts/selector.md) · [Broker](contracts/broker.md) · [Storage](contracts/storage.md) · [Embeddings](contracts/embeddings.md) · [Local IPC](contracts/local-ipc.md) · [Context](contracts/context.md)
 
 ## Development
 
@@ -16,4 +16,4 @@ Read [AGENTS.md](../AGENTS.md), then [implementation status](status/implementati
 
 ## Decisions
 
-[ADR-0001: Host authority and local-first boundaries](decisions/ADR-0001-host-authority.md) · [ADR-0002: Local EmbeddingGemma 2 ONNX](decisions/ADR-0002-local-embeddinggemma2-onnx.md)
+[ADR-0001: Host authority and local-first boundaries](decisions/ADR-0001-host-authority.md) · [ADR-0002: Local EmbeddingGemma 2 ONNX](decisions/ADR-0002-local-embeddinggemma2-onnx.md) · [ADR-0003: Native MCP SDK](decisions/ADR-0003-native-mcp-sdk.md)
