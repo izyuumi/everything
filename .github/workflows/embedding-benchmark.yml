@@ -1,0 +1,104 @@
+name: Local embedding benchmark
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - 'src/memory/embedding/**'
+      - 'src/bin/everything-embedding-bench.rs'
+      - '.github/workflows/embedding-benchmark.yml'
+permissions:
+  contents: read
+  checks: write
+jobs:
+  embedding:
+    runs-on: macos-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: |
+          python -m pip install --only-binary=:all: onnxruntime==1.31.0
+      - name: Provision pinned public model artifacts
+        env:
+          MODEL_ROOT: ${{ runner.temp }}/embeddinggemma2
+        run: |
+          python - <<'PY'
+          import os
+          import pathlib
+          import shutil
+          import urllib.request
+          root = pathlib.Path(os.environ['MODEL_ROOT'])
+          revision = 'daa72c51243991dfcaf9f9137d2c573d8f7790c0'
+          base = f'https://huggingface.co/onnx-community/embeddinggemma-2-ONNX/resolve/{revision}'
+          for name in ['config.json', 'tokenizer.json', 'onnx/model.onnx', 'onnx/model.onnx_data']:
+              destination = root / name
+              destination.parent.mkdir(parents=True, exist_ok=True)
+              with urllib.request.urlopen(f'{base}/{name}', timeout=120) as response:
+                  with destination.open('wb') as output:
+                      shutil.copyfileobj(response, output, 1024 * 1024)
+              print(f'Downloaded {name}: {destination.stat().st_size} bytes')
+          PY
+      - run: cargo build --release --locked --features local-embeddings --bin everything-embedding-bench
+      - name: Run native CPU benchmark
+        env:
+          MODEL_ROOT: ${{ runner.temp }}/embeddinggemma2
+        run: |
+          runtime_library=$(python - <<'PY'
+          import pathlib
+          import onnxruntime
+          libraries = list((pathlib.Path(onnxruntime.__file__).parent / 'capi').glob('libonnxruntime*.dylib'))
+          if len(libraries) != 1:
+              raise SystemExit('Expected exactly one native ONNX Runtime library')
+          print(libraries[0].resolve())
+          PY
+          )
+          /usr/bin/time -l target/release/everything-embedding-bench --runtime-library "$runtime_library" --model-dir "$MODEL_ROOT" --threads 2 --max-tokens 2048 --repetitions 3 --warmup-iterations 1 --inference-timeout-seconds 30 --load-timeout-seconds 120 --deadline-seconds 600 > embedding-report.json 2> embedding-process.txt
+      - name: Publish public measurement summary
+        if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BENCHMARK_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          import pathlib
+          import subprocess
+          report = json.loads(pathlib.Path('embedding-report.json').read_text())
+          process = pathlib.Path('embedding-process.txt').read_text()
+          rss_lines = [line.split()[0] for line in process.splitlines() if line.strip().endswith('maximum resident set size')]
+          metrics = {key: report[key] for key in ['operating_system', 'architecture', 'configuration', 'runtime', 'model', 'elapsed_ms']}
+          metrics['maximum_resident_set_bytes'] = int(rss_lines[0]) if len(rss_lines) == 1 else None
+          metrics['hardware'] = {}
+          for name in ['hw.model', 'hw.memsize', 'hw.ncpu']:
+              result = subprocess.run(['/usr/sbin/sysctl', '-n', name], capture_output=True, text=True, check=True)
+              metrics['hardware'][name] = result.stdout.strip()
+          metrics['validation_commit'] = subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip()
+          metrics['dimensions'] = [{key: dimension[key] for key in ['dimensions', 'query_latency', 'document_latency', 'all_finite', 'maximum_l2_norm_error', 'ranking_metrics']} for dimension in report['dimensions']]
+          payload = {
+              'name': 'EmbeddingGemma 2 macOS measurements',
+              'head_sha': os.environ['BENCHMARK_HEAD_SHA'],
+              'status': 'completed',
+              'conclusion': 'success',
+              'details_url': f"https://github.com/{os.environ['GITHUB_REPOSITORY']}/actions/runs/{os.environ['GITHUB_RUN_ID']}",
+              'output': {
+                  'title': 'Native CPU measurements on the public benchmark corpus',
+                  'summary': 'The native benchmark completed. This small shared-runner workload is not a broad accuracy or production-readiness evaluation. Raw reports remain attached to the workflow.',
+                  'text': json.dumps(metrics, indent=2)
+              }
+          }
+          pathlib.Path('embedding-check.json').write_text(json.dumps(payload))
+          PY
+          gh api --method POST "repos/$GITHUB_REPOSITORY/check-runs" --input embedding-check.json --jq '.html_url'
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: embedding-macos-report
+          path: |
+            embedding-report.json
+            embedding-process.txt
+          if-no-files-found: ignore

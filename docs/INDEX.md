@@ -4,7 +4,7 @@ Read [AGENTS.md](../AGENTS.md), then [implementation status](status/implementati
 
 ## Architecture
 
-[Overview](architecture/overview.md) · [Runtime](architecture/runtime.md) · [Agents](architecture/agents.md) · [Models](architecture/models.md) · [Tools](architecture/tools.md) · [Built-ins](architecture/builtin-tools.md) · [Permissions](architecture/permissions.md) · [Broker](architecture/broker.md) · [Context](architecture/context.md) · [Memory](architecture/memory.md) · [Transport](architecture/transport.md) · [Relay](architecture/relay.md) · [Service](architecture/service.md) · [Security](architecture/security.md)
+[Overview](architecture/overview.md) · [Runtime](architecture/runtime.md) · [Agents](architecture/agents.md) · [Models](architecture/models.md) · [Tools](architecture/tools.md) · [Built-ins](architecture/builtin-tools.md) · [Permissions](architecture/permissions.md) · [Broker](architecture/broker.md) · [Context](architecture/context.md) · [Memory](architecture/memory.md) · [EmbeddingGemma 2](architecture/embeddinggemma2.md) · [Transport](architecture/transport.md) · [Relay](architecture/relay.md) · [Service](architecture/service.md) · [Security](architecture/security.md)
 
 ## Contracts
 
@@ -12,8 +12,8 @@ Read [AGENTS.md](../AGENTS.md), then [implementation status](status/implementati
 
 ## Development
 
-[Setup](development/setup.md) · [CLI](development/cli.md) · [Conventions](development/conventions.md) · [Workflows](development/workflows.md) · [Validation](development/validation.md)
+[Setup](development/setup.md) · [CLI](development/cli.md) · [Conventions](development/conventions.md) · [Workflows](development/workflows.md) · [Validation](development/validation.md) · [Embedding benchmark](development/embedding-benchmark.md)
 
 ## Decisions
 
-[ADR-0001: Host authority and local-first boundaries](decisions/ADR-0001-host-authority.md)
+[ADR-0001: Host authority and local-first boundaries](decisions/ADR-0001-host-authority.md) · [ADR-0002: Local EmbeddingGemma 2 ONNX](decisions/ADR-0002-local-embeddinggemma2-onnx.md)
