@@ -107,8 +107,13 @@ impl Message {
     }
 
     pub fn validate(&self) -> Result<(), ModelError> {
-        if self.content.is_empty() || self.content.len() > MAX_CONTENT_BLOCKS {
-            return Err(invalid("content", "must contain between 1 and 1024 blocks"));
+        if (self.content.is_empty() && self.role != MessageRole::Assistant)
+            || self.content.len() > MAX_CONTENT_BLOCKS
+        {
+            return Err(invalid(
+                "content",
+                "must contain at most 1024 blocks; only assistant content may be empty",
+            ));
         }
         for block in &self.content {
             match block {
