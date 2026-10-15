@@ -1,6 +1,6 @@
 # ADR-0005: Scheduling calendar and durable native admission
 
-Status: Accepted for issue #51; implementation validation pending.
+Status: Accepted and implemented for issue #51; local static and disposable manual validation recorded in the [engine contract](../contracts/scheduling-engine.md).
 
 ## Context
 
