@@ -1074,9 +1074,8 @@ impl Agent {
             }
             checkpoint.last_turn = Some(summary);
             checkpoint.continuation = response.continuation;
-            if let Some(run) = &native.last_run {
-                if checkpoint.pending.is_none() { events.push(TurnEvent::RunCompleted { run: run.clone() }); }
-            }
+            if let Some(run) = &native.last_run
+                && checkpoint.pending.is_none() { events.push(TurnEvent::RunCompleted { run: run.clone() }); }
             Ok((captured, checkpoint, payloads, events))
         }).await?;
         conversation = captured;

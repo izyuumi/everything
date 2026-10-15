@@ -4,11 +4,11 @@ Assessment date: 2026-10-15. The initial main branch contained only LICENSE and 
 
 ## Current integration
 
-Foundation issues #1–#11, relay #13, Tool Broker #14, context #16, and embedding contracts #31 are merged through PRs #33–#57 after Linux/macOS CI. The CLI supports durable text conversations and explicit recovery of pending turns. Background service #18 has a validated library awaiting CLI integration. Reviewed local integration includes built-in tools #15, device synchronization #22, private model-attempt checkpoints and wiki maintenance #26; their focused PRs await GitHub Actions access. Local embedding #12 is merged in PR #49. Discovery #17/#20, device synchronization #22, the native tool loop #23, built-in tools #15, and MCP #19 have isolated implementation workstreams.
+Foundation issues #1–#11, relay #13, Tool Broker #14, context #16, and embedding contracts #31 are merged through PRs #33–#57 after Linux/macOS CI. The CLI supports durable text conversations and explicit recovery of pending turns. Background service #18 has a validated library awaiting CLI integration. Reviewed local integration includes built-in tools #15, device synchronization #22, private model-attempt checkpoints and wiki maintenance #26; their focused PRs await GitHub Actions access. Local embedding #12 is merged in PR #49. Offline discovery #17 is merged. The reviewed local integration also includes MCP #19 and native tool loop #23; their focused PRs await required GitHub checks. Optional System One #20, hybrid retrieval #21 and schedule persistence #50 have isolated workstreams.
 
-No live remote model requests have been made. EmbeddingGemma 2 produced finite normalized vectors and relevant-document rankings locally at all four dimensions; its native backend is merged, and Linux/macOS measurements have been inspected. Disposable manual checks covered storage rollback/dedup/restart, wiki CRUD/consolidation/provenance/prepared-write recovery, crypto/replay/sync, permission restrictions, broker approval/replay/quarantine, context budgets and native local embedding cancellation. These observations are not automated coverage or a security audit.
+No live remote model requests have been made. EmbeddingGemma 2 produced finite normalized vectors and relevant-document rankings locally at all four dimensions; its native backend is merged, and Linux/macOS measurements have been inspected. The combined native CLI preserved an uncertain local-only model attempt across restart, refused an implicit retry, and rejected saved-setup overrides. No live provider success was inferred from this failure-only observation. Disposable manual checks covered storage rollback/dedup/restart, wiki CRUD/consolidation/provenance/prepared-write recovery, crypto/replay/sync, permission restrictions, broker approval/replay/quarantine, context budgets and native local embedding cancellation. These observations are not automated coverage or a security audit.
 
-Rust 1.99.0 is installed. Apple SDKs and Mac hardware are unavailable locally; GitHub macOS CI supplies Rust builds and native embedding measurements. Swift interoperability and live model behavior remain unverified. Normal GitHub merge enforcement and passing CI are required.
+Rust 1.99.0 and the supported Rust 1.88.0 compiler are installed. Apple SDKs and Mac hardware are unavailable locally; Earlier successful GitHub macOS CI supplied Rust builds and native embedding measurements; new jobs currently cannot start because of account billing. Swift interoperability and live model behavior remain unverified. Normal GitHub merge enforcement and passing CI are required.
 
 ## Dependency graph and ownership
 
@@ -25,7 +25,7 @@ Rust 1.99.0 is installed. Apple SDKs and Mac hardware are unavailable locally; G
 | [#9](https://github.com/izyuumi/everything/issues/9) | Implement OpenAI native Responses adapter | #4 | Merged (#41); live API unverified |
 | [#10](https://github.com/izyuumi/everything/issues/10) | Build persistent CLI conversation loop | #2, #3, #4, #8 | Merged (#57); live provider success unverified |
 | [#11](https://github.com/izyuumi/everything/issues/11) | Implement permission policy and persistent grants | #2, #3, #5 | Merged (#43) |
-| [#12](https://github.com/izyuumi/everything/issues/12) | Implement local EmbeddingGemma 2 inference spike | #31 | Actual native inference and release benchmarks verified on Linux/macOS; integration validation |
+| [#12](https://github.com/izyuumi/everything/issues/12) | Implement local EmbeddingGemma 2 inference spike | #31 | Merged (#49); actual native inference and release benchmarks verified on Linux/macOS |
 | [#13](https://github.com/izyuumi/everything/issues/13) | Implement E2EE relay transport server | #7 | Merged (#45) |
 | [#14](https://github.com/izyuumi/everything/issues/14) | Implement Tool Broker execution journal | #3, #5, #11 | Implemented; native loop integration remains #23 |
 | [#15](https://github.com/izyuumi/everything/issues/15) | Implement shell and filesystem tools | #14 | Reviewed local integration; manual broker walkthrough passed; Actions billing blocks merge |
@@ -33,10 +33,10 @@ Rust 1.99.0 is installed. Apple SDKs and Mac hardware are unavailable locally; G
 | [#17](https://github.com/izyuumi/everything/issues/17) | Implement offline permission-aware tool discovery | #5, #11, #16 | Merged (#61); offline discovery |
 | [#18](https://github.com/izyuumi/everything/issues/18) | Implement native macOS background host service | #1, #2, #3 | Library merged (#48); CLI integration pending |
 | [#19](https://github.com/izyuumi/everything/issues/19) | Implement MCP client tool adapter | #5, #14, #17 | Reviewed local integration; native server walkthrough passed; Actions billing blocks merge |
-| [#20](https://github.com/izyuumi/everything/issues/20) | Implement configurable System One classification | #5, #11, #16, #17 | In progress; generic configurable adapter after merged #17 |
-| [#21](https://github.com/izyuumi/everything/issues/21) | Implement sqlite-vec hybrid retrieval and index switching | #6, #12, #31 | Backlog |
+| [#20](https://github.com/izyuumi/everything/issues/20) | Implement configurable System One classification | #5, #11, #16, #17 | Implementation and independent reviews complete; final cancellation-bound validation underway |
+| [#21](https://github.com/izyuumi/everything/issues/21) | Implement sqlite-vec hybrid retrieval and index switching | #6, #12, #31, #26 | In progress against frozen reviewed local prerequisites |
 | [#22](https://github.com/izyuumi/everything/issues/22) | Implement device pairing and client sync | #2, #3, #7, #13 | Reviewed local integration; real relay/restart/revocation passed; Actions billing blocks merge |
-| [#23](https://github.com/izyuumi/everything/issues/23) | Implement multi-tool agent loop | #8, #9, #10, #14 | In progress; private model-attempt checkpoint prerequisite |
+| [#23](https://github.com/izyuumi/everything/issues/23) | Implement multi-tool agent loop | #8, #9, #10, #14 | Reviewed local integration; actual Rust 1.88 checks, strict Clippy, all-feature release and CLI recovery observations passed; Actions billing blocks merge |
 | [#24](https://github.com/izyuumi/everything/issues/24) | Implement task scheduler and concurrent subagents | #3, #14, #23 | Backlog |
 | [#25](https://github.com/izyuumi/everything/issues/25) | Implement steering and autonomous continuation | #23, #24 | Backlog |
 | [#26](https://github.com/izyuumi/everything/issues/26) | Implement wiki consolidation and lint jobs | #6, #16 | Reviewed local integration; required GitHub checks blocked by account billing |
@@ -60,7 +60,7 @@ The coordinator owns root manifests, library registration, CLI integration, shar
 
 ## Deferred validation and blockers
 
-Automated test creation is deliberately deferred under the mission's explicit no-tests instruction. [Follow-up #32](https://github.com/izyuumi/everything/issues/32) tracks issue-specific missing assertions. No deferred acceptance criterion is considered verified. Swift builds/interoperability, live provider requests and security review still require their supported environments or credentials. Native Rust macOS CI passes; device/relay roundtrips and local embedding inference have disposable manual observations. The macOS native embedding benchmark completed and its published metrics were inspected. Each component document records the exact validation scope.
+Automated test creation is deliberately deferred under the mission's explicit no-tests instruction. [Follow-up #32](https://github.com/izyuumi/everything/issues/32) tracks issue-specific missing assertions. No deferred acceptance criterion is considered verified. Swift builds/interoperability, live provider requests and security review still require their supported environments or credentials. Earlier integrated Rust macOS CI passed; current PR heads await restored Actions access; device/relay roundtrips and local embedding inference have disposable manual observations. The macOS native embedding benchmark completed and its published metrics were inspected. Each component document records the exact validation scope.
 
 ## External integration blocker
 
