@@ -2,6 +2,8 @@
 
 Issue [#50](https://github.com/izyuumi/everything/issues/50) supplies `scheduling::ScheduleRepository`, typed definitions, and `0006_scheduled_jobs.sql`. It depends on the actual conversation configuration from #10, device transport schema 4, and the private checkpoint journal in schema 5. The repository uses the existing `Store` connection and mutex. It creates no database, service, timer, task worker, or model connection. All calls are synchronous and belong on a bounded blocking worker when called from async code. Only trusted crate modules can obtain the internal connection; no public connection or transaction API is introduced.
 
+Issue #51 adds the [schedule-engine contract](scheduling-engine.md), atomic terminal missed-range disposition and real first-attempt identities in schema 8. Default dispatch claim serialization remains unchanged. Actual wall admission remains separate from clamped recording timestamps; the original admission time determines the occurrence deadline.
+
 ## Definitions and authority
 
 `ScheduleDefinition` has explicit schema version 1, `ScheduleSpec`, `ScheduledTarget`, and `RunPolicies`. Unsupported versions fail validation on writes and reads. IDs are typed non-nil UUIDs: `ScheduledJobId` identifies a job and `OccurrenceId` identifies one durable occurrence. They serialize as UUID strings. All times are typed Unix milliseconds and scheduling rejects values after year 9999. Once and interval times represent UTC instants; cron carries its explicit IANA timezone.
