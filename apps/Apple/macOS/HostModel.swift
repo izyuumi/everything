@@ -225,6 +225,30 @@ final class HostModel {
         await apply(request, label: pendingActionLabel, expectedKind: kind)
     }
 
+    func inspectPendingCommand() async {
+        guard let request = pendingAction, request.body["kind"].string == "command", !acting, !closing else { return }
+        acting = true
+        defer { acting = false }
+        let original = connection
+        do {
+            let response = try await client.request(.query("command", fields: ["command_id": .string(request.id.string)]), connection: original)
+            guard original == connection, pendingAction?.id == request.id, !closing, !Task.isCancelled else { return }
+            guard response["kind"].string == "command" else { throw OwnerClientError.invalidResponse }
+            let receipt = response["receipt"]
+            if receipt == .null {
+                message = "This host has no durable record of the command. Its exact original request remains available for an explicit retry."
+                return
+            }
+            guard receipt["command_id"].string == request.id.string,
+                  receipt["conversation_id"] == request.body["command"]["conversation_id"],
+                  let phase = receipt["phase"].string,
+                  ["accepted", "applied", "completed", "rejected"].contains(phase) else { throw OwnerClientError.invalidResponse }
+            message = "Command state: " + phase + ". " + receipt["result"].formatted
+            if ["completed", "rejected"].contains(phase) { pendingAction = nil }
+            await refresh()
+        } catch { if !Task.isCancelled { message = error.localizedDescription } }
+    }
+
     func loadSettings() async {
         let original = connection
         do {

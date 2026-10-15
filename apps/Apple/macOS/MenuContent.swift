@@ -4,6 +4,7 @@ import SwiftUI
 @MainActor
 struct MenuContent: View {
     @Bindable var model: HostModel
+    @State private var clearingReminder = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -35,10 +36,17 @@ struct MenuContent: View {
             if model.pendingAction != nil {
                 VStack(alignment: .leading) {
                     Text("An owner action needs reconciliation.").font(.caption.bold())
+                    if let request = model.pendingAction {
+                        Text(request.id.string).font(.caption2.monospaced()).textSelection(.enabled)
+                    }
                     HStack {
                         Button("Repeat exact action") { Task { await model.repeatPending() } }
                             .disabled(model.acting || !model.connected || model.draining)
-                        Button("I inspected current state") { model.pendingAction = nil }
+                        if model.pendingAction?.body["kind"].string == "command" {
+                            Button("Inspect result") { Task { await model.inspectPendingCommand() } }
+                                .disabled(model.acting || !model.connected)
+                        }
+                        Button("Clear reminder…") { clearingReminder = true }
                             .disabled(model.acting)
                     }
                 }
@@ -61,6 +69,12 @@ struct MenuContent: View {
         }
         .padding(16)
         .frame(width: 540, height: 620)
+        .confirmationDialog("Clear this app's replay reminder?", isPresented: $clearingReminder, titleVisibility: .visible) {
+            Button("I inspected current state; clear reminder") { model.pendingAction = nil }
+                .disabled(model.acting)
+        } message: {
+            Text("The host retains admitted work and durable command history. This app will stop offering to repeat this action. Inspect the task, permission request or settings before continuing.")
+        }
         .sheet(item: $model.selectedTask) { task in TaskDetailsView(model: model, task: task) }
         .sheet(item: $model.selectedApproval) { approval in ApprovalDetailsView(model: model, approval: approval) }
     }
