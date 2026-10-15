@@ -60,7 +60,7 @@ async fn run(
     let conversation_id = task.definition.initial.conversation_id;
     let command_id = task.checkpoint.active_command;
     let conversation = match services.agent.conversation(conversation_id).await {
-        Ok(conversation) => conversation,
+        Ok(conversation) => Arc::new(conversation),
         Err(error) => return waiting(WaitingReason::Interrupted, error.to_string()),
     };
     if conversation.config != task.definition.configuration {
@@ -79,7 +79,7 @@ async fn run(
     let preparation = {
         let services = Arc::clone(services);
         let task = task.clone();
-        let conversation = conversation.clone();
+        let conversation = Arc::clone(&conversation);
         tokio::task::spawn_blocking(move || {
             prepare(&services, &task, &conversation, retry_uncertain)
         })
@@ -112,6 +112,7 @@ async fn run(
         }
     };
 
+    drop(conversation);
     let execution_cancellation = cancellation.child_token();
     let stream = services
         .agent
