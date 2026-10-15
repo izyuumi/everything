@@ -18,6 +18,8 @@ The native checkpoint saves the definition and its digest. An active resume must
 
 Saved catalog and authority checks bind an active turn. A later accepted command starts with its newly selected permitted tools; it need not keep historical tools advertised. The raw historical messages and provider continuation are preserved.
 
+LoopLimits.absolute_deadline is an optional authoritative UnixMillis deadline. Its omitted default preserves previous definition encodings. The native turn freezes the earlier of this deadline and started_at plus max_duration_ms; NativeRunInfo.deadline_ms reports that effective value. An already expired fresh turn stops at DurationLimit without a provider request. Recovery retains the original deadline, and clock rollback stops execution. Captured one-time execution policies may set it; recurring host defaults should leave it absent and supply a fresh captured deadline for each admitted occurrence.
+
 A legacy conversation with provider continuation cannot enter tool/context mode. Native history and opaque state must preserve their exact structure; a caller cannot reset them to overcome a pending tool round. Compaction is delegated to ContextBuilder, preserving raw history and required continuation rules.
 
 ## States and effects

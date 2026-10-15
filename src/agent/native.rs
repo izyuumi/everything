@@ -34,6 +34,8 @@ pub struct LoopLimits {
     pub max_selected_tools: usize,
     pub max_charged_tokens: u64,
     pub max_duration_ms: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub absolute_deadline: Option<UnixMillis>,
 }
 
 impl Default for LoopLimits {
@@ -46,6 +48,7 @@ impl Default for LoopLimits {
             max_selected_tools: 64,
             max_charged_tokens: 1_000_000,
             max_duration_ms: 3_600_000,
+            absolute_deadline: None,
         }
     }
 }
@@ -272,8 +275,8 @@ impl NativeCheckpoint {
             ContextBuilder::new(turn.definition.budget.clone())?;
             if turn.command_id != pending.command.command_id
                 || definition_digest(&turn.definition)? != turn.definition_digest
-                || turn.deadline_ms < turn.started_at_ms
-                || turn.deadline_ms - turn.started_at_ms != turn.definition.limits.max_duration_ms
+                || turn.deadline_ms
+                    != effective_deadline(turn.started_at_ms, &turn.definition.limits)?
                 || turn.attempts > turn.definition.limits.max_model_attempts
                 || turn.tool_calls > turn.definition.limits.max_tool_calls
             {
@@ -727,10 +730,7 @@ fn prepare_native(
             .command
             .command_id;
         let now = UnixMillis::now()?.get();
-        let deadline_ms = now
-            .checked_add(definition.limits.max_duration_ms)
-            .filter(|deadline| *deadline <= i64::MAX as u64)
-            .ok_or(AgentError::ResourceLimit("turn deadline"))?;
+        let deadline_ms = effective_deadline(now, &definition.limits)?;
         checkpoint.context.tools = definition.initial_tools.clone();
         checkpoint.turn = Some(NativeTurn {
             command_id,
@@ -743,7 +743,13 @@ fn prepare_native(
             charged_tokens: 0,
             reported_input_tokens: 0,
             reported_output_tokens: 0,
-            status: LoopStatus::Ready,
+            status: if deadline_ms <= now {
+                LoopStatus::Paused {
+                    reason: PauseReason::DurationLimit,
+                }
+            } else {
+                LoopStatus::Ready
+            },
             round: None,
         });
     }
@@ -850,6 +856,16 @@ fn reservation(built: &BuiltContext) -> u64 {
         .usage
         .estimated_input_tokens
         .saturating_add(u64::from(built.usage.reserved_output_tokens))
+}
+
+fn effective_deadline(started_at_ms: u64, limits: &LoopLimits) -> Result<u64, AgentError> {
+    let relative = started_at_ms
+        .checked_add(limits.max_duration_ms)
+        .filter(|deadline| *deadline <= i64::MAX as u64)
+        .ok_or(AgentError::ResourceLimit("turn deadline"))?;
+    Ok(limits
+        .absolute_deadline
+        .map_or(relative, |absolute| relative.min(absolute.get())))
 }
 
 fn next_attempt_limit(
