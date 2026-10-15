@@ -392,6 +392,10 @@ impl From<crate::agent::ConversationInfo> for ConversationSummary {
 impl OwnerQueryResult {
     pub fn validate_for(&self, query: &OwnerQuery) -> Result<(), &'static str> {
         let valid = match (query, self) {
+            (OwnerQuery::Schedule { query }, Self::Schedule { result }) => {
+                schedule_query_matches(query, result)
+            }
+            (OwnerQuery::ScheduleEngine, Self::ScheduleEngine { .. }) => true,
             (OwnerQuery::Conversations { limit }, Self::Conversations { conversations }) => {
                 conversations.len() <= *limit
             }
@@ -573,6 +577,13 @@ pub enum OwnerOperationResult {
 impl OwnerOperationResult {
     pub fn validate_for(&self, operation: &OwnerOperation) -> Result<(), &'static str> {
         let valid = match (operation, self) {
+            (OwnerOperation::Schedule { mutation }, Self::Schedule { result }) => {
+                schedule_mutation_matches(mutation, result)
+            }
+            (
+                OwnerOperation::AcknowledgeScheduledUnknown { request },
+                Self::ScheduledUnknownAcknowledged { acknowledgement },
+            ) => acknowledgement.request == *request,
             (
                 OwnerOperation::DiscardUnapplied {
                     command_id,
@@ -619,5 +630,127 @@ impl OwnerOperationResult {
             return Err("owner operation result does not match its request");
         }
         Ok(())
+    }
+}
+
+fn schedule_query_matches(
+    query: &crate::scheduling::controls::ScheduleQuery,
+    result: &crate::scheduling::controls::ScheduleQueryResult,
+) -> bool {
+    use crate::scheduling::controls::{ScheduleQuery, ScheduleQueryResult};
+
+    match (query, result) {
+        (
+            ScheduleQuery::List {
+                after_id,
+                enabled,
+                include_deleted,
+                limit,
+            },
+            ScheduleQueryResult::Jobs { jobs, next_after },
+        ) => {
+            jobs.len() <= *limit
+                && jobs.windows(2).all(|pair| pair[0].id < pair[1].id)
+                && jobs.iter().all(|job| {
+                    after_id.is_none_or(|id| job.id > id)
+                        && enabled.is_none_or(|value| job.enabled == value)
+                        && (*include_deleted || job.deleted_at.is_none())
+                })
+                && next_after.is_none_or(|id| jobs.last().is_some_and(|job| job.id == id))
+        }
+        (ScheduleQuery::Show { job_id }, ScheduleQueryResult::Job { job }) => job.id == *job_id,
+        (ScheduleQuery::Run { occurrence_id }, ScheduleQueryResult::Run { inspection }) => {
+            inspection.run.occurrence_id == *occurrence_id
+        }
+        (
+            ScheduleQuery::History {
+                job_id,
+                before,
+                limit,
+            },
+            ScheduleQueryResult::History { runs, next_before },
+        ) => {
+            let key = |run: &crate::scheduling::controls::ScheduleRunInspection| {
+                (run.run.claimed_at, run.run.occurrence_id)
+            };
+            runs.len() <= *limit
+                && runs.windows(2).all(|pair| key(&pair[0]) > key(&pair[1]))
+                && runs.iter().all(|run| {
+                    run.run.job_id == *job_id
+                        && before.is_none_or(|cursor| {
+                            key(run) < (cursor.claimed_at, cursor.occurrence_id)
+                        })
+                })
+                && next_before.is_none_or(|cursor| {
+                    runs.last()
+                        .is_some_and(|run| key(run) == (cursor.claimed_at, cursor.occurrence_id))
+                })
+        }
+        _ => false,
+    }
+}
+
+fn schedule_mutation_matches(
+    mutation: &crate::scheduling::controls::ScheduleMutation,
+    result: &crate::scheduling::controls::ScheduleMutationResult,
+) -> bool {
+    use crate::scheduling::controls::{ScheduleMutation, ScheduleMutationResult};
+
+    match (mutation, result) {
+        (ScheduleMutation::Create { job: requested }, ScheduleMutationResult::Job { job }) => {
+            job.id == requested.id
+                && job.name == requested.name
+                && job.definition == requested.definition
+                && job.enabled == requested.enabled
+                && job.revision == 1
+                && job.deleted_at.is_none()
+        }
+        (
+            ScheduleMutation::Update {
+                job: requested,
+                expected_revision,
+            },
+            ScheduleMutationResult::Job { job },
+        ) => {
+            job.id == requested.id
+                && job.name == requested.name
+                && job.definition == requested.definition
+                && job.enabled == requested.enabled
+                && expected_revision.checked_add(1) == Some(job.revision)
+                && job.deleted_at.is_none()
+        }
+        (
+            ScheduleMutation::Disable {
+                job_id,
+                expected_revision,
+            },
+            ScheduleMutationResult::Job { job },
+        ) => {
+            job.id == *job_id
+                && expected_revision.checked_add(1) == Some(job.revision)
+                && !job.enabled
+                && job.deleted_at.is_none()
+        }
+        (
+            ScheduleMutation::Delete {
+                job_id,
+                expected_revision,
+            },
+            ScheduleMutationResult::Job { job },
+        ) => {
+            job.id == *job_id
+                && expected_revision.checked_add(1) == Some(job.revision)
+                && !job.enabled
+                && job.deleted_at.is_some()
+        }
+        (ScheduleMutation::Run { claim }, ScheduleMutationResult::Run { run, .. }) => {
+            run.job_id == claim.job_id
+                && run.occurrence_id == claim.occurrence_id
+                && run.trigger
+                    == crate::scheduling::RunTrigger::Manual {
+                        command_id: claim.command_id,
+                    }
+        }
+        _ => false,
     }
 }
