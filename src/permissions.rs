@@ -146,7 +146,7 @@ impl ExecutionAuthority {
         Ok(self)
     }
 
-    fn permits_tool(&self, name: &str) -> bool {
+    pub fn permits_tool(&self, name: &str) -> bool {
         self.allowed_tools
             .as_ref()
             .is_none_or(|allowed| allowed.contains(name))

@@ -76,6 +76,10 @@ impl ToolRegistry {
         Ok(&self.get(name)?.descriptor)
     }
 
+    pub fn descriptors(&self) -> impl Iterator<Item = &ToolDescriptor> {
+        self.tools.values().map(|entry| &entry.descriptor)
+    }
+
     pub fn validate(&self, name: &str, arguments: &Value) -> Result<(), ToolError> {
         validate_arguments(self.get(name)?, arguments)
     }
