@@ -51,7 +51,7 @@ rmcp = { version = "=3.5.1", default-features = false, features = ["client", "tr
 
 [features]
 default = []
-local-embeddings = ["dep:ort", "dep:tokenizers"]
+local-embeddings = ["dep:ort", "dep:tokenizers", "dep:sqlite-vec"]
 
 [dependencies.ort]
 version = "=2.0.0-rc.10"
@@ -68,4 +68,8 @@ required-features = ["local-embeddings"]
 version = "=0.22.2"
 default-features = false
 features = ["fancy-regex"]
+optional = true
+
+[dependencies.sqlite-vec]
+version = "=0.1.9"
 optional = true
