@@ -864,7 +864,7 @@ async fn run_turn(
             }
         }
         drop(stream);
-        let completed = session.agent.conversation(session.profile.conversation_id()).await?.checkpoint.pending.is_none();
+        let completed = session.agent.conversation(session.profile.conversation_id()).await?.info.pending_command_id.is_none();
         Ok::<_, HostError>(completed)
     }).catch_unwind().await;
     let classified_stop = matches!(operation, Ok(Ok(_)))

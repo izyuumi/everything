@@ -192,7 +192,8 @@ impl Store {
         if session_id.is_nil() {
             return invalid("nil Settings session identity");
         }
-        read_session(&self.connection()?, session_id)
+        let connection = self.connection()?;
+        read_session(&connection, session_id)
     }
 
     pub(crate) fn arm_settings_turn(&self, fence: &SettingsTurnFence) -> StorageResult<()> {
@@ -279,7 +280,8 @@ impl Store {
         &self,
         command_id: CommandId,
     ) -> StorageResult<Option<SettingsTurnFence>> {
-        read_fence(&self.connection()?, command_id)
+        let connection = self.connection()?;
+        read_fence(&connection, command_id)
     }
 
     pub(crate) fn unsettled_settings_turns(
@@ -287,7 +289,8 @@ impl Store {
         after: Option<CommandId>,
         limit: usize,
     ) -> StorageResult<Vec<SettingsTurnFence>> {
-        unsettled(&self.connection()?, after, limit)
+        let connection = self.connection()?;
+        unsettled(&connection, after, limit)
     }
 
     pub(crate) fn has_unsettled_settings_turns(&self) -> StorageResult<bool> {

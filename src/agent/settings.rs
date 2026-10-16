@@ -483,7 +483,10 @@ impl SettingsProfile {
     ) -> Result<SettingsToolCapability, AgentError> {
         self.check_tool(&self.conversation_id().to_string(), task, tool)?;
         let id: CommandId = operation.parse()?;
-        reserve_outcome(&mut self.state.lock().map_err(|_| AgentError::Worker)?, id)?;
+        {
+            let mut state = self.state.lock().map_err(|_| AgentError::Worker)?;
+            reserve_outcome(&mut state, id)?;
+        }
         self.journal.settings_memory_capacity(TRANSITION_HEADROOM)?;
         Ok(SettingsToolCapability {
             profile: Arc::clone(self),
@@ -735,11 +738,22 @@ impl SettingsProfile {
         if self.broker_intake_closed.load(Ordering::Acquire) {
             return Err(AgentError::Cancelled);
         }
-        self.broker_workers
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |count| {
-                count.checked_add(1).filter(|next| *next <= 8)
-            })
-            .map_err(|_| AgentError::Busy)?;
+        let mut count = self.broker_workers.load(Ordering::Acquire);
+        loop {
+            let next = count
+                .checked_add(1)
+                .filter(|next| *next <= 8)
+                .ok_or(AgentError::Busy)?;
+            match self.broker_workers.compare_exchange_weak(
+                count,
+                next,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => break,
+                Err(actual) => count = actual,
+            }
+        }
         Ok(SettingsBrokerWork {
             profile: Arc::clone(self),
         })
@@ -764,15 +778,21 @@ impl SettingsProfile {
 
 impl Drop for SettingsBrokerWork {
     fn drop(&mut self) {
-        if self
-            .profile
-            .broker_workers
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |count| {
-                count.checked_sub(1)
-            })
-            .is_err()
-        {
-            self.profile.retire();
+        let mut count = self.profile.broker_workers.load(Ordering::Acquire);
+        loop {
+            let Some(next) = count.checked_sub(1) else {
+                self.profile.retire();
+                break;
+            };
+            match self.profile.broker_workers.compare_exchange_weak(
+                count,
+                next,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => break,
+                Err(actual) => count = actual,
+            }
         }
         self.profile.broker_changed.notify_waiters();
     }
