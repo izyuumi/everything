@@ -38,6 +38,8 @@ pub enum ProtocolError {
     NonMonotonicTaskTimestamp,
     #[error("failed task requires a failure, and other task states must not contain one")]
     InvalidTaskFailure,
+    #[error("invalid scheduled notification: {0}")]
+    InvalidScheduledNotification(&'static str),
     #[error("invalid sync request: {0}")]
     InvalidSyncRequest(&'static str),
     #[error("invalid sync batch: {0}")]
@@ -425,6 +427,9 @@ pub enum ConversationEvent {
         command_id: CommandId,
         children: Vec<TaskId>,
     },
+    ScheduledRunFinished {
+        notification: ScheduledRunNotification,
+    },
     SubagentFinished {
         task_id: TaskId,
         command_id: CommandId,
@@ -434,6 +439,89 @@ pub enum ConversationEvent {
         output: String,
         outcome_unknown: bool,
     },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ScheduledRunOutcomeKind {
+    Succeeded,
+    Failed,
+    Cancelled,
+    Skipped,
+    Unknown,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "ScheduledRunNotificationWire")]
+pub struct ScheduledRunNotification {
+    pub job_id: Uuid,
+    pub occurrence_id: Uuid,
+    pub generation: u64,
+    pub scheduled_for: UnixMillis,
+    pub finished_at: UnixMillis,
+    pub task_id: Option<TaskId>,
+    pub execution_conversation_id: Option<ConversationId>,
+    pub outcome: ScheduledRunOutcomeKind,
+    pub summary: String,
+    pub outcome_digest: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ScheduledRunNotificationWire {
+    job_id: Uuid,
+    occurrence_id: Uuid,
+    generation: u64,
+    scheduled_for: UnixMillis,
+    finished_at: UnixMillis,
+    task_id: Option<TaskId>,
+    execution_conversation_id: Option<ConversationId>,
+    outcome: ScheduledRunOutcomeKind,
+    summary: String,
+    outcome_digest: String,
+}
+
+impl ScheduledRunNotification {
+    pub fn validate(&self) -> Result<(), ProtocolError> {
+        if self.job_id.is_nil()
+            || self.occurrence_id.is_nil()
+            || self.generation == 0
+            || self.generation > i64::MAX as u64
+            || self.task_id.is_some() != self.execution_conversation_id.is_some()
+            || self.summary.len() > 4096
+            || self.summary.contains('\0')
+            || self.outcome_digest.len() != 64
+            || !self
+                .outcome_digest
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        {
+            return Err(ProtocolError::InvalidScheduledNotification(
+                "invalid identity, terminal preview or digest",
+            ));
+        }
+        Ok(())
+    }
+}
+
+impl TryFrom<ScheduledRunNotificationWire> for ScheduledRunNotification {
+    type Error = ProtocolError;
+    fn try_from(value: ScheduledRunNotificationWire) -> Result<Self, Self::Error> {
+        let value = Self {
+            job_id: value.job_id,
+            occurrence_id: value.occurrence_id,
+            generation: value.generation,
+            scheduled_for: value.scheduled_for,
+            finished_at: value.finished_at,
+            task_id: value.task_id,
+            execution_conversation_id: value.execution_conversation_id,
+            outcome: value.outcome,
+            summary: value.summary,
+            outcome_digest: value.outcome_digest,
+        };
+        value.validate()?;
+        Ok(value)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

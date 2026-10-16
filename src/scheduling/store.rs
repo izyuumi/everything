@@ -434,26 +434,39 @@ impl ScheduleRepository {
         now: UnixMillis,
     ) -> ScheduleResult<ScheduledRun> {
         outcome.validate()?;
-        let encoded = encode(outcome, MAX_RUN_OUTCOME_BYTES)?;
         let mut connection = self.store.connection()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let run = required_run(&transaction, id)?;
-        check_revision(run.revision, expected_revision)?;
-        check_time(now, run.updated_at)?;
-        if run.state.is_terminal()
-            || run.state == RunState::Claimed && outcome.state() == RunState::Succeeded
-            || run.state == RunState::Running && outcome.state() == RunState::Skipped
-        {
-            return Err(ScheduleError::RunStateConflict(id));
-        }
-        transaction.execute(
-            "UPDATE scheduled_runs SET state=?2,outcome=?3,finished_at=?4,updated_at=?4,revision=?5 WHERE occurrence_id=?1",
-            params![id.to_string(),outcome.state().as_str(),encoded,timestamp(now)?,increment(run.revision)?],
-        )?;
-        let updated = required_run(&transaction, id)?;
+        let updated = finish_run_in(&transaction, id, expected_revision, outcome, now)?;
+        super::delivery::ready_in(&transaction, &updated, now)?;
         transaction.commit()?;
         Ok(updated)
     }
+}
+
+pub(super) fn finish_run_in(
+    connection: &Connection,
+    id: OccurrenceId,
+    expected_revision: u64,
+    outcome: &RunOutcome,
+    now: UnixMillis,
+) -> ScheduleResult<ScheduledRun> {
+    outcome.validate()?;
+    let encoded = encode(outcome, MAX_RUN_OUTCOME_BYTES)?;
+    let run = required_run(connection, id)?;
+    check_revision(run.revision, expected_revision)?;
+    check_time(now, run.updated_at)?;
+    if run.state.is_terminal()
+        || run.state == RunState::Claimed && outcome.state() == RunState::Succeeded
+        || run.state == RunState::Running && outcome.state() == RunState::Skipped
+    {
+        return Err(ScheduleError::RunStateConflict(id));
+    }
+    connection.execute(
+            "UPDATE scheduled_runs SET state=?2,outcome=?3,finished_at=?4,updated_at=?4,revision=?5 WHERE occurrence_id=?1",
+            params![id.to_string(),outcome.state().as_str(),encoded,timestamp(now)?,increment(run.revision)?],
+        )?;
+    let updated = required_run(connection, id)?;
+    Ok(updated)
 }
 
 fn validate_input(
@@ -538,7 +551,7 @@ fn insert_run(
         forced_outcome,
     } = admission;
     let active: i64 = connection.query_row(
-        "SELECT count(*) FROM scheduled_runs WHERE job_id=?1 AND state IN ('claimed','running','unknown')",
+        "SELECT count(*) FROM scheduled_runs r WHERE job_id=?1 AND (state IN ('claimed','running') OR (state='unknown' AND NOT EXISTS(SELECT 1 FROM scheduled_unknown_acknowledgements a WHERE a.occurrence_id=r.occurrence_id)))",
         [job.id.to_string()],
         |row| row.get(0),
     )?;
@@ -593,7 +606,10 @@ fn insert_run(
         "INSERT INTO scheduled_runs(occurrence_id,job_id,generation,definition,scheduled_for,trigger,manual_command_id,initial_task_id,claim_digest,state,revision,claimed_at,finished_at,updated_at,outcome) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,1,?11,?12,?14,?13)",
         params![occurrence_id.to_string(),job.id.to_string(),job.generation,definition,timestamp(scheduled_for)?,kind,manual_command,initial_task_id.to_string(),digest,state.as_str(),timestamp(claimed_at)?,if skipped { Some(timestamp(now)?) } else { None },outcome_json,timestamp(now)?],
     )?;
-    required_run(connection, occurrence_id)
+    let run = required_run(connection, occurrence_id)?;
+    super::delivery::reserve_in(connection, &run)?;
+    super::delivery::ready_in(connection, &run, now)?;
+    Ok(run)
 }
 
 fn replay_claim(
