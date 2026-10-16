@@ -30,6 +30,14 @@ pub(crate) const MAX_BROKER_RECORD: usize = 64 * 1024;
 const TRANSITION_HEADROOM: usize = MAX_CHECKPOINT + 4 * MAX_APPEND + 8 * MAX_BROKER_RECORD;
 const OUTCOME_SLOTS: usize = 32;
 
+#[derive(Clone, Copy)]
+pub(crate) enum SettingsProviderStop {
+    StreamBoundary,
+    ProvisionalTextLimit,
+    ResponseShape,
+    InvalidAccounting,
+}
+
 #[derive(Clone, Copy, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum SettingsOutcome {
@@ -58,6 +66,7 @@ struct ProfileState {
     attempt: Option<AttemptFloor>,
     turn_deadline: Option<Instant>,
     observed_wall: u64,
+    provider_stop: Option<(CommandId, SettingsProviderStop)>,
     outcomes: [Option<OutcomeSlot>; OUTCOME_SLOTS],
 }
 
@@ -252,6 +261,7 @@ impl SettingsProfile {
         state.turn = Some(fence.clone());
         state.turns += 1;
         state.attempt = None;
+        state.provider_stop = None;
         state.outcomes.fill(None);
         state.outcomes[0] = Some(OutcomeSlot {
             operation_id: command,
@@ -327,6 +337,30 @@ impl SettingsProfile {
             state.turn = Some(next);
         }
         Ok(())
+    }
+
+    pub(crate) fn note_provider_stop(
+        &self,
+        boundary: SettingsProviderStop,
+    ) -> Result<(), AgentError> {
+        let mut state = self.state.lock().map_err(|_| AgentError::Worker)?;
+        let turn = state.turn.as_ref().ok_or(AgentError::NoPendingTurn)?;
+        if turn.phase != SettingsFencePhase::Armed {
+            return Err(AgentError::ConfigurationMismatch);
+        }
+        let attempt_id = turn.attempt_id.ok_or(AgentError::ConfigurationMismatch)?;
+        state.provider_stop = Some((attempt_id, boundary));
+        Ok(())
+    }
+
+    pub(crate) fn provider_stop_observed(&self) -> Result<bool, AgentError> {
+        let state = self.state.lock().map_err(|_| AgentError::Worker)?;
+        Ok(state.provider_stop.is_some_and(|(id, _)| {
+            state
+                .turn
+                .as_ref()
+                .is_some_and(|turn| turn.attempt_id == Some(id))
+        }))
     }
 
     pub(crate) fn provider_observation(&self) -> Result<Option<ProviderObservation>, AgentError> {
@@ -506,7 +540,9 @@ impl SettingsProfile {
             Err(AgentError::RestrictedProviderAccounting)
                 if matches!(
                     phase,
-                    SettingsFencePhase::StoppedUnusable | SettingsFencePhase::Unknown
+                    SettingsFencePhase::StoppedUnusable
+                        | SettingsFencePhase::StoppedUncertain
+                        | SettingsFencePhase::Unknown
                 ) =>
             {
                 self.provider_observation()?
@@ -662,6 +698,7 @@ impl Agent {
                 attempt: None,
                 turn_deadline: None,
                 observed_wall: 0,
+                provider_stop: None,
                 outcomes: [None; OUTCOME_SLOTS],
             }),
         });

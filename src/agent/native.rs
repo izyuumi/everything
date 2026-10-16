@@ -7,7 +7,7 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use tokio::time::Instant;
 
-use super::settings::NativeAttemptFloor;
+use super::settings::{NativeAttemptFloor, SettingsProviderStop};
 use super::*;
 use crate::context::{
     BuiltContext, CompactionRecord, ContextBudget, ContextBuilder, ContextInput,
@@ -677,7 +677,7 @@ impl Agent {
                     _ = tokio::time::sleep_until(deadline) => { child.cancel(); Err(AgentError::ResourceLimit("turn duration")) },
                     result = provider.stream(request, child.clone()) => result.map_err(AgentError::from),
                 };
-                if stream_result.is_err() { agent.observe_settings_provider().await?; }
+                if stream_result.is_err() { agent.observe_settings_stop(SettingsProviderStop::StreamBoundary).await?; }
                 let mut events = stream_result?;
                 let mut displayed = 0_usize;
                 let response = loop {
@@ -687,20 +687,20 @@ impl Agent {
                         _ = tokio::time::sleep_until(deadline) => { child.cancel(); Err(AgentError::ResourceLimit("turn duration")) },
                         event = events.next() => event.ok_or(AgentError::InvalidData("provider stream ended without completed response")).and_then(|event| event.map_err(AgentError::from)),
                     };
-                    if event_result.is_err() { agent.observe_settings_provider().await?; }
+                    if event_result.is_err() { agent.observe_settings_stop(SettingsProviderStop::StreamBoundary).await?; }
                     match event_result? {
                         ModelEvent::TextDelta { index, delta } => {
                             let text_limit = if agent.settings_profile.is_some() { crate::agent::settings::MAX_TEXT } else { MAX_CHAT_TEXT_BYTES };
                             let proposed = displayed.checked_add(delta.len()).filter(|size| *size <= text_limit);
-                            if proposed.is_none() { agent.observe_settings_provider().await?; }
+                            if proposed.is_none() { agent.observe_settings_stop(SettingsProviderStop::ProvisionalTextLimit).await?; }
                             displayed = proposed.ok_or(AgentError::ResourceLimit("assistant text"))?;
                             yield TurnEvent::ProvisionalText { index, delta };
                         }
                         ModelEvent::Completed { response } => {
-                            agent.observe_settings_provider().await?;
+                            agent.observe_settings_event().await?;
                             break response;
                         }
-                        ModelEvent::Usage { .. } => { agent.observe_settings_provider().await?; }
+                        ModelEvent::Usage { .. } => { agent.observe_settings_event().await?; }
                         ModelEvent::ToolCallStarted { .. } | ModelEvent::ToolCallArgumentsDelta { .. } if setup.is_none() => Err(AgentError::ToolsUnsupported)?,
                         ModelEvent::ContentBlockCompleted { block, .. } if setup.is_none() && !matches!(block, ContentBlock::Text(_)) => Err(AgentError::ToolsUnsupported)?,
                         _ => {}
@@ -1478,8 +1478,14 @@ impl Agent {
         let (captured, checkpoint, payloads, events) = blocking(move || {
             let _owner = owner; let _mapping_admission = mapping_admission;
             let captured = conversation;
-            response.validate()?;
-            if let Some(profile) = &restricted { profile.validate_response(&response)?; }
+            if let Err(error) = response.validate() {
+                if let Some(profile) = &restricted { profile.note_provider_stop(SettingsProviderStop::ResponseShape)?; }
+                return Err(AgentError::from(error));
+            }
+            if let Some(profile) = &restricted && let Err(error) = profile.validate_response(&response) {
+                profile.note_provider_stop(SettingsProviderStop::ResponseShape)?;
+                return Err(error);
+            }
             if response.continuation.as_ref().is_some_and(|value| value.provider() != captured.config.provider.id()) {
                 return Err(AgentError::ConfigurationMismatch);
             }
@@ -2210,6 +2216,31 @@ impl Agent {
             }
             _ => Err(AgentError::ConfigurationMismatch),
         }
+    }
+
+    async fn observe_settings_stop(
+        &self,
+        boundary: SettingsProviderStop,
+    ) -> Result<(), AgentError> {
+        let observed = self.observe_settings_provider().await;
+        if matches!(
+            observed,
+            Ok(()) | Err(AgentError::RestrictedProviderAccounting)
+        ) && let Some(profile) = &self.settings_profile
+        {
+            profile.note_provider_stop(boundary)?;
+        }
+        observed
+    }
+
+    async fn observe_settings_event(&self) -> Result<(), AgentError> {
+        let observed = self.observe_settings_provider().await;
+        if matches!(observed, Err(AgentError::RestrictedProviderAccounting))
+            && let Some(profile) = &self.settings_profile
+        {
+            profile.note_provider_stop(SettingsProviderStop::InvalidAccounting)?;
+        }
+        observed
     }
 
     pub(crate) async fn observe_settings_provider(&self) -> Result<(), AgentError> {

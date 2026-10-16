@@ -167,6 +167,7 @@ struct JoinedTurn {
     workers_joined: bool,
     mutation_links_known: bool,
     provider_terminal_observed: bool,
+    finalization_safe: bool,
 }
 
 pub(crate) struct SettingsAgentSupervisor {
@@ -285,7 +286,7 @@ impl SettingsAgentSupervisor {
                         Some(Err(error)) => {
                             self.note_failure();
                             match self.worker_sessions.remove(&error.id()) {
-                                Some(session) => Some(cleanup_turn(&self.core, &session, false, String::new()).await),
+                                Some(session) => Some(cleanup_turn(&self.core, &session, false, false, String::new()).await),
                                 None => None,
                             }
                         }
@@ -644,12 +645,32 @@ impl SettingsAgentSupervisor {
         let session = Arc::clone(&entry.session);
         let fence = session.profile.fence()?;
         let Some(fence) = fence else {
-            entry.status.phase = SettingsChatPhase::Unavailable;
+            entry.status.phase = SettingsChatPhase::Unknown;
             entry.closing = true;
-            self.close_session(session).await?;
+            session.profile.retire();
+            self.core.broker.quarantine_settings();
+            self.core
+                .service
+                .close_settings_agent(&session.child)
+                .await?;
             self.refresh_quiescent();
             return Ok(());
         };
+        if !joined.finalization_safe {
+            entry.status.phase = SettingsChatPhase::Unknown;
+            entry.status.model_attempts = fence.model_attempts;
+            entry.status.charged_tokens = fence.charged_tokens;
+            entry.status.reserved_output_tokens = fence.reserved_output_tokens;
+            entry.status.provider_complete = fence.provider_complete;
+            entry.status.usage_complete = fence.usage_complete;
+            entry.status.operation_ids = fence.mutation_ids;
+            entry.closing = true;
+            session.profile.retire();
+            self.core.broker.quarantine_settings();
+            self.close_session(session).await?;
+            self.refresh_quiescent();
+            return Ok(());
+        }
         let known = joined.local_cleanup_known && joined.mutation_links_known;
         let phase = if known
             && !joined.completed
@@ -836,10 +857,17 @@ async fn run_turn(
         let completed = session.agent.conversation(session.profile.conversation_id()).await?.checkpoint.pending.is_none();
         Ok::<_, HostError>(completed)
     }).catch_unwind().await;
+    let classified_stop = matches!(operation, Ok(Ok(_)))
+        || matches!(operation, Ok(Err(_)))
+            && session
+                .profile
+                .provider_stop_observed()
+                .is_ok_and(|observed| observed);
     cleanup_turn(
         core,
         session,
         matches!(operation, Ok(Ok(true))),
+        classified_stop,
         assistant_text,
     )
     .await
@@ -849,8 +877,10 @@ async fn cleanup_turn(
     core: &Arc<SettingsAgentComponents>,
     session: &Arc<Session>,
     completed: bool,
+    classified_stop: bool,
     assistant_text: String,
 ) -> JoinedTurn {
+    let provider_idle = session.profile.accounting.close_and_wait().await;
     let observed = session.agent.observe_settings_provider().await;
     let broker_idle = session.profile.close_broker_and_wait().await;
     let invocations = core.tools.finish_turn(session.id).await;
@@ -858,7 +888,8 @@ async fn cleanup_turn(
         .broker
         .settings_report(Arc::clone(&session.profile))
         .await;
-    let workers_joined = broker_idle.is_ok()
+    let workers_joined = provider_idle.is_ok()
+        && broker_idle.is_ok()
         && invocations.is_ok()
         && report
             .as_ref()
@@ -871,7 +902,8 @@ async fn cleanup_turn(
     let provider_terminal_observed = provider_observation
         .as_ref()
         .is_ok_and(|value| value.as_ref().is_some_and(|value| value.terminal_observed));
-    let local_cleanup_known = persisted
+    let local_cleanup_known = classified_stop
+        && persisted
         && provider_observation.is_ok()
         && workers_joined
         && report
@@ -884,7 +916,7 @@ async fn cleanup_turn(
             .map(|value| (value.operation_id, value.disposition))
             .collect::<Vec<_>>()
     });
-    let mutation_links_known = match receipts {
+    let receipt_observation = match receipts {
         Some(receipts) => tokio::task::spawn_blocking(move || {
             let retained = retained;
             let fence = retained.1.profile.fence()?;
@@ -930,9 +962,16 @@ async fn cleanup_turn(
             Ok(true)
         })
         .await
-        .is_ok_and(|result| matches!(result, Ok(true))),
-        None => false,
+        .map_err(|_| HostError::Worker)
+        .and_then(|result| result),
+        None => Err(HostError::Worker),
     };
+    let mutation_links_known = matches!(receipt_observation, Ok(true));
+    let finalization_safe = classified_stop
+        && persisted
+        && provider_observation.is_ok()
+        && workers_joined
+        && receipt_observation.is_ok();
     JoinedTurn {
         chat_id: session.id,
         completed,
@@ -942,6 +981,7 @@ async fn cleanup_turn(
         workers_joined,
         mutation_links_known,
         provider_terminal_observed,
+        finalization_safe,
     }
 }
 
