@@ -9,7 +9,8 @@ pub(crate) use settings_grants::settings_grant_head_on;
 #[cfg(unix)]
 pub(crate) use settings_transport::{
     SettingsBindAdmission, SettingsBindAdmissionError, SettingsBindReceiptCommit,
-    StoredSettingsBindReply,
+    SettingsCommandAdmission, SettingsCommandAdmissionError, SettingsCommandReceiptCommit,
+    StoredSettingsBindReply, StoredSettingsCommandReply,
 };
 pub use transport::*;
 pub(crate) use transport::{TransportInboxMetadata, TransportInboxRejection};

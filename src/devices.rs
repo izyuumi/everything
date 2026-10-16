@@ -19,7 +19,8 @@ pub(crate) use settings_connection::{
 pub(crate) use settings_ingress::{
     AuthenticatedSettingsCommandSource, AuthenticatedSettingsSource, BindRejection, BindingCreator,
     BindingGeneration, BindingHistorySnapshot, BindingHistoryState, BindingIntent, BindingLifetime,
-    CommandRejection, CommittedBindSource, OwnedCommittedSettingsBind,
+    CommandRejection, CommittedBindSource, CommittedSettingsCommandSource,
+    OwnedCommittedSettingsBind, OwnedCommittedSettingsCommand, OwnedHistoricalSettingsCommand,
     OwnedVerifiedSettingsCommand, OwnedVerifiedSettingsPacket, PendingSettingsReceipt,
     SettingsCommandIntent, SettingsParentReference, SettingsReceiveDrain, SettingsReceiveError,
     SettingsReceiveEvent, SettingsReceiveWitness, SettingsTransportReceipt, SettingsUpdateIntent,

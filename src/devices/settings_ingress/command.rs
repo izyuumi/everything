@@ -14,9 +14,10 @@ use super::{BindRejection, VerifiedSettingsEnvelope, work::PrivateWitness};
 use crate::agent::Agent;
 use crate::crypto::DevicePublicKeys;
 use crate::devices::{DeviceEndpoint, SettingsConnectionIdentity};
+use crate::host::settings::service::SettingsReceiptAuthority;
 use crate::protocol::{CommandId, DeviceId, UnixMillis};
-use crate::storage::settings_originals::RemoteDimensionSelection;
-use crate::storage::{Store, TransportInboxMetadata};
+use crate::storage::settings_originals::{RemoteDimensionSelection, RemoteOriginalRecord};
+use crate::storage::{Store, StoredSettingsCommandReply, TransportInboxMetadata};
 
 #[derive(Clone, PartialEq, Eq)]
 pub(crate) struct SettingsCommandIntent {
@@ -51,8 +52,31 @@ pub(crate) struct AuthenticatedSettingsCommandSource {
 }
 
 pub(crate) struct OwnedVerifiedSettingsCommand {
+    authority: SettingsReceiptAuthority,
     source: AuthenticatedSettingsCommandSource,
+    deadline: Instant,
     _witness: PrivateWitness,
+}
+
+pub(crate) struct OwnedCommittedSettingsCommand {
+    original: RemoteOriginalRecord,
+    reply: StoredSettingsCommandReply,
+    verified: OwnedVerifiedSettingsCommand,
+}
+
+pub(crate) struct OwnedHistoricalSettingsCommand {
+    original: RemoteOriginalRecord,
+    reply: StoredSettingsCommandReply,
+    verified: OwnedVerifiedSettingsCommand,
+}
+
+pub(crate) struct CommittedSettingsCommandSource<'request> {
+    request: &'request OwnedCommittedSettingsCommand,
+}
+
+pub(crate) enum SettingsCommandOutcome {
+    Fresh(OwnedCommittedSettingsCommand),
+    Historical(OwnedHistoricalSettingsCommand),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Error)]
@@ -153,20 +177,103 @@ impl OwnedVerifiedSettingsCommand {
     pub(super) fn from_verified_update(
         envelope: VerifiedSettingsEnvelope,
         intent: SettingsCommandIntent,
+        authority: SettingsReceiptAuthority,
+        deadline: Instant,
         witness: PrivateWitness,
     ) -> Self {
         Self {
+            authority,
             source: AuthenticatedSettingsCommandSource {
                 intent,
                 envelope,
                 invocation: Arc::new(()),
             },
+            deadline,
             _witness: witness,
         }
     }
 
     pub(crate) fn authority_source(&self) -> &AuthenticatedSettingsCommandSource {
         &self.source
+    }
+
+    pub(super) fn receipt_authority(&self) -> &SettingsReceiptAuthority {
+        &self.authority
+    }
+}
+
+impl OwnedCommittedSettingsCommand {
+    pub(super) fn from_commit(
+        verified: OwnedVerifiedSettingsCommand,
+        original: RemoteOriginalRecord,
+        reply: StoredSettingsCommandReply,
+    ) -> Self {
+        Self {
+            original,
+            reply,
+            verified,
+        }
+    }
+
+    pub(crate) fn committed_source(&self) -> CommittedSettingsCommandSource<'_> {
+        CommittedSettingsCommandSource { request: self }
+    }
+}
+
+impl CommittedSettingsCommandSource<'_> {
+    pub(crate) fn authority_source(&self) -> &AuthenticatedSettingsCommandSource {
+        self.request.verified.authority_source()
+    }
+
+    pub(crate) fn receipt_authority(&self) -> &SettingsReceiptAuthority {
+        &self.request.verified.authority
+    }
+
+    pub(crate) fn original(&self) -> &RemoteOriginalRecord {
+        &self.request.original
+    }
+
+    pub(crate) fn reply_reservation(&self) -> &StoredSettingsCommandReply {
+        &self.request.reply
+    }
+
+    pub(crate) fn original_deadline(&self) -> Instant {
+        self.request.verified.deadline
+    }
+
+    pub(crate) fn receipt_floor(&self) -> (UnixMillis, Instant) {
+        let clock = self.request.verified.source.envelope.clock;
+        (clock.wall, clock.monotonic)
+    }
+}
+
+impl OwnedHistoricalSettingsCommand {
+    pub(super) fn from_commit(
+        verified: OwnedVerifiedSettingsCommand,
+        original: RemoteOriginalRecord,
+        reply: StoredSettingsCommandReply,
+    ) -> Self {
+        Self {
+            original,
+            reply,
+            verified,
+        }
+    }
+
+    pub(crate) fn authority_source(&self) -> &AuthenticatedSettingsCommandSource {
+        self.verified.authority_source()
+    }
+
+    pub(crate) fn receipt_authority(&self) -> &SettingsReceiptAuthority {
+        &self.verified.authority
+    }
+
+    pub(crate) fn original(&self) -> &RemoteOriginalRecord {
+        &self.original
+    }
+
+    pub(crate) fn reply_reservation(&self) -> &StoredSettingsCommandReply {
+        &self.reply
     }
 }
 
@@ -190,6 +297,24 @@ impl fmt::Debug for AuthenticatedSettingsCommandSource {
 impl fmt::Debug for OwnedVerifiedSettingsCommand {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str("OwnedVerifiedSettingsCommand([private])")
+    }
+}
+
+impl fmt::Debug for OwnedCommittedSettingsCommand {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("OwnedCommittedSettingsCommand([fresh receipt])")
+    }
+}
+
+impl fmt::Debug for OwnedHistoricalSettingsCommand {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("OwnedHistoricalSettingsCommand([historical receipt])")
+    }
+}
+
+impl fmt::Debug for CommittedSettingsCommandSource<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("CommittedSettingsCommandSource([fresh receipt])")
     }
 }
 

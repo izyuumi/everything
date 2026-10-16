@@ -8,16 +8,166 @@ use uuid::Uuid;
 
 #[cfg(unix)]
 use crate::devices::{
-    AuthenticatedSettingsSource, BindRejection, BindingCreator, BindingIntent, BindingLifetime,
+    AuthenticatedSettingsCommandSource, AuthenticatedSettingsSource, BindRejection, BindingCreator,
+    BindingIntent, BindingLifetime,
 };
 #[cfg(unix)]
 use crate::host::settings::grants::SettingsGrantOwner;
+#[cfg(unix)]
+use crate::host::settings::service::{SettingsReceiptAuthority, SettingsServiceError};
 #[cfg(unix)]
 use crate::host::settings::{SettingsGrantHead, SettingsGrantReference, SettingsGrantState};
 #[cfg(unix)]
 use crate::protocol::{DeviceId, UnixMillis};
 
 use super::{StorageError, StorageResult};
+
+#[cfg(unix)]
+use super::settings_originals::{
+    RemoteAcceptedIdentity, RemoteOriginalIdentity, RemoteOriginalRecord,
+};
+
+#[cfg(unix)]
+pub(crate) struct SettingsCommandAdmission<'source> {
+    pub(crate) source: &'source AuthenticatedSettingsCommandSource,
+    pub(crate) authority: &'source SettingsReceiptAuthority,
+}
+
+#[cfg(unix)]
+#[derive(Error)]
+pub(crate) enum SettingsCommandAdmissionError {
+    #[error("Settings command authority rejected receipt admission")]
+    Authority(#[source] SettingsServiceError),
+    #[error("Settings command replay receipt capacity is exhausted")]
+    ReplayCapacity(#[source] StorageError),
+    #[error("Settings command Original capacity is exhausted")]
+    OriginalCapacity(#[source] StorageError),
+    #[error("Settings command reply capacity is exhausted")]
+    ReplyCapacity(#[source] StorageError),
+    #[error("Settings command receipt storage failed")]
+    Storage(#[from] StorageError),
+    #[error("Settings command receipt bookkeeping failed")]
+    Bookkeeping,
+    #[error("Settings command receipt rollback failed")]
+    Rollback {
+        #[source]
+        cause: Box<SettingsCommandAdmissionError>,
+        rollback: StorageError,
+    },
+}
+
+#[cfg(unix)]
+impl std::fmt::Debug for SettingsCommandAdmissionError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("SettingsCommandAdmissionError([retained cause])")
+    }
+}
+
+#[cfg(unix)]
+impl SettingsCommandAdmissionError {
+    pub(crate) fn is_capacity(&self) -> bool {
+        matches!(
+            self,
+            Self::ReplayCapacity(_) | Self::OriginalCapacity(_) | Self::ReplyCapacity(_)
+        )
+    }
+
+    pub(crate) fn is_policy_rejection(&self) -> bool {
+        matches!(
+            self,
+            Self::Authority(SettingsServiceError::Expired | SettingsServiceError::OutsideScope)
+        )
+    }
+}
+
+#[cfg(unix)]
+pub(crate) enum SettingsCommandReceiptCommit {
+    Duplicate,
+    Fresh {
+        original: RemoteOriginalRecord,
+        reply: StoredSettingsCommandReply,
+    },
+    Known {
+        original: RemoteOriginalRecord,
+        reply: StoredSettingsCommandReply,
+    },
+}
+
+#[cfg(unix)]
+pub(crate) struct StoredSettingsCommandReply {
+    pub(crate) reservation_id: Uuid,
+    pub(crate) local_device_id: DeviceId,
+    pub(crate) peer_device_id: DeviceId,
+    pub(crate) provenance: String,
+    pub(crate) created_at: UnixMillis,
+    pub(crate) expires_at: UnixMillis,
+}
+
+#[cfg(unix)]
+pub(super) fn matches_command_original(
+    original: &RemoteOriginalRecord,
+    current: &RemoteAcceptedIdentity,
+) -> bool {
+    let RemoteOriginalIdentity::Accepted(previous) = &original.identity else {
+        return false;
+    };
+    let mut expected = current.clone();
+    expected.admitted_at = previous.admitted_at;
+    previous == &expected
+}
+
+#[cfg(unix)]
+pub(super) fn reserve_command_reply_in(
+    connection: &Connection,
+    identity: &RemoteAcceptedIdentity,
+) -> Result<StoredSettingsCommandReply, SettingsCommandAdmissionError> {
+    let peer = identity.peer_keys.device_id;
+    match check_outbox_capacity(connection, &peer.to_string(), 90_112) {
+        Err(error @ StorageError::TransportCapacity(_)) => {
+            return Err(SettingsCommandAdmissionError::ReplyCapacity(error));
+        }
+        result => result?,
+    }
+    let provenance = serde_json::to_string(&HostBindProvenance {
+        side: "host",
+        version: 1,
+        local_id: identity.host_id,
+        peer_keys: &identity.peer_keys,
+        host_epoch: identity.host_epoch,
+        connection_epoch: identity.connection_epoch,
+        grant: SettingsGrantReference {
+            grant_id: identity.grant_id,
+            revision: identity.grant_revision,
+        },
+        parent_id: Some(identity.remote_parent_id),
+    })
+    .map_err(StorageError::from)?;
+    let reservation_id = Uuid::new_v4();
+    connection.execute("INSERT INTO settings_transport_reply_reservations(reservation_id,local_device_id,peer_device_id,provenance,family,reserved_bytes,created_at,expires_at) VALUES(?1,?2,?3,?4,'inspection',90112,?5,?6)",rusqlite::params![reservation_id.to_string(),identity.host_id.to_string(),peer.to_string(),provenance,identity.admitted_at.get() as i64,identity.expires_at.get() as i64]).map_err(StorageError::from)?;
+    let actual: (String, String, String, String, String, i64, i64, i64) = connection.query_row("SELECT reservation_id,local_device_id,peer_device_id,provenance,family,reserved_bytes,created_at,expires_at FROM settings_transport_reply_reservations WHERE reservation_id=?1",[reservation_id.to_string()],|row|Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?,row.get(4)?,row.get(5)?,row.get(6)?,row.get(7)?))).map_err(StorageError::from)?;
+    if actual
+        != (
+            reservation_id.to_string(),
+            identity.host_id.to_string(),
+            peer.to_string(),
+            provenance.clone(),
+            "inspection".into(),
+            90_112,
+            identity.admitted_at.get() as i64,
+            identity.expires_at.get() as i64,
+        )
+    {
+        return Err(SettingsCommandAdmissionError::Bookkeeping);
+    }
+    Ok(StoredSettingsCommandReply {
+        reservation_id,
+        local_device_id: identity.host_id,
+        peer_device_id: peer,
+        provenance,
+        created_at: identity.admitted_at,
+        expires_at: identity.expires_at,
+    })
+}
 
 #[cfg(unix)]
 pub(crate) struct SettingsBindAdmission<'source> {

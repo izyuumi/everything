@@ -365,6 +365,135 @@ impl Store {
         })
     }
 
+    #[cfg(unix)]
+    pub(crate) fn admit_settings_command(
+        &self,
+        admission: &super::SettingsCommandAdmission<'_>,
+    ) -> Result<super::SettingsCommandReceiptCommit, super::SettingsCommandAdmissionError> {
+        use super::settings_originals::{
+            RemoteOriginalAdmission, RemoteOriginalKey, insert_original_in, read_original_on,
+        };
+        use super::{SettingsCommandAdmissionError, SettingsCommandReceiptCommit};
+        use crate::host::settings::service::SettingsServiceError;
+
+        admission.source.check_precommit(self).map_err(|error| {
+            SettingsCommandAdmissionError::Authority(SettingsServiceError::from(error))
+        })?;
+        let receipt = admission.source.receipt_metadata().map_err(|error| {
+            SettingsCommandAdmissionError::Authority(SettingsServiceError::from(error))
+        })?;
+        validate_inbox_metadata(&receipt)?;
+        let mut connection = self.connection()?;
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(StorageError::from)?;
+        check_receipt_receiver(&transaction, &receipt, admission.source.pinned_identity())?;
+        let existing: Option<(String, String, String)> = transaction
+            .query_row(
+                "SELECT sender, recipient, envelope_digest FROM transport_inbox WHERE message_id = ?1",
+                [receipt.message_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional()
+            .map_err(StorageError::from)?;
+        if let Some((sender, recipient, digest)) = existing {
+            if sender != receipt.sender
+                || recipient != receipt.recipient
+                || digest != receipt.envelope_digest
+            {
+                return Err(StorageError::TransportConflict(receipt.message_id.into()).into());
+            }
+            return Ok(SettingsCommandReceiptCommit::Duplicate);
+        }
+        transaction
+            .execute(
+                "DELETE FROM transport_inbox WHERE expires_at <= ?1 AND state != 'pending'",
+                [receipt.received_at],
+            )
+            .map_err(StorageError::from)?;
+        let markers: i64 = transaction
+            .query_row("SELECT count(*) FROM transport_inbox", [], |row| row.get(0))
+            .map_err(StorageError::from)?;
+        if markers >= 100_000 {
+            return Err(rollback_command_receipt(
+                transaction,
+                SettingsCommandAdmissionError::ReplayCapacity(StorageError::TransportCapacity(
+                    "durable receiver inbox",
+                )),
+            ));
+        }
+        let qualified =
+            match admission
+                .authority
+                .precommit_command_on(self, &transaction, admission.source)
+            {
+                Ok(qualified) => qualified,
+                Err(error) => {
+                    return Err(rollback_command_receipt(
+                        transaction,
+                        SettingsCommandAdmissionError::Authority(error),
+                    ));
+                }
+            };
+        let RemoteOriginalAdmission::Accepted(identity) = qualified.original_admission() else {
+            return Err(SettingsCommandAdmissionError::Bookkeeping);
+        };
+        let key = RemoteOriginalKey {
+            host_id: identity.host_id,
+            actor_device_id: identity.peer_keys.device_id,
+            request_id: identity.request_id,
+        };
+        let (original, known) = match read_original_on(&transaction, key)? {
+            Some(original) => {
+                if !super::settings_transport::matches_command_original(&original, identity) {
+                    return Err(StorageError::StateConflict {
+                        entity: "remote Settings original",
+                        id: identity.request_id.to_string(),
+                    }
+                    .into());
+                }
+                (original, true)
+            }
+            None => {
+                let original =
+                    match insert_original_in(&transaction, qualified.original_admission()) {
+                        Err(error @ StorageError::TransportCapacity(_)) => {
+                            return Err(rollback_command_receipt(
+                                transaction,
+                                SettingsCommandAdmissionError::OriginalCapacity(error),
+                            ));
+                        }
+                        result => result?,
+                    };
+                (original, false)
+            }
+        };
+        let reply =
+            match super::settings_transport::reserve_command_reply_in(&transaction, identity) {
+                Err(error @ SettingsCommandAdmissionError::ReplyCapacity(_)) => {
+                    return Err(rollback_command_receipt(transaction, error));
+                }
+                result => result?,
+            };
+        transaction.execute("INSERT INTO transport_inbox(message_id,sender,recipient,envelope_digest,payload,received_at,expires_at,state,command_id,detail) VALUES(?1,?2,?3,?4,NULL,?5,?6,'processed',NULL,NULL)",params![receipt.message_id,receipt.sender,receipt.recipient,receipt.envelope_digest,receipt.received_at,receipt.expires_at]).map_err(StorageError::from)?;
+        check_receipt_receiver(&transaction, &receipt, admission.source.pinned_identity())?;
+        if let Err(error) = admission
+            .authority
+            .recheck_command_on(self, &transaction, &qualified)
+        {
+            return Err(rollback_command_receipt(
+                transaction,
+                SettingsCommandAdmissionError::Authority(error),
+            ));
+        }
+        transaction.commit().map_err(StorageError::from)?;
+        if known {
+            Ok(SettingsCommandReceiptCommit::Known { original, reply })
+        } else {
+            Ok(SettingsCommandReceiptCommit::Fresh { original, reply })
+        }
+    }
+
     pub fn pending_transport_inbox(&self, limit: usize) -> StorageResult<Vec<TransportInboxRow>> {
         self.pending_transport_inbox_after(None, limit)
     }
@@ -881,6 +1010,20 @@ impl Store {
         validate_id(device_id)?;
         validate_id(conversation_id)?;
         Ok(self.connection()?.query_row("SELECT after_sequence FROM device_sync_cursors WHERE device_id=?1 AND conversation_id=?2",params![device_id,conversation_id],|row|row.get(0)).optional()?.unwrap_or(0))
+    }
+}
+
+#[cfg(unix)]
+fn rollback_command_receipt(
+    transaction: rusqlite::Transaction<'_>,
+    cause: super::SettingsCommandAdmissionError,
+) -> super::SettingsCommandAdmissionError {
+    match transaction.rollback() {
+        Ok(()) => cause,
+        Err(error) => super::SettingsCommandAdmissionError::Rollback {
+            cause: Box::new(cause),
+            rollback: StorageError::from(error),
+        },
     }
 }
 
