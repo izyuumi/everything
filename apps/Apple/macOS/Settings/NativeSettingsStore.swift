@@ -188,6 +188,11 @@ final class NativeSettingsStore {
         }
     }
 
+    enum AssistantSectionResult: Sendable {
+        case opened(SettingsSection)
+        case dismissed
+    }
+
     private enum AssistantReadIdentity: Hashable {
         case open(UUID)
         case closeOpen(UUID)
@@ -596,6 +601,57 @@ final class NativeSettingsStore {
         try startAssistantEffect(owner, id: UUID(), read: .details(original.chat.opened.chatID, original.turnID, original.operationID, reference.id, reference.expiresAt, confirmation), work: {
             try await owner.lifecycle.session.assistantActionDetails(original, reference: reference)
         }, observe: { value in try self.adoptAssistantDetails(owner, receipt: value) }, completion: completion)
+    }
+
+    func presentAssistantSection(_ receipt: NativeSettingsSession.AssistantDetailsReceipt,
+        navigate: @escaping @MainActor @Sendable (SettingsSection) async throws -> AssistantSectionResult,
+        completion: @escaping @MainActor @Sendable (Result<NativeSettingsSession.Outcome, NativeSettingsSessionError>) -> Void) throws {
+        let original = receipt.original
+        let owner = try assistantOwner(original.chat, live: true)
+        try requireAssistantMembership(owner, original: original)
+        guard case .native(let request) = receipt.details.target, case .openSection(let section) = request.action,
+              owner.assistantSends[original.turnID]?.materialized.contains(original.operationID) == true,
+              let operation = owner.operations[original.operationID], operation.target == receipt.details.target,
+              operation.inspection == receipt.details.operation,
+              case .awaitingAction(let reference) = receipt.details.operation.phase else { throw NativeSettingsSessionError.invalidRequest }
+        guard canAct, !credentialLinksNeedRecovery(owner),
+              !owner.operations.contains(where: { $0.key != original.operationID && $0.value.blocksNewChanges }) else {
+            throw NativeSettingsSessionError.operationUncertain
+        }
+        let invocation = NativeActionInvocation(operationID: original.operationID, nativeRequestID: UUID(),
+                                                reference: .action(reference: reference))
+        let admission = try owner.lifecycle.prepareAssistantAction(.present(invocation), receipt: receipt)
+        owner.operations[original.operationID]?.executionPrepared = true
+        owner.operations[original.operationID]?.isWorking = true
+        owner.operations[original.operationID]?.issue = nil
+        publishOperations(owner)
+        do {
+            try startAssistantEffect(owner, id: original.operationID, work: {
+                try await owner.lifecycle.session.present(admission) { presentation in
+                    guard case .openSection(let expected) = presentation.action, expected == section else {
+                        throw NativeSettingsSessionError.invalidResponse
+                    }
+                    switch try await navigate(section) {
+                    case .opened(let actual) where actual == section: return .sectionOpened(section: actual)
+                    case .dismissed: return .dismissed
+                    case .opened: throw NativeSettingsSessionError.invalidResponse
+                    }
+                }
+            }, observe: { outcome in
+                guard case .inspected(let inspection) = outcome else { throw NativeSettingsSessionError.invalidResponse }
+                try owner.operations[original.operationID]?.adopt(inspection)
+            }, completion: { result in
+                owner.operations[original.operationID]?.isWorking = false
+                if case .failure(let error) = result { owner.operations[original.operationID]?.issue = error }
+                self.publishOperations(owner)
+                if self.isCurrent(owner) { self.invalidateObservation(); self.requestRefresh() }
+                completion(result)
+            })
+        } catch {
+            owner.operations[original.operationID]?.isWorking = false
+            publishOperations(owner)
+            throw error
+        }
     }
 
     private func assistantOwner(_ action: AssistantOpenAction, live: Bool) throws -> Owner {
