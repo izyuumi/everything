@@ -19,6 +19,9 @@ use crate::agent::{
     TurnEvent,
 };
 use crate::context::{ContextBudget, TaskContext};
+use crate::devices::{
+    OwnedCommittedSettingsBind, OwnedCommittedSettingsCommand, OwnedHistoricalSettingsCommand,
+};
 use crate::host::providers::{HostProviderFactory, SettingsProviderBinding};
 use crate::host::runtime::HostError;
 use crate::permissions::ExecutionAuthority;
@@ -33,7 +36,10 @@ use super::actions::SettingsActionTarget;
 use super::agent_tools::{InvocationResult, SettingsTools};
 use super::contract::{SettingsScope, SettingsToolName};
 use super::operations::SettingsOperationInspection;
-use super::service::SettingsService;
+use super::service::{
+    PairedParentAdmission, PairedSettingsParent, PairedUpdateOutcome, SettingsService,
+    SettingsServiceError,
+};
 use super::{
     SettingsAgentBinding, SettingsAgentSession, SettingsCaller, SettingsInvocationDisposition,
 };
@@ -86,6 +92,7 @@ pub(crate) const MAX_CHAT_STATUS_BYTES: usize = 200_704;
 pub(crate) const MAX_OPEN_STATE_BYTES: usize = 32 * 1024;
 pub(crate) const MAX_SCOPED_DETAILS_BYTES: usize = 64 * 1024;
 const MAX_OPEN_REQUESTS: usize = 1024;
+const MAX_PAIRED_ACCEPTED: usize = 32;
 const MAX_OPEN_RECORD_BYTES: usize = 512;
 const MAX_CONTEXT_SNAPSHOT_BYTES: usize = 32 * 1024;
 
@@ -210,8 +217,209 @@ struct Request {
     reply: oneshot::Sender<Result<SettingsAssistantReply, HostError>>,
 }
 
+enum SupervisorInput {
+    Native(Box<Request>),
+    Paired {
+        record: usize,
+        input: PairedRuntimeInput,
+    },
+}
+
+pub(crate) enum PairedRuntimeInput {
+    Bind(Box<OwnedCommittedSettingsBind>),
+    DirectUpdate {
+        request: Box<OwnedCommittedSettingsCommand>,
+        cancellation: CancellationToken,
+    },
+    Historical(Box<OwnedHistoricalSettingsCommand>),
+}
+
+pub(crate) enum PairedEnqueueError {
+    Full(PairedRuntimeInput),
+    Closed(PairedRuntimeInput),
+}
+
+impl PairedRuntimeInput {
+    fn identity(&self) -> (PairedWorkKind, Arc<()>) {
+        match self {
+            Self::Bind(request) => (
+                PairedWorkKind::Bind,
+                Arc::clone(request.committed_source().creation_identity()),
+            ),
+            Self::DirectUpdate { request, .. } => (
+                PairedWorkKind::DirectUpdate,
+                Arc::clone(
+                    request
+                        .committed_source()
+                        .authority_source()
+                        .invocation_identity(),
+                ),
+            ),
+            Self::Historical(request) => (
+                PairedWorkKind::Historical,
+                Arc::clone(request.authority_source().invocation_identity()),
+            ),
+        }
+    }
+}
+
+struct PairedIntakeState {
+    closed: bool,
+    accepted: usize,
+}
+
+struct PairedIntake {
+    state: std::sync::Mutex<PairedIntakeState>,
+    terminal_fault: AtomicBool,
+    changed: Notify,
+}
+
+impl PairedIntake {
+    fn fail(&self) {
+        self.terminal_fault.store(true, Ordering::Release);
+        self.changed.notify_one();
+    }
+
+    fn close(&self) {
+        match self.state.lock() {
+            Ok(mut state) => state.closed = true,
+            Err(_) => self.fail(),
+        }
+    }
+
+    fn idle(&self) -> bool {
+        !self.terminal_fault.load(Ordering::Acquire)
+            && self.state.lock().is_ok_and(|state| state.accepted == 0)
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PairedWorkKind {
+    Bind,
+    DirectUpdate,
+    Historical,
+}
+
+struct RetainedBind {
+    parent: Result<PairedSettingsParent, SettingsServiceError>,
+    close_error: Option<SettingsServiceError>,
+    close_attempted: bool,
+    request: Box<OwnedCommittedSettingsBind>,
+}
+
+struct RetainedUpdate {
+    result: Result<Box<SettingsOperationInspection>, SettingsServiceError>,
+    request: Box<OwnedCommittedSettingsCommand>,
+}
+
+enum PairedRecordState {
+    Running {
+        cancellation: Option<CancellationToken>,
+    },
+    Unstarted {
+        _input: PairedRuntimeInput,
+    },
+    Bind(RetainedBind),
+    DirectUpdate(RetainedUpdate),
+    Historical {
+        _request: Box<OwnedHistoricalSettingsCommand>,
+    },
+    Invariant {
+        _outcome: Box<PairedUpdateOutcome>,
+    },
+    Failed {
+        _error: SettingsServiceError,
+    },
+}
+
+struct PairedRecord {
+    kind: PairedWorkKind,
+    identity: Arc<()>,
+    state: PairedRecordState,
+}
+
+impl RetainedBind {
+    fn matches(&self, identity: &Arc<()>) -> bool {
+        Arc::ptr_eq(
+            self.request.committed_source().creation_identity(),
+            identity,
+        ) && match &self.parent {
+            Ok(parent) => {
+                !parent.id().is_nil()
+                    && parent.expires_at() == self.request.committed_source().lifetime().expires_at
+            }
+            Err(_) => true,
+        }
+    }
+}
+
+impl RetainedUpdate {
+    fn matches(&self, identity: &Arc<()>) -> bool {
+        let source = self.request.committed_source();
+        Arc::ptr_eq(source.authority_source().invocation_identity(), identity)
+            && match &self.result {
+                Ok(inspection) => {
+                    inspection.validate().is_ok()
+                        && inspection.binding.request_id == source.original().key.request_id
+                        && inspection.binding.scope
+                            == (SettingsScope::Host {
+                                host_id: source.original().key.host_id,
+                            })
+                }
+                Err(_) => true,
+            }
+    }
+}
+
+impl PairedRecord {
+    fn matches(&self) -> bool {
+        match &self.state {
+            PairedRecordState::Bind(retained) => {
+                self.kind == PairedWorkKind::Bind && retained.matches(&self.identity)
+            }
+            PairedRecordState::DirectUpdate(retained) => {
+                self.kind == PairedWorkKind::DirectUpdate && retained.matches(&self.identity)
+            }
+            PairedRecordState::Running { .. }
+            | PairedRecordState::Unstarted { .. }
+            | PairedRecordState::Historical { .. }
+            | PairedRecordState::Invariant { .. }
+            | PairedRecordState::Failed { .. } => false,
+        }
+    }
+}
+
+enum JoinedPairedWork {
+    Bind(Result<Box<PairedParentAdmission>, SettingsServiceError>),
+    DirectUpdate(Box<PairedUpdateOutcome>),
+}
+
+enum SupervisorJoined {
+    Native(JoinedTurn),
+    Paired {
+        record: usize,
+        result: JoinedPairedWork,
+    },
+}
+
+struct PairedTerminalRetention {
+    _workers: JoinSet<SupervisorJoined>,
+    _commands: Option<mpsc::Receiver<SupervisorInput>>,
+    _records: BTreeMap<usize, PairedRecord>,
+    _paired_workers: HashMap<tokio::task::Id, usize>,
+    _unmatched: Vec<JoinedPairedWork>,
+    _unmatched_inputs: Vec<PairedRuntimeInput>,
+    _join_errors: Vec<tokio::task::JoinError>,
+    _worker_sessions: HashMap<tokio::task::Id, (Arc<Session>, CommandId)>,
+    _sessions: BTreeMap<Uuid, SessionState>,
+    _opening: BTreeMap<CommandId, Arc<SettingsAgentSession>>,
+    _core: Arc<SettingsAgentComponents>,
+    _intake: Arc<PairedIntake>,
+}
+
 pub(crate) struct SettingsAgentRuntime {
-    commands: mpsc::Sender<Request>,
+    commands: mpsc::Sender<SupervisorInput>,
+    paired: Arc<PairedIntake>,
     draining: Arc<AtomicBool>,
     quiescent: Arc<AtomicBool>,
     changed: Arc<Notify>,
@@ -303,12 +511,18 @@ struct JoinedTurn {
 
 pub(crate) struct SettingsAgentSupervisor {
     core: Arc<SettingsAgentComponents>,
-    commands: mpsc::Receiver<Request>,
+    commands: Option<mpsc::Receiver<SupervisorInput>>,
+    paired: Arc<PairedIntake>,
+    paired_records: BTreeMap<usize, PairedRecord>,
+    paired_workers: HashMap<tokio::task::Id, usize>,
+    paired_unmatched: Vec<JoinedPairedWork>,
+    paired_unmatched_inputs: Vec<PairedRuntimeInput>,
+    paired_join_errors: Vec<tokio::task::JoinError>,
     sessions: BTreeMap<Uuid, SessionState>,
     opens: BTreeMap<CommandId, OpenRecord>,
     opening: BTreeMap<CommandId, Arc<SettingsAgentSession>>,
     archived: VecDeque<(Uuid, SettingsChatStatus)>,
-    workers: JoinSet<JoinedTurn>,
+    workers: JoinSet<SupervisorJoined>,
     worker_sessions: HashMap<tokio::task::Id, (Arc<Session>, CommandId)>,
     failed: bool,
     commands_open: bool,
@@ -324,16 +538,31 @@ impl SettingsAgentRuntime {
         let draining = Arc::new(AtomicBool::new(false));
         let quiescent = Arc::new(AtomicBool::new(true));
         let changed = Arc::new(Notify::new());
+        let paired = Arc::new(PairedIntake {
+            state: std::sync::Mutex::new(PairedIntakeState {
+                closed: false,
+                accepted: 0,
+            }),
+            terminal_fault: AtomicBool::new(false),
+            changed: Notify::new(),
+        });
         (
             Arc::new(Self {
                 commands,
+                paired: Arc::clone(&paired),
                 draining: Arc::clone(&draining),
                 quiescent: Arc::clone(&quiescent),
                 changed: Arc::clone(&changed),
             }),
             SettingsAgentSupervisor {
                 core: Arc::new(core),
-                commands: receiver,
+                commands: Some(receiver),
+                paired,
+                paired_records: BTreeMap::new(),
+                paired_workers: HashMap::new(),
+                paired_unmatched: Vec::new(),
+                paired_unmatched_inputs: Vec::new(),
+                paired_join_errors: Vec::new(),
                 sessions: BTreeMap::new(),
                 opens: BTreeMap::new(),
                 opening: BTreeMap::new(),
@@ -356,11 +585,54 @@ impl SettingsAgentRuntime {
     ) -> Result<SettingsAssistantReply, HostError> {
         let (reply, result) = oneshot::channel();
         self.commands
-            .try_send(Request { command, reply })
+            .try_send(SupervisorInput::Native(Box::new(Request {
+                command,
+                reply,
+            })))
             .map_err(|_| {
                 HostError::Invalid("Settings assistant intake is at capacity or stopped")
             })?;
         result.await.map_err(|_| HostError::Worker)?
+    }
+
+    pub(crate) fn try_enqueue_paired(
+        &self,
+        input: PairedRuntimeInput,
+    ) -> Result<(), PairedEnqueueError> {
+        let mut state = match self.paired.state.lock() {
+            Ok(state) => state,
+            Err(_) => {
+                self.paired.fail();
+                self.quiescent.store(false, Ordering::Release);
+                self.changed.notify_one();
+                return Err(PairedEnqueueError::Closed(input));
+            }
+        };
+        if state.closed
+            || self.draining.load(Ordering::Acquire)
+            || self.paired.terminal_fault.load(Ordering::Acquire)
+        {
+            return Err(PairedEnqueueError::Closed(input));
+        }
+        if state.accepted >= MAX_PAIRED_ACCEPTED {
+            return Err(PairedEnqueueError::Full(input));
+        }
+        let permit = match self.commands.try_reserve() {
+            Ok(permit) => permit,
+            Err(mpsc::error::TrySendError::Full(_)) => {
+                return Err(PairedEnqueueError::Full(input));
+            }
+            Err(mpsc::error::TrySendError::Closed(_)) => {
+                state.closed = true;
+                return Err(PairedEnqueueError::Closed(input));
+            }
+        };
+        let record = state.accepted;
+        state.accepted += 1;
+        self.quiescent.store(false, Ordering::Release);
+        permit.send(SupervisorInput::Paired { record, input });
+        self.paired.changed.notify_one();
+        Ok(())
     }
 
     pub(crate) async fn changed(&self) {
@@ -368,7 +640,9 @@ impl SettingsAgentRuntime {
     }
 
     pub(crate) fn is_quiescent(&self) -> bool {
-        self.draining.load(Ordering::Acquire) && self.quiescent.load(Ordering::Acquire)
+        self.draining.load(Ordering::Acquire)
+            && self.quiescent.load(Ordering::Acquire)
+            && self.paired.idle()
     }
 }
 
@@ -380,6 +654,12 @@ impl SettingsAgentSupervisor {
     ) -> Result<(), HostError> {
         let mut owner_stop_observed = false;
         loop {
+            if self.paired.terminal_fault.load(Ordering::Acquire) && !self.failed {
+                self.note_failure();
+                if self.close_all().await.is_err() {
+                    self.note_failure();
+                }
+            }
             if (stop_work.is_cancelled() || stop_owner.is_cancelled())
                 && !self.draining.load(Ordering::Acquire)
                 && self.close_all().await.is_err()
@@ -388,12 +668,18 @@ impl SettingsAgentSupervisor {
             }
             self.refresh_quiescent();
             if stop_owner.is_cancelled() && self.quiescent.load(Ordering::Acquire) {
-                self.commands.close();
-                return if self.failed {
-                    Err(HostError::Worker)
-                } else {
-                    Ok(())
-                };
+                self.paired.close();
+                self.refresh_quiescent();
+                if self.quiescent.load(Ordering::Acquire) {
+                    if let Some(commands) = self.commands.as_mut() {
+                        commands.close();
+                    }
+                    return if self.failed {
+                        Err(HostError::Worker)
+                    } else {
+                        Ok(())
+                    };
+                }
             }
             if self.expire_sessions().await.is_err() {
                 self.note_failure();
@@ -413,11 +699,12 @@ impl SettingsAgentSupervisor {
                 .unwrap_or_else(|| {
                     tokio::time::Instant::now() + std::time::Duration::from_secs(300)
                 });
+            let paired = Arc::clone(&self.paired);
             tokio::select! {
                 biased;
                 joined = self.workers.join_next_with_id(), if !self.workers.is_empty() => {
                     let completed = match joined {
-                        Some(Ok((id, joined))) => match self.worker_sessions.remove(&id) {
+                        Some(Ok((id, SupervisorJoined::Native(joined)))) => match self.worker_sessions.remove(&id) {
                             Some((session, turn_id)) if joined.chat_id == session.id && joined.turn_id == turn_id => Some(joined),
                             Some((session, turn_id)) => {
                                 self.note_failure();
@@ -425,11 +712,27 @@ impl SettingsAgentSupervisor {
                             }
                             None => { self.note_failure(); None }
                         }
+                        Some(Ok((id, SupervisorJoined::Paired { record, result }))) => {
+                            if !self.finish_paired(id, record, result) { self.fail_paired(); }
+                            None
+                        }
                         Some(Err(error)) => {
                             self.note_failure();
-                            match self.worker_sessions.remove(&error.id()) {
-                                Some((session, turn_id)) => Some(cleanup_turn(&self.core, &session, turn_id, false, false).await),
-                                None => None,
+                            if let Some(record) = self.paired_workers.remove(&error.id()) {
+                                if let Some(record) = self.paired_records.get_mut(&record) {
+                                    if let PairedRecordState::Running { cancellation: Some(cancellation) } = &record.state {
+                                        cancellation.cancel();
+                                    }
+                                    record.state = PairedRecordState::Failed { _error: SettingsServiceError::Worker };
+                                }
+                                self.paired_join_errors.push(error);
+                                self.fail_paired();
+                                None
+                            } else {
+                                match self.worker_sessions.remove(&error.id()) {
+                                    Some((session, turn_id)) => Some(cleanup_turn(&self.core, &session, turn_id, false, false).await),
+                                    None => None,
+                                }
                             }
                         }
                         None => None,
@@ -437,26 +740,192 @@ impl SettingsAgentSupervisor {
                     if let Some(joined) = completed && self.finish(joined).await.is_err() { self.note_failure(); }
                     if self.failed && self.close_all().await.is_err() { self.note_failure(); }
                 }
-                request = self.commands.recv(), if self.commands_open => {
+                request = async { match self.commands.as_mut() { Some(commands) => commands.recv().await, None => None } }, if self.commands_open => {
                     match request {
-                        Some(request) => {
+                        Some(SupervisorInput::Native(request)) => {
                             let result = self.handle(request.command).await;
                             if request.reply.send(result).is_err() { tracing::debug!("private Settings reply receiver disconnected"); }
                         }
+                        Some(SupervisorInput::Paired { record, input }) => self.start_paired(record, input),
                         None => { self.commands_open = false; if self.close_all().await.is_err() { self.note_failure(); } }
                     }
                 }
                 _ = stop_work.cancelled(), if !self.draining.load(Ordering::Acquire) => { if self.close_all().await.is_err() { self.note_failure(); } }
                 _ = stop_owner.cancelled(), if !owner_stop_observed => { owner_stop_observed = true; }
+                _ = paired.changed.notified() => {}
                 _ = session_cancellations.next(), if !session_cancellations.is_empty() => {}
                 _ = tokio::time::sleep_until(timer) => {}
             }
         }
     }
 
+    fn start_paired(&mut self, record: usize, input: PairedRuntimeInput) {
+        if record >= MAX_PAIRED_ACCEPTED || self.paired_records.contains_key(&record) {
+            self.paired_unmatched_inputs.push(input);
+            self.fail_paired();
+            return;
+        }
+        let (kind, identity) = input.identity();
+        if self.failed
+            || self.draining.load(Ordering::Acquire)
+            || self.paired.terminal_fault.load(Ordering::Acquire)
+        {
+            self.paired_records.insert(
+                record,
+                PairedRecord {
+                    kind,
+                    identity,
+                    state: PairedRecordState::Unstarted { _input: input },
+                },
+            );
+            return;
+        }
+        let worker = match input {
+            PairedRuntimeInput::Bind(request) => {
+                self.paired_records.insert(
+                    record,
+                    PairedRecord {
+                        kind,
+                        identity,
+                        state: PairedRecordState::Running { cancellation: None },
+                    },
+                );
+                let core = Arc::clone(&self.core);
+                self.workers.spawn(async move {
+                    let result = core.service.install_paired_parent(*request).await;
+                    SupervisorJoined::Paired {
+                        record,
+                        result: JoinedPairedWork::Bind(result.map(Box::new)),
+                    }
+                })
+            }
+            PairedRuntimeInput::DirectUpdate {
+                request,
+                cancellation,
+            } => {
+                let cancellation = cancellation.child_token();
+                self.paired_records.insert(
+                    record,
+                    PairedRecord {
+                        kind,
+                        identity,
+                        state: PairedRecordState::Running {
+                            cancellation: Some(cancellation.clone()),
+                        },
+                    },
+                );
+                let core = Arc::clone(&self.core);
+                self.workers.spawn(async move {
+                    let result = core.service.update_paired(*request, cancellation).await;
+                    SupervisorJoined::Paired {
+                        record,
+                        result: JoinedPairedWork::DirectUpdate(Box::new(result)),
+                    }
+                })
+            }
+            PairedRuntimeInput::Historical(request) => {
+                self.paired_records.insert(
+                    record,
+                    PairedRecord {
+                        kind,
+                        identity,
+                        state: PairedRecordState::Historical { _request: request },
+                    },
+                );
+                return;
+            }
+        };
+        self.paired_workers.insert(worker.id(), record);
+    }
+
+    fn finish_paired(
+        &mut self,
+        id: tokio::task::Id,
+        record: usize,
+        result: JoinedPairedWork,
+    ) -> bool {
+        let expected = self.paired_workers.remove(&id);
+        let Some(retained) = self.paired_records.get_mut(&record) else {
+            self.paired_unmatched.push(result);
+            return false;
+        };
+        if expected != Some(record)
+            || !matches!(retained.state, PairedRecordState::Running { .. })
+            || !matches!(
+                (&result, retained.kind),
+                (JoinedPairedWork::Bind(_), PairedWorkKind::Bind)
+                    | (
+                        JoinedPairedWork::DirectUpdate(_),
+                        PairedWorkKind::DirectUpdate
+                    )
+            )
+        {
+            self.paired_unmatched.push(result);
+            return false;
+        }
+        retained.state = match result {
+            JoinedPairedWork::Bind(Ok(admission)) => {
+                let (request, parent) = admission.into_parts();
+                PairedRecordState::Bind(RetainedBind {
+                    parent,
+                    close_error: None,
+                    close_attempted: false,
+                    request: Box::new(request),
+                })
+            }
+            JoinedPairedWork::Bind(Err(error)) => PairedRecordState::Failed { _error: error },
+            JoinedPairedWork::DirectUpdate(outcome) => match outcome.into_parts() {
+                Ok((result, request)) => PairedRecordState::DirectUpdate(RetainedUpdate {
+                    result: result.map(Box::new),
+                    request: Box::new(request),
+                }),
+                Err(outcome) => PairedRecordState::Invariant { _outcome: outcome },
+            },
+        };
+        let matches = retained.matches();
+        let closed = !self.draining.load(Ordering::Acquire) || self.close_paired_records();
+        matches && closed
+    }
+
+    fn close_paired_records(&mut self) -> bool {
+        let mut closed = true;
+        for record in self.paired_records.values_mut() {
+            match &mut record.state {
+                PairedRecordState::Running {
+                    cancellation: Some(cancellation),
+                } => {
+                    cancellation.cancel();
+                }
+                PairedRecordState::Bind(retained) => {
+                    if !retained.close_attempted {
+                        retained.close_attempted = true;
+                        if let Ok(parent) = &retained.parent {
+                            retained.close_error =
+                                self.core.service.close_paired_parent(parent).err();
+                        }
+                    }
+                    closed &= retained.close_error.is_none();
+                }
+                _ => {}
+            }
+        }
+        if !closed {
+            self.paired.fail();
+        }
+        closed
+    }
+
+    fn fail_paired(&mut self) {
+        self.paired.fail();
+        self.quiescent.store(false, Ordering::Release);
+        self.changed.notify_one();
+        self.note_failure();
+    }
+
     fn note_failure(&mut self) {
         self.failed = true;
         self.draining.store(true, Ordering::Release);
+        self.paired.close();
         self.core.broker.quarantine_settings();
         for entry in self.sessions.values() {
             entry.session.profile.retire();
@@ -467,6 +936,12 @@ impl SettingsAgentSupervisor {
         let idle = self.opening.is_empty()
             && self.workers.is_empty()
             && self.worker_sessions.is_empty()
+            && self.paired_workers.is_empty()
+            && self.paired_records.is_empty()
+            && self.paired_unmatched.is_empty()
+            && self.paired_unmatched_inputs.is_empty()
+            && self.paired_join_errors.is_empty()
+            && self.paired.idle()
             && self
                 .sessions
                 .values()
@@ -1012,7 +1487,7 @@ impl SettingsAgentSupervisor {
             ));
         }
         let request_digest = digest(&(turn_id, &binding_digest, &text))?;
-        let another_turn = !self.workers.is_empty();
+        let another_turn = !self.worker_sessions.is_empty();
         let entry = self.sessions.get_mut(&id).ok_or(HostError::Worker)?;
         if let Some(original) = entry.seen.iter().find(|original| original.id == turn_id) {
             if original.digest != request_digest {
@@ -1176,7 +1651,9 @@ impl SettingsAgentSupervisor {
         let tracked = Arc::clone(&session);
         let worker = self.workers.spawn(async move {
             let retained = (permit, core, session);
-            run_turn(&retained.1, &retained.2, turn_id, text, context).await
+            SupervisorJoined::Native(
+                run_turn(&retained.1, &retained.2, turn_id, text, context).await,
+            )
         });
         self.worker_sessions.insert(worker.id(), (tracked, turn_id));
         Ok(SettingsAssistantReply::Accepted {
@@ -1379,6 +1856,7 @@ impl SettingsAgentSupervisor {
     }
 
     async fn close_all(&mut self) -> Result<(), HostError> {
+        self.paired.close();
         self.quiescent.store(false, Ordering::Release);
         self.draining.store(true, Ordering::Release);
         let sessions: Vec<_> = self
@@ -1386,7 +1864,7 @@ impl SettingsAgentSupervisor {
             .values()
             .map(|entry| Arc::clone(&entry.session))
             .collect();
-        let mut failed = false;
+        let mut failed = !self.close_paired_records();
         let opening: Vec<_> = self
             .opening
             .iter()
@@ -1439,6 +1917,55 @@ impl SettingsAgentSupervisor {
             return Err(HostError::Worker);
         }
         Ok(())
+    }
+}
+
+impl Drop for SettingsAgentSupervisor {
+    fn drop(&mut self) {
+        let retained = match self.paired.state.lock() {
+            Ok(mut state) => {
+                state.closed = true;
+                state.accepted != 0
+            }
+            Err(_) => true,
+        };
+        if !retained && !self.paired.terminal_fault.load(Ordering::Acquire) {
+            return;
+        }
+        self.paired.fail();
+        self.draining.store(true, Ordering::Release);
+        self.quiescent.store(false, Ordering::Release);
+        self.changed.notify_one();
+        self.core.broker.quarantine_settings();
+        for entry in self.sessions.values() {
+            entry.session.profile.retire();
+        }
+        if let Some(commands) = self.commands.as_mut() {
+            commands.close();
+        }
+        for record in self.paired_records.values() {
+            if let PairedRecordState::Running {
+                cancellation: Some(cancellation),
+            } = &record.state
+            {
+                cancellation.cancel();
+            }
+        }
+        let retained = PairedTerminalRetention {
+            _workers: std::mem::replace(&mut self.workers, JoinSet::new()),
+            _commands: self.commands.take(),
+            _records: std::mem::take(&mut self.paired_records),
+            _paired_workers: std::mem::take(&mut self.paired_workers),
+            _unmatched: std::mem::take(&mut self.paired_unmatched),
+            _unmatched_inputs: std::mem::take(&mut self.paired_unmatched_inputs),
+            _join_errors: std::mem::take(&mut self.paired_join_errors),
+            _worker_sessions: std::mem::take(&mut self.worker_sessions),
+            _sessions: std::mem::take(&mut self.sessions),
+            _opening: std::mem::take(&mut self.opening),
+            _core: Arc::clone(&self.core),
+            _intake: Arc::clone(&self.paired),
+        };
+        let _ = Box::leak(Box::new(retained));
     }
 }
 
