@@ -8,7 +8,10 @@ use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 #[cfg(unix)]
-use super::settings_ingress::{ReceiveContext, work::SettingsReceiveWork};
+use super::settings_ingress::{
+    ReceiveContext,
+    work::{PairedResultAdmissionFailure, PendingSettingsReplyBuild, SettingsReceiveWork},
+};
 use super::{DeviceEndpoint, DeviceError, EndpointRole};
 #[cfg(unix)]
 use super::{
@@ -18,6 +21,8 @@ use super::{
 use crate::agent::Agent;
 #[cfg(unix)]
 use crate::crypto::EncryptedEnvelope;
+#[cfg(unix)]
+use crate::host::settings::agent::{PairedResultHandoff, SettingsAgentRuntime};
 use crate::protocol::DeviceId;
 use crate::transport::remote::RelayConnection;
 
@@ -223,6 +228,24 @@ impl SettingsConnectionOwner<'_> {
         &mut self,
     ) -> Result<Option<SettingsReceiveEvent>, SettingsReceiveError> {
         self.owner.receive.next().await
+    }
+
+    #[cfg(unix)]
+    pub(super) fn try_adopt_paired_result(
+        &mut self,
+        handoff: PairedResultHandoff,
+    ) -> Result<PendingSettingsReplyBuild, PairedResultAdmissionFailure> {
+        self.owner
+            .receive
+            .try_adopt_paired_result(&self.identity, handoff)
+    }
+
+    #[cfg(unix)]
+    pub(super) fn try_ack_paired_adoption(
+        &mut self,
+        runtime: &SettingsAgentRuntime,
+    ) -> Result<bool, SettingsReceiveError> {
+        self.owner.receive.try_ack_paired_adoption(runtime)
     }
 
     pub(super) fn identity(&self) -> &Arc<SettingsConnectionIdentity> {

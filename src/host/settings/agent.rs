@@ -1,3 +1,12 @@
+mod handoff;
+
+pub(crate) use handoff::{
+    PairedControlSendError, PairedHandoffReadError, PairedResultCorrelation, PairedResultHandoff,
+    PendingPairedResult,
+};
+
+use handoff::PairedJoinedOwner;
+
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -21,6 +30,7 @@ use crate::agent::{
 use crate::context::{ContextBudget, TaskContext};
 use crate::devices::{
     OwnedCommittedSettingsBind, OwnedCommittedSettingsCommand, OwnedHistoricalSettingsCommand,
+    PairedWorkAdoption,
 };
 use crate::host::providers::{HostProviderFactory, SettingsProviderBinding};
 use crate::host::runtime::HostError;
@@ -220,9 +230,12 @@ struct Request {
 enum SupervisorInput {
     Native(Box<Request>),
     Paired {
-        record: usize,
+        record: u64,
         input: PairedRuntimeInput,
+        completion: oneshot::Sender<PairedResultHandoff>,
+        handoff: Arc<()>,
     },
+    PairedAdopted(PairedWorkAdoption),
 }
 
 pub(crate) enum PairedRuntimeInput {
@@ -265,7 +278,8 @@ impl PairedRuntimeInput {
 
 struct PairedIntakeState {
     closed: bool,
-    accepted: usize,
+    next_record: u64,
+    live: usize,
 }
 
 struct PairedIntake {
@@ -289,7 +303,7 @@ impl PairedIntake {
 
     fn idle(&self) -> bool {
         !self.terminal_fault.load(Ordering::Acquire)
-            && self.state.lock().is_ok_and(|state| state.accepted == 0)
+            && self.state.lock().is_ok_and(|state| state.live == 0)
     }
 }
 
@@ -322,7 +336,7 @@ enum PairedRecordState {
     Bind(RetainedBind),
     DirectUpdate(RetainedUpdate),
     Historical {
-        _request: Box<OwnedHistoricalSettingsCommand>,
+        request: Box<OwnedHistoricalSettingsCommand>,
     },
     Invariant {
         _outcome: Box<PairedUpdateOutcome>,
@@ -330,11 +344,18 @@ enum PairedRecordState {
     Failed {
         _error: SettingsServiceError,
     },
+    Offered,
+    WorkOwned,
+    RetainedHandoff {
+        _handoff: Box<PairedResultHandoff>,
+    },
 }
 
 struct PairedRecord {
     kind: PairedWorkKind,
     identity: Arc<()>,
+    handoff: Arc<()>,
+    completion: Option<oneshot::Sender<PairedResultHandoff>>,
     state: PairedRecordState,
 }
 
@@ -380,11 +401,20 @@ impl PairedRecord {
             PairedRecordState::DirectUpdate(retained) => {
                 self.kind == PairedWorkKind::DirectUpdate && retained.matches(&self.identity)
             }
+            PairedRecordState::Historical { request } => {
+                self.kind == PairedWorkKind::Historical
+                    && Arc::ptr_eq(
+                        request.authority_source().invocation_identity(),
+                        &self.identity,
+                    )
+            }
             PairedRecordState::Running { .. }
             | PairedRecordState::Unstarted { .. }
-            | PairedRecordState::Historical { .. }
             | PairedRecordState::Invariant { .. }
-            | PairedRecordState::Failed { .. } => false,
+            | PairedRecordState::Failed { .. }
+            | PairedRecordState::Offered
+            | PairedRecordState::WorkOwned
+            | PairedRecordState::RetainedHandoff { .. } => false,
         }
     }
 }
@@ -397,7 +427,7 @@ enum JoinedPairedWork {
 enum SupervisorJoined {
     Native(JoinedTurn),
     Paired {
-        record: usize,
+        record: u64,
         result: JoinedPairedWork,
     },
 }
@@ -405,11 +435,12 @@ enum SupervisorJoined {
 struct PairedTerminalRetention {
     _workers: JoinSet<SupervisorJoined>,
     _commands: Option<mpsc::Receiver<SupervisorInput>>,
-    _records: BTreeMap<usize, PairedRecord>,
-    _paired_workers: HashMap<tokio::task::Id, usize>,
+    _records: BTreeMap<u64, PairedRecord>,
+    _paired_workers: HashMap<tokio::task::Id, u64>,
     _unmatched: Vec<JoinedPairedWork>,
     _unmatched_inputs: Vec<PairedRuntimeInput>,
     _join_errors: Vec<tokio::task::JoinError>,
+    _unmatched_adoptions: Vec<PairedWorkAdoption>,
     _worker_sessions: HashMap<tokio::task::Id, (Arc<Session>, CommandId)>,
     _sessions: BTreeMap<Uuid, SessionState>,
     _opening: BTreeMap<CommandId, Arc<SettingsAgentSession>>,
@@ -513,11 +544,12 @@ pub(crate) struct SettingsAgentSupervisor {
     core: Arc<SettingsAgentComponents>,
     commands: Option<mpsc::Receiver<SupervisorInput>>,
     paired: Arc<PairedIntake>,
-    paired_records: BTreeMap<usize, PairedRecord>,
-    paired_workers: HashMap<tokio::task::Id, usize>,
+    paired_records: BTreeMap<u64, PairedRecord>,
+    paired_workers: HashMap<tokio::task::Id, u64>,
     paired_unmatched: Vec<JoinedPairedWork>,
     paired_unmatched_inputs: Vec<PairedRuntimeInput>,
     paired_join_errors: Vec<tokio::task::JoinError>,
+    paired_unmatched_adoptions: Vec<PairedWorkAdoption>,
     sessions: BTreeMap<Uuid, SessionState>,
     opens: BTreeMap<CommandId, OpenRecord>,
     opening: BTreeMap<CommandId, Arc<SettingsAgentSession>>,
@@ -541,7 +573,8 @@ impl SettingsAgentRuntime {
         let paired = Arc::new(PairedIntake {
             state: std::sync::Mutex::new(PairedIntakeState {
                 closed: false,
-                accepted: 0,
+                next_record: 0,
+                live: 0,
             }),
             terminal_fault: AtomicBool::new(false),
             changed: Notify::new(),
@@ -563,6 +596,7 @@ impl SettingsAgentRuntime {
                 paired_unmatched: Vec::new(),
                 paired_unmatched_inputs: Vec::new(),
                 paired_join_errors: Vec::new(),
+                paired_unmatched_adoptions: Vec::new(),
                 sessions: BTreeMap::new(),
                 opens: BTreeMap::new(),
                 opening: BTreeMap::new(),
@@ -598,7 +632,7 @@ impl SettingsAgentRuntime {
     pub(crate) fn try_enqueue_paired(
         &self,
         input: PairedRuntimeInput,
-    ) -> Result<(), PairedEnqueueError> {
+    ) -> Result<PendingPairedResult, PairedEnqueueError> {
         let mut state = match self.paired.state.lock() {
             Ok(state) => state,
             Err(_) => {
@@ -614,7 +648,7 @@ impl SettingsAgentRuntime {
         {
             return Err(PairedEnqueueError::Closed(input));
         }
-        if state.accepted >= MAX_PAIRED_ACCEPTED {
+        if state.live >= MAX_PAIRED_ACCEPTED {
             return Err(PairedEnqueueError::Full(input));
         }
         let permit = match self.commands.try_reserve() {
@@ -627,11 +661,53 @@ impl SettingsAgentRuntime {
                 return Err(PairedEnqueueError::Closed(input));
             }
         };
-        let record = state.accepted;
-        state.accepted += 1;
+        let Some(next_record) = state.next_record.checked_add(1) else {
+            state.closed = true;
+            self.paired.fail();
+            self.quiescent.store(false, Ordering::Release);
+            self.changed.notify_one();
+            return Err(PairedEnqueueError::Closed(input));
+        };
+        let Some(live) = state.live.checked_add(1) else {
+            state.closed = true;
+            self.paired.fail();
+            self.quiescent.store(false, Ordering::Release);
+            self.changed.notify_one();
+            return Err(PairedEnqueueError::Closed(input));
+        };
+        let record = state.next_record;
+        let (completion, receiver) = oneshot::channel();
+        let handoff = Arc::new(());
+        state.next_record = next_record;
+        state.live = live;
         self.quiescent.store(false, Ordering::Release);
-        permit.send(SupervisorInput::Paired { record, input });
+        permit.send(SupervisorInput::Paired {
+            record,
+            input,
+            completion,
+            handoff,
+        });
         self.paired.changed.notify_one();
+        Ok(PendingPairedResult::new(receiver))
+    }
+
+    pub(crate) fn try_ack_paired_adoption(
+        &self,
+        proof: PairedWorkAdoption,
+    ) -> Result<(), PairedControlSendError> {
+        if !proof.correlation().belongs_to(&self.paired) {
+            return Err(PairedControlSendError::Closed(proof));
+        }
+        let permit = match self.commands.try_reserve() {
+            Ok(permit) => permit,
+            Err(mpsc::error::TrySendError::Full(_)) => {
+                return Err(PairedControlSendError::Full(proof));
+            }
+            Err(mpsc::error::TrySendError::Closed(_)) => {
+                return Err(PairedControlSendError::Closed(proof));
+            }
+        };
+        permit.send(SupervisorInput::PairedAdopted(proof));
         Ok(())
     }
 
@@ -746,7 +822,10 @@ impl SettingsAgentSupervisor {
                             let result = self.handle(request.command).await;
                             if request.reply.send(result).is_err() { tracing::debug!("private Settings reply receiver disconnected"); }
                         }
-                        Some(SupervisorInput::Paired { record, input }) => self.start_paired(record, input),
+                        Some(SupervisorInput::Paired { record, input, completion, handoff }) => self.start_paired(record, input, completion, handoff),
+                        Some(SupervisorInput::PairedAdopted(proof)) => {
+                            if !self.ack_paired_adoption(proof) { self.fail_paired(); }
+                        }
                         None => { self.commands_open = false; if self.close_all().await.is_err() { self.note_failure(); } }
                     }
                 }
@@ -759,8 +838,19 @@ impl SettingsAgentSupervisor {
         }
     }
 
-    fn start_paired(&mut self, record: usize, input: PairedRuntimeInput) {
-        if record >= MAX_PAIRED_ACCEPTED || self.paired_records.contains_key(&record) {
+    fn start_paired(
+        &mut self,
+        record: u64,
+        input: PairedRuntimeInput,
+        completion: oneshot::Sender<PairedResultHandoff>,
+        handoff: Arc<()>,
+    ) {
+        let admitted = self
+            .paired
+            .state
+            .lock()
+            .is_ok_and(|state| record < state.next_record && state.live <= MAX_PAIRED_ACCEPTED);
+        if !admitted || self.paired_records.contains_key(&record) {
             self.paired_unmatched_inputs.push(input);
             self.fail_paired();
             return;
@@ -775,6 +865,8 @@ impl SettingsAgentSupervisor {
                 PairedRecord {
                     kind,
                     identity,
+                    handoff,
+                    completion: Some(completion),
                     state: PairedRecordState::Unstarted { _input: input },
                 },
             );
@@ -787,6 +879,8 @@ impl SettingsAgentSupervisor {
                     PairedRecord {
                         kind,
                         identity,
+                        handoff,
+                        completion: Some(completion),
                         state: PairedRecordState::Running { cancellation: None },
                     },
                 );
@@ -809,6 +903,8 @@ impl SettingsAgentSupervisor {
                     PairedRecord {
                         kind,
                         identity,
+                        handoff,
+                        completion: Some(completion),
                         state: PairedRecordState::Running {
                             cancellation: Some(cancellation.clone()),
                         },
@@ -829,9 +925,14 @@ impl SettingsAgentSupervisor {
                     PairedRecord {
                         kind,
                         identity,
-                        state: PairedRecordState::Historical { _request: request },
+                        handoff,
+                        completion: Some(completion),
+                        state: PairedRecordState::Historical { request },
                     },
                 );
+                if !self.offer_paired(record) {
+                    self.fail_paired();
+                }
                 return;
             }
         };
@@ -841,7 +942,7 @@ impl SettingsAgentSupervisor {
     fn finish_paired(
         &mut self,
         id: tokio::task::Id,
-        record: usize,
+        record: u64,
         result: JoinedPairedWork,
     ) -> bool {
         let expected = self.paired_workers.remove(&id);
@@ -865,7 +966,7 @@ impl SettingsAgentSupervisor {
         }
         retained.state = match result {
             JoinedPairedWork::Bind(Ok(admission)) => {
-                let (request, parent) = admission.into_parts();
+                let (parent, request) = admission.into_parts();
                 PairedRecordState::Bind(RetainedBind {
                     parent,
                     close_error: None,
@@ -882,9 +983,65 @@ impl SettingsAgentSupervisor {
                 Err(outcome) => PairedRecordState::Invariant { _outcome: outcome },
             },
         };
-        let matches = retained.matches();
-        let closed = !self.draining.load(Ordering::Acquire) || self.close_paired_records();
-        matches && closed
+        if !retained.matches() {
+            return false;
+        }
+        if self.draining.load(Ordering::Acquire) {
+            self.close_paired_records()
+        } else {
+            self.offer_paired(record)
+        }
+    }
+
+    fn offer_paired(&mut self, record: u64) -> bool {
+        let Some(retained) = self.paired_records.get_mut(&record) else {
+            return false;
+        };
+        if !retained.matches() {
+            return false;
+        }
+        let Some(completion) = retained.completion.take() else {
+            return false;
+        };
+        let state = std::mem::replace(&mut retained.state, PairedRecordState::Offered);
+        let owner = match state {
+            PairedRecordState::Bind(bind) => PairedJoinedOwner::Bind(bind),
+            PairedRecordState::DirectUpdate(update) => PairedJoinedOwner::DirectUpdate(update),
+            PairedRecordState::Historical { request } => PairedJoinedOwner::Historical(request),
+            state => {
+                retained.state = state;
+                retained.completion = Some(completion);
+                return false;
+            }
+        };
+        let correlation = PairedResultCorrelation::new(
+            record,
+            Arc::clone(&retained.identity),
+            Arc::clone(&retained.handoff),
+            Arc::clone(&self.paired),
+        );
+        let handoff = PairedResultHandoff::new(correlation, owner);
+        if let Err(handoff) = completion.send(handoff) {
+            retained.state = PairedRecordState::RetainedHandoff {
+                _handoff: Box::new(handoff),
+            };
+        }
+        true
+    }
+
+    fn ack_paired_adoption(&mut self, proof: PairedWorkAdoption) -> bool {
+        let correlation = proof.correlation();
+        let record = correlation.record();
+        if let Some(retained) = self.paired_records.get_mut(&record)
+            && matches!(retained.state, PairedRecordState::Offered)
+            && correlation.matches(record, &retained.identity, &retained.handoff, &self.paired)
+        {
+            retained.state = PairedRecordState::WorkOwned;
+            true
+        } else {
+            self.paired_unmatched_adoptions.push(proof);
+            false
+        }
     }
 
     fn close_paired_records(&mut self) -> bool {
@@ -905,6 +1062,13 @@ impl SettingsAgentSupervisor {
                         }
                     }
                     closed &= retained.close_error.is_none();
+                }
+                PairedRecordState::Offered
+                | PairedRecordState::WorkOwned
+                | PairedRecordState::RetainedHandoff { .. }
+                    if record.kind == PairedWorkKind::Bind =>
+                {
+                    closed = false;
                 }
                 _ => {}
             }
@@ -941,6 +1105,7 @@ impl SettingsAgentSupervisor {
             && self.paired_unmatched.is_empty()
             && self.paired_unmatched_inputs.is_empty()
             && self.paired_join_errors.is_empty()
+            && self.paired_unmatched_adoptions.is_empty()
             && self.paired.idle()
             && self
                 .sessions
@@ -1925,7 +2090,7 @@ impl Drop for SettingsAgentSupervisor {
         let retained = match self.paired.state.lock() {
             Ok(mut state) => {
                 state.closed = true;
-                state.accepted != 0
+                state.live != 0
             }
             Err(_) => true,
         };
@@ -1959,6 +2124,7 @@ impl Drop for SettingsAgentSupervisor {
             _unmatched: std::mem::take(&mut self.paired_unmatched),
             _unmatched_inputs: std::mem::take(&mut self.paired_unmatched_inputs),
             _join_errors: std::mem::take(&mut self.paired_join_errors),
+            _unmatched_adoptions: std::mem::take(&mut self.paired_unmatched_adoptions),
             _worker_sessions: std::mem::take(&mut self.worker_sessions),
             _sessions: std::mem::take(&mut self.sessions),
             _opening: std::mem::take(&mut self.opening),
