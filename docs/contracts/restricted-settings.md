@@ -1,6 +1,6 @@
 # Private Settings runtime contracts
 
-These contracts describe the restricted runtime and the #115 backend seams. The new assistant seams have source-only formatting verification; combined Rust gates and disposable behavior verification remain pending for those changes. The existing [typed Settings contract](settings.md) and its native action/confirmation authority remain authoritative.
+These contracts describe the #113 runtime merged in PR #143 after exact-tree Linux/macOS compilation, static analysis, release and Rust1.88 checks, together with the #115 backend additions. Those additions have source-only formatting and review; their combined Rust gates and disposable behavior verification remain pending. The existing [typed Settings contract](settings.md) and its native action/confirmation authority remain authoritative.
 
 ## Private native frames
 

@@ -11,6 +11,12 @@ struct SettingsView: View {
         TabView {
             hostSettings
                 .tabItem { Label("General", systemImage: "gearshape") }
+            NativeSettingsControls(store: model.nativeSettings, section: .models, connectionEdited: model.connectionEdited)
+                .tabItem { Label("Models", systemImage: "cpu") }
+            NativeSettingsControls(store: model.nativeSettings, section: .memory, connectionEdited: model.connectionEdited)
+                .tabItem { Label("Memory", systemImage: "brain") }
+            NativeSettingsControls(store: model.nativeSettings, section: .toolSelection, connectionEdited: model.connectionEdited)
+                .tabItem { Label("Tool Selection", systemImage: "wrench.and.screwdriver") }
             NativeHostSettingsPane(store: model.nativeSettings, connectionEdited: model.connectionEdited)
                 .tabItem { Label("Host settings", systemImage: "slider.horizontal.3") }
             Group {
@@ -24,6 +30,7 @@ struct SettingsView: View {
             .tabItem { Label("Notifications", systemImage: "bell") }
         }
         .frame(width: 700, height: 800)
+        .onChange(of: model.connected) { _, connected in model.nativeSettings.hostAvailabilityChanged(connected) }
         .background {
             SettingsWindowObserver(bindingID: model.settingsSurfaceID,
                                    onChange: { visible, active in model.settingsWindowChanged(visible: visible, active: active) },
@@ -58,7 +65,7 @@ struct SettingsView: View {
                     Button("Save defaults") { Task { await model.saveSettings() } }
                         .disabled(!model.canMutate || model.settings == .null)
                 }
-                Text("Existing tasks keep their captured authority. Other settings and credential references are preserved by revision-checked updates; credentials are managed through the CLI.")
+                Text("Existing tasks keep their captured authority. Other settings and credential references are preserved by revision-checked updates. Use Models or Tool Selection for native credential entry.")
                     .font(.caption).foregroundStyle(.secondary)
             }.disabled(!model.connected || model.draining)
             Section("Per-user background service") {
@@ -171,7 +178,11 @@ private struct NativeHostSettingsPane: View {
                     ForEach(store.cleanup) { cleanup in
                         VStack(alignment: .leading, spacing: 4) {
                             if let report = cleanup.report {
-                                Text("Earlier session cleanup reported issues. Its original state is retained.")
+                                if cleanup.hasIssues {
+                                    Text("Earlier session cleanup reported issues. Its original state is retained.")
+                                } else {
+                                    Text("The original native cleanup report is retained.")
+                                }
                                 ForEach(Array(report.failures.prefix(4).enumerated()), id: \.offset) { _, failure in
                                     Text(failure.errorDescription ?? "The original drain has an unconfirmed outcome.")
                                         .font(.caption)
@@ -179,6 +190,11 @@ private struct NativeHostSettingsPane: View {
                                 if report.failures.count > 4 { Text("\(report.failures.count) total drain issues are retained.").font(.caption) }
                                 if !report.unresolvedOperationIDs.isEmpty { Text("\(report.unresolvedOperationIDs.count) original operations remain unresolved.").font(.caption) }
                             } else { ProgressView("Closing the original Host session…") }
+                            if !cleanup.unlinkedCredentialOperationIDs.isEmpty {
+                                Text("Unlinked initial storage receipts: \(cleanup.unlinkedCredentialOperationIDs.count)")
+                                Text("Original storage completed without an observed metadata link. Review its record in Models or Tool Selection. A historical receipt does not establish current key presence.")
+                                    .font(.caption).foregroundStyle(.secondary)
+                            }
                             Text("Original connection: \(cleanup.connectionKey.uuidString.lowercased())").font(.caption).textSelection(.enabled)
                         }
                     }
@@ -191,57 +207,8 @@ private struct NativeHostSettingsPane: View {
         .textSelection(.enabled)
     }
 
-    private func label(_ key: SettingKey) -> String {
-        switch key {
-        case .modelSelection: "Model"
-        case .toolSelection: "Tool selection"
-        case .embeddingsEnabled: "Local embeddings"
-        case .embeddingsDimensions: "Embedding dimensions"
-        case .embeddingsModel: "Embedding model"
-        case .notificationsCompletion: "Completion notifications"
-        case .notificationsAttention: "Attention notifications"
-        case .notificationAuthorization: "Notification authorization"
-        }
-    }
-
-    private func value(_ value: SettingValue?) -> String {
-        guard let value else { return "Not reported" }
-        switch value {
-        case .model(let selection):
-            guard let selection else { return "No model selected" }
-            let endpoint: String
-            switch selection.endpoint {
-            case .official: endpoint = "Official endpoint"
-            case .loopback(let url): endpoint = url
-            }
-            return selection.provider.rawValue + " · " + selection.model + " · " + endpoint
-        case .toolSelection(.local): return "Local discovery"
-        case .toolSelection(.systemOne(let endpoint, let model)): return "System One · " + model + " · " + endpoint
-        case .boolean(let enabled): return enabled ? "Enabled" : "Disabled"
-        case .dimensions(let dimensions): return dimensions.map { String($0) } ?? "Model default"
-        case .embeddingModel(let model): return model ?? "Unavailable"
-        case .notificationAuthorization(let state): return state.rawValue.replacingOccurrences(of: "_", with: " ")
-        }
-    }
-
-    private func state(_ state: SettingState) -> String {
-        switch state {
-        case .effective: "Effective"
-        case .pendingApplication: "Pending application"
-        case .restartRequired: "Restart required"
-        case .unavailable: "Unavailable"
-        }
-    }
-
-    private func unavailable(_ reason: SettingsUnavailableReason) -> String {
-        switch reason {
-        case .hostOffline: "Host is offline."
-        case .providerUnavailable: "The provider is unavailable. A saved model does not verify successful inference."
-        case .embeddingMetadataUnavailable: "Embedding model metadata is unavailable."
-        case .embeddingBoundaryUnavailable: "The local embedding boundary is unavailable; lexical retrieval remains available."
-        case .nativeActionUnavailable: "The native action is unavailable."
-        case .permissionDenied: "Permission was denied."
-        case .expired: "The original authority expired."
-        }
-    }
+    private func label(_ key: SettingKey) -> String { NativeSettingsText.label(key) }
+    private func value(_ value: SettingValue?) -> String { NativeSettingsText.value(value) }
+    private func state(_ state: SettingState) -> String { NativeSettingsText.state(state) }
+    private func unavailable(_ reason: SettingsUnavailableReason) -> String { NativeSettingsText.unavailable(reason) }
 }

@@ -1,6 +1,6 @@
 # Restricted Settings agent source
 
-The restricted backend adds an on-demand Settings conversation to the existing Rust Host. The #115 live-presentation, original-Open recovery, per-Send context and scoped-receipt additions still require combined compilation, strict static analysis and disposable runtime verification. This document describes the implemented source boundaries; it does not establish working inference, an Apple screen, native platform verification or security readiness. Deferred automation remains [#32](https://github.com/izyuumi/everything/issues/32).
+The #113 runtime implementation merged in PR #143 after exact-tree Linux/macOS compilation, static analysis, release and Rust1.88 checks passed. The #115 live-presentation, original-Open recovery, per-Send context and scoped-receipt additions require their own combined Rust gates and disposable runtime verification. This document describes the implemented source boundaries; it does not establish working inference, an Apple screen, native platform verification or security readiness. Deferred automation remains [#32](https://github.com/izyuumi/everything/issues/32).
 
 ## Ownership and execution
 
