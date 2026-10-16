@@ -1,0 +1,13 @@
+# Settings-aware Host startup
+
+The existing Host opens one SettingsService over its actual leased Agent, SettingsRepository, DeviceEndpoint and shared mutation guard. Before optional services consume configuration, `startup_context()` validates the actual private file against its cache and reads the bounded typed operation history. The Host uses that returned settings snapshot for MCP bootstrap, worker configuration, memory, selection, relay and composition.
+
+An unresolved file intent or an exact-current applied file receipt awaiting application keeps optional embedding and remote selection admission off. The original operation identifier remains available for reconciliation. This policy does not infer file success, silently rebase a patch or load a helper to discover whether an old operation completed. Historical pending applications for other file fingerprints cannot establish the current file's effective state.
+
+Memory opens through `open_with_embedding_preferences` with its original configured MemorySettings and the startup context's separately resolved preferences. Off is resolved before optional runtime, model or vector access. Retained desired configuration is preserved. Selection retains its configured endpoint/model/reference but uses the existing local fallback when startup policy or the saved preference disables remote selection. No remote classifier request or credential lookup establishes availability during this configuration step.
+
+Worker endpoint preparation runs on an owned blocking worker after this snapshot is obtained. The complete configuration/Agent tuple is bound before filesystem or database work, and successful output retains the actual Agent last. The existing preparation and registry/Authorizer ownership guards remain in place.
+
+The Host binds the same constructed Composition back into SettingsService before owner ingress or Scheduler activation. The service verifies the shared Store connection and exact state-lease identity; this consistency check grants no caller authority and creates no second runtime, registry, memory writer or configuration source.
+
+This source wiring does not complete the shared write routes or Host-owned application supervisor. The original pending application must advance through that separately integrated supervisor, with actual helper cleanup and immutable operation observations. Source review and compilation remain distinct from disposable startup/recovery/runtime acceptance. No automated tests were added; deferred coverage remains [#32](https://github.com/izyuumi/everything/issues/32). See [live memory application](../architecture/memory-live-application.md) and [settings service](settings-service.md).

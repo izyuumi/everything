@@ -190,8 +190,6 @@ impl HostService {
             mut scopes,
             task_tools,
             schedule_tools,
-            effective,
-            worker_endpoint,
             _preparation_lease,
         ) = tokio::task::spawn_blocking(move || {
             let preparation_lease = Arc::clone(&prepared_lease);
@@ -203,21 +201,7 @@ impl HostService {
             let identity = crate::devices::load_or_create_identity_in(&directory)?;
             let devices = DeviceEndpoint::new(store.clone(), identity, EndpointRole::Host)?;
             let settings = SettingsRepository::open(Arc::clone(&prepared_lease))?;
-            let effective = settings.snapshot()?;
             let agent = Agent::from_leased_store(store, prepared_lease);
-            let worker_endpoint = effective
-                .worker
-                .as_ref()
-                .map(|configuration| {
-                    let identity = crate::worker::load_or_create_worker_identity(&agent)?;
-                    crate::worker::WorkerEndpoint::open(
-                        agent.clone(),
-                        identity,
-                        crate::worker::WorkerRole::Coordinator,
-                        configuration.relay_origin.clone(),
-                    )
-                })
-                .transpose()?;
             let mut registry = ToolRegistry::new();
             let mut scopes =
                 BuiltinTools::new(BuiltinConfig::default())?.register_into(&mut registry)?;
@@ -233,8 +217,6 @@ impl HostService {
                 scopes,
                 task_tools,
                 schedule_tools,
-                effective,
-                worker_endpoint,
                 preparation_lease,
             ))
         })
@@ -244,6 +226,37 @@ impl HostService {
         let settings_service =
             SettingsService::open(agent.clone(), settings.clone(), &devices, mutation.clone())
                 .await?;
+        let startup = settings_service.startup_context().await?;
+        let effective = startup.settings.clone();
+        if let super::settings::service::SettingsStartupPolicy::OptionalFeaturesSuspended {
+            operation_id,
+        } = &startup.policy
+        {
+            tracing::warn!(
+                %operation_id,
+                pending_application = startup.pending_application.is_some(),
+                "optional settings execution remains suspended for original-operation recovery"
+            );
+        }
+        let worker_endpoint = if let Some(configuration) = effective.worker.clone() {
+            let owned = (configuration, agent.clone());
+            let (endpoint, _worker_owner) = tokio::task::spawn_blocking(move || {
+                let owned = owned;
+                let identity = crate::worker::load_or_create_worker_identity(&owned.1)?;
+                let endpoint = crate::worker::WorkerEndpoint::open(
+                    owned.1.clone(),
+                    identity,
+                    crate::worker::WorkerRole::Coordinator,
+                    owned.0.relay_origin,
+                )?;
+                Ok::<_, HostError>((endpoint, owned.1))
+            })
+            .await
+            .map_err(|_| HostError::Worker)??;
+            Some(endpoint)
+        } else {
+            None
+        };
         let credentials = CredentialVault::from_environment();
         if let Some(path) = binding_file {
             credentials
@@ -294,22 +307,28 @@ impl HostService {
             settings.clone(),
             credentials.clone(),
         ));
-        let memory = super::memory::MemoryService::open(
+        let memory = super::memory::MemoryService::open_with_embedding_preferences(
             agent.clone(),
             effective.memory.clone(),
             Some(providers.clone()),
             CancellationToken::new(),
+            startup.embedding_preferences(),
         )
         .await?;
         let catalog = super::selection::SelectionCatalog::from_registry(&registry)?;
+        let (selection_settings, remote_enabled) = startup.selection_configuration();
         let selection = super::selection::SelectionPreflight::new(
             agent.clone(),
             discovery.selector.clone(),
-            &effective.selection,
+            &selection_settings,
             credentials.native_store(),
             catalog.clone(),
             Duration::from_secs(300),
         )?;
+        if !remote_enabled {
+            let generation = selection.suspend_remote()?;
+            selection.configure_remote(generation, selection_settings, false)?;
+        }
         let relay_origin = effective.relay_origin.clone();
         let worker_settings = effective.worker.clone();
         let composition = Arc::new(super::composition::Composition::new(
@@ -321,6 +340,7 @@ impl HostService {
             HostInbox::new(agent.store()),
             agent.clone(),
         ));
+        settings_service.bind_composition(composition.clone())?;
         let broker = ToolBroker::start_with_owner(
             agent.store(),
             registry.clone(),
