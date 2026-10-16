@@ -363,6 +363,8 @@ pub(super) struct TaskCheckpoint {
     pub child_wait: Option<ChildWaitSet>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_retirement: Option<ProviderRetirement>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub terminal_evidence: Option<super::evidence::TerminalTaskEvidence>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
