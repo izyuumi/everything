@@ -10,7 +10,8 @@ use uuid::Uuid;
 
 use crate::crypto::DevicePublicKeys;
 use crate::devices::{
-    AccessStatusRejection, DeviceAccess, DeviceError, OwnedVerifiedSettingsAccess,
+    AccessStatusRejection, DeviceAccess, DeviceError, OwnedCommittedSettingsAccess,
+    OwnedVerifiedSettingsAccess,
 };
 use crate::host::settings::{SettingsGrantHead, SettingsGrantReference};
 use crate::protocol::{DeviceId, UnixMillis};
@@ -591,4 +592,275 @@ struct AccessPinnedPeer {
     version: u16,
     keys: DevicePublicKeys,
     access: DeviceAccess,
+}
+
+pub(crate) struct QualifiedSettingsAccessReply<'scope> {
+    authority: &'scope SettingsReceiptAuthority,
+    request: &'scope OwnedCommittedSettingsAccess,
+    mutation: &'scope OwnedMutexGuard<()>,
+    query: Arc<()>,
+    invocation: Arc<()>,
+    decision: AccessDecision,
+    query_floor: (UnixMillis, Instant),
+    query_deadline: Instant,
+    reply_deadline: Instant,
+    observed_wall: UnixMillis,
+    observed_monotonic: Instant,
+}
+
+struct AccessReplyObservation {
+    status: AccessObservation,
+    reply_deadline: Instant,
+}
+
+impl fmt::Debug for QualifiedSettingsAccessReply<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("QualifiedSettingsAccessReply([joined own-status read])")
+    }
+}
+
+impl SettingsReceiptAuthority {
+    pub(crate) fn qualify_access_reply_on<'scope>(
+        &'scope self,
+        store: &Store,
+        transaction: &Transaction<'_>,
+        mutation: &'scope OwnedMutexGuard<()>,
+        request: &'scope OwnedCommittedSettingsAccess,
+    ) -> Result<QualifiedSettingsAccessReply<'scope>, SettingsAccessQualificationError> {
+        let observed = self.observe_access_reply_on(store, transaction, mutation, request)?;
+        Ok(QualifiedSettingsAccessReply {
+            authority: self,
+            request,
+            mutation,
+            query: observed.status.query,
+            invocation: Arc::clone(
+                request
+                    .verified_request()
+                    .authority_source()
+                    .invocation_identity(),
+            ),
+            decision: observed.status.decision,
+            query_floor: observed.status.query_floor,
+            query_deadline: observed.status.query_deadline,
+            reply_deadline: observed.reply_deadline,
+            observed_wall: observed.status.wall,
+            observed_monotonic: observed.status.monotonic,
+        })
+    }
+
+    pub(crate) fn recheck_access_reply_on(
+        &self,
+        store: &Store,
+        transaction: &Transaction<'_>,
+        qualified: &QualifiedSettingsAccessReply<'_>,
+    ) -> Result<(), SettingsAccessQualificationError> {
+        if !std::ptr::eq(self, qualified.authority)
+            || !Arc::ptr_eq(
+                &qualified.invocation,
+                qualified
+                    .request
+                    .verified_request()
+                    .authority_source()
+                    .invocation_identity(),
+            )
+        {
+            return Err(SettingsServiceError::OutsideScope.into());
+        }
+        let observed = self.observe_access_reply_on(
+            store,
+            transaction,
+            qualified.mutation,
+            qualified.request,
+        )?;
+        if !Arc::ptr_eq(&observed.status.query, &qualified.query)
+            || observed.status.query_floor != qualified.query_floor
+            || observed.status.query_deadline != qualified.query_deadline
+            || observed.reply_deadline != qualified.reply_deadline
+            || observed.status.decision != qualified.decision
+            || observed.status.wall < qualified.observed_wall
+            || observed.status.monotonic < qualified.observed_monotonic
+        {
+            return Err(SettingsServiceError::OutsideScope.into());
+        }
+        Ok(())
+    }
+
+    fn observe_access_reply_on(
+        &self,
+        store: &Store,
+        connection: &Connection,
+        mutation: &OwnedMutexGuard<()>,
+        request: &OwnedCommittedSettingsAccess,
+    ) -> Result<AccessReplyObservation, SettingsAccessQualificationError> {
+        if !Arc::ptr_eq(OwnedMutexGuard::mutex(mutation), &self.core.mutation) {
+            return Err(SettingsServiceError::OutsideScope.into());
+        }
+        let verified = request.verified_request();
+        let status = self.observe_access_on(store, connection, verified)?;
+        let owner = self.core.authority.paired_receipt_owner(&self.host)?;
+        let reply_deadline = check_access_reply_metadata(request, &status)?;
+        check_access_reply_reservation(connection, request)?;
+        let observed = self.core.authority.observe_access_query(
+            &self.host,
+            verified.authority_source(),
+            &self.core.application_stop,
+        )?;
+        if observed.owner != owner
+            || !Arc::ptr_eq(&observed.query, &status.query)
+            || observed.floor != status.query_floor
+            || observed.deadline != status.query_deadline
+            || observed.wall < status.wall
+            || observed.monotonic < status.monotonic
+            || observed.wall < request.reply_reservation().created_at
+        {
+            return Err(SettingsServiceError::OutsideScope.into());
+        }
+        if observed.wall >= request.reply_reservation().expires_at
+            || observed.monotonic >= reply_deadline
+            || matches!(
+                &status.decision,
+                AccessDecision::Active(head)
+                    if observed.wall >= head.grant.change.target.expires_at
+            )
+        {
+            return Err(SettingsServiceError::Expired.into());
+        }
+        self.check_access_context(store, verified)?;
+        Ok(AccessReplyObservation {
+            status: AccessObservation {
+                query: observed.query,
+                query_floor: observed.floor,
+                query_deadline: observed.deadline,
+                decision: status.decision,
+                wall: observed.wall,
+                monotonic: observed.monotonic,
+            },
+            reply_deadline,
+        })
+    }
+}
+
+fn check_access_reply_metadata(
+    request: &OwnedCommittedSettingsAccess,
+    observed: &AccessObservation,
+) -> Result<Instant, SettingsAccessQualificationError> {
+    let source = request.verified_request().authority_source();
+    let intent = source.intent();
+    let reply = request.reply_reservation();
+    let floor = source.receipt_floor();
+    if reply.reservation_id.is_nil()
+        || reply.local_device_id != intent.host_id
+        || reply.peer_device_id != source.verified_peer_keys().device_id
+        || reply.provenance.len() > 2048
+        || reply.created_at < floor.0
+        || reply.created_at < observed.query_floor.0
+        || reply.created_at < intent.issued_at
+        || reply.created_at > observed.wall
+        || reply.created_at >= reply.expires_at
+        || reply.created_at >= intent.expires_at
+    {
+        return Err(SettingsServiceError::OutsideScope.into());
+    }
+    let query_lifetime = intent
+        .expires_at
+        .get()
+        .checked_sub(observed.query_floor.0.get())
+        .ok_or(SettingsServiceError::Expired)?;
+    if observed
+        .query_floor
+        .1
+        .checked_add(Duration::from_millis(query_lifetime))
+        != Some(observed.query_deadline)
+    {
+        return Err(SettingsServiceError::OutsideScope.into());
+    }
+    let (family, grant, grant_expiry) = match &observed.decision {
+        AccessDecision::GrantUnavailable => (SettingsAccessReplyFamily::Denial, None, None),
+        AccessDecision::Active(head) => {
+            if reply.created_at < head.grant.change.target.issued_at {
+                return Err(SettingsServiceError::OutsideScope.into());
+            }
+            (
+                SettingsAccessReplyFamily::Default,
+                Some(SettingsGrantReference {
+                    grant_id: head.grant.change.target.grant_id,
+                    revision: head.grant.revision,
+                }),
+                Some(head.grant.change.target.expires_at),
+            )
+        }
+    };
+    let expected_expiry = reply
+        .created_at
+        .get()
+        .checked_add(60_000)
+        .ok_or(SettingsServiceError::Expired)?
+        .min(intent.expires_at.get());
+    let expected_expiry =
+        grant_expiry.map_or(expected_expiry, |expiry| expected_expiry.min(expiry.get()));
+    let provenance = serde_json::to_string(&AccessReplyProvenance {
+        side: "host",
+        version: 1,
+        local_id: intent.host_id,
+        peer_keys: source.verified_peer_keys(),
+        host_epoch: source.connection().host_identity().host_epoch(),
+        connection_epoch: source.connection().connection_epoch(),
+        grant,
+        parent_id: None,
+    })
+    .map_err(SettingsAccessQualificationError::Metadata)?;
+    if reply.family != family
+        || reply.expires_at.get() != expected_expiry
+        || reply.provenance != provenance
+    {
+        return Err(SettingsServiceError::OutsideScope.into());
+    }
+    let clip = intent
+        .expires_at
+        .get()
+        .checked_sub(reply.expires_at.get())
+        .ok_or(SettingsServiceError::Expired)?;
+    let deadline = observed
+        .query_deadline
+        .min(source.original_deadline())
+        .checked_sub(Duration::from_millis(clip))
+        .ok_or(SettingsServiceError::Expired)?;
+    if observed.wall >= reply.expires_at || observed.monotonic >= deadline {
+        return Err(SettingsServiceError::Expired.into());
+    }
+    Ok(deadline)
+}
+
+fn check_access_reply_reservation(
+    connection: &Connection,
+    request: &OwnedCommittedSettingsAccess,
+) -> Result<(), SettingsAccessQualificationError> {
+    let reply = request.reply_reservation();
+    let reserved_bytes = i64::try_from(reply.family.reserved_bytes())
+        .map_err(|_| SettingsServiceError::CorruptJournal)?;
+    let created_at =
+        i64::try_from(reply.created_at.get()).map_err(|_| SettingsServiceError::CorruptJournal)?;
+    let expires_at =
+        i64::try_from(reply.expires_at.get()).map_err(|_| SettingsServiceError::CorruptJournal)?;
+    let mut statement = connection.prepare("SELECT reservation_id,local_device_id,peer_device_id,provenance,family,reserved_bytes,created_at,expires_at FROM settings_transport_reply_reservations WHERE reservation_id=?1")
+        .map_err(SettingsServiceError::from)?;
+    let mut rows = statement
+        .query([reply.reservation_id.to_string()])
+        .map_err(SettingsServiceError::from)?;
+    let row = rows
+        .next()
+        .map_err(SettingsServiceError::from)?
+        .ok_or(SettingsServiceError::NotFound)?;
+    if original_reply_text(row, 0, 36)? != reply.reservation_id.to_string()
+        || original_reply_text(row, 1, 36)? != reply.local_device_id.to_string()
+        || original_reply_text(row, 2, 36)? != reply.peer_device_id.to_string()
+        || original_reply_text(row, 3, 2048)? != reply.provenance
+        || original_reply_text(row, 4, 7)? != reply.family.name()
+        || row.get::<_, i64>(5).map_err(SettingsServiceError::from)? != reserved_bytes
+        || row.get::<_, i64>(6).map_err(SettingsServiceError::from)? != created_at
+        || row.get::<_, i64>(7).map_err(SettingsServiceError::from)? != expires_at
+    {
+        return Err(SettingsServiceError::CorruptJournal.into());
+    }
+    Ok(())
 }
