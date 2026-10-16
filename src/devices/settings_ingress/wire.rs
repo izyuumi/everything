@@ -2,7 +2,7 @@ use std::fmt;
 use std::marker::PhantomData;
 
 use serde::de::{MapAccess, Visitor, value::MapAccessDeserializer};
-use serde::{Deserialize, Deserializer};
+use serde::{Deserialize, Deserializer, Serialize};
 use uuid::Uuid;
 
 use crate::protocol::DeviceId;
@@ -19,7 +19,7 @@ pub(crate) struct BindingIntent {
     pub(crate) requested_parent_expires_at: u64,
 }
 
-#[derive(Clone, PartialEq, Eq, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct BindingGeneration {
     #[serde(deserialize_with = "canonical_uuid")]
