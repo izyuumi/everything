@@ -55,6 +55,23 @@ pub enum SettingsOperationOrigin {
         session_id: Uuid,
         native_session_id: Uuid,
     },
+    PairedSettings {
+        actor_device_id: DeviceId,
+        remote_parent_id: Uuid,
+        grant_id: Uuid,
+        grant_revision: u64,
+        host_epoch: Uuid,
+        connection_epoch: Uuid,
+    },
+    PairedSettingsAgent {
+        actor_device_id: DeviceId,
+        remote_parent_id: Uuid,
+        grant_id: Uuid,
+        grant_revision: u64,
+        host_epoch: Uuid,
+        connection_epoch: Uuid,
+        session_id: Uuid,
+    },
 }
 
 #[derive(Clone)]
@@ -665,6 +682,10 @@ impl Authority {
                 *native_session_id
             }
             SettingsOperationOrigin::LocalOwner { .. } => return Ok(()),
+            SettingsOperationOrigin::PairedSettings { .. }
+            | SettingsOperationOrigin::PairedSettingsAgent { .. } => {
+                return Err(SettingsServiceError::OutsideScope);
+            }
         };
         let native = sessions
             .values

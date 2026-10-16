@@ -1,3 +1,5 @@
+mod paired;
+
 use rusqlite::{Transaction, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -69,6 +71,9 @@ pub struct SettingsOperationInspection {
 impl SettingsOperationInspection {
     pub fn validate(&self) -> Result<(), SettingsContractError> {
         self.binding.validate()?;
+        if paired::is_origin(&self.origin) {
+            paired::validate_inspection(self)?;
+        }
         let valid_origin = match self.origin {
             SettingsOperationOrigin::LocalOwner { request_id } => {
                 request_id == self.binding.request_id
@@ -81,6 +86,8 @@ impl SettingsOperationInspection {
                 session_id,
                 native_session_id,
             } => !session_id.is_nil() && native_session_id == self.binding.client_session_id,
+            SettingsOperationOrigin::PairedSettings { .. }
+            | SettingsOperationOrigin::PairedSettingsAgent { .. } => true,
         };
         if !valid_origin || self.updated_at.get() < self.binding.issued_at.get() {
             return Err(SettingsContractError::Invalid(
@@ -345,6 +352,15 @@ impl OperationRecord {
 
 impl OperationIdentity {
     pub fn validate(&self) -> Result<(), SettingsServiceError> {
+        if self.version == 2 {
+            paired::validate_identity(self)?;
+            encode(self, MAX_IDENTITY_BYTES)?;
+            return Ok(());
+        }
+        self.validate_native()
+    }
+
+    fn validate_native(&self) -> Result<(), SettingsServiceError> {
         if self.version != 1 {
             return Err(SettingsServiceError::CorruptJournal);
         }
@@ -439,6 +455,9 @@ impl OperationRepository {
         phase: SettingsOperationPhase,
         check_current: impl Fn() -> Result<(), SettingsServiceError>,
     ) -> Result<OperationRecord, SettingsServiceError> {
+        if identity.version != 1 {
+            return Err(SettingsServiceError::OutsideScope);
+        }
         identity.validate()?;
         let encoded = encode(&identity, MAX_IDENTITY_BYTES)?;
         let mut connection = self.store.connection()?;
@@ -772,6 +791,9 @@ impl OperationRepository {
         intent: SettingsWriteIntent,
         check_current: impl Fn() -> Result<(), SettingsServiceError>,
     ) -> Result<(OperationRecord, bool), SettingsServiceError> {
+        if identity.version != 1 {
+            return Err(SettingsServiceError::OutsideScope);
+        }
         identity.validate()?;
         intent.validate(&identity)?;
         let encoded = encode(&identity, MAX_IDENTITY_BYTES)?;
@@ -1124,6 +1146,18 @@ fn validate_native_link(
     identity: &OperationIdentity,
     record: &UpdateRecord,
 ) -> Result<(), SettingsServiceError> {
+    if identity.version == 2 {
+        if native_request(
+            connection,
+            identity.binding.request_id,
+            identity.binding.request_id,
+        )?
+        .is_some()
+        {
+            return Err(SettingsServiceError::CorruptJournal);
+        }
+        return Ok(());
+    }
     if let SettingsActionTarget::PairingApproval(approval) = &identity.target {
         let native = native_request(connection, approval.native_request_id, approval.request_id)?;
         if native.as_ref().is_some_and(|native| {
@@ -1311,6 +1345,9 @@ fn validate_update(
     identity: &OperationIdentity,
     update: &UpdateRecord,
 ) -> Result<(), SettingsServiceError> {
+    if identity.version == 2 {
+        paired::validate_update(update)?;
+    }
     if update.updated_at.get() < identity.binding.issued_at.get() {
         return Err(SettingsServiceError::CorruptJournal);
     }
@@ -1482,6 +1519,9 @@ fn decode<T: serde::de::DeserializeOwned + Serialize>(
 
 impl SettingsWriteIntent {
     pub fn validate(&self, identity: &OperationIdentity) -> Result<(), SettingsServiceError> {
+        if identity.version == 2 {
+            paired::validate_write_intent(self)?;
+        }
         validate_digest(&self.before.sha256)?;
         validate_digest(&self.after.sha256)?;
         if self.version != 1
