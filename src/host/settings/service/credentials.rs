@@ -128,7 +128,7 @@ impl ServiceCore {
         else {
             return Err(SettingsServiceError::OutsideScope);
         };
-        let settings = self.settings.snapshot()?;
+        let settings = self.settings.observed_snapshot()?;
         let matches = match binding {
             SettingsCredentialBinding::Model { binding } => {
                 settings.model_credentials.contains(&binding.as_native())
