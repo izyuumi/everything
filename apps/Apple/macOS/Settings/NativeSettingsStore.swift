@@ -128,6 +128,8 @@ final class NativeSettingsStore {
         var reloadAfterRead = false
         var refreshRequested = false
         var retirement: Task<Cleanup, Never>?
+        var retirementID: UUID?
+        var recoveryRetirementPending = false
         var report: NativeSettingsSession.DrainReport?
         var nativeReport: NativeSettingsSession.DrainReport?
 
@@ -491,7 +493,9 @@ final class NativeSettingsStore {
 
     func canLinkCredential(_ handle: CredentialHandle) -> Bool {
         guard canAct, let (owner, context) = credential(handle), isCurrent(owner), context.initial,
-              context.link == nil, identityCount(owner) <= 64, let completed = owner.operations[handle.id]?.inspection,
+              context.link == nil, identityCount(owner) <= 64,
+              !owner.operations.values.contains(where: \.blocksNewChanges), !credentialLinksNeedRecovery(owner),
+              let completed = owner.operations[handle.id]?.inspection,
               case .finished(let result) = completed.phase, case .completed = result.state,
               snapshot?.revision == context.metadata.revision else { return false }
         return true
@@ -524,7 +528,8 @@ final class NativeSettingsStore {
 
     func canRecoverCredentialLink(_ handle: CredentialHandle) -> Bool {
         guard !isClosed, let (owner, context) = credential(handle), let link = context.link else { return false }
-        return link.attempted && owner.effects.count < 4 && owner.effects[link.plan.ownerRequest.id.value] == nil
+        return link.attempted && !owner.recoveryRetirementPending
+            && owner.effects.count < 4 && owner.effects[link.plan.ownerRequest.id.value] == nil
     }
 
     func hostAvailabilityChanged(_ available: Bool) {
@@ -645,6 +650,8 @@ final class NativeSettingsStore {
         let work = owner.work
         let observer = owner.observer
         let effects = Array(owner.effects.values)
+        let retirementID = UUID()
+        owner.retirementID = retirementID
         owner.retirement = Task { [self, owner, work, observer, effects] in
             if let work { await work.value }
             if let observer { await observer.value }
@@ -655,7 +662,9 @@ final class NativeSettingsStore {
             let result = Cleanup(id: owner.id, connectionKey: owner.connectionKey, report: report,
                                  unlinkedCredentialOperationIDs: unlinkedCredentialIDs(owner))
             owner.report = report
-            if !result.requiresRetention { owners.removeValue(forKey: owner.id) }
+            if owner.retirementID == retirementID, owner.effects.isEmpty, !result.requiresRetention {
+                owners.removeValue(forKey: owner.id)
+            }
             refreshCleanup()
             publishCredentials()
             return result
@@ -835,6 +844,7 @@ final class NativeSettingsStore {
             credentialPresentation = presentation
         } catch {
             context.retired = true
+            context.issue = credentialError(error)
             let cancelled = try await owner.lifecycle.session.cancel(operationID: context.handle.id)
             try owner.operations[context.handle.id]?.adopt(cancelled)
             throw error
@@ -925,10 +935,11 @@ final class NativeSettingsStore {
 
     private func recoverCredentialLink(_ handle: CredentialHandle, reconcile: Bool) {
         guard !isClosed, let (owner, context) = credential(handle), let link = context.link,
-              link.attempted, owner.effects.count < 4 else { return }
+              link.attempted, !owner.recoveryRetirementPending, owner.effects.count < 4 else { return }
         let id = link.plan.ownerRequest.id.value
         guard owner.effects[id] == nil else { return }
         if reconcile, link.receipt?.operation.write == nil || link.receipt?.operation.write?.resolution != nil { return }
+        if owner.retirement != nil { owner.recoveryRetirementPending = true }
         link.state = .working
         publishCredentials()
         owner.effects[id] = Task { [self, owner, link] in
@@ -948,6 +959,8 @@ final class NativeSettingsStore {
         }
         if owner.retirement != nil, let effect = owner.effects[id] {
             let previous = owner.retirement
+            let retirementID = UUID()
+            owner.retirementID = retirementID
             owner.retirement = Task { [self, owner, effect, previous] in
                 if let previous { _ = await previous.value }
                 await effect.value
@@ -955,7 +968,10 @@ final class NativeSettingsStore {
                 let result = Cleanup(id: owner.id, connectionKey: owner.connectionKey, report: report,
                                      unlinkedCredentialOperationIDs: unlinkedCredentialIDs(owner))
                 owner.report = report
-                if !result.requiresRetention { owners.removeValue(forKey: owner.id) }
+                if owner.retirementID == retirementID {
+                    owner.recoveryRetirementPending = false
+                    if owner.effects.isEmpty, !result.requiresRetention { owners.removeValue(forKey: owner.id) }
+                }
                 refreshCleanup()
                 publishCredentials()
                 return result
