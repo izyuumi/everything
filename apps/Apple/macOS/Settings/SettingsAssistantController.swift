@@ -90,7 +90,7 @@ final class SettingsAssistantController {
 
     @MainActor
     @Observable
-    private final class Context {
+    fileprivate final class Context {
         let id = UUID()
         let action: NativeSettingsStore.AssistantOpenAction
         let connectionKey: UUID

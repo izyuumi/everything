@@ -70,6 +70,7 @@ struct SettingsView: View {
         .onChange(of: model.nativeSettings.sessionPresent) { _, _ in model.settingsAssistant.ownershipChanged() }
         .onChange(of: model.nativeSettings.information) { _, _ in model.settingsAssistant.ownershipChanged() }
         .onChange(of: model.nativeSettings.cleanup.count) { _, _ in model.settingsAssistant.ownershipChanged() }
+        .onChange(of: model.nativeSettings.deviceOperations.filter(\.retired).map(\.id)) { _, _ in model.settingsAssistant.ownershipChanged() }
         .background {
             SettingsWindowObserver(bindingID: model.settingsSurfaceID,
                                    onChange: { visible, active, covered in model.settingsWindowChanged(visible: visible, active: active, covered: covered) },
