@@ -922,6 +922,15 @@ pub(crate) struct QualifiedOriginalReply<'scope> {
     observed_monotonic: Instant,
 }
 
+struct OriginalReplyRead {
+    owner: SettingsGrantOwner,
+    original: RemoteOriginalRecord,
+    operation: Option<OperationRecord>,
+    grant_expires_at: UnixMillis,
+    wall: UnixMillis,
+    monotonic: Instant,
+}
+
 struct OriginalReplyObservation {
     original: RemoteOriginalRecord,
     operation: Option<OperationRecord>,
@@ -1013,32 +1022,39 @@ impl SettingsReceiptAuthority {
         transaction: &Transaction<'_>,
         qualified: &QualifiedOriginalReply<'_>,
     ) -> Result<(), SettingsServiceError> {
-        if !std::ptr::eq(self, qualified.authority)
-            || !Arc::ptr_eq(
-                &qualified.invocation,
-                qualified.source.authenticated().invocation_identity(),
-            )
-        {
-            return Err(SettingsServiceError::OutsideScope);
-        }
+        self.check_original_reply_association(qualified)?;
         let observed = self.observe_original_reply_on(
             store,
             transaction,
             qualified.mutation,
             &qualified.source,
         )?;
-        let same_operation = match (&qualified.operation, &observed.operation) {
-            (None, None) => true,
-            (Some(previous), Some(current)) => {
-                previous.identity == current.identity
-                    && previous.inspection() == current.inspection()
-            }
-            _ => false,
-        };
-        if observed.original != qualified.original
-            || !same_operation
-            || observed.wall < qualified.observed_wall
-            || observed.monotonic < qualified.observed_monotonic
+        check_original_reply_observation(qualified, observed)
+    }
+
+    fn recheck_consumed_original_reply_on(
+        &self,
+        store: &Store,
+        transaction: &Transaction<'_>,
+        qualified: &QualifiedOriginalReply<'_>,
+    ) -> Result<(), SettingsServiceError> {
+        self.check_original_reply_association(qualified)?;
+        let read =
+            self.read_original_reply_on(store, transaction, qualified.mutation, &qualified.source)?;
+        check_original_reply_reservation_identity(&qualified.source, read.wall)?;
+        let observed = self.finish_original_reply_observation(&qualified.source, read)?;
+        check_original_reply_observation(qualified, observed)
+    }
+
+    fn check_original_reply_association(
+        &self,
+        qualified: &QualifiedOriginalReply<'_>,
+    ) -> Result<(), SettingsServiceError> {
+        if !std::ptr::eq(self, qualified.authority)
+            || !Arc::ptr_eq(
+                &qualified.invocation,
+                qualified.source.authenticated().invocation_identity(),
+            )
         {
             return Err(SettingsServiceError::OutsideScope);
         }
@@ -1052,6 +1068,18 @@ impl SettingsReceiptAuthority {
         mutation: &OwnedMutexGuard<()>,
         subject: &OriginalReplySource<'_>,
     ) -> Result<OriginalReplyObservation, SettingsServiceError> {
+        let read = self.read_original_reply_on(store, connection, mutation, subject)?;
+        check_original_reply_reservation(connection, subject, read.wall)?;
+        self.finish_original_reply_observation(subject, read)
+    }
+
+    fn read_original_reply_on(
+        &self,
+        store: &Store,
+        connection: &Connection,
+        mutation: &OwnedMutexGuard<()>,
+        subject: &OriginalReplySource<'_>,
+    ) -> Result<OriginalReplyRead, SettingsServiceError> {
         if self.core.application_stop.is_cancelled() {
             return Err(SettingsServiceError::Stopped);
         }
@@ -1173,7 +1201,24 @@ impl SettingsReceiptAuthority {
             }
             Some(_) => return Err(SettingsServiceError::CorruptJournal),
         };
-        check_original_reply_reservation(connection, subject, first_wall)?;
+        Ok(OriginalReplyRead {
+            owner,
+            original,
+            operation,
+            grant_expires_at: head.grant.change.target.expires_at,
+            wall: first_wall,
+            monotonic: first_monotonic,
+        })
+    }
+
+    fn finish_original_reply_observation(
+        &self,
+        subject: &OriginalReplySource<'_>,
+        read: OriginalReplyRead,
+    ) -> Result<OriginalReplyObservation, SettingsServiceError> {
+        let source = subject.authenticated();
+        let floor = subject.receipt_floor();
+        let deadline = subject.original_deadline();
         let (checked_owner, wall, monotonic) = self.core.authority.observe_paired_reply(
             &self.host,
             source,
@@ -1181,10 +1226,10 @@ impl SettingsReceiptAuthority {
             deadline,
             &self.core.application_stop,
         )?;
-        if checked_owner != owner
-            || wall < first_wall
-            || monotonic < first_monotonic
-            || wall >= head.grant.change.target.expires_at
+        if checked_owner != read.owner
+            || wall < read.wall
+            || monotonic < read.monotonic
+            || wall >= read.grant_expires_at
             || wall >= subject.reply_reservation().expires_at
             || self.core.application_stop.is_cancelled()
             || !source.connection().is_live()
@@ -1193,12 +1238,33 @@ impl SettingsReceiptAuthority {
             return Err(SettingsServiceError::OutsideScope);
         }
         Ok(OriginalReplyObservation {
-            original,
-            operation,
+            original: read.original,
+            operation: read.operation,
             wall,
             monotonic,
         })
     }
+}
+
+fn check_original_reply_observation(
+    qualified: &QualifiedOriginalReply<'_>,
+    observed: OriginalReplyObservation,
+) -> Result<(), SettingsServiceError> {
+    let same_operation = match (&qualified.operation, &observed.operation) {
+        (None, None) => true,
+        (Some(previous), Some(current)) => {
+            previous.identity == current.identity && previous.inspection() == current.inspection()
+        }
+        _ => false,
+    };
+    if observed.original != qualified.original
+        || !same_operation
+        || observed.wall < qualified.observed_wall
+        || observed.monotonic < qualified.observed_monotonic
+    {
+        return Err(SettingsServiceError::OutsideScope);
+    }
+    Ok(())
 }
 
 fn check_original_reply_operation(
@@ -1268,8 +1334,7 @@ fn check_original_reply_operation(
     Ok(())
 }
 
-fn check_original_reply_reservation(
-    connection: &Connection,
+fn check_original_reply_reservation_identity(
     subject: &OriginalReplySource<'_>,
     now: UnixMillis,
 ) -> Result<(), SettingsServiceError> {
@@ -1290,6 +1355,16 @@ fn check_original_reply_reservation(
     {
         return Err(SettingsServiceError::OutsideScope);
     }
+    Ok(())
+}
+
+fn check_original_reply_reservation(
+    connection: &Connection,
+    subject: &OriginalReplySource<'_>,
+    now: UnixMillis,
+) -> Result<(), SettingsServiceError> {
+    check_original_reply_reservation_identity(subject, now)?;
+    let reply = subject.reply_reservation();
     let mut statement = connection.prepare("SELECT reservation_id,local_device_id,peer_device_id,provenance,family,reserved_bytes,created_at,expires_at FROM settings_transport_reply_reservations WHERE reservation_id=?1")?;
     let mut rows = statement.query([reply.reservation_id.to_string()])?;
     let row = rows.next()?.ok_or(SettingsServiceError::NotFound)?;
