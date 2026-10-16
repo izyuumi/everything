@@ -106,6 +106,50 @@ The process completed 144 measured inferences and eight warmup inferences. Runti
 
 All vectors were finite. Each dimension had precision@1, recall@3 and reciprocal rank 1.0, and precision@3 2/3, on the same tiny authored corpus. These are limited observations rather than broad retrieval accuracy or controlled cross-platform comparisons. The workflow publishes its raw report/process output as an artifact and a summary through a GitHub check run. The development proxy could not download the Azure-backed artifact, so the coordinator inspected the GitHub check-run measurements directly.
 
+## Current-core production boundary observations
+
+The direct benchmark measurements above and the production Host boundary are separate evidence. On 2026-10-16, disposable Linux x86_64 observations used copied normal `0.1.0` core artifacts from `dbee29aec2d72795eac37c6abffbeb44b8ee6e04`, built with Rust 1.88. They did not run the later private Settings runtime. Retained external drivers changed only reviewed paths, package/version checks and source/report identity metadata; the two Rust inspection sources and helper-failure driver retained their original bytes. No new automated tests or production implementations were introduced by this observation.
+
+| Exact core artifact | SHA-256 |
+| --- | --- |
+| Host/CLI `everything` | `79adadbd3323c977ddc3804193cb5d6654789eaa18350d8c566cb1e5e5147f1f` |
+| Adjacent `everything-embedding-worker` | `3404db9c5109c16d738b7f8c7f75a78fc2627da2159961d1c99f88c48e2a97b8` |
+| Copied `libeverything.rlib` used for external inspectors | `48ea256bf61ee98f88247fd47f47f8bf21d469de9ffd335a29a751db4d7bd0f9` |
+
+The actual pinned float32 ONNX export and Linux ONNX Runtime 1.31.0 digest match the earlier Linux artifact identities above. Lifecycle inspectors linked with the actual Cargo-recorded extern/native paths rather than rebuilding a modified package. Native archives were hashed after linking and before/after runtime; those hashes do not establish a pre-link archive snapshot. Coordinator-retained receipts include `summary.json`, `post-run-audit.json`, `linking.json`, `runtime-after.json`, `sidecar-addendum.json` and the independent retained-state/trace review. Temporary states, traces and model files are not shipped in this repository.
+
+### Host inference and fallback
+
+Four separate disposable profile states exercised real owner-IPC rebuilds at 128/256/512/768 dimensions and returned nonempty vectors and genuine hybrid excerpts with Wiki provenance. All seven walkthrough jobs included default-off Host phases with zero traced model/runtime/vector open or metadata access. Actual missing-helper installation and a disposable outer profile disabling further user namespaces each produced isolation-unavailable status and genuine FTS before configured runtime/model/vector sentinel access. The namespace negative changed no global kernel setting and supplied no unrestricted fallback.
+
+The production helper had its own network namespace, required private mounts, only HOME/LANG/ORT_DISABLE_TELEMETRY/PWD environment keys and no inherited sockets or exposed workspace/home roots. Ordinary positive Hosts retained their original network namespace; that topology observation does not establish a successful provider or relay request. The walkthrough traces contained no AF_INET/AF_INET6 family line across 4,420,404 bytes. One post-load Host maps sample excluded ORT. The observer's `parent_never_mapped_ORT` flag is that sample, not continuous instrumentation.
+
+A real authoritative Wiki update through an explicitly supplied maintenance plan caused stale-source FTS. An incremental rebuild restored hybrid retrieval. pidfd SIGKILL targeted only the exact owned helper; repeated retrieval then reported embedding_process_unavailable with genuine FTS and no respawn. Fourteen ready/stopped Hosts recorded successful Host exits; the deliberately killed helper is a separate outcome. The plans were observer-provided, not model-generated maintenance.
+
+### Cancellation and retained cleanup
+
+The separately linked inspectors observed the following actual core behavior. Times describe those observations and include cleanup where stated; they are not performance targets.
+
+| Case | Observation | Qualification |
+| --- | --- | --- |
+| Adapter API cancellation | Cancelled after 32 ms with actual worker cleanup | Worker CPU progress was observed; no Embed frame delivery or native function entry was asserted. |
+| Framed cancellation | A 3,759-byte Embed write matched the worker read; the same-starttime worker advanced CPU ticks 290→291; cancellation returned in 60 ms and joined worker/monitor | Payload delivery and CPU activity do not instrument native function entry. The adapter became unavailable rather than automatically respawning. |
+| Load deadline configured 1 ms | Deadline returned after 136 ms including actual cleanup | No hard 1 ms completion or native-load interruption is established. |
+| Inference deadline configured 1 ms | A successfully loaded adapter returned Deadline after 65 ms including cleanup | Request delivery and native inference start were not asserted in this deadline case. |
+| Last adapter Arc drop | Drop completed in 20 ms with tracked processes absent | No explicit shutdown call was used. |
+| Last MemoryService owner drop | Drop returned in 3 µs; StateLease reacquisition succeeded after 303 ms with tracked processes absent | Fast owner drop is distinct from completion of retained cleanup. |
+| Initialization future drop | A non-probe serving helper was observed before dropping the caller future; lease reacquisition succeeded after 207 ms | Caller future completion before drop was not observed; no exact native initialization phase is inferred. |
+
+The lifecycle/cancellation traces contained no Internet-family line across 5,993,957 bytes; all 40 recorded trace process IDs and 12 separately tracked worker/monitor identities were absent after cleanup. The inspector library, linked artifacts and model/runtime hashes were retained. These observations do not establish a hard process-death, RAM or descendant-PID bound.
+
+### Audit scope and remaining validation
+
+Independent retained-state/trace review covered the combined 33 stopped databases and 1,681 trace files. Integrity and foreign-key checks passed; application/lexical/maintenance/vector schema versions were 12/2/1/1. All recorded trace process IDs were absent and no Internet-family line appeared. This reviewed retained data and trace identities rather than reexecuting every producer command assertion.
+
+The lifecycle producer enumerated related files before opening each read-only/query_only database and rehashed only that initial inventory. Fourteen advisory WAL/SHM paths were newly listed afterward. Previously recorded database hashes were unchanged; unchanged hashes did not prove an unchanged full sidecar set. Sidecar creation during audit is a plausible explanation, not an instrumented attribution. The later independent immutable/query_only audit covered the complete current DB/WAL/SHM set with unchanged hashes and zero-byte WALs. No sidecar was deleted or checkpointed to make this qualification pass.
+
+No same-database dimension switch, already-enabled generation restart, native task context capture or later Settings live-apply hook was verified in this current-core run. Successful conversational/classifier/provider inference, Apple/UI/Keychain/device/launchd behavior, broad performance/quality, arbitrary native-code security and production readiness remain outside it. Production Apple embeddings still report unavailable and retain FTS until an enforced supported boundary is implemented. Automated acceptance remains deferred to [#32](https://github.com/izyuumi/everything/issues/32); issue [#72](https://github.com/izyuumi/everything/issues/72) requires coordinator reconciliation rather than closure based on this document alone.
+
 ## Validation
 
 Validate feature wiring and the benchmark with formatting, feature-enabled compilation, strict Clippy, and a release build. These checks do not require a model load:
