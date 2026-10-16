@@ -4,6 +4,16 @@
     };
     "objectVersion" = "56";
     "objects" = {
+        "19B43C83CF20CE08EC92E9BB" = {
+            "isa" = "PBXFileReference";
+            "lastKnownFileType" = "sourcecode.swift";
+            "path" = "NativeSettingsAssistantWire.swift";
+            "sourceTree" = "<group>";
+        };
+        "F9AADB8D6356703E3CC8152E" = {
+            "isa" = "PBXBuildFile";
+            "fileRef" = "19B43C83CF20CE08EC92E9BB";
+        };
         "A64AF72E31D5E9D03F451318" = {
             "isa" = "PBXFileReference";
             "lastKnownFileType" = "sourcecode.swift";
@@ -324,6 +334,7 @@
                 "CA5BAA9EA21332F2292E9231",
                 "67760B4C40D0E024DE5E3660",
                 "0A337230134DAA8722D393C4",
+                "19B43C83CF20CE08EC92E9BB",
             );
             "path" = "Settings";
             "sourceTree" = "<group>";
@@ -454,6 +465,7 @@
                 "23879FBD469F2CB181AA5704",
                 "7050C019B8826A6B562E6C8B",
                 "CCCB026149B99186971190C7",
+                "F9AADB8D6356703E3CC8152E",
             );
             "runOnlyForDeploymentPostprocessing" = "0";
         };
