@@ -1,3 +1,5 @@
+mod build;
+
 use std::collections::BTreeMap;
 use std::fmt;
 use std::future::Future;
@@ -9,6 +11,8 @@ use std::sync::{Arc, Mutex};
 use tokio::sync::{Notify, OwnedMutexGuard, oneshot};
 use tokio::task::{Id, JoinSet};
 use uuid::Uuid;
+
+use build::{ReplyBuildState, ReplyBuildWorkerOutput};
 
 use super::access::{AccessReceiptOutput, AccessWorkState, OwnedCommittedSettingsAccess};
 use super::{
@@ -68,15 +72,16 @@ pub(crate) struct PendingSettingsReceipt {
 
 pub(in crate::devices) struct SettingsReceiveWork {
     ledger: Arc<Ledger>,
-    jobs: JoinSet<WorkerOutput>,
+    jobs: JoinSet<RegisteredJobOutput>,
     receipts: BTreeMap<Id, oneshot::Sender<Result<SettingsTransportReceipt, SettingsReceiveError>>>,
     pending: Option<PendingInput>,
-    build: Option<RegisteredReplyBuild>,
+    build: Option<ReplyBuildState>,
     history: Option<Arc<BindingHistory>>,
     context: Option<Arc<ReceiveContext>>,
     closed: bool,
     failure: Option<SettingsReceiveError>,
     retained_join: Option<JoinedReceiveWork>,
+    unexpected_join: Option<JoinedRegisteredJob>,
 }
 
 struct PendingInput {
@@ -113,6 +118,33 @@ struct WorkerOutput {
 }
 
 type JoinedReceiveWork = Result<(Id, WorkerOutput), tokio::task::JoinError>;
+type JoinedRegisteredJob = Result<(Id, RegisteredJobOutput), tokio::task::JoinError>;
+
+enum RegisteredJobOutput {
+    Receive(Box<WorkerOutput>),
+    ReplyBuild(Box<ReplyBuildWorkerOutput>),
+}
+
+enum RegisteredProgress {
+    Receive,
+    ReplyBuild,
+}
+
+enum ReadyWork {
+    ReceiveGuard(OwnedMutexGuard<()>),
+    ReplyBuildGuard(OwnedMutexGuard<()>),
+    Joined(JoinedRegisteredJob),
+}
+
+pub(in crate::devices) enum SettingsReceiveWorkEvent {
+    Receive(Box<SettingsReceiveEvent>),
+    ReplyBuildJoined,
+}
+
+struct UnmatchedRegisteredJoin {
+    _cause: SettingsReceiveError,
+    _joined: JoinedRegisteredJob,
+}
 
 enum AccessJoinedDisposition {
     Fresh,
@@ -241,15 +273,16 @@ struct RegisteredReplyBuild {
 }
 
 type TerminalQuarantine = (
-    JoinSet<WorkerOutput>,
+    JoinSet<RegisteredJobOutput>,
     Option<PendingInput>,
-    Option<RegisteredReplyBuild>,
+    Option<ReplyBuildState>,
     BTreeMap<Id, oneshot::Sender<Result<SettingsTransportReceipt, SettingsReceiveError>>>,
     Option<Arc<ReceiveContext>>,
     Option<Arc<BindingHistory>>,
     Arc<Ledger>,
     Option<SettingsReceiveError>,
     Option<JoinedReceiveWork>,
+    Option<JoinedRegisteredJob>,
 );
 
 impl ReplyBuildStamp {
@@ -592,6 +625,7 @@ impl SettingsReceiveWork {
             closed: true,
             failure: None,
             retained_join: None,
+            unexpected_join: None,
         }
     }
 
@@ -736,12 +770,12 @@ impl SettingsReceiveWork {
             Err(reason) => return Err(ReplyBuildAdmissionFailure { reason, request }),
         };
         let slot = Arc::clone(&permit.slot);
-        self.build = Some(RegisteredReplyBuild {
+        self.build = Some(ReplyBuildState::Unstarted(RegisteredReplyBuild {
             adoption: None,
             adoption_sent: true,
             request: RegisteredReplyBuildOwner::Direct(request),
             permit,
-        });
+        }));
         Ok(PendingSettingsReplyBuild { slot })
     }
 
@@ -778,12 +812,12 @@ impl SettingsReceiveWork {
             }
         };
         let slot = Arc::clone(&permit.slot);
-        self.build = Some(RegisteredReplyBuild {
+        self.build = Some(ReplyBuildState::Unstarted(RegisteredReplyBuild {
             adoption: None,
             adoption_sent: false,
             request: RegisteredReplyBuildOwner::Supervised(Box::new(handoff)),
             permit,
-        });
+        }));
         Ok(PendingSettingsReplyBuild { slot })
     }
 
@@ -792,7 +826,10 @@ impl SettingsReceiveWork {
         runtime: &SettingsAgentRuntime,
     ) -> Result<bool, SettingsReceiveError> {
         self.ledger.check_admission()?;
-        let Some(record) = self.build.as_mut() else {
+        let Some(state) = self.build.as_mut() else {
+            return Ok(true);
+        };
+        let ReplyBuildState::Unstarted(record) = state else {
             return Ok(true);
         };
         if record.adoption_sent {
@@ -903,12 +940,15 @@ impl SettingsReceiveWork {
     ) -> Result<Option<SettingsReplyBuildRequest>, SettingsReceiveError> {
         let mut counts = self.ledger.counts.lock().map_err(|_| self.ledger.fail())?;
         self.ledger.check_admission()?;
-        let Some(record) = self.build.as_ref() else {
+        let Some(state) = self.build.as_ref() else {
             return if counts.build.is_none() {
                 Ok(None)
             } else {
                 Err(self.ledger.fail())
             };
+        };
+        let ReplyBuildState::Unstarted(record) = state else {
+            return Err(SettingsReceiveError::Closed);
         };
         let RegisteredReplyBuildOwner::Direct(request) = &record.request else {
             return Err(self.ledger.fail());
@@ -930,11 +970,11 @@ impl SettingsReceiveWork {
         }
         let record = self.build.take().ok_or_else(|| self.ledger.fail())?;
         match record {
-            RegisteredReplyBuild {
+            ReplyBuildState::Unstarted(RegisteredReplyBuild {
                 request: RegisteredReplyBuildOwner::Direct(request),
                 mut permit,
                 ..
-            } => {
+            }) => {
                 counts.build = None;
                 permit.armed = false;
                 drop(counts);
@@ -1004,60 +1044,196 @@ impl SettingsReceiveWork {
 
     pub(in crate::devices) async fn next(
         &mut self,
-    ) -> Result<Option<SettingsReceiveEvent>, SettingsReceiveError> {
-        if self.retained_join.is_some() {
+    ) -> Result<Option<SettingsReceiveWorkEvent>, SettingsReceiveError> {
+        if let Err(error) = self.ledger.check_admission() {
+            if self.failure.is_none() {
+                self.failure = Some(error);
+            }
+        }
+        if self.failure.is_some() || self.retained_join.is_some() || self.unexpected_join.is_some()
+        {
             self.close_intake();
-            return Err(self
-                .failure
-                .clone()
-                .unwrap_or(SettingsReceiveError::Bookkeeping));
         }
-        if let Some(pending) = self.pending.as_mut() {
-            let guard = pending.waiting.as_mut().await;
-            let Some(pending) = self.pending.take() else {
-                return Err(self.ledger.fail());
+        loop {
+            let build_waiting = matches!(self.build, Some(ReplyBuildState::Waiting { .. }));
+            if self.jobs.is_empty() && self.pending.is_none() && !build_waiting {
+                return match &self.failure {
+                    Some(error) => Err(error.clone()),
+                    None => Ok(None),
+                };
+            }
+            let has_jobs = !self.jobs.is_empty();
+            let receive = &mut self.pending;
+            let build = &mut self.build;
+            let receive_ready = async {
+                match receive {
+                    Some(pending) => pending.waiting.as_mut().await,
+                    None => std::future::pending().await,
+                }
             };
-            let PendingInput {
-                receipt_authority,
-                envelope,
-                context,
-                connection,
-                history,
-                waiting,
-                receipt,
-                frame,
-            } = pending;
-            drop(waiting);
-            let input = WorkerInput {
-                receipt_authority: Some(receipt_authority),
-                envelope,
-                context,
-                connection,
-                history,
-                ledger: Arc::clone(&self.ledger),
-                guard: GuardScope {
-                    guard: Some(guard),
-                    active: Arc::new(AtomicBool::new(true)),
+            let build_ready = async {
+                match build {
+                    Some(ReplyBuildState::Waiting { waiting, .. }) => waiting.as_mut().await,
+                    _ => std::future::pending().await,
+                }
+            };
+            let ready = tokio::select! {
+                biased;
+                joined = self.jobs.join_next_with_id(), if has_jobs => {
+                    match joined {
+                        Some(joined) => ReadyWork::Joined(joined),
+                        None => return Err(self.ledger.fail()),
+                    }
+                }
+                guard = receive_ready => ReadyWork::ReceiveGuard(guard),
+                guard = build_ready => ReadyWork::ReplyBuildGuard(guard),
+            };
+            match ready {
+                ReadyWork::ReceiveGuard(guard) => {
+                    if let Err(error) = self.spawn_receive(guard) {
+                        self.failure = Some(error.clone());
+                        self.close_intake();
+                        return Err(error);
+                    }
+                }
+                ReadyWork::ReplyBuildGuard(guard) => {
+                    if let Err(error) = self.spawn_reply_build(guard) {
+                        self.failure = Some(error.clone());
+                        self.close_intake();
+                        return Err(error);
+                    }
+                }
+                ReadyWork::Joined(joined) => match self.register_join(joined)? {
+                    RegisteredProgress::Receive => {
+                        return self.finish_receive_join().map(|event| {
+                            event.map(|event| SettingsReceiveWorkEvent::Receive(Box::new(event)))
+                        });
+                    }
+                    RegisteredProgress::ReplyBuild => {
+                        self.finish_reply_build_join()?;
+                        return Ok(Some(SettingsReceiveWorkEvent::ReplyBuildJoined));
+                    }
                 },
-                frame: Some(frame),
-            };
-            {
-                let mut counts = self.ledger.counts.lock().map_err(|_| self.ledger.fail())?;
-                counts.jobs = counts
-                    .jobs
-                    .checked_add(1)
-                    .ok_or_else(|| self.ledger.fail())?;
-            }
-            let task = self.jobs.spawn_blocking(move || run(input));
-            if self.receipts.insert(task.id(), receipt).is_some() {
-                self.failure = Some(self.ledger.fail());
-                self.closed = true;
             }
         }
-        let Some(joined) = self.jobs.join_next_with_id().await else {
-            return Ok(None);
+    }
+
+    fn spawn_receive(&mut self, guard: OwnedMutexGuard<()>) -> Result<(), SettingsReceiveError> {
+        self.ledger.check_admission()?;
+        if self.closed {
+            return Err(SettingsReceiveError::Closed);
+        }
+        let Some(pending) = self.pending.take() else {
+            return Err(self.ledger.fail());
         };
-        self.retained_join = Some(joined);
+        let PendingInput {
+            receipt_authority,
+            envelope,
+            context,
+            connection,
+            history,
+            waiting,
+            receipt,
+            frame,
+        } = pending;
+        drop(waiting);
+        let input = WorkerInput {
+            receipt_authority: Some(receipt_authority),
+            envelope,
+            context,
+            connection,
+            history,
+            ledger: Arc::clone(&self.ledger),
+            guard: GuardScope {
+                guard: Some(guard),
+                active: Arc::new(AtomicBool::new(true)),
+            },
+            frame: Some(frame),
+        };
+        {
+            let mut counts = self.ledger.counts.lock().map_err(|_| self.ledger.fail())?;
+            self.ledger.check_admission()?;
+            counts.jobs = counts
+                .jobs
+                .checked_add(1)
+                .ok_or_else(|| self.ledger.fail())?;
+        }
+        let task = self
+            .jobs
+            .spawn_blocking(move || RegisteredJobOutput::Receive(Box::new(run(input))));
+        if self.receipts.insert(task.id(), receipt).is_some() {
+            self.failure = Some(self.ledger.fail());
+            self.closed = true;
+        }
+        Ok(())
+    }
+
+    fn register_join(
+        &mut self,
+        joined: JoinedRegisteredJob,
+    ) -> Result<RegisteredProgress, SettingsReceiveError> {
+        let unexpected = match joined {
+            Ok((id, RegisteredJobOutput::Receive(output))) if self.retained_join.is_none() => {
+                self.retained_join = Some(Ok((id, *output)));
+                return Ok(RegisteredProgress::Receive);
+            }
+            Ok((id, RegisteredJobOutput::ReplyBuild(output))) => {
+                match self.register_reply_build_join(Ok((id, *output))) {
+                    Ok(()) => return Ok(RegisteredProgress::ReplyBuild),
+                    Err(Ok((id, output))) => {
+                        Ok((id, RegisteredJobOutput::ReplyBuild(Box::new(output))))
+                    }
+                    Err(Err(error)) => Err(error),
+                }
+            }
+            Err(error)
+                if self
+                    .reply_build_task()
+                    .is_some_and(|task| task == error.id()) =>
+            {
+                match self.register_reply_build_join(Err(error)) {
+                    Ok(()) => return Ok(RegisteredProgress::ReplyBuild),
+                    Err(Ok((id, output))) => {
+                        Ok((id, RegisteredJobOutput::ReplyBuild(Box::new(output))))
+                    }
+                    Err(Err(error)) => Err(error),
+                }
+            }
+            Err(error)
+                if self.retained_join.is_none() && self.receipts.contains_key(&error.id()) =>
+            {
+                self.retained_join = Some(Err(error));
+                return Ok(RegisteredProgress::Receive);
+            }
+            joined => joined,
+        };
+        if self.unexpected_join.is_none() {
+            self.unexpected_join = Some(unexpected);
+            if let Some(Ok((_, RegisteredJobOutput::Receive(output)))) =
+                self.unexpected_join.as_mut()
+            {
+                output.guard.active.store(false, Ordering::Release);
+                drop(output.guard.guard.take());
+            }
+        } else {
+            let mut retained = Box::new(UnmatchedRegisteredJoin {
+                _cause: SettingsReceiveError::Bookkeeping,
+                _joined: unexpected,
+            });
+            if let Ok((_, RegisteredJobOutput::Receive(output))) = &mut retained._joined {
+                output.guard.active.store(false, Ordering::Release);
+                drop(output.guard.guard.take());
+            }
+            self.ledger.terminal.store(true, Ordering::Release);
+            let _ = Box::leak(retained);
+        }
+        self.latch_failure();
+        Err(SettingsReceiveError::Bookkeeping)
+    }
+
+    fn finish_receive_join(
+        &mut self,
+    ) -> Result<Option<SettingsReceiveEvent>, SettingsReceiveError> {
         if let Some(Ok((_, output))) = self.retained_join.as_mut() {
             output.guard.active.store(false, Ordering::Release);
             drop(output.guard.guard.take());
@@ -1406,6 +1582,7 @@ impl SettingsReceiveWork {
         if let Some(pending) = self.pending.take() {
             let _ = pending.receipt.send(Err(SettingsReceiveError::Closed));
         }
+        self.stop_waiting_reply_build(SettingsReceiveError::Closed);
     }
 
     pub(in crate::devices) fn latch_failure(&mut self) {
@@ -1417,7 +1594,12 @@ impl SettingsReceiveWork {
         let mut report = self.ledger.snapshot();
         report.bookkeeping_ok &= self.failure.is_none()
             && self.retained_join.is_none()
-            && self.receipts.len() == self.jobs.len()
+            && self.unexpected_join.is_none()
+            && self
+                .receipts
+                .len()
+                .checked_add(usize::from(self.reply_build_task().is_some()))
+                == Some(self.jobs.len())
             && self.build.is_some() == report.reply_build_active
             && self
                 .history
@@ -1470,6 +1652,7 @@ impl Drop for SettingsReceiveWork {
     fn drop(&mut self) {
         self.closed = true;
         self.ledger.closed.store(true, Ordering::Release);
+        self.stop_waiting_reply_build(SettingsReceiveError::Closed);
         if !self.report().complete() || self.failure.is_some() {
             self.ledger.terminal.store(true, Ordering::Release);
             self.ledger.changed.notify_waiters();
@@ -1483,6 +1666,7 @@ impl Drop for SettingsReceiveWork {
                 Arc::clone(&self.ledger),
                 self.failure.take(),
                 self.retained_join.take(),
+                self.unexpected_join.take(),
             );
             let _ = Box::leak(Box::new(retained));
         }

@@ -10,13 +10,15 @@ use uuid::Uuid;
 #[cfg(unix)]
 use super::settings_ingress::{
     ReceiveContext,
-    work::{PairedResultAdmissionFailure, PendingSettingsReplyBuild, SettingsReceiveWork},
+    work::{
+        PairedResultAdmissionFailure, PendingSettingsReplyBuild, SettingsReceiveWork,
+        SettingsReceiveWorkEvent,
+    },
 };
 use super::{DeviceEndpoint, DeviceError, EndpointRole};
 #[cfg(unix)]
 use super::{
-    PendingSettingsReceipt, SettingsReceiveDrain, SettingsReceiveError, SettingsReceiveEvent,
-    SettingsReceiveWitness,
+    PendingSettingsReceipt, SettingsReceiveDrain, SettingsReceiveError, SettingsReceiveWitness,
 };
 use crate::agent::Agent;
 #[cfg(unix)]
@@ -226,7 +228,7 @@ impl SettingsConnectionOwner<'_> {
     #[cfg(unix)]
     pub(super) async fn next_receive_event(
         &mut self,
-    ) -> Result<Option<SettingsReceiveEvent>, SettingsReceiveError> {
+    ) -> Result<Option<SettingsReceiveWorkEvent>, SettingsReceiveError> {
         self.owner.receive.next().await
     }
 
@@ -238,6 +240,17 @@ impl SettingsConnectionOwner<'_> {
         self.owner
             .receive
             .try_adopt_paired_result(&self.identity, handoff)
+    }
+
+    #[cfg(unix)]
+    pub(super) fn try_start_reply_build(
+        &mut self,
+        ticket: &PendingSettingsReplyBuild,
+        authority: crate::host::settings::service::SettingsReceiptAuthority,
+    ) -> Result<(), SettingsReceiveError> {
+        self.owner
+            .receive
+            .try_start_reply_build(&self.identity, ticket, authority)
     }
 
     #[cfg(unix)]
