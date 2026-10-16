@@ -1,4 +1,6 @@
+mod external;
 mod transport;
+pub(crate) use external::ExternalTaskStateUpdate;
 pub use transport::*;
 
 use rusqlite::{Connection, OptionalExtension, Row, TransactionBehavior, params};
@@ -10,7 +12,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 use thiserror::Error;
 
-const SCHEMA_VERSION: i64 = 9;
+const SCHEMA_VERSION: i64 = 12;
 const MAX_JSON_BYTES: usize = 1_048_576;
 const MAX_APPEND_EVENTS: usize = 256;
 const MAX_STATE_BYTES: usize = 8 * MAX_JSON_BYTES;
@@ -359,6 +361,19 @@ impl Store {
             transaction
                 .execute_batch(include_str!("../migrations/0009_scheduled_execution.sql"))?;
         }
+        if version < 10 {
+            transaction.execute_batch(include_str!("../migrations/0010_workers.sql"))?;
+        }
+        if version < 11 {
+            transaction.execute_batch(include_str!(
+                "../migrations/0011_worker_terminal_sources.sql"
+            ))?;
+        }
+        if version < 12 {
+            transaction.execute_batch(include_str!(
+                "../migrations/0012_remote_delegation_lookup.sql"
+            ))?;
+        }
         transaction.pragma_update(None, "user_version", SCHEMA_VERSION)?;
         transaction.commit()?;
         Ok(Self {
@@ -369,6 +384,10 @@ impl Store {
 
     pub(crate) fn connection(&self) -> StorageResult<MutexGuard<'_, Connection>> {
         self.connection.lock().map_err(|_| StorageError::Poisoned)
+    }
+
+    pub(crate) fn shares_connection(&self, other: &Store) -> bool {
+        Arc::ptr_eq(&self.connection, &other.connection)
     }
 
     pub fn create_conversation(
@@ -477,7 +496,7 @@ impl Store {
     }
 
     pub fn append(&self, request: &AppendRequest) -> StorageResult<AppendOutcome> {
-        self.append_internal(request, None)
+        self.append_internal(request, None, None)
     }
 
     pub fn append_with_state(
@@ -485,7 +504,16 @@ impl Store {
         request: &AppendRequest,
         state: &ConversationStateUpdate,
     ) -> StorageResult<AppendOutcome> {
-        self.append_internal(request, Some(state))
+        self.append_internal(request, Some(state), None)
+    }
+
+    pub(crate) fn append_with_external_task(
+        &self,
+        request: &AppendRequest,
+        state: &ConversationStateUpdate,
+        task: &ExternalTaskStateUpdate,
+    ) -> StorageResult<AppendOutcome> {
+        self.append_internal(request, Some(state), Some(task))
     }
 
     pub fn checkpoint_conversation_state(
@@ -610,6 +638,7 @@ impl Store {
         &self,
         request: &AppendRequest,
         state: Option<&ConversationStateUpdate>,
+        task: Option<&ExternalTaskStateUpdate>,
     ) -> StorageResult<AppendOutcome> {
         validate_id(&request.conversation_id)?;
         validate_id(&request.command_id)?;
@@ -638,14 +667,26 @@ impl Store {
                 encode_json_with_limit(&state.payload, MAX_STATE_BYTES)
             })
             .transpose()?;
-        let state_digest = state
-            .map(|state| {
-                let mut hash = Sha256::new();
-                hash.update(b"everything.conversation.state-update.v1\0");
-                hash.update(serde_json::to_vec(state)?);
-                Ok::<_, StorageError>(format!("{:x}", hash.finalize()))
-            })
+        let prepared_task = task
+            .map(|task| external::prepare(request, task))
             .transpose()?;
+        let state_digest = if let Some(task) = task {
+            let state = state.ok_or_else(|| {
+                StorageError::InvalidInput(
+                    "external task append requires conversation state".into(),
+                )
+            })?;
+            Some(external::state_digest(state, task)?)
+        } else {
+            state
+                .map(|state| {
+                    let mut hash = Sha256::new();
+                    hash.update(b"everything.conversation.state-update.v1\0");
+                    hash.update(serde_json::to_vec(state)?);
+                    Ok::<_, StorageError>(format!("{:x}", hash.finalize()))
+                })
+                .transpose()?
+        };
         let mut connection = self.connection()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let checkpoint_exists: bool = transaction.query_row(
@@ -753,10 +794,16 @@ impl Store {
                 params![request.conversation_id, revision, payload],
             )?;
         }
+        if let (Some(task), Some(prepared)) = (task, prepared_task) {
+            external::apply(&transaction, task, &prepared)?;
+        }
         transaction.execute(
             "INSERT INTO commands(id, conversation_id, request, first_sequence, last_sequence, state_digest) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
             params![request.command_id, request.conversation_id, encoded_request, actual + 1, last, state_digest],
         )?;
+        if let Some(task) = task {
+            external::verify_committed(&transaction, task)?;
+        }
         transaction.commit()?;
         Ok(AppendOutcome {
             replayed: false,

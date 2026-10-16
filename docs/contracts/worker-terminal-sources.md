@@ -1,0 +1,13 @@
+# Immutable worker terminal sources
+
+Schema eleven adds `worker_terminal_sources`, a bounded reference from one retained worker delegation to one unique retained worker message. Both references are foreign keys. Update and deletion triggers preserve that mapping. Existing immutable message rows retain the exact packet, encrypted envelope, peer, direction and receipt timestamp; redundant digest columns are unnecessary.
+
+The schema, transactional writer and authenticated [Worker bridge](worker-bridge.md) consumer are implemented. This table alone grants no execution, native result admission or acknowledgment authority.
+
+The writer binds the first authenticated inbound Executor Result or Rejected message for a Coordinator after inserting its message row in the same immediate transaction as the original outcome. It checks that no result or rejection existed before applying that packet. Identical subsequent terminal packets cannot replace the source. Source selection never relies on wall-clock ordering, SQLite row identifiers or whichever message happened to be read last.
+
+Before native admission, the bridge must authenticate the exact referenced encrypted message with the established cryptographic implementation and original receipt time, validate its role, endpoint, pinned peer, full binding and canonical outcome, and retain actual endpoint and Host authority through the atomic Agent/Scheduler commit. A matching public report or source-table row is insufficient. Known result artifacts additionally require verified private quarantine. Result acknowledgement requires the actual opaque native receipt; rejection has no result-acknowledgement wire variant.
+
+Migration deliberately does not guess a source for an already-terminal schema-ten delegation. Its retained history remains inspectable, but absent original source binding fails closed for automatic result admission. Receiving another identical packet cannot repair that ambiguity. Pending schema-ten delegations can bind their first authenticated terminal message after migration. Existing message and delegation data are neither rewritten nor removed.
+
+The qualified bridge walkthrough verified first-source retention after later identical terminal packets and authenticated native result admission. Earlier schema-ten worker observations retain their original qualification. The normal Store registers this migration before schema12 and passed the six combined normal-package Rust 1.88 gates at `d273c52`; the actual Host original-source rejection/result-acceptance walkthrough also passed. See [worker validation](../development/worker.md#combined-host-validation-checkpoint) for its scope. Automated verification remains deferred to issue #32.

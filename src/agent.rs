@@ -1,6 +1,7 @@
 mod control_events;
 mod foreground;
 mod native;
+mod remote;
 mod scheduled;
 mod steering;
 
@@ -8,6 +9,7 @@ pub use control_events::{PermissionPublicationReceipt, TaskPublicationReceipt};
 pub use native::{
     LoopLimits, LoopStatus, NativeRunInfo, PauseReason, ProviderResume, ToolRunSetup,
 };
+pub use remote::{RemoteResultInspection, RemoteResultReceipt, VerifiedRemoteOutcome};
 pub use scheduled::{ScheduledResultCommand, ScheduledResultReceipt};
 pub use steering::{TaskInput, TaskInputCommand, TaskInputReceipt, TaskInputState};
 
@@ -351,6 +353,11 @@ impl Agent {
     #[cfg(unix)]
     pub fn state_directory(&self) -> Option<&Path> {
         self._foreground.as_ref().map(|lease| lease.path())
+    }
+
+    #[cfg(unix)]
+    pub(crate) fn state_lease(&self) -> Option<Arc<crate::service::StateLease>> {
+        self._foreground.as_ref().map(Arc::clone)
     }
 
     pub fn from_store(store: Store) -> Self {
@@ -1066,6 +1073,7 @@ fn event_kind(event: &ConversationEvent) -> &'static str {
         ConversationEvent::PermissionDecided { .. } => "permission_decided",
         ConversationEvent::SteeringReceived { .. } => "steering_received",
         ConversationEvent::TaskWaitRequested { .. } => "task_wait_requested",
+        ConversationEvent::RemoteTaskFinished { .. } => "remote_task_finished",
         ConversationEvent::ScheduledRunFinished { .. } => "scheduled_run_finished",
         ConversationEvent::SubagentFinished { .. } => "subagent_finished",
     }

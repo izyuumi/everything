@@ -108,6 +108,8 @@ pub struct HostSettings {
     pub model_credentials: Vec<ModelCredentialReference>,
     pub relay_origin: Option<crate::relay_protocol::RelayOrigin>,
     #[serde(default)]
+    pub worker: Option<super::worker::WorkerCoordinatorSettings>,
+    #[serde(default)]
     pub memory: super::memory::MemorySettings,
     #[serde(default)]
     pub mcp: super::mcp::McpSettings,
@@ -222,6 +224,7 @@ impl SettingsRepository {
                     loop_limits: LoopLimits::default(),
                     model_credentials: Vec::new(),
                     relay_origin: None,
+                    worker: None,
                     memory: Default::default(),
                     mcp: Default::default(),
                     selection: Default::default(),
