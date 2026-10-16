@@ -4,6 +4,7 @@ pub mod mcp;
 mod registry;
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -49,6 +50,26 @@ pub struct ToolExecutionContext {
     task_id: String,
     workspace_root: PathBuf,
     cancellation: CancellationToken,
+    _retained_owner: Option<RetainedToolOwner>,
+}
+
+#[derive(Clone)]
+pub(crate) struct RetainedToolOwner {
+    _owner: Arc<dyn Send + Sync>,
+}
+
+impl RetainedToolOwner {
+    pub(crate) fn new(owner: impl Send + Sync + 'static) -> Self {
+        Self {
+            _owner: Arc::new(owner),
+        }
+    }
+}
+
+impl std::fmt::Debug for RetainedToolOwner {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("RetainedToolOwner")
+    }
 }
 
 impl ToolExecutionContext {
@@ -77,7 +98,13 @@ impl ToolExecutionContext {
             task_id,
             workspace_root,
             cancellation,
+            _retained_owner: None,
         })
+    }
+
+    pub(super) fn with_retained_owner(mut self, owner: Option<RetainedToolOwner>) -> Self {
+        self._retained_owner = owner;
+        self
     }
 
     pub fn request_id(&self) -> &str {

@@ -5,13 +5,25 @@ use std::sync::Arc;
 
 use clap::{ArgGroup, Args, Parser, Subcommand, ValueEnum};
 use everything::agent::{
-    Agent, AgentError, Conversation, ConversationConfig, MAX_CHAT_TEXT_BYTES, ProviderEndpoint,
-    ProviderKind, TextAcceptance, TextCommand, TurnEvent,
+    Agent, AgentError, Conversation, ConversationConfig, LoopLimits, LoopStatus,
+    MAX_CHAT_TEXT_BYTES, ProviderEndpoint, ProviderKind, ProviderResume, TextAcceptance,
+    TextCommand, ToolRunSetup, TurnEvent,
 };
+use everything::context::{ContextBudget, TaskContext};
 use everything::model::ModelProvider;
 use everything::model::anthropic::{AnthropicConfig, AnthropicProvider};
 use everything::model::openai::{OpenAiConfig, OpenAiProvider};
+use everything::permissions::{
+    ApprovalChoice, ApprovalResolution, Authorizer, ExecutionAuthority, ExecutionMode,
+    ToolScopeRule,
+};
 use everything::protocol::{CommandId, ConversationId, ConversationMessage, MessageContent};
+use everything::selector::{SEARCH_TOOLS_NAME, SearchTools, ToolSelector};
+use everything::tools::{
+    ToolRegistry,
+    broker::{BrokerLimits, ToolBroker},
+    builtin::{BuiltinConfig, BuiltinTools},
+};
 use futures_util::StreamExt;
 use serde::Serialize;
 use thiserror::Error;
@@ -155,6 +167,51 @@ struct ChatArguments {
     title: Option<String>,
     #[command(flatten)]
     model: ModelArguments,
+    #[command(flatten)]
+    tools: ToolArguments,
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum ModeArgument {
+    ReadOnly,
+    TrustedWorkspace,
+    FullHost,
+}
+
+impl From<ModeArgument> for ExecutionMode {
+    fn from(value: ModeArgument) -> Self {
+        match value {
+            ModeArgument::ReadOnly => Self::ReadOnly,
+            ModeArgument::TrustedWorkspace => Self::TrustedWorkspace,
+            ModeArgument::FullHost => Self::FullHost,
+        }
+    }
+}
+
+#[derive(Args)]
+struct ToolArguments {
+    #[arg(long)]
+    tools: bool,
+    #[arg(long, requires = "tools")]
+    workspace: Option<PathBuf>,
+    #[arg(long, value_enum, requires = "tools")]
+    execution_mode: Option<ModeArgument>,
+    #[arg(long, requires = "tools")]
+    context_tokens: Option<u64>,
+    #[arg(long, requires = "tools")]
+    max_model_attempts: Option<u32>,
+    #[arg(long, requires = "tools")]
+    max_tool_calls: Option<u32>,
+    #[arg(long, requires = "tools")]
+    max_charged_tokens: Option<u64>,
+    #[arg(long, requires = "tools")]
+    max_duration_seconds: Option<u64>,
+    #[arg(long, requires_all = ["tools", "resume"])]
+    retry_uncertain: bool,
+    #[arg(long, requires_all = ["tools", "resume"], conflicts_with = "deny")]
+    approve: Option<String>,
+    #[arg(long, requires_all = ["tools", "resume"])]
+    deny: Option<String>,
 }
 
 #[derive(Args)]
@@ -189,6 +246,18 @@ enum CliError {
     Worker,
     #[error("could not serialize CLI output")]
     Serialization,
+    #[error(transparent)]
+    Tool(#[from] everything::tools::ToolError),
+    #[error(transparent)]
+    Permission(#[from] everything::permissions::PermissionError),
+    #[error(transparent)]
+    Selector(#[from] everything::selector::SelectorError),
+    #[error(transparent)]
+    Broker(#[from] everything::tools::broker::BrokerError),
+    #[error("tool run stopped at a durable boundary; inspect status before resuming")]
+    ToolPaused,
+    #[error("invalid tool options: {0}")]
+    ToolOptions(&'static str),
 }
 
 #[tokio::main]
@@ -324,7 +393,13 @@ async fn chat(
             text: text.ok_or(CliError::Required("--message or --message-file"))?,
         };
         match agent.accept_text(command).await? {
-            TextAcceptance::Completed { message, .. } => {
+            TextAcceptance::Completed {
+                command_id,
+                message,
+            } => {
+                agent
+                    .reconcile_foreground_task(conversation.info.id, command_id)
+                    .await?;
                 eprintln!(
                     "replaying saved response for conversation {}",
                     conversation.info.id
@@ -346,6 +421,16 @@ async fn chat(
         "conversation {} command {}; streamed text is provisional until saved",
         conversation.info.id, command_id
     );
+    if arguments.tools.tools {
+        return tool_chat(
+            agent,
+            conversation.info.id,
+            command_id,
+            arguments.tools,
+            cancellation,
+        )
+        .await;
+    }
     let provider = native_provider(&conversation)?;
     let mut events = agent
         .run_pending(conversation.info.id, command_id, provider, cancellation)
@@ -377,7 +462,328 @@ async fn chat(
                     summary.message_id, summary.stop_reason
                 );
             }
+            TurnEvent::ContextBuilt { .. }
+            | TurnEvent::ModelAttemptStarted { .. }
+            | TurnEvent::ToolCallRecorded { .. }
+            | TurnEvent::ToolResultRecorded { .. }
+            | TurnEvent::AwaitingPermission { .. }
+            | TurnEvent::Paused { .. }
+            | TurnEvent::RunCompleted { .. }
+            | TurnEvent::ToolBlocked { .. } => {
+                return Err(AgentError::NativeSetupRequired.into());
+            }
         }
+    }
+    agent
+        .reconcile_foreground_task(conversation.info.id, command_id)
+        .await?;
+    Ok(())
+}
+
+async fn tool_chat(
+    agent: Agent,
+    conversation_id: ConversationId,
+    command_id: CommandId,
+    options: ToolArguments,
+    cancellation: CancellationToken,
+) -> Result<(), CliError> {
+    let conversation = agent.conversation(conversation_id).await?;
+    let provider = native_provider(&conversation)?;
+    let task = agent
+        .prepare_foreground_task(conversation_id, command_id)
+        .await?;
+    let result = run_tool_chat(
+        &agent,
+        conversation,
+        command_id,
+        provider,
+        &task,
+        options,
+        cancellation,
+    )
+    .await;
+    let settled = agent
+        .settle_foreground_task(conversation_id, command_id)
+        .await;
+    match (result, settled) {
+        (Ok(()), Ok(_)) => Ok(()),
+        (Err(error), Ok(_)) => Err(error),
+        (Ok(()), Err(error)) => Err(error.into()),
+        (Err(error), Err(settle_error)) => {
+            eprintln!("foreground task remains in its previous durable state: {settle_error}");
+            Err(error)
+        }
+    }
+}
+
+async fn run_tool_chat(
+    agent: &Agent,
+    conversation: Conversation,
+    command_id: CommandId,
+    provider: Arc<dyn ModelProvider>,
+    task: &everything::protocol::TaskRecord,
+    options: ToolArguments,
+    cancellation: CancellationToken,
+) -> Result<(), CliError> {
+    let active = conversation
+        .native_run()
+        .filter(|run| run.command_id == command_id);
+    if active.is_some()
+        && (options.workspace.is_some()
+            || options.execution_mode.is_some()
+            || options.context_tokens.is_some()
+            || options.max_model_attempts.is_some()
+            || options.max_tool_calls.is_some()
+            || options.max_charged_tokens.is_some()
+            || options.max_duration_seconds.is_some())
+    {
+        return Err(CliError::ToolOptions(
+            "an active native turn must use its saved setup; omit workspace, mode and budget overrides",
+        ));
+    }
+    if active.as_ref().is_some_and(|run| run.task_id != task.id) {
+        return Err(AgentError::ConfigurationMismatch.into());
+    }
+    let store = agent.store();
+    let task_id = task.id;
+    let conversation_id = conversation.info.id;
+    let instruction = task.instruction.clone();
+    let output_tokens = conversation.config.max_output_tokens;
+    let prepare_store = store.clone();
+    let approval = options
+        .approve
+        .clone()
+        .map(|id| (id, ApprovalChoice::Allow))
+        .or_else(|| options.deny.clone().map(|id| (id, ApprovalChoice::Deny)));
+    let provider_resume = if options.retry_uncertain {
+        ProviderResume::RetryUncertain
+    } else {
+        ProviderResume::OnlyUnstarted
+    };
+    let preparation_owner = agent.clone();
+    let (registry, authorizer, search, authority, initial, limits, budget) =
+        tokio::task::spawn_blocking(move || {
+            let _retained_agent = preparation_owner;
+            let workspace = match &active {
+                Some(run) => run.workspace_root.clone(),
+                None => options.workspace.unwrap_or(std::env::current_dir()?),
+            };
+            let mode = active.as_ref().map(|run| run.mode).unwrap_or_else(|| {
+                options
+                    .execution_mode
+                    .map(ExecutionMode::from)
+                    .unwrap_or(ExecutionMode::ReadOnly)
+            });
+            let mut authority = ExecutionAuthority::new(
+                conversation_id.to_string(),
+                task_id.to_string(),
+                workspace,
+                mode,
+            )?;
+            if let Some(run) = &active {
+                authority =
+                    authority.restrict_tools(run.allowed_tools.iter().cloned().collect())?;
+            }
+            let redact_literals = ["ANTHROPIC_API_KEY", "OPENAI_API_KEY"]
+                .into_iter()
+                .filter_map(|name| std::env::var(name).ok())
+                .filter(|value| !value.is_empty())
+                .collect();
+            let builtins = BuiltinTools::new(BuiltinConfig { redact_literals })?;
+            let mut registry = ToolRegistry::new();
+            let mut scopes = builtins.register_into(&mut registry)?;
+            let selection_authorizer = Arc::new(Authorizer::new(
+                prepare_store.clone(),
+                Arc::new(registry.clone()),
+                scopes.clone(),
+            )?);
+            let selector = ToolSelector::new(&registry, selection_authorizer)?;
+            let search = Arc::new(SearchTools::new(selector.clone()));
+            registry.register(search.clone())?;
+            scopes.insert(SEARCH_TOOLS_NAME.to_owned(), ToolScopeRule::LocalReadOnly);
+            let registry = Arc::new(registry);
+            let authorizer = Arc::new(Authorizer::new(prepare_store, registry.clone(), scopes)?);
+            if let Some((id, choice)) = approval {
+                let now = i64::try_from(
+                    everything::protocol::UnixMillis::now()
+                        .map_err(AgentError::from)?
+                        .get(),
+                )
+                .map_err(|_| CliError::ToolOptions("timestamp overflow"))?;
+                let existing = authorizer.approval(&id, now)?;
+                if existing.request.scope.conversation_id != conversation_id.to_string()
+                    || existing.request.scope.task_id != task_id.to_string()
+                {
+                    return Err(CliError::ToolOptions(
+                        "approval belongs to a different task",
+                    ));
+                }
+                authorizer.resolve(
+                    &id,
+                    &ApprovalResolution {
+                        choice,
+                        expires_at: None,
+                    },
+                    now,
+                )?;
+            }
+            let query: String = instruction
+                .chars()
+                .scan(0_usize, |bytes, character| {
+                    *bytes += character.len_utf8();
+                    (*bytes <= 4096).then_some(character)
+                })
+                .collect();
+            let initial = selector.select_local(&authority, &query, 8)?.definitions();
+            let mut limits = LoopLimits::default();
+            if let Some(value) = options.max_model_attempts {
+                limits.max_model_attempts = value;
+            }
+            if let Some(value) = options.max_tool_calls {
+                limits.max_tool_calls = value;
+            }
+            if let Some(value) = options.max_charged_tokens {
+                limits.max_charged_tokens = value;
+            }
+            if let Some(value) = options.max_duration_seconds {
+                limits.max_duration_ms = value
+                    .checked_mul(1000)
+                    .ok_or(CliError::ToolOptions("duration overflow"))?;
+            }
+            limits.validate()?;
+            let budget = ContextBudget {
+                max_context_tokens: options.context_tokens.unwrap_or(128_000),
+                reserved_output_tokens: output_tokens,
+                safety_margin_tokens: 1024,
+                max_request_bytes: 32 * 1024 * 1024,
+                max_compaction_bytes: 16 * 1024,
+            };
+            Ok::<_, CliError>((
+                registry, authorizer, search, authority, initial, limits, budget,
+            ))
+        })
+        .await
+        .map_err(|_| CliError::Worker)??;
+    let broker = ToolBroker::start_with_owner(
+        store,
+        registry.clone(),
+        authorizer,
+        BrokerLimits {
+            max_concurrent: 8,
+            max_in_flight: 32,
+            queue_timeout: std::time::Duration::from_secs(30),
+            execution_timeout: std::time::Duration::from_secs(120),
+            cancellation_grace: std::time::Duration::from_secs(5),
+        },
+        agent.clone(),
+    )
+    .await?;
+    if broker.is_quarantined() {
+        eprintln!(
+            "tool broker requires owner cleanup reconciliation; operations will remain blocked"
+        );
+    }
+    let _discovery = search.bind_task(authority.clone())?;
+    let scoped = broker.scoped(authority);
+    let setup = if conversation
+        .native_run()
+        .is_some_and(|run| run.command_id == command_id)
+    {
+        ToolRunSetup::resume(scoped, registry, &conversation, provider_resume)?
+    } else {
+        ToolRunSetup {
+            broker: scoped,
+            registry,
+            task: TaskContext {
+                objective: task.instruction.clone(),
+                constraints: vec!["Use only the host-authorized tool capabilities. Ask for exact operation approval when required.".into()],
+                state: "Foreground task admitted by the local owner.".into(),
+            },
+            budget,
+            memory: Vec::new(),
+            selected_tools: initial,
+            limits,
+            provider_resume,
+        }
+    };
+    let mut events = agent
+        .run_tools(
+            conversation_id,
+            command_id,
+            provider,
+            setup,
+            cancellation.clone(),
+        )
+        .await?;
+    let mut output = tokio::io::stdout();
+    let mut provisional = String::new();
+    let mut failure = None;
+    let mut completed = false;
+    while let Some(event) = events.next().await {
+        let event = match event {
+            Ok(event) => event,
+            Err(error) => {
+                if failure.is_none() {
+                    failure = Some(CliError::Agent(error));
+                }
+                cancellation.cancel();
+                continue;
+            }
+        };
+        if failure.is_some() {
+            continue;
+        }
+        let rendered = async {
+            match event {
+                TurnEvent::ProvisionalText { delta, .. } => {
+                    provisional.push_str(&delta);
+                    output.write_all(delta.as_bytes()).await?;
+                    output.flush().await?;
+                }
+                TurnEvent::Committed { message, summary } => {
+                    let authoritative = message_text(&message);
+                    if authoritative != provisional {
+                        if !provisional.is_empty() { output.write_all(b"\n").await?; }
+                        output.write_all(authoritative.as_bytes()).await?;
+                    }
+                    if !authoritative.is_empty() || !provisional.is_empty() { output.write_all(b"\n").await?; }
+                    output.flush().await?;
+                    provisional.clear();
+                    eprintln!("saved assistant message {} ({:?})", summary.message_id, summary.stop_reason);
+                }
+                TurnEvent::ContextBuilt { usage, .. } => {
+                    eprintln!("context input estimate {} tokens", usage.estimated_input_tokens);
+                }
+                TurnEvent::ModelAttemptStarted { attempt_id } => eprintln!("model attempt {attempt_id}"),
+                TurnEvent::ToolCallRecorded { call } => eprintln!("saved tool call {} {}", call.id, call.name),
+                TurnEvent::ToolResultRecorded { result } => eprintln!("saved tool result {} error={}", result.tool_call_id, result.is_error),
+                TurnEvent::AwaitingPermission { approval, .. } => {
+                    let request = serde_json::to_string_pretty(&approval).map_err(|_| CliError::Serialization)?;
+                    eprintln!("exact operation approval required:\n{request}\nresume with --tools --approve {} or --deny {}", approval.id, approval.id);
+                }
+                TurnEvent::Paused { reason } => eprintln!("native run paused: {reason:?}"),
+                TurnEvent::ToolBlocked { call_id, reason, diagnostic } => eprintln!("tool call {call_id} blocked ({reason:?}): {diagnostic}"),
+                TurnEvent::RunCompleted { run } => {
+                    completed = matches!(run.status, LoopStatus::Completed);
+                    eprintln!("completed task {}; charged token budget {}", run.task_id, run.charged_tokens);
+                }
+            }
+            Ok::<_, CliError>(())
+        }.await;
+        if let Err(error) = rendered {
+            failure = Some(error);
+            cancellation.cancel();
+        }
+    }
+    drop(events);
+    if let Some(error) = failure {
+        return Err(error);
+    }
+    if cancellation.is_cancelled() {
+        return Err(AgentError::Cancelled.into());
+    }
+    if !completed {
+        return Err(CliError::ToolPaused);
     }
     Ok(())
 }

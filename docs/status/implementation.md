@@ -16,6 +16,10 @@ The #21 leaf is prepared against actual main `b53df85538f3c6b48225c0ebd3a4b75631
 
 Production semantic acceptance remains blocked by [#72](https://github.com/izyuumi/everything/issues/72). Historical vectors and hybrid retrieval do not prove production local-only execution. The Host's strict embedding-only isolation is being implemented separately and is not included here. Default-off and genuine FTS fallback remain available. Issue #21 stays open until that boundary is validated and integrated; automated assertions remain deferred to [#32](https://github.com/izyuumi/everything/issues/32).
 
+## Native tool loop integration checkpoint, 2026-10-16
+
+The #23 branch includes actual main `1ce2e3fee68c5e0ff12b2b4387db69c2d8fac63f` and reviewed hybrid prerequisite `a7142be9a4ff66ccde2462ac6fcf70bf989912c7`. The native loop preserves its reviewed provider/tool identities, exact saved authority, continuation state, limits, and durable recovery semantics. Its latest corrections retain the complete Agent through blocking SQL, tool validation, filesystem work and broker startup, and bound the constructed provider timeout while rechecking the saved start/deadline before admission. These corrections have source and formatting inspection only; the combined head requires fresh CI, and caller-drop or wall-clock runtime behavior has not been newly exercised. See the [agent contract](../contracts/agent.md) and [runtime validation](../architecture/runtime.md#validation-performed) for qualified earlier disposable observations. No successful live provider inference or deferred automated acceptance criterion is claimed.
+
 ## Dependency graph and ownership
 
 | Issue | Objective | Prerequisites | State |
@@ -42,7 +46,7 @@ Production semantic acceptance remains blocked by [#72](https://github.com/izyuu
 | [#20](https://github.com/izyuumi/everything/issues/20) | Implement configurable System One classification | #5, #11, #16, #17 | Implemented in PR #66; prior disposable offline/native-unavailable/refused-loopback checks passed; current-main CI pending; live classification and native persistence unverified; automated assertions deferred to #32 |
 | [#21](https://github.com/izyuumi/everything/issues/21) | Implement sqlite-vec hybrid retrieval and index switching | #6, #12, #26, #31; production locality gated by #72 | Current-main source union prepared; exact-head CI pending; historical numerical observations are qualified; remains open for #72 |
 | [#22](https://github.com/izyuumi/everything/issues/22) | Implement device pairing and client sync | #2, #3, #7, #13 | Merged (#60); qualified native relay roundtrip/restart/revocation observations and reviewed concurrent-revocation correction; automated assertions deferred to #32 |
-| [#23](https://github.com/izyuumi/everything/issues/23) | Implement multi-tool agent loop | #8, #9, #10, #14 | Private checkpoint prerequisite merged (#64); native-loop integration and lifecycle review in progress |
+| [#23](https://github.com/izyuumi/everything/issues/23) | Implement multi-tool agent loop | #8, #9, #10, #14 | PR #65 prepared with merged foundations and reviewed hybrid prerequisites; exact-head CI pending; deadline and state-lease corrections have source inspection only; successful live inference and automated assertions remain unverified (#32) |
 | [#24](https://github.com/izyuumi/everything/issues/24) | Implement task scheduler and concurrent subagents | #3, #14, #23 | Backlog |
 | [#25](https://github.com/izyuumi/everything/issues/25) | Implement steering and autonomous continuation | #23, #24 | Backlog |
 | [#26](https://github.com/izyuumi/everything/issues/26) | Implement wiki consolidation and lint jobs | #6, #16 | Merged (#59); actual configured Wiki admission and managed metadata visibility corrected; qualified manual checks and production CI passed; automated assertions deferred to #32 |

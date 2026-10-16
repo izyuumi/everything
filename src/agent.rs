@@ -1,11 +1,18 @@
+mod foreground;
+mod native;
+
+pub use native::{
+    LoopLimits, LoopStatus, NativeRunInfo, PauseReason, ProviderResume, ToolRunSetup,
+};
+
+use std::collections::{BTreeMap, HashMap};
 use std::io::{self, Write};
 use std::net::IpAddr;
 use std::path::Path;
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex as AdmissionMutex, Weak};
 
 use futures_core::Stream;
-use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tokio::sync::Mutex;
@@ -17,7 +24,7 @@ use crate::model::{
 };
 use crate::protocol::{
     CommandId, ConversationEvent, ConversationId, ConversationMessage, EventEnvelope, EventId,
-    EventSequence, MessageContent, MessageId, MessageRole, ProtocolError, UnixMillis,
+    EventSequence, MessageContent, MessageId, MessageRole, ProtocolError, ToolCallId, UnixMillis,
 };
 use crate::storage::{
     AppendRequest, ConversationRow, ConversationStateUpdate, EventInput, EventRow, StorageError,
@@ -30,7 +37,7 @@ const MAX_INSTRUCTIONS_BYTES: usize = 32 * 1_024;
 const MAX_CHECKPOINT_BYTES: usize = 8 * 1_024 * 1_024;
 const MAX_HISTORY_BYTES: usize = 64 * 1_024 * 1_024;
 const MAX_HISTORY_EVENTS: usize = 65_536;
-const CHECKPOINT_VERSION: u16 = 1;
+const CHECKPOINT_VERSION: u16 = 2;
 
 #[derive(Debug, Error)]
 pub enum AgentError {
@@ -38,6 +45,10 @@ pub enum AgentError {
     Storage(#[from] StorageError),
     #[error(transparent)]
     Model(#[from] ModelError),
+    #[error(transparent)]
+    Context(#[from] crate::context::ContextError),
+    #[error(transparent)]
+    Broker(#[from] crate::tools::broker::BrokerError),
     #[error(transparent)]
     Protocol(#[from] ProtocolError),
     #[error(transparent)]
@@ -60,8 +71,12 @@ pub enum AgentError {
         "conversation {0} initialization is incomplete; retry init with its original title and configuration"
     )]
     IncompleteConversation(ConversationId),
-    #[error("this runtime is already running a text turn")]
+    #[error("this conversation already has an active turn")]
     Busy,
+    #[error("native tool/context execution requires its matching saved setup")]
+    NativeSetupRequired,
+    #[error("legacy provider continuation cannot enter tool mode; create a new conversation")]
+    LegacyContinuation,
     #[error("provider or conversation configuration does not match")]
     ConfigurationMismatch,
     #[error("text-only conversations cannot execute or resume tool calls")]
@@ -209,6 +224,8 @@ pub struct ConversationInfo {
     pub checkpoint_revision: u64,
     pub message_count: usize,
     pub pending_command_id: Option<CommandId>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub native_status: Option<LoopStatus>,
 }
 
 #[derive(Clone, Debug)]
@@ -253,6 +270,36 @@ pub enum TurnEvent {
         message: ConversationMessage,
         summary: TurnSummary,
     },
+    ContextBuilt {
+        usage: crate::context::ContextUsage,
+        citations: Vec<crate::context::MemoryCitation>,
+        omitted_memory: Vec<crate::context::MemoryCitation>,
+        continuation: crate::context::ContinuationDisposition,
+    },
+    ModelAttemptStarted {
+        attempt_id: CommandId,
+    },
+    ToolCallRecorded {
+        call: crate::protocol::ToolCall,
+    },
+    ToolResultRecorded {
+        result: crate::protocol::ToolResult,
+    },
+    AwaitingPermission {
+        call_id: ToolCallId,
+        approval: Box<crate::permissions::ApprovalRequest>,
+    },
+    Paused {
+        reason: PauseReason,
+    },
+    RunCompleted {
+        run: NativeRunInfo,
+    },
+    ToolBlocked {
+        call_id: ToolCallId,
+        reason: PauseReason,
+        diagnostic: String,
+    },
 }
 
 pub type TurnStream = Pin<Box<dyn Stream<Item = Result<TurnEvent, AgentError>> + Send>>;
@@ -274,6 +321,8 @@ struct Checkpoint {
     pending: Option<PendingText>,
     continuation: Option<ProviderContinuation>,
     last_turn: Option<TurnSummary>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    native: Option<native::NativeCheckpoint>,
 }
 
 #[cfg(unix)]
@@ -285,17 +334,21 @@ struct ForegroundState {
 #[derive(Clone)]
 pub struct Agent {
     store: Store,
-    execution: Arc<Mutex<()>>,
+    execution: Arc<AdmissionMutex<HashMap<ConversationId, Weak<Mutex<()>>>>>,
     acceptance: Arc<Mutex<()>>,
     #[cfg(unix)]
     _foreground: Option<Arc<ForegroundState>>,
 }
 
 impl Agent {
+    pub fn store(&self) -> Store {
+        self.store.clone()
+    }
+
     pub fn from_store(store: Store) -> Self {
         Self {
             store,
-            execution: Arc::new(Mutex::new(())),
+            execution: Arc::new(AdmissionMutex::new(HashMap::new())),
             acceptance: Arc::new(Mutex::new(())),
             #[cfg(unix)]
             _foreground: None,
@@ -391,7 +444,7 @@ impl Agent {
             }
             let checkpoint = Checkpoint {
                 version: CHECKPOINT_VERSION, config, message_head: 0, message_count: 0,
-                pending: None, continuation: None, last_turn: None,
+                pending: None, continuation: None, last_turn: None, native: None,
             };
             let event = event_input(id, 1, command_id, now, ConversationEvent::ConversationCreated { title: Some(title) })?;
             store.append_with_state(
@@ -504,7 +557,9 @@ impl Agent {
                 }],
                 created_at: now,
             };
-            build_request(&conversation, Some(&message))?;
+            if conversation.checkpoint.native.is_none() {
+                build_request(&conversation, Some(&message))?;
+            }
             let sequence = next_sequence(conversation.info.last_sequence)?;
             let mut checkpoint = conversation.checkpoint;
             checkpoint.message_head = sequence;
@@ -550,74 +605,32 @@ impl Agent {
         provider: Arc<dyn ModelProvider>,
         cancellation: CancellationToken,
     ) -> Result<TurnStream, AgentError> {
-        if cancellation.is_cancelled() {
-            return Err(AgentError::Cancelled);
-        }
-        let admission = Arc::new(
-            self.execution
-                .clone()
-                .try_lock_owned()
-                .map_err(|_| AgentError::Busy)?,
-        );
-        let host = self.clone();
-        let store = self.store.clone();
-        let provider_id = provider.id().to_owned();
-        let (conversation, request) = blocking(move || {
-            let _host = host;
-            let conversation = load_conversation(&store, conversation_id)?;
-            let pending = conversation
-                .checkpoint
-                .pending
-                .as_ref()
-                .ok_or(AgentError::NoPendingTurn)?;
-            if pending.command.command_id != command_id {
-                return Err(AgentError::CommandConflict(command_id));
-            }
-            if provider_id != conversation.config.provider.id() {
-                return Err(AgentError::ConfigurationMismatch);
-            }
-            let request = build_request(&conversation, None)?;
-            Ok((conversation, request))
-        })
-        .await?;
-        if cancellation.is_cancelled() {
-            return Err(AgentError::Cancelled);
-        }
-        let turn_cancellation = cancellation.child_token();
-        let cancellation_guard = turn_cancellation.clone().drop_guard();
-        let mut events = provider.stream(request, turn_cancellation.clone()).await?;
-        let agent = self.clone();
-        let stream = async_stream::try_stream! {
-            let admission_guard = admission;
-            let _cancellation_guard = cancellation_guard;
-            let mut displayed_bytes = 0_usize;
-            loop {
-                let next = tokio::select! {
-                    biased;
-                    _ = turn_cancellation.cancelled() => Err(AgentError::Cancelled),
-                    event = events.next() => Ok(event),
-                }?;
-                let event = next.ok_or(AgentError::InvalidData("provider stream ended without completed response"))??;
-                match event {
-                    ModelEvent::TextDelta { index, delta } => {
-                        displayed_bytes = displayed_bytes.checked_add(delta.len())
-                            .filter(|size| *size <= MAX_CHAT_TEXT_BYTES)
-                            .ok_or(AgentError::ResourceLimit("assistant text"))?;
-                        yield TurnEvent::ProvisionalText { index, delta };
+        self.run_native(conversation_id, command_id, provider, None, cancellation)
+            .await
+    }
+
+    fn admit(
+        &self,
+        id: ConversationId,
+    ) -> Result<Arc<tokio::sync::OwnedMutexGuard<()>>, AgentError> {
+        let gate = {
+            let mut active = self.execution.lock().map_err(|_| AgentError::Worker)?;
+            active.retain(|_, gate| gate.strong_count() > 0);
+            match active.get(&id).and_then(Weak::upgrade) {
+                Some(gate) => gate,
+                None => {
+                    if active.len() >= 1_024 {
+                        return Err(AgentError::Busy);
                     }
-                    ModelEvent::ToolCallStarted { .. } | ModelEvent::ToolCallArgumentsDelta { .. } => Err(AgentError::ToolsUnsupported)?,
-                    ModelEvent::ContentBlockCompleted { block, .. } if !matches!(block, ContentBlock::Text(_)) => Err(AgentError::ToolsUnsupported)?,
-                    ModelEvent::Completed { response } => {
-                        if turn_cancellation.is_cancelled() { Err(AgentError::Cancelled)?; }
-                        let (message, summary) = agent.commit_response(conversation, command_id, response, turn_cancellation.clone(), admission_guard.clone()).await?;
-                        yield TurnEvent::Committed { message, summary };
-                        break;
-                    }
-                    _ => {}
+                    let gate = Arc::new(Mutex::new(()));
+                    active.insert(id, Arc::downgrade(&gate));
+                    gate
                 }
             }
         };
-        Ok(Box::pin(stream))
+        Ok(Arc::new(
+            gate.try_lock_owned().map_err(|_| AgentError::Busy)?,
+        ))
     }
 
     async fn commit_response(
@@ -762,6 +775,7 @@ fn load_conversation(store: &Store, id: ConversationId) -> Result<Conversation, 
     let mut total_bytes = 0_usize;
     let mut message_head = 0;
     let mut saw_creation = false;
+    let mut mapping = MessageMapping::default();
     for row in rows {
         if row.sequence != expected {
             return Err(AgentError::InvalidData(
@@ -784,7 +798,7 @@ fn load_conversation(store: &Store, id: ConversationId) -> Result<Conversation, 
                 saw_creation = true;
             }
             ConversationEvent::MessageAppended { message } => {
-                model_message(&message)?;
+                model_message(&message, &mut mapping)?;
                 message_head = row.sequence;
                 messages.push(RecordedMessage {
                     event_id: event.event_id,
@@ -806,8 +820,16 @@ fn load_conversation(store: &Store, id: ConversationId) -> Result<Conversation, 
     }
     if let Some(pending) = &checkpoint.pending {
         let latest = messages
-            .last()
+            .iter()
+            .find(|entry| entry.message.id == pending.message_id)
             .ok_or(AgentError::InvalidData("pending turn has no user message"))?;
+        if checkpoint.native.is_none()
+            && messages.last().map(|entry| entry.message.id) != Some(pending.message_id)
+        {
+            return Err(AgentError::InvalidData(
+                "legacy pending message is not the latest message",
+            ));
+        }
         if pending.command.conversation_id != id
             || latest.message.id != pending.message_id
             || latest.causation_id != Some(pending.command.command_id)
@@ -822,6 +844,9 @@ fn load_conversation(store: &Store, id: ConversationId) -> Result<Conversation, 
             ));
         }
     }
+    if let Some(native) = &checkpoint.native {
+        native.validate(&checkpoint, &messages)?;
+    }
     let info = info(snapshot.conversation, state.revision, &checkpoint, id)?;
     Ok(Conversation {
         config: checkpoint.config.clone(),
@@ -832,13 +857,17 @@ fn load_conversation(store: &Store, id: ConversationId) -> Result<Conversation, 
 }
 
 fn decode_checkpoint(value: serde_json::Value) -> Result<Checkpoint, AgentError> {
-    let checkpoint: Checkpoint = serde_json::from_value(value)
+    let mut checkpoint: Checkpoint = serde_json::from_value(value)
         .map_err(|_| AgentError::InvalidData("malformed private conversation checkpoint"))?;
-    if checkpoint.version != CHECKPOINT_VERSION || checkpoint.message_count > MAX_HISTORY_EVENTS {
+    if !matches!(checkpoint.version, 1 | CHECKPOINT_VERSION)
+        || checkpoint.message_count > MAX_HISTORY_EVENTS
+        || (checkpoint.version == 1 && checkpoint.native.is_some())
+    {
         return Err(AgentError::InvalidData(
             "unsupported private conversation checkpoint",
         ));
     }
+    checkpoint.version = CHECKPOINT_VERSION;
     checkpoint.config.validate()?;
     if let Some(continuation) = &checkpoint.continuation {
         continuation.validate()?;
@@ -879,6 +908,10 @@ fn info(
             .pending
             .as_ref()
             .map(|pending| pending.command.command_id),
+        native_status: checkpoint
+            .native
+            .as_ref()
+            .map(native::NativeCheckpoint::status),
     })
 }
 
@@ -886,13 +919,14 @@ fn build_request(
     conversation: &Conversation,
     additional: Option<&ConversationMessage>,
 ) -> Result<ModelRequest, AgentError> {
+    let mut mapping = MessageMapping::default();
     let mut messages = conversation
         .messages
         .iter()
-        .map(|message| model_message(&message.message))
+        .map(|message| model_message(&message.message, &mut mapping))
         .collect::<Result<Vec<_>, _>>()?;
     if let Some(message) = additional {
-        messages.push(model_message(message)?);
+        messages.push(model_message(message, &mut mapping)?);
     }
     let mut request = ModelRequest::new(conversation.config.model.clone(), messages)?;
     request.instructions = Some(conversation.config.instructions.clone());
@@ -904,18 +938,65 @@ fn build_request(
     Ok(request)
 }
 
-fn model_message(message: &ConversationMessage) -> Result<model::Message, AgentError> {
+#[derive(Default)]
+struct MessageMapping {
+    calls: BTreeMap<ToolCallId, model::ToolCall>,
+    provider_ids: std::collections::HashSet<String>,
+    completed: std::collections::HashSet<ToolCallId>,
+}
+
+fn model_message(
+    message: &ConversationMessage,
+    mapping: &mut MessageMapping,
+) -> Result<model::Message, AgentError> {
     let role = match message.role {
         MessageRole::System => model::MessageRole::System,
         MessageRole::User => model::MessageRole::User,
         MessageRole::Assistant => model::MessageRole::Assistant,
-        MessageRole::Tool => return Err(AgentError::ToolsUnsupported),
+        MessageRole::Tool => model::MessageRole::Tool,
     };
     let mut content = Vec::with_capacity(message.content.len());
     for block in &message.content {
         match block {
             MessageContent::Text { text } => content.push(ContentBlock::Text(text.clone())),
-            _ => return Err(AgentError::ToolsUnsupported),
+            MessageContent::ToolCall(call) => {
+                let provider_id = call
+                    .provider_call_id
+                    .clone()
+                    .ok_or(AgentError::InvalidData(
+                        "host tool call cannot become a native provider call",
+                    ))?;
+                if mapping.calls.contains_key(&call.id)
+                    || !mapping.provider_ids.insert(provider_id.clone())
+                {
+                    return Err(AgentError::InvalidData(
+                        "duplicate durable or provider tool call identifier",
+                    ));
+                }
+                let converted =
+                    model::ToolCall::new(provider_id, call.name.clone(), call.arguments.clone())?;
+                mapping.calls.insert(call.id, converted.clone());
+                content.push(ContentBlock::ToolCall(converted));
+            }
+            MessageContent::ToolResult(result) => {
+                let call =
+                    mapping
+                        .calls
+                        .get(&result.tool_call_id)
+                        .ok_or(AgentError::InvalidData(
+                            "tool result has no durable native call mapping",
+                        ))?;
+                if !mapping.completed.insert(result.tool_call_id) {
+                    return Err(AgentError::InvalidData("duplicate durable tool result"));
+                }
+                let output = serde_json::from_str(&result.content)
+                    .map_err(|_| AgentError::InvalidData("native tool result is not valid JSON"))?;
+                content.push(ContentBlock::ToolResult(model::ToolResult::new(
+                    call.id.clone(),
+                    output,
+                    result.is_error,
+                )?));
+            }
         }
     }
     let message = model::Message { role, content };

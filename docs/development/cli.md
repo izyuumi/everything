@@ -1,4 +1,4 @@
-# Persistent text CLI
+# Persistent native CLI
 
 Build with `cargo build --release --locked`. `everything --state-dir /absolute/private/path` places the global state option before the subcommand. `EVERYTHING_STATE_DIR` supplies the same default; otherwise the CLI uses `$HOME/.everything`. The state directory is created with owner-only permissions and validated on every foreground open. One host owns its exclusive lock.
 
@@ -27,7 +27,7 @@ everything --state-dir /absolute/private/path chat --conversation CONVERSATION_U
 
 Each invocation performs one text turn; invoke `chat` again with the same UUID to continue its persisted history. A first `chat` can omit `--conversation` if it supplies `--provider` and `--model`; it creates a conversation and prints the conversation and command UUIDs to standard error. `--title` applies to that new conversation. Streaming text goes to standard output. It is provisional until standard error reports `saved message`. If the authoritative completed text differs from streamed deltas, the CLI prints the saved text separately.
 
-Message files must be regular UTF-8 files at most 128 KiB. Input text must be nonempty, contain no NUL, and fit the same bound. There is no implicit stdin read or interactive prompt. No tools execute through this initial text-only CLI.
+Message files must be regular UTF-8 files at most 128 KiB. Input text must be nonempty, contain no NUL, and fit the same bound. There is no implicit stdin read or interactive prompt. Tool execution is explicit through `--tools`; ordinary text invocations retain the text-only path.
 
 ## Replay and recover
 
@@ -47,3 +47,29 @@ Initialization supports explicit `--conversation` and `--command-id` values for 
 A new conversation can explicitly select a local proxy using `--loopback-endpoint http://127.0.0.1:PORT/v1/messages` for Anthropic, or `/v1/responses` for OpenAI. Literal IPv6 loopback is also supported. The full endpoint is persisted as immutable configuration; later commands retain it without repeating the flag. External custom endpoints, endpoint credentials, queries, and fragments are rejected. Credentials are still read from the selected environment variable.
 
 Compilation and static analysis do not verify live inference. Focused local validation can inspect offline initialization, restart persistence, strict replay, pending recovery, owner-only paths, and cancellation against disposable local resources. Do not send requests to live providers merely to verify a build. Automated tests, including issue #10's mock integration coverage, are deferred to [issue #32](https://github.com/izyuumi/everything/issues/32).
+
+## Native tool rounds
+
+Use a fresh conversation when entering native tool/context mode after a legacy text continuation. A new native turn saves the workspace, mode, context budget, memory inputs, selected tools, and run limits. The foreground CLI currently uses no memory excerpts; an injected host can supply retrieved excerpts and provenance.
+
+```sh
+everything --state-dir /absolute/private/path chat --provider openai --model MODEL_ID --tools --workspace /absolute/workspace --message "Find the relevant source files."
+everything --state-dir /absolute/private/path chat --conversation CONVERSATION_UUID --tools --resume
+```
+
+Read-only mode is the default. `--execution-mode trusted-workspace` permits authorized native writes inside the saved workspace. `--execution-mode full-host` exposes host-scoped capabilities, including shell, subject to exact operation approval. Arbitrary shell has full host access; path checks are not a sandbox. The registered tools are read_file, write_file, search_files, shell, and offline search_tools. The kernel can expand advertised schemas through successful local discovery without discarding native provider continuation.
+
+A required approval prints its exact request, arguments, scope, expiry, and UUID. Review it before a separate decision:
+
+```sh
+everything --state-dir /absolute/private/path chat --conversation CONVERSATION_UUID --tools --resume --approve APPROVAL_UUID
+everything --state-dir /absolute/private/path chat --conversation CONVERSATION_UUID --tools --resume --deny APPROVAL_UUID
+```
+
+An uncertain provider attempt stops on normal resume. Inspect status, then explicitly authorize another potentially paid request with `--tools --resume --retry-uncertain`. This flag never re-executes an unknown broker operation. In-flight broker operations retain their original UUID for lookup; unknown effects and required cleanup reconciliation remain stopped.
+
+Initial native budget options are `--context-tokens` (default 128000), `--max-model-attempts` (16), `--max-tool-calls` (64, including zero for a hard no-tools budget), `--max-charged-tokens` (1000000), and `--max-duration-seconds` (3600). Charged tokens conservatively reserve estimated input plus output capacity before each request; reported provider usage is separate. Active resume uses its saved setup and rejects workspace, mode, or budget overrides. An accepted command without an attached native setup, such as one stopped by missing credentials, may still supply those initial flags on resume.
+
+Tool messages and results are durable before subsequent inference. Larger model-facing results use explicit truncation metadata; the full output remains in the broker journal. Intermediate `saved assistant message` output may contain calls; only `completed task` reports a saved final native response. A paused tool invocation exits unsuccessfully and leaves resumable state. `status --history` excludes opaque provider checkpoint data.
+
+The CLI owns one foreground host and broker. It retains discovery bindings through the stream and drains active tool cleanup on signals or output failure. Background task scheduling and proxying CLI commands to an already running host are separate integrations. Successful live inference and native tool continuation with real providers require authorized credentials and remain unverified in this environment. See [agent contract](../contracts/agent.md).
