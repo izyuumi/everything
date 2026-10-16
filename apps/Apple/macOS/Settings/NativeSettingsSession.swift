@@ -89,6 +89,14 @@ actor NativeSettingsSession {
     struct DrainReport: Sendable {
         let failures: [NativeSettingsSessionError]
         let unresolvedOperationIDs: [UUID]
+        let pairingLifecycles: [UUID: NativeSettingsWire.PairingLifecycle]
+
+        init(failures: [NativeSettingsSessionError], unresolvedOperationIDs: [UUID],
+             pairingLifecycles: [UUID: NativeSettingsWire.PairingLifecycle] = [:]) {
+            self.failures = failures
+            self.unresolvedOperationIDs = unresolvedOperationIDs
+            self.pairingLifecycles = pairingLifecycles
+        }
     }
 
     private struct Record {
@@ -876,6 +884,8 @@ actor NativeSettingsSession {
 
     private func finishDrain() async -> DrainReport {
         var failures: [NativeSettingsSessionError] = []
+        var pairingLifecycles: [UUID: NativeSettingsWire.PairingLifecycle] = [:]
+        var pairingUnresolved: Set<UUID> = []
         if let openingTask, case .failure(let error) = await openingTask.value { failures.append(error) }
         let approvals = Array(pairingApprovals.values)
         for record in approvals {
@@ -900,7 +910,13 @@ actor NativeSettingsSession {
             for id in identifiers {
                 do {
                     if case .device(let request) = records[id]?.target, request.action == .pair {
-                        _ = try await pairingOriginal(id, cancel: true)
+                        pairingUnresolved.insert(id)
+                        let status = try await pairingOriginal(id, cancel: true)
+                        pairingLifecycles[id] = status.lifecycle
+                        switch status.lifecycle {
+                        case .cancelled, .expired, .noLongerPending: pairingUnresolved.remove(id)
+                        case .retained, .cancellationPending, .unavailable: failures.append(.operationUncertain)
+                        }
                     }
                     let inspection = try await inspectOriginal(id, operation: .inspect(id))
                     if let record = records[id], let observation = record.observation,
@@ -941,7 +957,9 @@ actor NativeSettingsSession {
             guard let status = record.status, case .finished(let result) = status.operation.phase, result.state != .unknown else { return id }
             return nil
         }
-        return DrainReport(failures: failures, unresolvedOperationIDs: (unresolved + approvalUnresolved).sorted { $0.uuidString < $1.uuidString })
+        let unresolvedIDs = Set(unresolved + approvalUnresolved).union(pairingUnresolved)
+        return DrainReport(failures: failures, unresolvedOperationIDs: unresolvedIDs.sorted { $0.uuidString < $1.uuidString },
+                           pairingLifecycles: pairingLifecycles)
     }
 
     private func sanitize(_ error: any Error) -> NativeSettingsSessionError {
