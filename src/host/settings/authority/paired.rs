@@ -372,3 +372,210 @@ impl Authority {
         ))
     }
 }
+
+pub(super) struct PairedUpdateProof {
+    record: Arc<ParentRecord>,
+    original: crate::storage::settings_originals::RemoteAcceptedIdentity,
+    invocation: Arc<()>,
+    deadline: Instant,
+    floor: (UnixMillis, Instant),
+}
+
+impl Authority {
+    pub(in crate::host::settings) fn paired_update_caller(
+        self: &Arc<Self>,
+        committed: &crate::devices::CommittedSettingsCommandSource<'_>,
+    ) -> Result<super::SettingsCaller, SettingsServiceError> {
+        let crate::storage::settings_originals::RemoteOriginalIdentity::Accepted(original) =
+            &committed.original().identity
+        else {
+            return Err(SettingsServiceError::OutsideScope);
+        };
+        let source = committed.authority_source();
+        let sessions = self
+            .sessions
+            .lock()
+            .map_err(|_| SettingsServiceError::Poisoned)?;
+        let record = sessions
+            .paired
+            .entries
+            .values()
+            .find(|entry| entry.record.id == original.remote_parent_id)
+            .map(|entry| Arc::clone(&entry.record))
+            .ok_or(SettingsServiceError::OutsideScope)?;
+        if record.peer != *source.verified_peer_keys()
+            || !Arc::ptr_eq(&record.connection, source.connection())
+            || original.host_id != self.host_id
+        {
+            return Err(SettingsServiceError::OutsideScope);
+        }
+        drop(sessions);
+        let caller = super::SettingsCaller {
+            authority: Arc::clone(self),
+            source: super::CallerSource::PairedSettings {
+                request_id: original.request_id,
+                actor_device_id: original.peer_keys.device_id,
+                remote_parent_id: original.remote_parent_id,
+                grant_id: original.grant_id,
+                grant_revision: original.grant_revision,
+                host_epoch: original.host_epoch,
+                connection_epoch: original.connection_epoch,
+            },
+            agent_identity: None,
+            paired_update: Some(Box::new(PairedUpdateProof {
+                record,
+                original: original.clone(),
+                invocation: Arc::clone(source.invocation_identity()),
+                deadline: committed.original_deadline(),
+                floor: committed.receipt_floor(),
+            })),
+        };
+        self.check_paired_update(&caller)?;
+        Ok(caller)
+    }
+
+    pub(in crate::host::settings) fn paired_update_identity<'caller>(
+        &self,
+        caller: &'caller super::SettingsCaller,
+    ) -> Result<
+        &'caller crate::storage::settings_originals::RemoteAcceptedIdentity,
+        SettingsServiceError,
+    > {
+        self.check_paired_update(caller)?;
+        Ok(&caller
+            .paired_update
+            .as_ref()
+            .ok_or(SettingsServiceError::OutsideScope)?
+            .original)
+    }
+
+    pub(in crate::host::settings) fn paired_update_matches(
+        &self,
+        caller: &super::SettingsCaller,
+        committed: &crate::devices::CommittedSettingsCommandSource<'_>,
+    ) -> Result<(), SettingsServiceError> {
+        self.check_paired_update(caller)?;
+        let proof = caller
+            .paired_update
+            .as_ref()
+            .ok_or(SettingsServiceError::OutsideScope)?;
+        if !Arc::ptr_eq(
+            &proof.invocation,
+            committed.authority_source().invocation_identity(),
+        ) || proof.deadline != committed.original_deadline()
+            || proof.floor != committed.receipt_floor()
+            || committed.original().identity
+                != crate::storage::settings_originals::RemoteOriginalIdentity::Accepted(
+                    proof.original.clone(),
+                )
+        {
+            return Err(SettingsServiceError::OutsideScope);
+        }
+        Ok(())
+    }
+
+    pub(in crate::host::settings) fn paired_update_cancellation(
+        &self,
+        caller: &super::SettingsCaller,
+    ) -> Result<CancellationToken, SettingsServiceError> {
+        self.check_paired_update(caller)?;
+        Ok(caller
+            .paired_update
+            .as_ref()
+            .ok_or(SettingsServiceError::OutsideScope)?
+            .record
+            .cancellation
+            .child_token())
+    }
+
+    pub(in crate::host::settings) fn check_paired_update(
+        &self,
+        caller: &super::SettingsCaller,
+    ) -> Result<(UnixMillis, Instant), SettingsServiceError> {
+        if !std::ptr::eq(self, Arc::as_ptr(&caller.authority)) {
+            return Err(SettingsServiceError::OutsideScope);
+        }
+        let proof = caller
+            .paired_update
+            .as_ref()
+            .ok_or(SettingsServiceError::OutsideScope)?;
+        let original = &proof.original;
+        let super::CallerSource::PairedSettings {
+            request_id,
+            actor_device_id,
+            remote_parent_id,
+            grant_id,
+            grant_revision,
+            host_epoch,
+            connection_epoch,
+        } = caller.source
+        else {
+            return Err(SettingsServiceError::OutsideScope);
+        };
+        if request_id != original.request_id
+            || actor_device_id != original.peer_keys.device_id
+            || remote_parent_id != original.remote_parent_id
+            || grant_id != original.grant_id
+            || grant_revision != original.grant_revision
+            || host_epoch != original.host_epoch
+            || connection_epoch != original.connection_epoch
+            || original.host_id != self.host_id
+            || original.owner_principal_id != self.owner_principal
+        {
+            return Err(SettingsServiceError::OutsideScope);
+        }
+        let mut sessions = self
+            .sessions
+            .lock()
+            .map_err(|_| SettingsServiceError::Poisoned)?;
+        if sessions.closed {
+            return Err(SettingsServiceError::Stopped);
+        }
+        let wall = UnixMillis::now()?;
+        let monotonic = Instant::now();
+        let host = sessions
+            .paired
+            .host
+            .as_ref()
+            .ok_or(SettingsServiceError::OutsideScope)?;
+        if !Arc::ptr_eq(host, proof.record.connection.host_identity()) || !host.is_live() {
+            return Err(SettingsServiceError::OutsideScope);
+        }
+        let entry = sessions
+            .paired
+            .entries
+            .values_mut()
+            .find(|entry| Arc::ptr_eq(&entry.record, &proof.record))
+            .ok_or(SettingsServiceError::OutsideScope)?;
+        let record = &entry.record;
+        let generation = &record.intent.generation;
+        if record.id != original.remote_parent_id
+            || record.peer != original.peer_keys
+            || generation.grant_id != original.grant_id
+            || generation.grant_revision != original.grant_revision
+            || generation.host_epoch != original.host_epoch
+            || generation.connection_epoch != original.connection_epoch
+            || !record.connection.is_live()
+            || record.cancellation.is_cancelled()
+            || original.expires_at > record.lifetime.expires_at
+            || wall < entry.observed_wall
+            || monotonic < entry.observed_monotonic
+            || wall < proof.floor.0
+            || monotonic < proof.floor.1
+            || wall < original.admitted_at
+            || wall < original.issued_at
+        {
+            return Err(SettingsServiceError::OutsideScope);
+        }
+        if wall >= original.expires_at
+            || monotonic >= proof.deadline
+            || wall >= record.lifetime.expires_at
+            || monotonic >= record.lifetime.deadline
+        {
+            return Err(SettingsServiceError::Expired);
+        }
+        entry.observed_wall = wall;
+        entry.observed_monotonic = monotonic;
+        Ok((wall, monotonic))
+    }
+}

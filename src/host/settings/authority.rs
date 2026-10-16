@@ -33,10 +33,22 @@ pub struct SettingsCaller {
     pub(super) authority: Arc<Authority>,
     pub(super) source: CallerSource,
     agent_identity: Option<Arc<()>>,
+    #[cfg(unix)]
+    paired_update: Option<Box<paired::PairedUpdateProof>>,
 }
 
 #[derive(Clone, Copy)]
 pub(super) enum CallerSource {
+    #[cfg(unix)]
+    PairedSettings {
+        request_id: CommandId,
+        actor_device_id: DeviceId,
+        remote_parent_id: Uuid,
+        grant_id: Uuid,
+        grant_revision: u64,
+        host_epoch: Uuid,
+        connection_epoch: Uuid,
+    },
     LocalOwner {
         request_id: CommandId,
     },
@@ -271,6 +283,8 @@ impl Authority {
                 request_id: call.request.request_id,
             },
             agent_identity: None,
+            #[cfg(unix)]
+            paired_update: None,
         })
     }
 
@@ -285,6 +299,8 @@ impl Authority {
                 request_id: call.request.request_id,
             },
             agent_identity: None,
+            #[cfg(unix)]
+            paired_update: None,
         })
     }
 
@@ -381,6 +397,8 @@ impl Authority {
             authority: Arc::clone(self),
             source: CallerSource::NativeUi(proof.session_id),
             agent_identity: None,
+            #[cfg(unix)]
+            paired_update: None,
         })
     }
 
@@ -391,6 +409,13 @@ impl Authority {
     ) -> Result<(), SettingsServiceError> {
         if !std::ptr::eq(self, Arc::as_ptr(&caller.authority)) {
             return Err(SettingsServiceError::OutsideScope);
+        }
+        #[cfg(unix)]
+        if matches!(caller.source, CallerSource::PairedSettings { .. }) {
+            if cleanup {
+                return Err(SettingsServiceError::OutsideScope);
+            }
+            return self.check_paired_update(caller).map(|_| ());
         }
         let now = UnixMillis::now()?;
         let sessions = self
@@ -452,6 +477,8 @@ impl Authority {
                 native_session_id, ..
             } => Ok(native_session_id),
             CallerSource::LocalOwner { .. } => Err(SettingsServiceError::OutsideScope),
+            #[cfg(unix)]
+            CallerSource::PairedSettings { .. } => Err(SettingsServiceError::OutsideScope),
         }
     }
 
@@ -528,6 +555,8 @@ impl Authority {
                 tool,
             },
             agent_identity: Some(Arc::clone(&session.identity)),
+            #[cfg(unix)]
+            paired_update: None,
         };
         self.validate(&caller, false)?;
         Ok(caller)
@@ -637,6 +666,12 @@ impl Authority {
         tool: SettingsToolName,
     ) -> Result<(), SettingsServiceError> {
         self.validate(caller, false)?;
+        #[cfg(unix)]
+        if matches!(caller.source, CallerSource::PairedSettings { .. })
+            && tool != SettingsToolName::Update
+        {
+            return Err(SettingsServiceError::OutsideScope);
+        }
         if let CallerSource::SettingsAgent { tool: actual, .. } = caller.source
             && actual != tool
         {
@@ -647,6 +682,23 @@ impl Authority {
 
     pub fn origin(&self, caller: &SettingsCaller) -> SettingsOperationOrigin {
         match caller.source {
+            #[cfg(unix)]
+            CallerSource::PairedSettings {
+                actor_device_id,
+                remote_parent_id,
+                grant_id,
+                grant_revision,
+                host_epoch,
+                connection_epoch,
+                ..
+            } => SettingsOperationOrigin::PairedSettings {
+                actor_device_id,
+                remote_parent_id,
+                grant_id,
+                grant_revision,
+                host_epoch,
+                connection_epoch,
+            },
             CallerSource::LocalOwner { request_id } => {
                 SettingsOperationOrigin::LocalOwner { request_id }
             }
