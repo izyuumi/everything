@@ -30,7 +30,7 @@ struct ThisMacSettingsView: View {
                             .disabled(!store.canInspect)
                     }
                 }
-                if let message = store.preferenceStatus { Text(message).accessibilityLiveRegion(.polite) }
+                if let message = store.preferenceStatus { Text(message) }
                 if let error = store.preferenceError { Text(error.errorDescription ?? "Local preferences are unavailable.").foregroundStyle(.red) }
                 if let patch = store.pendingPatch {
                     Text("Save reference: \(patch.requestID.uuidString.lowercased())")
@@ -60,7 +60,7 @@ struct ThisMacSettingsView: View {
                     Button("Refresh status") { store.refresh() }
                         .disabled(!store.isForeground || store.isObservingAuthorization || store.isRefreshing)
                 }
-                if let message = store.notificationStatus { Text(message).accessibilityLiveRegion(.polite) }
+                if let message = store.notificationStatus { Text(message) }
                 if let issue = store.notificationIssue { Text(issue.message).foregroundStyle(.red) }
                 if let instructions = store.notificationGuidance.instructions { Text(instructions) }
                 if store.notificationObservation?.authorization == .denied {
