@@ -16,7 +16,7 @@ use sha2::{Digest, Sha256};
 use tokio_util::sync::CancellationToken;
 use zeroize::Zeroizing;
 
-use super::accounting::ProviderAccounting;
+use super::accounting::{ProviderAccounting, ProviderWork};
 use super::{
     ContentBlock, MAX_CONTENT_BLOCKS, MAX_CONTINUATION_BYTES, MAX_JSON_BYTES, MAX_REQUEST_BYTES,
     MAX_TEXT_BYTES, Message, MessageRole, ModelError, ModelEvent, ModelProvider, ModelRequest,
@@ -211,23 +211,32 @@ impl ModelProvider for AnthropicProvider {
         };
         let runtime = tokio::runtime::Handle::try_current()
             .map_err(|_| transport("Anthropic requests require a Tokio runtime"))?;
+        let mut request = ProviderWork::new(request, self.config.accounting.as_ref())?;
+        request.fork_preparation()?;
         let preparation = runtime.spawn_blocking(move || {
-            request.validate()?;
-            let (body, names, continuation, index) = prepare_request(request, config)?;
-            let mut encoded = BoundedRequestBody(Vec::new());
-            serde_json::to_writer(&mut encoded, &body).map_err(|_| {
-                invalid(
-                    "request",
-                    "native Anthropic request exceeds 32 MiB or cannot be encoded",
-                )
-            })?;
-            Ok::<_, ModelError>((encoded.0, names, continuation, index))
+            request.prepare(|request| {
+                request.validate()?;
+                let (body, names, continuation, index) = prepare_request(request, config)?;
+                let mut encoded = BoundedRequestBody(Vec::new());
+                serde_json::to_writer(&mut encoded, &body).map_err(|_| {
+                    invalid(
+                        "request",
+                        "native Anthropic request exceeds 32 MiB or cannot be encoded",
+                    )
+                })?;
+                Ok::<_, ModelError>((encoded.0, names, continuation, index))
+            })
         });
-        let (body, tool_names, continuation, assistant_index) = tokio::select! {
+        let ProviderWork {
+            value,
+            root,
+            preparation,
+        } = tokio::select! {
             biased;
             _ = cancellation.cancelled() => return Err(ModelError::Cancelled),
-            prepared = preparation => prepared.map_err(|_| transport("Anthropic request preparation failed"))??,
+            prepared = preparation => prepared.map_err(|_| transport("Anthropic request preparation failed"))?,
         };
+        let (body, tool_names, continuation, assistant_index) = value?;
         if cancellation.is_cancelled() {
             return Err(ModelError::Cancelled);
         }
@@ -314,7 +323,12 @@ impl ModelProvider for AnthropicProvider {
                 Err(protocol("Anthropic event stream ended without message_stop"))?;
             }
         };
-        Ok(Box::pin(stream))
+        Ok(ProviderWork {
+            value: Box::pin(stream) as ProviderStream,
+            root,
+            preparation,
+        }
+        .into_stream())
     }
 }
 

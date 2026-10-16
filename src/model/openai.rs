@@ -16,7 +16,7 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 use tokio_util::sync::CancellationToken;
 
-use super::accounting::ProviderAccounting;
+use super::accounting::{ProviderAccounting, ProviderWork};
 use super::{
     ContentBlock, MAX_CONTENT_BLOCKS, MAX_CONTINUATION_BYTES, MAX_JSON_BYTES, MAX_REQUEST_BYTES,
     MAX_TEXT_BYTES, Message, MessageRole, ModelError, ModelEvent, ModelProvider, ModelRequest,
@@ -189,17 +189,26 @@ impl ModelProvider for OpenAiProvider {
         if cancellation.is_cancelled() {
             return Err(ModelError::Cancelled);
         }
+        let mut request = ProviderWork::new(request, self.config.accounting.as_ref())?;
+        request.fork_preparation()?;
         let preparation = tokio::task::spawn_blocking(move || {
-            request.validate()?;
-            let continuation = read_continuation(&request)?;
-            let body = prepare_request(&request, &continuation)?;
-            Ok::<_, ModelError>((request, continuation, body))
+            request.prepare(|request| {
+                request.validate()?;
+                let continuation = read_continuation(&request)?;
+                let body = prepare_request(&request, &continuation)?;
+                Ok::<_, ModelError>((request, continuation, body))
+            })
         });
-        let (request, continuation, body) = tokio::select! {
+        let ProviderWork {
+            value,
+            root,
+            preparation,
+        } = tokio::select! {
             biased;
             _ = cancellation.cancelled() => return Err(ModelError::Cancelled),
-            prepared = preparation => prepared.map_err(|_| transport("request preparation failed"))??,
+            prepared = preparation => prepared.map_err(|_| transport("request preparation failed"))?,
         };
+        let (request, continuation, body) = value?;
         if cancellation.is_cancelled() {
             return Err(ModelError::Cancelled);
         }
@@ -300,7 +309,12 @@ impl ModelProvider for OpenAiProvider {
                 }
             }
         };
-        Ok(Box::pin(stream))
+        Ok(ProviderWork {
+            value: Box::pin(stream) as ProviderStream,
+            root,
+            preparation,
+        }
+        .into_stream())
     }
 }
 
