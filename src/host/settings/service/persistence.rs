@@ -102,3 +102,151 @@ pub(super) fn file_fingerprint(
         sha256: format!("{:x}", digest.finalize()),
     })
 }
+
+impl super::SettingsService {
+    pub async fn reconcile_write(
+        &self,
+        caller: super::SettingsCaller,
+        operation_id: crate::protocol::CommandId,
+        cancellation: tokio_util::sync::CancellationToken,
+    ) -> Result<super::super::SettingsOperationInspection, SettingsServiceError> {
+        let cleanup = match caller.source {
+            super::super::authority::CallerSource::NativeUi(_) => true,
+            super::super::authority::CallerSource::LocalOwner { .. } => false,
+            super::super::authority::CallerSource::SettingsAgent { .. } => {
+                return Err(SettingsServiceError::OutsideScope);
+            }
+        };
+        self.core.authority.validate(&caller, cleanup)?;
+        if !cleanup {
+            self.core
+                .authority
+                .require_tool(&caller, super::super::contract::SettingsToolName::Get)?;
+        }
+        let mutation = tokio::select! {
+            biased;
+            _=cancellation.cancelled()=>return Err(SettingsServiceError::Cancelled),
+            guard=std::sync::Arc::clone(&self.core.mutation).lock_owned()=>guard,
+        };
+        self.blocking(move |core| {
+            let _mutation = mutation;
+            core.authority.validate(&caller, cleanup)?;
+            if cancellation.is_cancelled() {
+                return Err(SettingsServiceError::Cancelled);
+            }
+            let record = core.repository.get(operation_id)?;
+            core.check_principal(&caller, &record.identity)?;
+            let write = record.write().ok_or(SettingsServiceError::Conflict)?;
+            if write.resolution.is_some() {
+                return Ok(record.inspection());
+            }
+            core.repository
+                .unresolved_write()?
+                .ok_or(SettingsServiceError::CorruptJournal)?;
+            let inspection = core.reconcile_file(&record.identity, &write.intent)?;
+            core.authority.validate(&caller, cleanup)?;
+            Ok(inspection)
+        })
+        .await
+    }
+}
+
+impl super::ServiceCore {
+    pub(super) fn reconcile_file(
+        &self,
+        identity: &super::super::operations::OperationIdentity,
+        intent: &SettingsWriteIntent,
+    ) -> Result<super::super::SettingsOperationInspection, SettingsServiceError> {
+        use super::super::contract::{SettingsFailureReason, SettingsOperationState};
+        let observed = self.settings.observe_file(intent);
+        let (resolution, state) = match observed {
+            Ok(Some(observation)) => {
+                let state = match observation.resolution {
+                    SettingsWriteResolution::NotApplied => SettingsOperationState::Failed {
+                        reason: SettingsFailureReason::ApplyFailed,
+                    },
+                    SettingsWriteResolution::Applied
+                        if intent.memory_changed || intent.selection_changed =>
+                    {
+                        SettingsOperationState::PendingApplication {
+                            revision: observation.settings.revision,
+                        }
+                    }
+                    SettingsWriteResolution::Applied if intent.restart_required => {
+                        SettingsOperationState::RestartRequired {
+                            revision: observation.settings.revision,
+                        }
+                    }
+                    SettingsWriteResolution::Applied => SettingsOperationState::Applied {
+                        revision: observation.settings.revision,
+                    },
+                };
+                (Some(observation.resolution), state)
+            }
+            Ok(None) => (None, SettingsOperationState::Unknown),
+            Err(cause) => {
+                let repair = self.repository.finish_write(
+                    identity,
+                    intent,
+                    None,
+                    self.result(identity, SettingsOperationState::Unknown),
+                );
+                return Err(SettingsServiceError::OutcomeUnknown {
+                    request_id: identity.binding.request_id,
+                    cause: Box::new(cause),
+                    repair_error: repair.err().map(Box::new),
+                });
+            }
+        };
+        let inspection = self
+            .repository
+            .finish_write(identity, intent, resolution, self.result(identity, state))
+            .map_err(|cause| SettingsServiceError::OutcomeUnknown {
+                request_id: identity.binding.request_id,
+                cause: Box::new(cause),
+                repair_error: None,
+            })?;
+        if resolution.is_some() {
+            let cleanup = (|| {
+                let claim = self
+                    .claims
+                    .lock()
+                    .map_err(|_| SettingsServiceError::Poisoned)?
+                    .remove(&identity.binding.request_id);
+                if let Some(claim) = claim {
+                    claim.close()?;
+                    let session = claim
+                        .session
+                        .lock()
+                        .map_err(|_| SettingsServiceError::Poisoned)?
+                        .take();
+                    drop(session);
+                }
+                let retained = {
+                    let mut active = self
+                        .active_write
+                        .lock()
+                        .map_err(|_| SettingsServiceError::Poisoned)?;
+                    if active
+                        .as_ref()
+                        .is_some_and(|active| active.request_id == identity.binding.request_id)
+                    {
+                        active.take()
+                    } else {
+                        None
+                    }
+                };
+                drop(retained);
+                Ok::<(), SettingsServiceError>(())
+            })();
+            if let Err(cause) = cleanup {
+                return Err(SettingsServiceError::OutcomeUnknown {
+                    request_id: identity.binding.request_id,
+                    cause: Box::new(cause),
+                    repair_error: None,
+                });
+            }
+        }
+        Ok(inspection)
+    }
+}

@@ -3,9 +3,6 @@ mod devices;
 mod persistence;
 mod updates;
 
-pub use super::operations::{
-    SettingsApplicationState, SettingsWriteInspection, SettingsWriteResolution,
-};
 pub use changes::{SettingsChangeHint, SettingsChangePage, SettingsChangeState};
 pub use devices::NativeDeviceActionResult;
 

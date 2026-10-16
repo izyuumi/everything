@@ -149,3 +149,105 @@ pub(super) fn tool_selection(
         }),
     }
 }
+
+pub(super) struct OwnerDifference {
+    pub changed_keys: Vec<SettingKey>,
+    pub memory_changed: bool,
+    pub selection_changed: bool,
+    pub protected: bool,
+    pub restart_required: bool,
+}
+
+pub(super) fn embeddings_enabled(settings: &HostSettings) -> bool {
+    settings
+        .preference_overrides
+        .embeddings_enabled
+        .unwrap_or(!matches!(
+            settings.memory.embeddings,
+            crate::host::memory::EmbeddingSettings::Disabled
+        ))
+}
+
+pub(super) fn embedding_dimensions(settings: &HostSettings) -> Option<u32> {
+    match settings.preference_overrides.embedding_dimensions {
+        EmbeddingDimensionsOverride::BackendDefault => None,
+        EmbeddingDimensionsOverride::Selected { dimensions } => Some(dimensions),
+        EmbeddingDimensionsOverride::Inherit => match &settings.memory.embeddings {
+            crate::host::memory::EmbeddingSettings::Disabled => None,
+            crate::host::memory::EmbeddingSettings::EmbeddingGemma2(configuration) => {
+                Some(configuration.dimensions as u32)
+            }
+        },
+    }
+}
+
+pub(super) fn owner_difference(
+    before: &HostSettings,
+    after: &HostSettings,
+) -> Result<OwnerDifference, SettingsServiceError> {
+    let model_changed = model_selection(before) != model_selection(after);
+    let tool_changed = tool_selection(before)? != tool_selection(after)?;
+    let mut changed_keys = Vec::new();
+    if model_changed {
+        changed_keys.push(SettingKey::ModelSelection);
+    }
+    if tool_changed {
+        changed_keys.push(SettingKey::ToolSelection);
+    }
+    if embeddings_enabled(before) != embeddings_enabled(after) {
+        changed_keys.push(SettingKey::EmbeddingsEnabled);
+    }
+    if embedding_dimensions(before) != embedding_dimensions(after) {
+        changed_keys.push(SettingKey::EmbeddingsDimensions);
+    }
+    let memory_changed = !same_value(&before.memory.embeddings, &after.memory.embeddings)?
+        || before.preference_overrides.embeddings_enabled
+            != after.preference_overrides.embeddings_enabled
+        || before.preference_overrides.embedding_dimensions
+            != after.preference_overrides.embedding_dimensions;
+    let selection_changed = before.selection != after.selection
+        || before.preference_overrides.system_one_enabled
+            != after.preference_overrides.system_one_enabled;
+    let mut retained_memory = before.memory.clone();
+    retained_memory.embeddings = after.memory.embeddings.clone();
+    let restart_required = !same_value(&retained_memory, &after.memory)?
+        || !same_value(&before.mcp, &after.mcp)?
+        || before.worker != after.worker
+        || before.relay_origin != after.relay_origin;
+    let configured_selection_before = configured_selection(before)?;
+    let configured_selection_after = configured_selection(after)?;
+    Ok(OwnerDifference {
+        changed_keys,
+        memory_changed,
+        selection_changed,
+        protected: model_changed
+            || tool_changed
+            || configured_selection_before != configured_selection_after,
+        restart_required,
+    })
+}
+
+fn configured_selection(
+    settings: &HostSettings,
+) -> Result<ToolSelectionPreference, SettingsServiceError> {
+    match settings
+        .selection
+        .configuration()
+        .map_err(|_| SettingsServiceError::Invalid("configured System One selection"))?
+    {
+        SelectionConfig::Local => Ok(ToolSelectionPreference::Local),
+        SelectionConfig::SystemOne(settings) => Ok(ToolSelectionPreference::SystemOne {
+            endpoint: settings.endpoint().into(),
+            model: settings.model().into(),
+        }),
+    }
+}
+
+fn same_value(
+    left: &impl serde::Serialize,
+    right: &impl serde::Serialize,
+) -> Result<bool, SettingsServiceError> {
+    let left = serde_json::to_value(left).map_err(|_| SettingsServiceError::Encoding)?;
+    let right = serde_json::to_value(right).map_err(|_| SettingsServiceError::Encoding)?;
+    Ok(left == right)
+}

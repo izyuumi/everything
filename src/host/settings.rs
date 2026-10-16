@@ -9,7 +9,10 @@ pub use authority::{
     NativeSessionOpened, NativeSessionProof, SettingsAgentSession, SettingsCaller,
     SettingsOperationOrigin,
 };
-pub use operations::{SettingsOperationInspection, SettingsOperationPhase};
+pub use operations::{
+    SettingsApplicationState, SettingsOperationInspection, SettingsOperationPhase,
+    SettingsWriteInspection, SettingsWriteResolution,
+};
 
 use std::fs::File;
 use std::io::{self, Read, Write};
