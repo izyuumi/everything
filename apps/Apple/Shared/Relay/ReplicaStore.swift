@@ -79,9 +79,19 @@ private enum SQLValue {
     case text(String), integer(Int64), bytes(Data), null
 }
 
+private struct ReplicaTransactionRollbackFailure: Error, LocalizedError, CustomStringConvertible, CustomDebugStringConvertible {
+    let primary: any Error
+    let rollback: any Error
+
+    var errorDescription: String? { "Protected local storage requires inspection after rollback failed." }
+    var description: String { "ReplicaTransactionRollbackFailure([retained causes])" }
+    var debugDescription: String { description }
+}
+
 private final class ReplicaDatabase: @unchecked Sendable {
     let handle: OpaquePointer
     private let transient = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
+    private var quarantined = false
 
     init(url: URL) throws {
         var opened: OpaquePointer?
@@ -101,6 +111,7 @@ private final class ReplicaDatabase: @unchecked Sendable {
 
     @discardableResult
     func rows<T>(_ sql: String, _ values: [SQLValue] = [], map: (OpaquePointer) throws -> T) throws -> [T] {
+        guard !quarantined else { throw WireError.storage }
         var statement: OpaquePointer?
         try check(sqlite3_prepare_v2(handle, sql, -1, &statement, nil))
         guard let statement else { throw WireError.storage }
@@ -133,8 +144,13 @@ private final class ReplicaDatabase: @unchecked Sendable {
             try execute("COMMIT")
             return result
         } catch {
-            do { try execute("ROLLBACK") } catch { throw WireError.storage }
-            throw error
+            let primary = error
+            do { try execute("ROLLBACK") }
+            catch {
+                quarantined = true
+                throw ReplicaTransactionRollbackFailure(primary: primary, rollback: error)
+            }
+            throw primary
         }
     }
 
