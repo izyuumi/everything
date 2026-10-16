@@ -335,10 +335,10 @@ impl Consolidator {
                         "UPDATE maintenance_jobs SET cancel_requested = 1 WHERE id = ?1",
                         [&id],
                     )?;
-                    if let Some((active, token)) = &state.active {
-                        if active == &id {
-                            token.cancel();
-                        }
+                    if let Some((active, token)) = &state.active
+                        && active == &id
+                    {
+                        token.cancel();
                     }
                 }
                 MaintenancePhase::Completed | MaintenancePhase::Cancelled => {}
@@ -751,9 +751,8 @@ impl MaintenanceState {
         let encoded = serde_json::to_string(request)?;
         let digest = digest("request", encoded.as_bytes());
         if let Some(existing) = self.connection.query_row("SELECT id FROM maintenance_jobs WHERE id = ?1 OR ingest_digest = ?2 ORDER BY sequence LIMIT 1", params![id, if matches!(request, MaintenanceRequest::Ingest { .. }) { Some(&digest) } else { None }], |row| row.get::<_, String>(0)).optional()? {
-            if let Ok(job) = self.job(id) {
-                if job.request_digest != digest { return Err(ConsolidationError::JobConflict(id.into())); }
-            }
+            if let Ok(job) = self.job(id)
+                && job.request_digest != digest { return Err(ConsolidationError::JobConflict(id.into())); }
             let mut job = self.job(&existing)?;
             if job.request_digest != digest { return Err(ConsolidationError::JobConflict(id.into())); }
             job.replayed = true;
@@ -1258,19 +1257,18 @@ impl MaintenanceState {
                                 "Managed ID occurs more than once in this lint page",
                             );
                         }
-                        if let Some(successor) = &entry.successor {
-                            if !by_id
+                        if let Some(successor) = &entry.successor
+                            && !by_id
                                 .get(successor.as_str())
                                 .is_some_and(|next| next.supersedes.contains(&entry.id))
-                            {
-                                finding(
-                                    &mut report,
-                                    path,
-                                    entry.start_line,
-                                    "broken_supersession",
-                                    "Superseded entry has no reciprocal successor",
-                                );
-                            }
+                        {
+                            finding(
+                                &mut report,
+                                path,
+                                entry.start_line,
+                                "broken_supersession",
+                                "Superseded entry has no reciprocal successor",
+                            );
                         }
                         let mut chain = BTreeSet::new();
                         let mut current = Some(entry.id.as_str());
