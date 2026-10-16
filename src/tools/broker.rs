@@ -436,7 +436,7 @@ impl ToolBroker {
                 "cleanup requires an exact digest and a nonempty bounded note".into(),
             ));
         }
-        let _gate = tokio::time::timeout(
+        let gate = tokio::time::timeout(
             self.inner.limits.queue_timeout,
             Arc::clone(&self.inner.exclusion).write_owned(),
         )
@@ -447,7 +447,8 @@ impl ToolBroker {
         let expected_result_digest = expected_result_digest.to_owned();
         let operator = operator.to_owned();
         let note = note.to_owned();
-        let mut report = blocking(None, move || {
+        blocking(None, move || {
+            let _gate = gate;
             let status = inner.store.tool_cleanup_status(&operation_id)?;
             if status.original_result_digest != expected_result_digest {
                 return Err(BrokerError::CleanupAttestationConflict { operation_id });
@@ -478,15 +479,15 @@ impl ToolBroker {
                 }
             };
             inner.store.attest_tool_cleanup(&attestation)?;
-            inspect_cleanup(&inner.store, inner.recovered_operations)
+            let mut report = inspect_cleanup(&inner.store, inner.recovered_operations)?;
+            report.restart_required = inner.restart_required.load(Ordering::Acquire);
+            report.quarantined |= report.restart_required;
+            inner
+                .quarantined
+                .store(report.quarantined, Ordering::Release);
+            Ok(report)
         })
-        .await?;
-        report.restart_required = self.inner.restart_required.load(Ordering::Acquire);
-        report.quarantined |= report.restart_required;
-        self.inner
-            .quarantined
-            .store(report.quarantined, Ordering::Release);
-        Ok(report)
+        .await
     }
 
     pub async fn execute(
