@@ -1744,6 +1744,13 @@ impl ServiceCore {
         caller: &SettingsCaller,
         identity: &OperationIdentity,
     ) -> Result<(), SettingsServiceError> {
+        if matches!(
+            identity.origin,
+            SettingsOperationOrigin::PairedSettings { .. }
+                | SettingsOperationOrigin::PairedSettingsAgent { .. }
+        ) {
+            return Err(SettingsServiceError::OutsideScope);
+        }
         if !Arc::ptr_eq(&self.authority, &caller.authority)
             || identity.binding.principal_id != self.authority.principal()
         {
