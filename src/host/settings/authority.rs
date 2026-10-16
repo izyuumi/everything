@@ -13,7 +13,7 @@ use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 use zeroize::Zeroizing;
 
-use crate::protocol::{DeviceId, UnixMillis};
+use crate::protocol::{CommandId, DeviceId, UnixMillis};
 
 use super::contract::SettingsToolName;
 use crate::transport::local::LocalCall;
@@ -30,7 +30,9 @@ pub struct SettingsCaller {
 
 #[derive(Clone, Copy)]
 pub(super) enum CallerSource {
-    LocalOwner,
+    LocalOwner {
+        request_id: CommandId,
+    },
     NativeUi(Uuid),
     SettingsAgent {
         session_id: Uuid,
@@ -42,7 +44,9 @@ pub(super) enum CallerSource {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum SettingsOperationOrigin {
-    LocalOwner,
+    LocalOwner {
+        request_id: CommandId,
+    },
     NativeUi {
         session_id: Uuid,
     },
@@ -221,7 +225,9 @@ impl Authority {
         }
         Ok(SettingsCaller {
             authority: Arc::clone(self),
-            source: CallerSource::LocalOwner,
+            source: CallerSource::LocalOwner {
+                request_id: call.request.request_id,
+            },
         })
     }
 
@@ -322,7 +328,7 @@ impl Authority {
             .lock()
             .map_err(|_| SettingsServiceError::Poisoned)?;
         match caller.source {
-            CallerSource::LocalOwner if !sessions.closed && !cleanup => Ok(()),
+            CallerSource::LocalOwner { .. } if !sessions.closed && !cleanup => Ok(()),
             CallerSource::NativeUi(id) => {
                 let session = sessions
                     .values
@@ -373,7 +379,7 @@ impl Authority {
             CallerSource::SettingsAgent {
                 native_session_id, ..
             } => Ok(native_session_id),
-            CallerSource::LocalOwner => Err(SettingsServiceError::OutsideScope),
+            CallerSource::LocalOwner { .. } => Err(SettingsServiceError::OutsideScope),
         }
     }
 
@@ -466,7 +472,9 @@ impl Authority {
 
     pub fn origin(&self, caller: &SettingsCaller) -> SettingsOperationOrigin {
         match caller.source {
-            CallerSource::LocalOwner => SettingsOperationOrigin::LocalOwner,
+            CallerSource::LocalOwner { request_id } => {
+                SettingsOperationOrigin::LocalOwner { request_id }
+            }
             CallerSource::NativeUi(session_id) => SettingsOperationOrigin::NativeUi { session_id },
             CallerSource::SettingsAgent {
                 session_id,
@@ -508,7 +516,7 @@ impl Authority {
                 }
                 *native_session_id
             }
-            SettingsOperationOrigin::LocalOwner => return Ok(()),
+            SettingsOperationOrigin::LocalOwner { .. } => return Ok(()),
         };
         let native = sessions
             .values

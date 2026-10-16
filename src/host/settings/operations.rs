@@ -113,6 +113,10 @@ impl OperationIdentity {
         }
         self.binding.validate()?;
         match &self.origin {
+            SettingsOperationOrigin::LocalOwner { request_id }
+                if *request_id == self.binding.request_id
+                    && *request_id.as_uuid() == self.binding.client_session_id
+                    && matches!(self.target, SettingsActionTarget::Patch(_)) => {}
             SettingsOperationOrigin::NativeUi { session_id }
                 if *session_id == self.binding.client_session_id && !session_id.is_nil() => {}
             SettingsOperationOrigin::SettingsAgent {

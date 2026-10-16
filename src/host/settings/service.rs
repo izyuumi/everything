@@ -199,14 +199,14 @@ impl SettingsService {
         self.core.authority.native(call, proof, true)
     }
 
-    pub(crate) fn begin_settings_session(
+    pub fn begin_settings_session(
         &self,
         caller: SettingsCaller,
     ) -> Result<SettingsAgentSession, SettingsServiceError> {
         self.core.authority.begin_agent(&caller)
     }
 
-    pub(crate) fn settings_session_caller(
+    pub fn settings_session_caller(
         &self,
         session: &SettingsAgentSession,
         tool: SettingsToolName,
