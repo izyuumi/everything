@@ -1,6 +1,6 @@
 # Restricted Settings agent source
 
-The #113 source candidate adds an on-demand Settings conversation to the existing Rust Host. Combined compilation, strict static analysis and disposable runtime verification remain pending. This document describes the implemented source boundaries; it does not establish working inference, an Apple screen, native platform verification or security readiness. Deferred automation remains [#32](https://github.com/izyuumi/everything/issues/32).
+The #113 runtime implementation merged in PR #143, adding an on-demand Settings conversation to the existing Rust Host. Actual exact-tree PR CI passed all seven Linux/macOS compilation/static/release forms and Rust1.88 MSRV. Later integration heads need their own applicable checks; disposable runtime verification remains pending. This document describes the implemented source boundaries; it does not establish working inference, an Apple screen, native platform verification or security readiness. Deferred automation remains [#32](https://github.com/izyuumi/everything/issues/32).
 
 ## Ownership and execution
 

@@ -1,6 +1,6 @@
 # Private Settings runtime contracts
 
-These contracts describe the #113 source candidate. Combined Rust gates and disposable behavior verification remain pending. The existing [typed Settings contract](settings.md) and its native action/confirmation authority remain authoritative.
+These contracts describe the #113 implementation merged in PR #143 after exact-tree Linux/macOS compilation/static/release and Rust1.88 checks passed. Disposable behavior verification remains pending; later integration heads require their own checks. The existing [typed Settings contract](settings.md) and its native action/confirmation authority remain authoritative.
 
 ## Private native frames
 

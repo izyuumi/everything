@@ -429,6 +429,7 @@
                 "53488E3C87EE638D27D5E7AC",
                 "9A366DE20CFD9B8E254752CF",
                 "BFEC0EC93EFD77227B071563",
+                "23879FBD469F2CB181AA5704",
             );
             "runOnlyForDeploymentPostprocessing" = "0";
         };
@@ -688,6 +689,10 @@
             "lastKnownFileType" = "sourcecode.swift";
             "path" = "Pairing.swift";
             "sourceTree" = "<group>";
+        };
+        "23879FBD469F2CB181AA5704" = {
+            "isa" = "PBXBuildFile";
+            "fileRef" = "1016BFB55EA83224B544938D";
         };
         "E69DF34A052D3EDAFC894B8F" = {
             "isa" = "PBXBuildFile";
