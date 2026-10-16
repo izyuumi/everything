@@ -3,11 +3,12 @@ import SwiftUI
 
 @MainActor
 struct SettingsWindowObserver: NSViewRepresentable {
+    let bindingID: UUID
     let onChange: @MainActor (Bool, Bool) -> Void
     let onClose: @MainActor () -> Void
 
     func makeCoordinator() -> Coordinator {
-        Coordinator(onChange: onChange, onClose: onClose)
+        Coordinator(bindingID: bindingID, onChange: onChange, onClose: onClose)
     }
 
     func makeNSView(context: Context) -> WindowView {
@@ -17,8 +18,7 @@ struct SettingsWindowObserver: NSViewRepresentable {
     }
 
     func updateNSView(_ view: WindowView, context: Context) {
-        context.coordinator.onChange = onChange
-        context.coordinator.onClose = onClose
+        context.coordinator.rebind(bindingID: bindingID, onChange: onChange, onClose: onClose)
     }
 
     static func dismantleNSView(_ view: WindowView, coordinator: Coordinator) {
@@ -38,8 +38,9 @@ struct SettingsWindowObserver: NSViewRepresentable {
 
     @MainActor
     final class Coordinator: NSObject {
-        var onChange: @MainActor (Bool, Bool) -> Void
-        var onClose: @MainActor () -> Void
+        private var bindingID: UUID
+        private var onChange: @MainActor (Bool, Bool) -> Void
+        private var onClose: @MainActor () -> Void
         private weak var window: NSWindow?
         private var closing = false
         private var stopped = false
@@ -51,7 +52,8 @@ struct SettingsWindowObserver: NSViewRepresentable {
             let active: Bool
         }
 
-        init(onChange: @escaping @MainActor (Bool, Bool) -> Void, onClose: @escaping @MainActor () -> Void) {
+        init(bindingID: UUID, onChange: @escaping @MainActor (Bool, Bool) -> Void, onClose: @escaping @MainActor () -> Void) {
+            self.bindingID = bindingID
             self.onChange = onChange
             self.onClose = onClose
             super.init()
@@ -64,6 +66,23 @@ struct SettingsWindowObserver: NSViewRepresentable {
 
         deinit {
             NotificationCenter.default.removeObserver(self)
+        }
+
+        func rebind(bindingID selected: UUID, onChange: @escaping @MainActor (Bool, Bool) -> Void, onClose: @escaping @MainActor () -> Void) {
+            guard !stopped else { return }
+            if bindingID != selected {
+                closeSurface()
+                bindingID = selected
+                self.onChange = onChange
+                self.onClose = onClose
+                closing = false
+                closeDelivered = false
+                previous = nil
+                publish()
+            } else {
+                self.onChange = onChange
+                self.onClose = onClose
+            }
         }
 
         func attach(_ selected: NSWindow?) {
