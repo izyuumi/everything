@@ -2,9 +2,15 @@
 
 `src/storage.rs` implements durable host storage for issue #3. `Store` owns one SQLite connection behind a shared mutex. Clones share that connection. The API is synchronous: async callers must execute storage calls inside `tokio::task::spawn_blocking` or an equivalent dedicated blocking boundary. Owned asynchronous exclusion guards may remain held through that blocking transaction when the component's lock order requires continuous authority; remote admission transfers those guards and its leased Agent into the actual blocking closure so caller cancellation cannot release them early. Do not block Tokio workers, hold synchronous mutex guards across awaits, or create a dependency cycle in which a storage worker needs a lock held by its waiting caller. The public API exposes no connection or transaction handle. Trusted crate-internal typed repositories may acquire the same mutex-protected connection through `Store::connection`; they must not open a second connection or expose raw SQL publicly.
 
+## Permanent connection quarantine
+
+Every Store clone shares a permanent connection-health latch. `connection()` checks it before attempting the real mutex and again after acquisition, so a waiter cannot inherit a quarantined connection. `quarantine_connection()` is crate-private and sets the shared latch without SQL. A writer must invoke it while still holding that exact Main connection mutex after an observed rollback failure, before releasing the mutex. All subsequent checked borrows return `StorageError::Quarantined`; no reset, retry, repair or alternate connection is provided.
+
+This protects unrelated Store users from an uncertain transaction left active after rollback failure. It does not prove whether a prior commit or rollback occurred, destroy data, retire Source/permit ownership or establish Host drain. The original structured primary and rollback errors remain with their actual worker. Writer integration, strict compilation and disposable engine/concurrency/fault observations remain separate gates; no forced failure was executed for this latch. See [ADR-0013](../decisions/ADR-0013-permanent-store-quarantine.md).
+
 ## Initialization and migrations
 
-`Store::open(path)` opens or creates a database at an existing parent directory. Startup enables foreign keys, WAL, full synchronous durability, and a five-second busy timeout before applying pending versioned migrations in one immediate transaction. Fresh databases apply migrations `0001_initial.sql` through `0015_settings_grants.sql` in order; existing databases apply only their pending migrations. The current schema version is SQLite `user_version = 15`; newer databases are rejected. The ordered additions are:
+`Store::open(path)` opens or creates a database at an existing parent directory. Startup enables foreign keys, WAL, full synchronous durability, and a five-second busy timeout before applying pending versioned migrations in one immediate transaction. Fresh databases apply migrations `0001_initial.sql` through `0017_settings_transport.sql` in order; existing databases apply only their pending migrations. The current schema version is SQLite `user_version = 17`; newer databases are rejected. The ordered additions are:
 
 | Migration | Addition |
 | --- | --- |
@@ -23,6 +29,8 @@
 | 13 | Revisioned Settings operations, native requests and immutable operation updates |
 | 14 | Restricted Settings namespace, original sessions/turn fences and cleanup attestations |
 | 15 | Immutable scoped Settings grant decisions, current heads and reserved revocation capacity |
+| 16 | Durable scoped Settings Originals, bounded lifecycle metadata and protected operation roots |
+| 17 | Private reply reservations and immutable encrypted outbox associations |
 
 See [scheduled storage](scheduling-storage.md), [host inbox](host-inbox.md), [schedule admission](scheduling-engine.md), [scheduled execution](scheduled-execution.md), [worker terminal sources](worker-terminal-sources.md) and [remote binding lookup](remote-binding-lookup.md) for component invariants. `open_in_memory` uses the same migrations and constraints, with SQLite's in-memory journal mode because WAL is unavailable for memory databases. There is no backup or restore API.
 

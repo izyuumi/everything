@@ -21,6 +21,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 use thiserror::Error;
@@ -41,6 +42,8 @@ pub enum StorageError {
     Json(#[from] serde_json::Error),
     #[error("storage connection lock was poisoned")]
     Poisoned,
+    #[error("storage connection requires restart after an uncertain rollback")]
+    Quarantined,
     #[error("invalid storage input: {0}")]
     InvalidInput(String),
     #[error("read page exceeds the {MAX_PAGE_BYTES}-byte budget; request fewer rows")]
@@ -86,6 +89,7 @@ pub type StorageResult<T> = Result<T, StorageError>;
 #[derive(Clone)]
 pub struct Store {
     connection: Arc<Mutex<Connection>>,
+    quarantined: Arc<AtomicBool>,
     _database_file: Option<Arc<std::fs::File>>,
 }
 
@@ -407,12 +411,24 @@ impl Store {
         transaction.commit()?;
         Ok(Self {
             connection: Arc::new(Mutex::new(connection)),
+            quarantined: Arc::new(AtomicBool::new(false)),
             _database_file: None,
         })
     }
 
     pub(crate) fn connection(&self) -> StorageResult<MutexGuard<'_, Connection>> {
-        self.connection.lock().map_err(|_| StorageError::Poisoned)
+        if self.quarantined.load(Ordering::Acquire) {
+            return Err(StorageError::Quarantined);
+        }
+        let connection = self.connection.lock().map_err(|_| StorageError::Poisoned)?;
+        if self.quarantined.load(Ordering::Acquire) {
+            return Err(StorageError::Quarantined);
+        }
+        Ok(connection)
+    }
+
+    pub(crate) fn quarantine_connection(&self) {
+        self.quarantined.store(true, Ordering::Release);
     }
 
     pub(crate) fn shares_connection(&self, other: &Store) -> bool {
