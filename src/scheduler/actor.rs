@@ -61,6 +61,12 @@ enum Control {
         reply: oneshot::Sender<Result<TaskInputReceipt, SchedulerError>>,
     },
     Cancel(TaskId, Reply),
+    RetireProviderUnavailable {
+        task: TaskId,
+        command: CommandId,
+        request: CommandId,
+        reply: Reply,
+    },
     Resume {
         task: TaskId,
         target: ResumeTarget,
@@ -110,6 +116,22 @@ impl Scheduler {
         services: SchedulerServices,
         limits: SchedulerLimits,
     ) -> Result<Self, SchedulerError> {
+        Self::start_inner(services, limits, None).await
+    }
+
+    pub async fn start_with_preparation(
+        services: SchedulerServices,
+        limits: SchedulerLimits,
+        preparation: Arc<dyn TaskPreparation>,
+    ) -> Result<Self, SchedulerError> {
+        Self::start_inner(services, limits, Some(preparation)).await
+    }
+
+    async fn start_inner(
+        services: SchedulerServices,
+        limits: SchedulerLimits,
+        preparation: Option<Arc<dyn TaskPreparation>>,
+    ) -> Result<Self, SchedulerError> {
         limits.validate()?;
         let (sender, receiver) = mpsc::channel(64);
         let (ready, started) = oneshot::channel();
@@ -120,8 +142,14 @@ impl Scheduler {
         let shutdown_grace = limits.shutdown_grace;
         tokio::task::spawn_blocking(move || {
             runtime.block_on(async move {
-                let mut actor =
-                    Actor::new(services, limits, receiver, actor_changed, drained_sender);
+                let mut actor = Actor::new(
+                    services,
+                    limits,
+                    receiver,
+                    actor_changed,
+                    drained_sender,
+                    preparation,
+                );
                 match actor.recover().await {
                     Ok(()) => {
                         if ready.send(Ok(())).is_ok() {
@@ -233,6 +261,21 @@ impl Scheduler {
 
     pub async fn cancel(&self, task: TaskId) -> Result<TaskSnapshot, SchedulerError> {
         self.request(|reply| Control::Cancel(task, reply)).await
+    }
+
+    pub async fn retire_provider_unavailable(
+        &self,
+        task: TaskId,
+        expected_command: CommandId,
+        request_id: CommandId,
+    ) -> Result<TaskSnapshot, SchedulerError> {
+        self.request(|reply| Control::RetireProviderUnavailable {
+            task,
+            command: expected_command,
+            request: request_id,
+            reply,
+        })
+        .await
     }
 
     pub async fn resume_provider_once(
@@ -406,6 +449,7 @@ struct Active {
 
 struct Actor {
     services: Arc<SchedulerServices>,
+    preparation: Option<Arc<dyn TaskPreparation>>,
     limits: SchedulerLimits,
     receiver: mpsc::Receiver<Control>,
     queue: VecDeque<TaskId>,
@@ -428,9 +472,11 @@ impl Actor {
         receiver: mpsc::Receiver<Control>,
         changed: watch::Sender<u64>,
         drained: watch::Sender<Option<ShutdownReport>>,
+        preparation: Option<Arc<dyn TaskPreparation>>,
     ) -> Self {
         Self {
             services: Arc::new(services),
+            preparation,
             limits,
             receiver,
             queue: VecDeque::new(),
@@ -677,6 +723,17 @@ impl Actor {
                 let result = self.cancel(id).await;
                 let _ = reply.send(result);
             }
+            Control::RetireProviderUnavailable {
+                task,
+                command,
+                request,
+                reply,
+            } => {
+                let result = self
+                    .retire_provider_unavailable(task, command, request)
+                    .await;
+                let _ = reply.send(result);
+            }
             Control::Resume {
                 task,
                 target,
@@ -799,6 +856,61 @@ impl Actor {
             self.queue(submission.task_id);
         }
         Ok(existing.snapshot())
+    }
+
+    async fn retire_provider_unavailable(
+        &mut self,
+        id: TaskId,
+        command: CommandId,
+        request: CommandId,
+    ) -> Result<TaskSnapshot, SchedulerError> {
+        let mut task = repository::load(&self.store(), id)?;
+        if let Some(retired) = &task.checkpoint.provider_retirement {
+            return if retired.command_id == command && retired.request_id == request {
+                Ok(task.snapshot())
+            } else {
+                Err(SchedulerError::Conflict(id))
+            };
+        }
+        if self.stopping {
+            return Err(SchedulerError::Stopped);
+        }
+        if self.active.contains_key(&id)
+            || self.services.broker.is_quarantined()
+            || task.definition.initial.parent_task_id.is_some()
+            || task.checkpoint.active_command != command
+            || task.checkpoint.task.status != TaskStatus::WaitingForChildren
+            || !matches!(
+                task.checkpoint.waiting,
+                Some(WaitingReason::ProviderUnavailable)
+            )
+            || task.checkpoint.cancel_requested
+            || !task.checkpoint.queued.is_empty()
+            || !task.checkpoint.resumes.is_empty()
+            || task.checkpoint.child_wait.is_some()
+            || repository::cancelled_ancestor(&self.store(), id)?
+        {
+            return Err(SchedulerError::OwnerDecision(id));
+        }
+        let native_guard = self
+            .services
+            .agent
+            .guard_unstarted_tools(task.definition.initial.conversation_id, command, id)
+            .await?;
+        repository::retire_provider_unavailable(&self.store(), &mut task, request).map_err(
+            |error| match error {
+                SchedulerError::OwnerDecision(_)
+                | SchedulerError::Conflict(_)
+                | SchedulerError::Capacity(_)
+                | SchedulerError::Invalid(_) => error,
+                _ => mutation_uncertain(error),
+            },
+        )?;
+        self.queue.retain(|queued| *queued != id);
+        self.wake_active.remove(&id);
+        self.retry_once.remove(&id);
+        drop(native_guard);
+        Ok(task.snapshot())
     }
 
     fn validate_caller(
@@ -1476,10 +1588,19 @@ impl Actor {
             repository::save(&self.store(), &mut task, TaskStatus::Running)?;
             let cancellation = CancellationToken::new();
             let services = Arc::clone(&self.services);
+            let preparation = self.preparation.clone();
             let worker_cancellation = cancellation.clone();
             let changed = self.changed.clone();
             let handle = self.workers.spawn(async move {
-                worker::execute(services, task, worker_cancellation, resume, changed).await
+                worker::execute(
+                    services,
+                    task,
+                    worker_cancellation,
+                    resume,
+                    changed,
+                    preparation,
+                )
+                .await
             });
             self.active.insert(
                 id,
@@ -1735,6 +1856,7 @@ fn initial_task(
             diagnostic: None,
             resumes: Vec::new(),
             child_wait: None,
+            provider_retirement: None,
         },
         state: crate::storage::TaskState::Queued,
     }

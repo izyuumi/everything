@@ -140,6 +140,18 @@ fn decode(row: TaskRow) -> Result<StoredTask, SchedulerError> {
             ));
         }
     }
+    if let Some(retired) = &checkpoint.provider_retirement
+        && (checkpoint.task.status != TaskStatus::Failed
+            || checkpoint.cancel_requested
+            || checkpoint.active_command != retired.command_id
+            || checkpoint.task.updated_at != retired.retired_at
+            || !matches!(checkpoint.waiting, Some(WaitingReason::ProviderUnavailable))
+            || checkpoint.task.failure.as_ref().is_none_or(|failure| {
+                failure.code != "provider_factory_unavailable" || failure.retryable
+            }))
+    {
+        return Err(SchedulerError::Invalid("invalid provider retirement audit"));
+    }
     let initial = &definition.initial;
     let current = &checkpoint.task;
     if definition.scheduler_version != 1
@@ -260,6 +272,70 @@ pub(super) fn save(
         )?;
     }
     task.state = next;
+    Ok(())
+}
+
+pub(super) fn retire_provider_unavailable(
+    store: &Store,
+    task: &mut StoredTask,
+    request: crate::protocol::CommandId,
+) -> Result<(), SchedulerError> {
+    let id = task.definition.initial.id;
+    let expected = serde_json::to_value(&task.checkpoint)?;
+    let now = UnixMillis::try_from(
+        UnixMillis::now()?
+            .get()
+            .max(task.checkpoint.task.updated_at.get()),
+    )?;
+    let mut next = task.checkpoint.clone();
+    next.task.transition(
+        TaskStatus::Failed,
+        now,
+        Some(crate::protocol::TaskFailure {
+            code: "provider_factory_unavailable".into(),
+            message: "Provider construction failed before native execution".into(),
+            retryable: false,
+        }),
+    )?;
+    next.provider_retirement = Some(ProviderRetirement {
+        request_id: request,
+        command_id: next.active_command,
+        retired_at: now,
+    });
+    let payload = encode_checkpoint(&next)?;
+    let mut connection = store.connection()?;
+    let transaction =
+        connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    let (current, state): (String, String) = transaction
+        .query_row(
+            "SELECT checkpoint,state FROM tasks WHERE id=?1 AND typeof(checkpoint)='text' AND length(CAST(checkpoint AS BLOB))<=?2 AND state='waiting'",
+            params![id.to_string(), MAX_TASK_BYTES],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?
+        .ok_or(SchedulerError::Conflict(id))?;
+    let current: TaskCheckpoint = serde_json::from_str(&current)?;
+    if serde_json::to_value(current)? != expected || state != task.state.as_str() {
+        return Err(SchedulerError::Conflict(id));
+    }
+    let has_operations: bool = transaction.query_row(
+        "SELECT EXISTS(SELECT 1 FROM tool_calls WHERE task_id=?1)",
+        [id.to_string()],
+        |row| row.get(0),
+    )?;
+    if has_operations {
+        return Err(SchedulerError::OwnerDecision(id));
+    }
+    let changed = transaction.execute(
+        "UPDATE tasks SET state='failed',checkpoint=?2,updated_at=?3 WHERE id=?1 AND state=?4 AND updated_at<=?3",
+        params![id.to_string(), serde_json::to_string(&payload)?, timestamp(now)?, task.state.as_str()],
+    )?;
+    if changed != 1 {
+        return Err(SchedulerError::Conflict(id));
+    }
+    transaction.commit()?;
+    task.checkpoint = next;
+    task.state = TaskState::Failed;
     Ok(())
 }
 
