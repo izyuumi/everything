@@ -8,6 +8,12 @@ use tokio_util::sync::CancellationToken;
 
 #[cfg(feature = "local-embeddings")]
 pub mod embeddinggemma2;
+#[cfg(feature = "local-embeddings")]
+pub mod isolated;
+#[cfg(feature = "local-embeddings")]
+pub mod wire;
+#[cfg(feature = "local-embeddings")]
+pub mod worker;
 
 const MAX_DIMENSIONS: usize = 65_536;
 const MAX_INPUT_BYTES: usize = 1024 * 1024;

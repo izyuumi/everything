@@ -105,6 +105,12 @@ pub struct HostSettings {
     pub loop_limits: LoopLimits,
     pub model_credentials: Vec<ModelCredentialReference>,
     pub relay_origin: Option<crate::relay_protocol::RelayOrigin>,
+    #[serde(default)]
+    pub memory: super::memory::MemorySettings,
+    #[serde(default)]
+    pub mcp: super::mcp::McpSettings,
+    #[serde(default)]
+    pub selection: super::selection::SelectionSettings,
 }
 
 impl HostSettings {
@@ -163,6 +169,15 @@ impl HostSettings {
                 ));
             }
         }
+        self.memory
+            .validate()
+            .map_err(|_| SettingsError::Invalid("invalid memory configuration"))?;
+        self.mcp
+            .validate()
+            .map_err(|_| SettingsError::Invalid("invalid MCP configuration"))?;
+        self.selection
+            .configuration()
+            .map_err(|_| SettingsError::Invalid("invalid optional selection configuration"))?;
         let encoded = serde_json::to_vec(self)
             .map_err(|_| SettingsError::Invalid("settings could not be encoded"))?;
         if encoded.len() > MAX_SETTINGS_BYTES {
@@ -205,6 +220,9 @@ impl SettingsRepository {
                     loop_limits: LoopLimits::default(),
                     model_credentials: Vec::new(),
                     relay_origin: None,
+                    memory: Default::default(),
+                    mcp: Default::default(),
+                    selection: Default::default(),
                 };
                 settings.validate()?;
                 write_settings(&lease, &settings)?;
