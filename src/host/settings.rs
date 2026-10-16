@@ -1,4 +1,14 @@
+pub mod actions;
+mod authority;
 pub mod contract;
+mod operations;
+pub mod service;
+
+pub use authority::{
+    NativeSessionOpened, NativeSessionProof, SettingsAgentSession, SettingsCaller,
+    SettingsOperationOrigin,
+};
+pub use operations::{SettingsOperationInspection, SettingsOperationPhase};
 
 use std::fs::File;
 use std::io::{self, Read, Write};
