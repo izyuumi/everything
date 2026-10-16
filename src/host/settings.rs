@@ -1,6 +1,7 @@
 pub mod actions;
 mod authority;
 pub mod contract;
+mod driver;
 pub mod native;
 mod operations;
 pub mod service;

@@ -164,6 +164,7 @@ enum HostWorker {
     Local(Result<(), HostError>),
     Dispatcher(Result<(), HostError>),
     Publication(Result<(), HostError>),
+    Settings(Result<(), HostError>),
     Relay(Result<(), DeviceError>),
     Coordinator(Result<(), crate::worker::WorkerError>),
 }
@@ -486,6 +487,11 @@ impl HostService {
         workers.spawn(
             async move { HostWorker::Dispatcher(dispatcher.dispatch(dispatcher_stop).await) },
         );
+        let settings_owner = inner.clone();
+        let settings_stop = work_stop.clone();
+        workers.spawn(async move {
+            HostWorker::Settings(settings_owner.apply_settings(settings_stop).await)
+        });
         if let Some(origin) = inner.relay_origin.clone() {
             let host = inner.clone();
             let relay_stop = work_stop.clone();
@@ -547,7 +553,7 @@ impl HostService {
                             tracing::warn!("optional relay stopped during initial metadata reconciliation");
                         }
                     }
-                    Some(Ok(HostWorker::Local(outcome) | HostWorker::Dispatcher(outcome) | HostWorker::Publication(outcome))) => break outcome.and(Err(HostError::Worker)),
+                    Some(Ok(HostWorker::Local(outcome) | HostWorker::Dispatcher(outcome) | HostWorker::Publication(outcome) | HostWorker::Settings(outcome))) => break outcome.and(Err(HostError::Worker)),
                     _ => break Err(HostError::Worker),
                 },
                 joined = handlers.join_next(), if !handlers.is_empty() => {
@@ -577,7 +583,7 @@ impl HostService {
                                 tracing::warn!("optional relay stopped; local host remains available");
                             }
                         }
-                        Some(Ok(HostWorker::Local(outcome) | HostWorker::Dispatcher(outcome) | HostWorker::Publication(outcome))) => break outcome.and(Err(HostError::Worker)),
+                        Some(Ok(HostWorker::Local(outcome) | HostWorker::Dispatcher(outcome) | HostWorker::Publication(outcome) | HostWorker::Settings(outcome))) => break outcome.and(Err(HostError::Worker)),
                         _ => break Err(HostError::Worker),
                     },
                     joined = handlers.join_next(), if !handlers.is_empty() => {
@@ -770,7 +776,7 @@ impl HostService {
                 }
                 joined = workers.join_next(), if !workers.is_empty() => {
                     let failure = match joined {
-                        Some(Ok(HostWorker::Local(outcome) | HostWorker::Dispatcher(outcome) | HostWorker::Publication(outcome))) => outcome.err(),
+                        Some(Ok(HostWorker::Local(outcome) | HostWorker::Dispatcher(outcome) | HostWorker::Publication(outcome) | HostWorker::Settings(outcome))) => outcome.err(),
                         Some(Ok(HostWorker::Coordinator(outcome))) => { if outcome.is_err() { tracing::warn!("optional worker coordinator ended during host drain"); } None },
                         Some(Ok(HostWorker::Relay(outcome))) => { if outcome.is_err() { tracing::warn!("optional relay stopped during host drain"); } None },
                         _ => Some(HostError::Worker),
@@ -814,7 +820,8 @@ impl HostService {
                 Ok(
                     HostWorker::Local(outcome)
                     | HostWorker::Dispatcher(outcome)
-                    | HostWorker::Publication(outcome),
+                    | HostWorker::Publication(outcome)
+                    | HostWorker::Settings(outcome),
                 ) => {
                     if result.is_ok() {
                         result = outcome;
