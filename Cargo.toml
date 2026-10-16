@@ -55,7 +55,7 @@ croner = "=4.0.1"
 
 [features]
 default = []
-local-embeddings = ["dep:ort", "dep:tokenizers", "dep:sqlite-vec"]
+local-embeddings = ["dep:ort", "dep:tokenizers", "dep:sqlite-vec", "dep:command-fds"]
 
 [dependencies.ort]
 version = "=2.0.0-rc.10"
@@ -66,6 +66,11 @@ optional = true
 [[bin]]
 name = "everything-embedding-bench"
 path = "src/bin/everything-embedding-bench.rs"
+required-features = ["local-embeddings"]
+
+[[bin]]
+name = "everything-embedding-worker"
+path = "src/bin/everything-embedding-worker.rs"
 required-features = ["local-embeddings"]
 
 [dependencies.tokenizers]
@@ -82,4 +87,5 @@ optional = true
 keyring = { version = "=3.6.3", default-features = false, features = ["apple-native"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
+command-fds = { version = "=0.3.3", optional = true }
 keyring = { version = "=3.6.3", default-features = false, features = ["sync-secret-service", "crypto-rust", "vendored"] }

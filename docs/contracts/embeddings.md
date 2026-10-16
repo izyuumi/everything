@@ -53,3 +53,9 @@ The optional EmbeddingGemma 2 backend requires `ORT_DISABLE_TELEMETRY=1` at proc
 ## Validation
 
 Formatting, workspace compilation, strict Clippy, and release builds passed for this implementation. Disposable manual runtime checks exercised template substitution without reinterpreting user placeholders, serialized metadata roundtrips, incompatible model/revision/dimension rejection, invalid deserialization, finite and normalized vector rules, and disabled configuration without creating a mock embedder or calling a model. An independent Python encoding reproduced the Rust spec, profile, and index fingerprints exactly. These checks do not establish the deferred automated coverage or actual model inference correctness.
+
+## Isolated Host execution
+
+The Host uses `IsolatedEmbeddingGemma2` behind this same `Embedder`/profile/vector contract. Linux confinement is established by a strict bubblewrap launch, not by a model response, environment flag or caller-provided digest. No supported boundary means an unavailable backend and real FTS; it does not select in-process inference. Bounded private IPC preserves the actual native profile/fingerprint and validates vectors again in the parent. Loading, calls, shutdown and final live-resource drop are synchronous and must run off Tokio workers. The Host explicitly shuts down its separately retained helper after actual memory admission settles, retaining its state lease through reap.
+
+The public `EmbeddingRuntime`/`EmbeddingGemma2` API and macOS benchmark remain direct native development interfaces. They do not establish confinement and must not be used as ordinary Host fallback. Their native-runtime trust, telemetry and blocking-call requirements remain applicable.

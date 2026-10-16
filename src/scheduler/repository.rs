@@ -140,18 +140,17 @@ fn decode(row: TaskRow) -> Result<StoredTask, SchedulerError> {
             ));
         }
     }
-    if let Some(retired) = &checkpoint.provider_retirement {
-        if checkpoint.task.status != TaskStatus::Failed
+    if let Some(retired) = &checkpoint.provider_retirement
+        && (checkpoint.task.status != TaskStatus::Failed
             || checkpoint.cancel_requested
             || checkpoint.active_command != retired.command_id
             || checkpoint.task.updated_at != retired.retired_at
             || !matches!(checkpoint.waiting, Some(WaitingReason::ProviderUnavailable))
             || checkpoint.task.failure.as_ref().is_none_or(|failure| {
                 failure.code != "provider_factory_unavailable" || failure.retryable
-            })
-        {
-            return Err(SchedulerError::Invalid("invalid provider retirement audit"));
-        }
+            }))
+    {
+        return Err(SchedulerError::Invalid("invalid provider retirement audit"));
     }
     let initial = &definition.initial;
     let current = &checkpoint.task;

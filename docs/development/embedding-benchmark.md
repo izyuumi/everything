@@ -2,6 +2,8 @@
 
 Issue [#12](https://github.com/izyuumi/everything/issues/12) includes the standalone `everything-embedding-bench` binary. It performs real local inference through the [EmbeddingGemma 2 ONNX backend](../architecture/embeddinggemma2.md), sharing one loaded model across the 128-, 256-, 512-, and 768-dimensional profiles. It does not download models, start Python, call a model service, create a vector index, or read user documents.
 
+The benchmark intentionally uses the direct native development API. It does not launch the production embedding helper or establish confinement. Its existing macOS workflow remains a genuine performance measurement; ordinary macOS Host embeddings are unavailable and retain FTS until a platform boundary is implemented and verified. See [the production boundary](../architecture/embeddinggemma2.md#production-embedding-boundary) for the separate Linux Host behavior.
+
 ## Build and run
 
 Prepare the pinned model bundle and a trusted compatible ONNX Runtime shared library according to the backend documentation. Selecting a native library explicitly authorizes loading its code; do not use an untrusted library. Model files remain outside the repository. The `local-embeddings` Cargo feature is required; default builds skip the backend and benchmark binary.
