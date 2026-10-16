@@ -1,8 +1,8 @@
 mod access;
 
 pub(crate) use access::{
-    QualifiedSettingsAccess, SettingsAccessQualificationError, SettingsAccessReplyFamily,
-    SettingsAccessReservationSpec,
+    QualifiedSettingsAccess, QualifiedSettingsAccessReply, SettingsAccessQualificationError,
+    SettingsAccessReplyFamily, SettingsAccessReservationSpec,
 };
 
 mod replies;
