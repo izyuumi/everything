@@ -34,22 +34,29 @@ struct SettingsView: View {
                 Button("Pair with host", action: pair).disabled(model.busy || model.state?.snapshot.revoked == true)
                 Text("The host chooses access separately; its signed acceptance does not contain conversation or permission grants. Add only conversation IDs that its owner authorized.").font(.footnote)
             }
-            Section("Notifications") {
-                Button(model.notificationsEnabled ? "Generic activity notifications enabled" : "Enable generic activity notifications") { Task { await model.authorizeNotifications() } }
-                Text("Notifications contain no conversation, message, tool, identity or pairing details. They require activity this foreground client has actually received.").font(.footnote)
+            Section("This iPhone") {
+                NavigationLink("Appearance and notifications", value: ClientSettingsDestination.thisDevice)
+                if let issue = model.localSettingsIssue { Text(issue).foregroundStyle(.red) }
+                Text("Local preferences use this iPhone's existing identity and remain independent of the Host connection. Completion and attention delivery is unavailable; no generic cursor-activity notifications are scheduled.").font(.footnote)
             }
             Section("Local privacy") {
                 Text("Identity secrets use unlocked-only, non-synchronizing ThisDeviceOnly Keychain storage. Local history uses complete file protection. These Curve25519 keys are not Secure Enclave keys.").font(.footnote)
-                Button("Permanently disable this device", role: .destructive) { disabling = true }.disabled(model.state?.snapshot.revoked != false)
+                Button("Permanently disable this device", role: .destructive) { setDisabling(true) }.disabled(model.state?.snapshot.revoked != false)
                 Text("Disabling is sticky and stops this client. The host owner must separately revoke this device and its relay enrollment. Previously received local history remains here.").font(.footnote)
             }
         }
         .navigationTitle("Settings")
         .task { origin = model.state?.snapshot.origin ?? "" }
-        .confirmationDialog("Permanently disable this device?", isPresented: $disabling) {
+        .confirmationDialog("Permanently disable this device?", isPresented: Binding(get: { disabling }, set: { setDisabling($0) })) {
             Button("Disable device", role: .destructive) { Task { await model.disable() } }
-            Button("Cancel", role: .cancel) {}
+            Button("Cancel", role: .cancel) { setDisabling(false) }
         }
+    }
+
+    private func setDisabling(_ presented: Bool) {
+        if presented { model.localCoverChanged(.deviceDisable, presented: true) }
+        disabling = presented
+        if !presented { model.localCoverChanged(.deviceDisable, presented: false) }
     }
 }
 

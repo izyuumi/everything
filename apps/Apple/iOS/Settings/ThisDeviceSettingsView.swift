@@ -3,6 +3,7 @@ import SwiftUI
 @MainActor
 struct ThisDeviceSettingsView: View {
     let store: ThisDeviceSettingsStore
+    let onPresentationChange: (Bool) -> Void
     @State private var confirmingReload = false
     @State private var confirmingAppearanceReload = false
 
@@ -26,7 +27,7 @@ struct ThisDeviceSettingsView: View {
                     Button("Save appearance") { store.saveAppearance() }
                         .disabled(!store.canSaveAppearance)
                     Button("Reload appearance") {
-                        if store.hasAppearanceDraftChanges { confirmingAppearanceReload = true }
+                        if store.hasAppearanceDraftChanges { setAppearanceReload(true) }
                         else { store.reloadAppearance() }
                     }
                     .disabled(!store.canReloadAppearance)
@@ -71,7 +72,7 @@ struct ThisDeviceSettingsView: View {
                     Button("Save") { store.save() }
                         .disabled(!store.canSave)
                     Button("Reload") {
-                        if store.hasDraftChanges { confirmingReload = true }
+                        if store.hasDraftChanges { setNotificationReload(true) }
                         else { store.reload() }
                     }
                     .disabled(!store.canReload)
@@ -125,16 +126,29 @@ struct ThisDeviceSettingsView: View {
             .disabled(store.isClosed)
         }
         .navigationTitle("This iPhone")
-        .confirmationDialog("Discard unsaved notification preferences?", isPresented: $confirmingReload, titleVisibility: .visible) {
+        .onAppear { onPresentationChange(confirmingReload || confirmingAppearanceReload) }
+        .confirmationDialog("Discard unsaved notification preferences?", isPresented: Binding(get: { confirmingReload }, set: { setNotificationReload($0) }), titleVisibility: .visible) {
             Button("Reload saved preferences", role: .destructive) { store.reload() }
         } message: {
             Text("The latest saved notification preferences will replace this draft. Appearance edits are kept. An unresolved save must be inspected first.")
         }
-        .confirmationDialog("Discard unsaved appearance edits?", isPresented: $confirmingAppearanceReload, titleVisibility: .visible) {
+        .confirmationDialog("Discard unsaved appearance edits?", isPresented: Binding(get: { confirmingAppearanceReload }, set: { setAppearanceReload($0) }), titleVisibility: .visible) {
             Button("Reload saved appearance", role: .destructive) { store.reloadAppearance() }
         } message: {
             Text("The latest saved appearance will replace this draft. Notification edits are kept. An unresolved save must be inspected first.")
         }
+    }
+
+    private func setNotificationReload(_ presented: Bool) {
+        if presented { onPresentationChange(true) }
+        confirmingReload = presented
+        if !presented { onPresentationChange(confirmingAppearanceReload) }
+    }
+
+    private func setAppearanceReload(_ presented: Bool) {
+        if presented { onPresentationChange(true) }
+        confirmingAppearanceReload = presented
+        if !presented { onPresentationChange(confirmingReload) }
     }
 
     private func appearanceLabel(_ value: DeviceAppearance) -> String {
