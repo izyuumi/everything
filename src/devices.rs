@@ -17,11 +17,12 @@ pub(crate) use settings_connection::{
 
 #[cfg(unix)]
 pub(crate) use settings_ingress::{
-    AuthenticatedSettingsSource, BindRejection, BindingCreator, BindingGeneration,
-    BindingHistorySnapshot, BindingHistoryState, BindingIntent, BindingLifetime,
-    CommittedBindSource, OwnedCommittedSettingsBind, OwnedVerifiedSettingsPacket,
-    PendingSettingsReceipt, SettingsReceiveDrain, SettingsReceiveError, SettingsReceiveEvent,
-    SettingsReceiveWitness, SettingsTransportReceipt,
+    AuthenticatedSettingsCommandSource, AuthenticatedSettingsSource, BindRejection, BindingCreator,
+    BindingGeneration, BindingHistorySnapshot, BindingHistoryState, BindingIntent, BindingLifetime,
+    CommandRejection, CommittedBindSource, OwnedCommittedSettingsBind,
+    OwnedVerifiedSettingsCommand, OwnedVerifiedSettingsPacket, PendingSettingsReceipt,
+    SettingsCommandIntent, SettingsParentReference, SettingsReceiveDrain, SettingsReceiveError,
+    SettingsReceiveEvent, SettingsReceiveWitness, SettingsTransportReceipt, SettingsUpdateIntent,
 };
 
 use crate::crypto::{
