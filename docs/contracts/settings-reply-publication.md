@@ -1,6 +1,6 @@
 # Held Settings reply seal and consumed transfer
 
-The Unix-only publication foundation defines genuine Original and Bind seal producers plus a transaction-local consumed proof. It remains unregistered, uncompiled and unactivated until Root adds module/exports and the actual owned worker/Core consumers. It creates no task, queue, runtime, accepted Delivery, commit, queued success or send owner.
+The Unix-only publication foundation defines genuine Original and Bind seal producers plus a transaction-local consumed proof. Module and narrow exports are registered; it remains uncompiled and unactivated. The actual owned worker and post-consumption Core consumers are still required. It creates no task, queue, runtime, accepted Delivery, commit, queued success or send owner.
 
 ## Genuine seal producers
 

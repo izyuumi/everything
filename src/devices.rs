@@ -9,6 +9,8 @@ mod settings_connection;
 #[cfg(unix)]
 mod settings_ingress;
 #[cfg(unix)]
+mod settings_publication;
+#[cfg(unix)]
 mod settings_reply;
 
 pub use session::RelaySessionStatus;
@@ -49,6 +51,12 @@ pub(crate) use settings_ingress::{
 pub(crate) use settings_reply::{
     OriginalKind, OriginalLink, OriginalView, RemoteOperationPhase, RemoteOperationState,
     RemoteServiceReceipt, ServiceLookup, SettingsOriginalReplyPacket, SettingsReplyContractError,
+};
+
+#[cfg(unix)]
+pub(crate) use settings_publication::{
+    SealedSettingsReply, SettingsReplyPublicationError, SettingsReplyQualification,
+    SettingsReplySealContext,
 };
 
 use crate::crypto::{

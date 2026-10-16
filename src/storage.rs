@@ -8,9 +8,10 @@ pub(crate) use external::ExternalTaskStateUpdate;
 pub(crate) use settings_grants::settings_grant_head_on;
 #[cfg(unix)]
 pub(crate) use settings_transport::{
-    SettingsBindAdmission, SettingsBindAdmissionError, SettingsBindReceiptCommit,
-    SettingsCommandAdmission, SettingsCommandAdmissionError, SettingsCommandReceiptCommit,
-    StoredSettingsBindReply, StoredSettingsCommandReply,
+    ConsumedSettingsReply, SettingsBindAdmission, SettingsBindAdmissionError,
+    SettingsBindReceiptCommit, SettingsCommandAdmission, SettingsCommandAdmissionError,
+    SettingsCommandReceiptCommit, StoredSettingsBindReply, StoredSettingsCommandReply,
+    consume_settings_reply_in,
 };
 pub use transport::*;
 pub(crate) use transport::{TransportInboxMetadata, TransportInboxRejection};
