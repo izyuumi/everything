@@ -77,6 +77,9 @@ impl OwnerCommand {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum OwnerQuery {
+    WorkerCoordinator {
+        query: crate::host::worker::WorkerCoordinatorQuery,
+    },
     Conversations {
         limit: usize,
     },
@@ -107,6 +110,9 @@ pub enum OwnerQuery {
     Schedule {
         query: crate::scheduling::controls::ScheduleQuery,
     },
+    Worker {
+        query: crate::worker::commands::WorkerQuery,
+    },
     MemoryJob {
         job_id: String,
     },
@@ -127,6 +133,14 @@ pub enum OwnerQuery {
 
 impl OwnerQuery {
     pub fn validate(&self) -> Result<(), &'static str> {
+        if let Self::WorkerCoordinator { query } = self {
+            query
+                .validate()
+                .map_err(|_| "invalid worker coordinator query")?;
+        }
+        if let Self::Worker { query } = self {
+            query.validate()?;
+        }
         if matches!(
             self,
             Self::Conversations { limit } | Self::Tasks { limit, .. } | Self::Devices { limit } | Self::Approvals { limit, .. }
@@ -179,6 +193,12 @@ pub enum ApprovalLookup {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum OwnerOperation {
+    WorkerCoordinator {
+        operation: Box<crate::host::worker::WorkerCoordinatorOperation>,
+    },
+    RevokeWorkerPeer {
+        device_id: DeviceId,
+    },
     Schedule {
         mutation: crate::scheduling::controls::ScheduleMutation,
     },
@@ -265,6 +285,9 @@ pub enum OwnerOperation {
 impl OwnerOperation {
     pub fn validate(&self) -> Result<(), &'static str> {
         match self {
+            Self::WorkerCoordinator { operation } => operation
+                .validate()
+                .map_err(|_| "invalid worker coordinator operation"),
             #[cfg(feature = "local-embeddings")]
             Self::RebuildEmbeddings {
                 max_chunks,
@@ -344,6 +367,12 @@ impl ConversationWait {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum OwnerQueryResult {
+    WorkerCoordinator {
+        result: Box<crate::host::worker::WorkerCoordinatorQueryResult>,
+    },
+    Worker {
+        result: crate::worker::commands::WorkerQueryResult,
+    },
     Schedule {
         result: crate::scheduling::controls::ScheduleQueryResult,
     },
@@ -448,6 +477,12 @@ impl From<crate::agent::ConversationInfo> for ConversationSummary {
 impl OwnerQueryResult {
     pub fn validate_for(&self, query: &OwnerQuery) -> Result<(), &'static str> {
         let valid = match (query, self) {
+            (OwnerQuery::WorkerCoordinator { query }, Self::WorkerCoordinator { result }) => {
+                result.validate_for(query).is_ok()
+            }
+            (OwnerQuery::Worker { query }, Self::Worker { result }) => {
+                result.validate_for(query).is_ok()
+            }
             (OwnerQuery::Schedule { query }, Self::Schedule { result }) => {
                 schedule_query_matches(query, result)
             }
@@ -607,6 +642,9 @@ pub struct TaskExecutionMetadata {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum OwnerOperationResult {
+    WorkerCoordinator {
+        result: Box<crate::host::worker::WorkerCoordinatorOperationResult>,
+    },
     Schedule {
         result: crate::scheduling::controls::ScheduleMutationResult,
     },
@@ -650,6 +688,22 @@ pub enum OwnerOperationResult {
 }
 
 impl OwnerOperationResult {
+    pub fn validate_for_request(
+        &self,
+        operation: &OwnerOperation,
+        request_id: CommandId,
+    ) -> Result<(), &'static str> {
+        if let (
+            OwnerOperation::WorkerCoordinator { operation },
+            Self::WorkerCoordinator { result },
+        ) = (operation, self)
+        {
+            return result
+                .validate_for(operation, request_id)
+                .map_err(|_| "worker coordinator result does not match its request");
+        }
+        self.validate_for(operation)
+    }
     pub fn validate_for(&self, operation: &OwnerOperation) -> Result<(), &'static str> {
         let valid = match (operation, self) {
             (OwnerOperation::Schedule { mutation }, Self::Schedule { result }) => {
@@ -719,6 +773,7 @@ impl OwnerOperationResult {
             }
             (
                 OwnerOperation::Credential { .. }
+                | OwnerOperation::RevokeWorkerPeer { .. }
                 | OwnerOperation::RevokeDevice { .. }
                 | OwnerOperation::WakeTask { .. }
                 | OwnerOperation::RetryProvider { .. },
