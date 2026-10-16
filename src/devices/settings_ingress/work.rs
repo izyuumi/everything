@@ -18,7 +18,7 @@ use super::{
 };
 use crate::crypto::EncryptedEnvelope;
 use crate::devices::SettingsConnectionIdentity;
-use crate::host::settings::service::SettingsReceiptAuthority;
+use crate::host::settings::service::{PairedSettingsParent, SettingsReceiptAuthority};
 use crate::protocol::{DeviceId, UnixMillis};
 use crate::storage::{StoredSettingsBindReply, StoredSettingsCommandReply};
 
@@ -172,7 +172,10 @@ pub(crate) struct ReplyBuildPermit {
 }
 
 pub(in crate::devices) enum SettingsReplyBuildRequest {
-    Bind(Box<OwnedCommittedSettingsBind>),
+    Bind {
+        parent: PairedSettingsParent,
+        request: Box<OwnedCommittedSettingsBind>,
+    },
     Fresh(Box<OwnedCommittedSettingsCommand>),
     Historical(Box<OwnedHistoricalSettingsCommand>),
 }
@@ -326,7 +329,7 @@ impl Drop for ReplyBuildPermit {
 impl SettingsReplyBuildRequest {
     fn witness(&self) -> &PrivateWitness {
         match self {
-            Self::Bind(request) => &request.verified._witness,
+            Self::Bind { request, .. } => &request.verified._witness,
             Self::Fresh(request) => request.reply_build_witness(),
             Self::Historical(request) => request.reply_build_witness(),
         }
@@ -334,7 +337,7 @@ impl SettingsReplyBuildRequest {
 
     fn witness_mut(&mut self) -> &mut PrivateWitness {
         match self {
-            Self::Bind(request) => &mut request.verified._witness,
+            Self::Bind { request, .. } => &mut request.verified._witness,
             Self::Fresh(request) => request.reply_build_witness_mut(),
             Self::Historical(request) => request.reply_build_witness_mut(),
         }
@@ -346,7 +349,7 @@ impl SettingsReplyBuildRequest {
         connection: &Arc<SettingsConnectionIdentity>,
     ) -> bool {
         match self {
-            Self::Bind(request) => {
+            Self::Bind { request, .. } => {
                 let source = request.authority_source();
                 Arc::ptr_eq(source.connection(), connection)
                     && source.matches_context(&context.agent, &context.endpoint, &context.mutation)
@@ -367,7 +370,7 @@ impl SettingsReplyBuildRequest {
 
     fn matches_association(&self, association: &ReplyBuildAssociation) -> bool {
         match self {
-            Self::Bind(request) => {
+            Self::Bind { request, .. } => {
                 let source = request.committed_source();
                 association.matches(
                     ReplyBuildFamily::BindDefault49152,
