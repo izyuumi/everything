@@ -14,7 +14,7 @@ use crate::host::settings::actions::{
     ActionClaim, NativeActionAdmissionResult, NativeActionInvocation, NativeHostEffectAdmission,
     SettingsActionTarget, validate_current,
 };
-use crate::host::settings::authority::{CallerSource, SettingsCaller};
+use crate::host::settings::authority::{CallerSource, SettingsCaller, SettingsOperationOrigin};
 use crate::host::settings::contract::{
     NativeSettingsAction, SettingsActionRequest, SettingsCredentialBinding, SettingsOperationState,
 };
@@ -160,7 +160,64 @@ impl ServiceCore {
                 }
             }
         };
-        if !matches {
+        if matches {
+            return Ok(binding.clone());
+        }
+        if !matches!(
+            identity.origin,
+            SettingsOperationOrigin::NativeUi { session_id }
+                if !session_id.is_nil() && session_id == identity.binding.client_session_id
+        ) {
+            return Err(SettingsServiceError::Conflict);
+        }
+        let reference = match binding {
+            SettingsCredentialBinding::Model { binding } => binding.reference,
+            SettingsCredentialBinding::SystemOne { reference, .. } => *reference,
+        };
+        if reference.is_nil()
+            || settings
+                .model_credentials
+                .iter()
+                .any(|configured| configured.reference == reference)
+            || settings
+                .mcp
+                .servers
+                .iter()
+                .flat_map(|server| server.environment.values())
+                .any(|configured| configured.reference == reference)
+            || matches!(
+                &settings.selection,
+                SelectionSettings::SystemOne {
+                    credential_reference: Some(configured),
+                    ..
+                } if *configured == reference
+            )
+        {
+            return Err(SettingsServiceError::Conflict);
+        }
+        let matches_initial = match binding {
+            SettingsCredentialBinding::Model { binding } => settings
+                .default_conversation
+                .as_ref()
+                .is_some_and(|selected| {
+                    selected.provider == binding.provider
+                        && selected.endpoint == binding.endpoint.as_native()
+                        && settings.credential_for(selected).is_none()
+                }),
+            SettingsCredentialBinding::SystemOne { endpoint, .. } => {
+                match (&settings.selection, settings.selection.configuration()) {
+                    (
+                        SelectionSettings::SystemOne {
+                            credential_reference: None,
+                            ..
+                        },
+                        Ok(SelectionConfig::SystemOne(current)),
+                    ) => current.endpoint() == endpoint,
+                    _ => false,
+                }
+            }
+        };
+        if !matches_initial {
             return Err(SettingsServiceError::Conflict);
         }
         Ok(binding.clone())
