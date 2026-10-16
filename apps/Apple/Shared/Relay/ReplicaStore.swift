@@ -50,6 +50,21 @@ struct ReplicaSnapshot: Sendable {
     let commands: [ReplicaPendingCommand]
 }
 
+enum ReplicaNotificationCategory: String, Sendable {
+    case completion
+    case attention
+}
+
+struct ReplicaNotificationNotice: Sendable {
+    let category: ReplicaNotificationCategory
+    let identifier: String
+}
+
+struct ReplicaNotificationPage: Sendable {
+    let notices: [ReplicaNotificationNotice]
+    let hasMore: Bool
+}
+
 struct StoredDelivery: Sendable {
     let id: UUID
     let payload: Data
@@ -442,8 +457,154 @@ actor ReplicaStore: DurableEnvelopeInbox {
             if batch.hasMore, let request = replies.last {
                 try setMetadata(key, WireValue.object(["id": .id(request.header.messageID), "expires": .unsigned(request.header.expires)]).encoded(maximum: 256))
             }
+            if !batch.hasMore, try notificationFloor(batch.conversationID, cursor: through) == nil {
+                try setMetadata(notificationFloorKey(batch.conversationID), Data(String(through).utf8))
+            }
             try finishInbox(messageID)
         }
+    }
+
+    func claimNotifications(conversation: UUID, host: DevicePublicKeys, localID: UUID, now: UInt64) throws -> ReplicaNotificationPage {
+        try database.transaction {
+            try checkActive(host: host)
+            guard conversation != WireID.zero, localID != WireID.zero, now <= UInt64(Int64.max),
+                  try identityID() == localID, let cursor = try cursor(conversation) else { throw WireError.identity }
+            guard let floor = try notificationFloor(conversation, cursor: cursor), floor < cursor else {
+                return ReplicaNotificationPage(notices: [], hasMore: false)
+            }
+            let sql = """
+                SELECT conversation,sequence,event_id,kind,envelope FROM (
+                    SELECT conversation,sequence,event_id,kind,envelope,
+                        sum(length(CAST(envelope AS BLOB))) OVER (ORDER BY sequence) AS bytes
+                    FROM (
+                        SELECT conversation,sequence,event_id,kind,envelope FROM events
+                        WHERE conversation=? AND sequence>? AND sequence<=?
+                        ORDER BY sequence LIMIT 256
+                    )
+                ) WHERE bytes<=2097152 ORDER BY sequence
+                """
+            let conversationID = conversation.uuidString.lowercased()
+            var through = floor
+            var bytes = 0
+            var seen = Set<UUID>()
+            var completion = false
+            var attention = false
+            let count = try database.rows(sql, [.text(conversationID), .integer(Int64(floor)), .integer(Int64(cursor))]) { row in
+                guard sqlite3_column_type(row, 0) == SQLITE_TEXT, sqlite3_column_bytes(row, 0) == 36,
+                      sqlite3_column_type(row, 1) == SQLITE_INTEGER,
+                      sqlite3_column_type(row, 2) == SQLITE_TEXT, sqlite3_column_bytes(row, 2) == 36,
+                      sqlite3_column_type(row, 3) == SQLITE_TEXT, sqlite3_column_bytes(row, 3) <= 64,
+                      sqlite3_column_type(row, 4) == SQLITE_BLOB else { throw WireError.storage }
+                let sequence = sqlite3_column_int64(row, 1)
+                guard through < UInt64(Int64.max), sequence > 0, UInt64(sequence) == through + 1 else { throw WireError.gap }
+                let length = Int(sqlite3_column_bytes(row, 4))
+                guard length > 0, length <= 262_144, bytes <= 2_097_152 - length else { throw WireError.size }
+                let encoded = try ReplicaDatabase.data(row, 4)
+                let event = try WireEvent(WireValue.parse(encoded, maximum: 262_144))
+                let kind = try ReplicaDatabase.text(row, 3)
+                guard event.conversationID == conversation, event.sequence == UInt64(sequence),
+                      try ReplicaDatabase.text(row, 0) == conversationID,
+                      try ReplicaDatabase.text(row, 2) == event.id.uuidString.lowercased(),
+                      kind == event.kind, kind.utf8.count == Int(sqlite3_column_bytes(row, 3)),
+                      seen.insert(event.id).inserted else { throw WireError.conflict }
+                if event.kind == "task_status_changed", try event.payload.field("status").text == "completed" { completion = true }
+                if event.kind == "permission_requested", try notificationPermissionIsPending(event, now: now) { attention = true }
+                through = event.sequence
+                bytes += encoded.count
+            }.count
+            guard count > 0, count <= 256, through <= cursor else { throw WireError.gap }
+            var notices: [ReplicaNotificationNotice] = []
+            for category in [ReplicaNotificationCategory.completion, .attention] {
+                guard category == .completion ? completion : attention else { continue }
+                let identifier = notificationIdentifier(category, conversation: conversation, through: through, host: host, localID: localID)
+                notices.append(ReplicaNotificationNotice(category: category, identifier: identifier))
+            }
+            try setMetadata(notificationFloorKey(conversation), Data(String(through).utf8))
+            return ReplicaNotificationPage(notices: notices, hasMore: through < cursor)
+        }
+    }
+
+    private func notificationFloorKey(_ conversation: UUID) -> String {
+        "notifications_v1_" + conversation.uuidString.lowercased()
+    }
+
+    private func notificationFloor(_ conversation: UUID, cursor: UInt64) throws -> UInt64? {
+        guard let conversationCount = try database.rows("SELECT count(*) FROM conversations", map: { sqlite3_column_int64($0, 0) }).first,
+              conversationCount >= 0, conversationCount <= 64 else { throw WireError.storage }
+        let sql = """
+            SELECT m.key,m.value,c.id,c.cursor FROM metadata m
+            LEFT JOIN conversations c ON m.key='notifications_v1_'||c.id
+            WHERE m.key GLOB 'notifications_v1_*' ORDER BY m.key LIMIT 65
+            """
+        let floors = try database.rows(sql) { row in
+            guard sqlite3_column_type(row, 0) == SQLITE_TEXT, sqlite3_column_bytes(row, 0) == 53,
+                  sqlite3_column_type(row, 1) == SQLITE_BLOB, (1...19).contains(Int(sqlite3_column_bytes(row, 1))),
+                  sqlite3_column_type(row, 2) == SQLITE_TEXT, sqlite3_column_bytes(row, 2) == 36,
+                  sqlite3_column_type(row, 3) == SQLITE_INTEGER,
+                  let id = UUID(uuidString: try ReplicaDatabase.text(row, 2)), id != WireID.zero,
+                  try ReplicaDatabase.text(row, 2) == id.uuidString.lowercased(),
+                  try ReplicaDatabase.text(row, 0) == notificationFloorKey(id),
+                  let text = String(data: try ReplicaDatabase.data(row, 1), encoding: .utf8),
+                  let value = UInt64(text), String(value) == text,
+                  value <= UInt64(Int64.max) else { throw WireError.storage }
+            let durableCursor = sqlite3_column_int64(row, 3)
+            guard durableCursor >= 0, value <= UInt64(durableCursor) else { throw WireError.storage }
+            if id == conversation, UInt64(durableCursor) != cursor { throw WireError.conflict }
+            return (id, value)
+        }
+        guard floors.count <= 64, floors.count <= Int(conversationCount) else { throw WireError.storage }
+        return floors.first { $0.0 == conversation }?.1
+    }
+
+    private func notificationPermissionIsPending(_ event: WireEvent, now: UInt64) throws -> Bool {
+        let payload = event.payload
+        let operation = try payload.field("operation_id").identifier.uuidString.lowercased()
+        let conversation = event.conversationID.uuidString.lowercased()
+        let task = try payload.field("task_id").identifier.uuidString.lowercased()
+        let call = try payload.field("tool_call_id").identifier.uuidString.lowercased()
+        let tool = try payload.field("tool_name").text
+        let current = try database.rows("SELECT conversation,task,tool,call,decided,inspection FROM approvals WHERE id=?", [.text(operation)]) { row in
+            for index: Int32 in [0, 1, 3] {
+                guard sqlite3_column_type(row, index) == SQLITE_TEXT, sqlite3_column_bytes(row, index) == 36 else { throw WireError.storage }
+            }
+            guard sqlite3_column_type(row, 2) == SQLITE_TEXT, sqlite3_column_bytes(row, 2) <= 262_144,
+                  sqlite3_column_type(row, 4) == SQLITE_INTEGER else { throw WireError.storage }
+            let decided = sqlite3_column_int64(row, 4)
+            guard decided == 0 || decided == 1 else { throw WireError.storage }
+            let inspection: WirePermissionInspection?
+            if sqlite3_column_type(row, 5) == SQLITE_NULL { inspection = nil }
+            else {
+                guard sqlite3_column_type(row, 5) == SQLITE_BLOB, sqlite3_column_bytes(row, 5) <= 32_768 else { throw WireError.storage }
+                let parsed = try WirePermissionInspection(WireValue.parse(ReplicaDatabase.data(row, 5), maximum: 32_768))
+                try parsed.verifyArguments()
+                inspection = parsed
+            }
+            guard try ReplicaDatabase.text(row, 0) == conversation, try ReplicaDatabase.text(row, 1) == task,
+                  try ReplicaDatabase.text(row, 2) == tool, tool.utf8.count == Int(sqlite3_column_bytes(row, 2)),
+                  try ReplicaDatabase.text(row, 3) == call else { throw WireError.conflict }
+            return (decided, inspection)
+        }.first
+        guard let current else { throw WireError.conflict }
+        if let original = try payload.fields["inspection"], original != .null {
+            guard current.1?.raw == original else { throw WireError.conflict }
+        }
+        guard current.0 == 0, try database.permissionDecision(operation: operation, conversation: conversation) == nil else { return false }
+        if let inspection = current.1 {
+            return inspection.requestedAt <= now && now < inspection.expiresAt
+        }
+        return true
+    }
+
+    private func notificationIdentifier(_ category: ReplicaNotificationCategory, conversation: UUID, through: UInt64,
+                                        host: DevicePublicKeys, localID: UUID) -> String {
+        var identity = Data("everything.replica.notification.v1\0".utf8)
+        identity.append(WireID.bytes(localID))
+        identity.append(host.canonical)
+        identity.append(WireID.bytes(conversation))
+        identity.append(Data(String(through).utf8))
+        identity.append(0)
+        identity.append(Data(category.rawValue.utf8))
+        return "everything.replica.notification.v1." + SHA256.hash(data: identity).map { String(format: "%02x", $0) }.joined()
     }
 
     func rejectGap(_ messageID: UUID, conversation: UUID, request: EncryptedEnvelope, host: DevicePublicKeys) throws {
