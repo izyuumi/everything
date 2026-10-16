@@ -68,6 +68,8 @@ pub enum EmbeddingGemma2Error {
     RuntimeInitialization,
     #[error("ONNX Runtime is already initialized; share the existing EmbeddingRuntime instance")]
     RuntimeAlreadyInitialized,
+    #[error("start the host with ORT_DISABLE_TELEMETRY=1 before initializing ONNX Runtime")]
+    TelemetrySuppressionRequired,
     #[error("EmbeddingGemma 2 native resources are busy")]
     Busy,
     #[error("EmbeddingGemma 2 runtime already owns a loaded model; share it with with_dimensions")]
@@ -97,7 +99,15 @@ pub struct EmbeddingRuntime {
 }
 
 impl EmbeddingRuntime {
+    pub fn require_telemetry_suppression() -> Result<(), EmbeddingError> {
+        if std::env::var_os("ORT_DISABLE_TELEMETRY").as_deref() != Some(std::ffi::OsStr::new("1")) {
+            return Err(native(EmbeddingGemma2Error::TelemetrySuppressionRequired));
+        }
+        Ok(())
+    }
+
     pub fn initialize(library_path: impl AsRef<Path>) -> Result<Arc<Self>, EmbeddingError> {
+        Self::require_telemetry_suppression()?;
         let path = library_path
             .as_ref()
             .canonicalize()
