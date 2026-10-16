@@ -1,5 +1,6 @@
 mod devices;
 mod persistence;
+mod updates;
 
 pub use devices::NativeDeviceActionResult;
 
@@ -79,6 +80,8 @@ pub enum SettingsServiceError {
     Worker,
     #[error("settings file reconciliation is required for original operation {request_id}")]
     WriteBlocked { request_id: CommandId },
+    #[error("embedding profile metadata is unavailable")]
+    EmbeddingMetadataUnavailable,
     #[error(transparent)]
     Contract(#[from] SettingsContractError),
     #[error(transparent)]
@@ -123,6 +126,7 @@ struct ServiceCore {
     pairings: Mutex<BTreeMap<CommandId, Arc<PendingPairingLease>>>,
     endpoint: DeviceEndpoint,
     active_write: Mutex<Option<Arc<ActiveSettingsWrite>>>,
+    composition: Mutex<Option<Arc<crate::host::composition::Composition>>>,
     agent: Agent,
 }
 
@@ -152,6 +156,7 @@ impl SettingsService {
                 pairings: Mutex::new(BTreeMap::new()),
                 endpoint: endpoint.clone(),
                 active_write: Mutex::new(None),
+                composition: Mutex::new(None),
                 agent,
             }),
         };
@@ -188,6 +193,28 @@ impl SettingsService {
             })
             .await?;
         Ok(service)
+    }
+
+    pub(in crate::host) fn bind_composition(
+        &self,
+        composition: Arc<crate::host::composition::Composition>,
+    ) -> Result<(), SettingsServiceError> {
+        if !composition.shares_agent(&self.core.agent) {
+            return Err(SettingsServiceError::LeaseRequired);
+        }
+        let mut current = self
+            .core
+            .composition
+            .lock()
+            .map_err(|_| SettingsServiceError::Poisoned)?;
+        if let Some(existing) = &*current {
+            if !Arc::ptr_eq(existing, &composition) {
+                return Err(SettingsServiceError::Conflict);
+            }
+            return Ok(());
+        }
+        *current = Some(composition);
+        Ok(())
     }
 
     pub(crate) fn local_owner_caller(
