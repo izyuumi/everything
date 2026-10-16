@@ -41,6 +41,18 @@ pub enum MemoryError {
         #[source]
         shutdown: Box<MemoryError>,
     },
+    #[error("semantic operation and owned cleanup both failed")]
+    EmbeddingCleanup {
+        operation: Box<MemoryError>,
+        #[source]
+        cleanup: Box<MemoryError>,
+    },
+    #[cfg(feature = "local-embeddings")]
+    #[error("isolated embedding helper shutdown failed")]
+    EmbeddingShutdown(#[source] Box<crate::memory::embedding::EmbeddingError>),
+    #[cfg(feature = "local-embeddings")]
+    #[error("isolated embedding helper cleanup worker failed")]
+    EmbeddingShutdownWorker(#[source] Box<tokio::task::JoinError>),
     #[error(transparent)]
     Service(#[from] ServiceError),
     #[error(transparent)]
@@ -1129,7 +1141,10 @@ async fn apply_embedding_step(
                 .map_err(|_| MemoryError::Worker)?
                 .process
                 .take();
-            stop_backend(hybrid, process, core._agent.clone()).await?;
+            if let Err(error) = stop_backend(hybrid, process, core._agent.clone()).await {
+                latch_failed_cleanup(core);
+                return Err(error);
+            }
         }
         ensure_application(core, generation, request)?;
         let settings = request.preferences.resolved()?;
@@ -1197,10 +1212,11 @@ async fn apply_embedding_step(
                 }
             };
             if let Err(error) = ensure_application(core, generation, request) {
-                dispose_built(built).await?;
-                return Err(error);
+                return Err(dispose_after_error(core, built, error).await);
             }
-            let hybrid = built.hybrid.take().ok_or(MemoryError::Worker)?;
+            let Some(hybrid) = built.hybrid.take() else {
+                return Err(dispose_after_error(core, built, MemoryError::Worker).await);
+            };
             let profile = hybrid.specification().profile().clone();
             let installation = core
                 .consolidator
@@ -1210,12 +1226,12 @@ async fn apply_embedding_step(
                 Ok(Ok(())) => {}
                 Ok(Err(hybrid)) => {
                     built.hybrid = Some(hybrid);
-                    dispose_built(built).await?;
-                    return Err(MemoryError::BindingChanged);
+                    return Err(
+                        dispose_after_error(core, built, MemoryError::BindingChanged).await,
+                    );
                 }
                 Err(error) => {
-                    dispose_built(built).await?;
-                    return Err(error.into());
+                    return Err(dispose_after_error(core, built, error.into()).await);
                 }
             }
             {
@@ -1338,26 +1354,57 @@ async fn stop_backend(
     tokio::task::spawn_blocking(move || {
         let owned = owned;
         let result = match &owned.1 {
-            Some(process) => process.shutdown().map_err(|_| MemoryError::Worker),
+            Some(process) => process
+                .shutdown()
+                .map_err(|error| MemoryError::EmbeddingShutdown(Box::new(error))),
             None => Ok(()),
         };
         drop(owned);
         result
     })
     .await
-    .map_err(|_| MemoryError::Worker)?
+    .map_err(|error| MemoryError::EmbeddingShutdownWorker(Box::new(error)))?
 }
 
 #[cfg(feature = "local-embeddings")]
 async fn dispose_built(built: BuiltEmbeddings) -> Result<(), MemoryError> {
     tokio::task::spawn_blocking(move || {
         let owned = built;
-        let result = owned.process.shutdown().map_err(|_| MemoryError::Worker);
+        let result = owned
+            .process
+            .shutdown()
+            .map_err(|error| MemoryError::EmbeddingShutdown(Box::new(error)));
         drop(owned);
         result
     })
     .await
-    .map_err(|_| MemoryError::Worker)?
+    .map_err(|error| MemoryError::EmbeddingShutdownWorker(Box::new(error)))?
+}
+
+#[cfg(feature = "local-embeddings")]
+fn latch_failed_cleanup(core: &MemoryCore) {
+    core.quiescence_failed.store(true, Ordering::Release);
+    core.closing.store(true, Ordering::Release);
+    core.stop.cancel();
+    core.embedding_changes.notify_waiters();
+}
+
+#[cfg(feature = "local-embeddings")]
+async fn dispose_after_error(
+    core: &MemoryCore,
+    built: BuiltEmbeddings,
+    operation: MemoryError,
+) -> MemoryError {
+    match dispose_built(built).await {
+        Ok(()) => operation,
+        Err(cleanup) => {
+            latch_failed_cleanup(core);
+            MemoryError::EmbeddingCleanup {
+                operation: Box::new(operation),
+                cleanup: Box::new(cleanup),
+            }
+        }
+    }
 }
 
 #[cfg(feature = "local-embeddings")]
