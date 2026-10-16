@@ -105,6 +105,36 @@ impl ModelCredentialReference {
     }
 }
 
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct HostPreferenceOverrides {
+    pub embeddings_enabled: Option<bool>,
+    pub embedding_dimensions: EmbeddingDimensionsOverride,
+    pub system_one_enabled: Option<bool>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum EmbeddingDimensionsOverride {
+    #[default]
+    Inherit,
+    BackendDefault,
+    Selected {
+        dimensions: u32,
+    },
+}
+
+impl HostPreferenceOverrides {
+    fn validate(&self) -> Result<(), SettingsError> {
+        if let EmbeddingDimensionsOverride::Selected { dimensions } = self.embedding_dimensions
+            && !(1..=65_536).contains(&dimensions)
+        {
+            return Err(SettingsError::Invalid("embedding dimension preference"));
+        }
+        Ok(())
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct HostSettings {
@@ -126,6 +156,8 @@ pub struct HostSettings {
     pub mcp: super::mcp::McpSettings,
     #[serde(default)]
     pub selection: super::selection::SelectionSettings,
+    #[serde(default)]
+    pub preference_overrides: HostPreferenceOverrides,
 }
 
 impl HostSettings {
@@ -193,6 +225,7 @@ impl HostSettings {
         self.selection
             .configuration()
             .map_err(|_| SettingsError::Invalid("invalid optional selection configuration"))?;
+        self.preference_overrides.validate()?;
         let encoded = serde_json::to_vec(self)
             .map_err(|_| SettingsError::Invalid("settings could not be encoded"))?;
         if encoded.len() > MAX_SETTINGS_BYTES {
@@ -239,6 +272,7 @@ impl SettingsRepository {
                     memory: Default::default(),
                     mcp: Default::default(),
                     selection: Default::default(),
+                    preference_overrides: Default::default(),
                 };
                 settings.validate()?;
                 write_settings(&lease, &settings)?;

@@ -76,6 +76,8 @@ pub enum SettingsServiceError {
     },
     #[error("settings worker failed; inspect its original operation")]
     Worker,
+    #[error("settings file reconciliation is required for original operation {request_id}")]
+    WriteBlocked { request_id: CommandId },
     #[error(transparent)]
     Contract(#[from] SettingsContractError),
     #[error(transparent)]
@@ -97,6 +99,19 @@ pub struct SettingsService {
     core: Arc<ServiceCore>,
 }
 
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case", deny_unknown_fields)]
+pub enum SettingsStartupPolicy {
+    Ready,
+    OptionalFeaturesSuspended { operation_id: CommandId },
+}
+
+struct ActiveSettingsWrite {
+    request_id: CommandId,
+    client_session_id: Uuid,
+    cancellation: CancellationToken,
+}
+
 struct ServiceCore {
     repository: OperationRepository,
     settings: SettingsRepository,
@@ -106,6 +121,7 @@ struct ServiceCore {
     pending: Mutex<BTreeMap<CommandId, Instant>>,
     pairings: Mutex<BTreeMap<CommandId, Arc<PendingPairingLease>>>,
     endpoint: DeviceEndpoint,
+    active_write: Mutex<Option<Arc<ActiveSettingsWrite>>>,
     agent: Agent,
 }
 
@@ -134,6 +150,7 @@ impl SettingsService {
                 pending: Mutex::new(BTreeMap::new()),
                 pairings: Mutex::new(BTreeMap::new()),
                 endpoint: endpoint.clone(),
+                active_write: Mutex::new(None),
                 agent,
             }),
         };
@@ -141,6 +158,9 @@ impl SettingsService {
             .blocking(move |core| {
                 core.check_endpoint(public_keys)?;
                 for operation in core.repository.pending()? {
+                    if operation.write().is_some() {
+                        continue;
+                    }
                     let state = match operation.phase() {
                         SettingsOperationPhase::InFlight { .. } => SettingsOperationState::Unknown,
                         _ => SettingsOperationState::Unavailable {
@@ -176,6 +196,20 @@ impl SettingsService {
         self.core.authority.owner(call)
     }
 
+    pub(crate) async fn startup_policy(
+        &self,
+    ) -> Result<SettingsStartupPolicy, SettingsServiceError> {
+        self.blocking(|core| {
+            Ok(match core.repository.unresolved_write()? {
+                Some(operation) => SettingsStartupPolicy::OptionalFeaturesSuspended {
+                    operation_id: operation.identity.binding.request_id,
+                },
+                None => SettingsStartupPolicy::Ready,
+            })
+        })
+        .await
+    }
+
     pub(crate) fn open_native_session(
         &self,
         call: &LocalCall,
@@ -199,14 +233,14 @@ impl SettingsService {
         self.core.authority.native(call, proof, true)
     }
 
-    pub(crate) fn begin_settings_session(
+    pub fn begin_settings_session(
         &self,
         caller: SettingsCaller,
     ) -> Result<SettingsAgentSession, SettingsServiceError> {
         self.core.authority.begin_agent(&caller)
     }
 
-    pub(crate) fn settings_session_caller(
+    pub fn settings_session_caller(
         &self,
         session: &SettingsAgentSession,
         tool: SettingsToolName,
@@ -701,6 +735,10 @@ impl SettingsService {
             if record.identity.binding.client_session_id != session_id {
                 return Err(SettingsServiceError::OutsideScope);
             }
+            if record.write().is_some() {
+                core.cancel_write(request_id)?;
+                return Ok(record.inspection());
+            }
             match record.phase() {
                 SettingsOperationPhase::InFlight { .. } => {
                     let claim = core
@@ -724,6 +762,9 @@ impl SettingsService {
                     Ok(record.inspection())
                 }
                 SettingsOperationPhase::Finished { .. } => Ok(record.inspection()),
+                SettingsOperationPhase::Applying { .. } => {
+                    Err(SettingsServiceError::CorruptJournal)
+                }
                 _ => {
                     let inspection = core.repository.finish_unadmitted(
                         &record.identity,
@@ -753,6 +794,10 @@ impl SettingsService {
                 if record.identity.binding.client_session_id != session_id {
                     continue;
                 }
+                if record.write().is_some() {
+                    core.cancel_write(record.identity.binding.request_id)?;
+                    continue;
+                }
                 if matches!(record.phase(), SettingsOperationPhase::InFlight { .. }) {
                     let claim = core
                         .claims
@@ -774,6 +819,16 @@ impl SettingsService {
                         .remove(&record.identity.binding.request_id);
                 }
             }
+            let active = core
+                .active_write
+                .lock()
+                .map_err(|_| SettingsServiceError::Poisoned)?
+                .clone();
+            if let Some(active) = active
+                && active.client_session_id == session_id
+            {
+                active.cancellation.cancel();
+            }
             for pairing in core.retained_pairings()? {
                 if pairing.session_id == session_id {
                     pairing.cancel()?;
@@ -791,6 +846,17 @@ impl SettingsService {
 
     pub(crate) async fn close(&self) -> Result<(), SettingsServiceError> {
         self.stop_intake()?;
+        let active = self
+            .core
+            .active_write
+            .lock()
+            .map_err(|_| SettingsServiceError::Poisoned)?
+            .clone();
+        if let Some(active) = active {
+            active.cancellation.cancel();
+        }
+        let mutation = Arc::clone(&self.core.mutation).lock_owned().await;
+        drop(mutation);
         self.blocking(|core| {
             let claims = core
                 .claims
@@ -838,6 +904,28 @@ impl SettingsService {
 }
 
 impl ServiceCore {
+    fn require_resolved_file(&self) -> Result<(), SettingsServiceError> {
+        if let Some(operation) = self.repository.unresolved_write()? {
+            return Err(SettingsServiceError::WriteBlocked {
+                request_id: operation.identity.binding.request_id,
+            });
+        }
+        Ok(())
+    }
+
+    fn cancel_write(&self, request_id: CommandId) -> Result<(), SettingsServiceError> {
+        let active = self
+            .active_write
+            .lock()
+            .map_err(|_| SettingsServiceError::Poisoned)?
+            .clone();
+        if let Some(active) = active
+            && active.request_id == request_id
+        {
+            active.cancellation.cancel();
+        }
+        Ok(())
+    }
     fn create_pairing(
         &self,
         effect: &NativeHostEffectAdmission,
@@ -1171,7 +1259,7 @@ impl ServiceCore {
     fn expire_unadmitted(&self) -> Result<(), SettingsServiceError> {
         let now = UnixMillis::now()?;
         for record in self.repository.pending()? {
-            if matches!(record.phase(), SettingsOperationPhase::InFlight { .. }) {
+            if record.admitted() {
                 continue;
             }
             let deadline = self
@@ -1329,7 +1417,9 @@ impl ServiceCore {
                 }
             }
             SettingsOperationPhase::Finished { result } => return Ok(result.clone()),
-            SettingsOperationPhase::InFlight { .. } => SettingsOperationState::Unknown,
+            SettingsOperationPhase::InFlight { .. } | SettingsOperationPhase::Applying { .. } => {
+                SettingsOperationState::Unknown
+            }
         };
         Ok(SettingsOperationResult {
             contract_version: SETTINGS_CONTRACT_VERSION,
