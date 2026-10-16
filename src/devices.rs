@@ -25,6 +25,11 @@ pub(crate) use settings_bind_reply::{SettingsBindReplyContractError, SettingsBin
 pub(crate) use settings_ingress::work::ReplyBuildPermit;
 #[cfg(unix)]
 pub(crate) use settings_ingress::{
+    AccessStatusRejection, AuthenticatedSettingsAccessSource, OwnedVerifiedSettingsAccess,
+    SettingsAccessStatusIntent,
+};
+#[cfg(unix)]
+pub(crate) use settings_ingress::{
     AuthenticatedSettingsCommandSource, AuthenticatedSettingsSource, BindRejection, BindingCreator,
     BindingGeneration, BindingHistorySnapshot, BindingHistoryState, BindingIntent, BindingLifetime,
     CommandRejection, CommittedBindSource, CommittedSettingsCommandSource,

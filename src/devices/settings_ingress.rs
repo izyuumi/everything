@@ -1,3 +1,4 @@
+mod access;
 mod command;
 mod wire;
 pub(super) mod work;
@@ -27,6 +28,10 @@ use crate::storage::{
     StoredSettingsBindReply, TransportInboxMetadata, TransportInboxRejection,
 };
 
+pub(crate) use access::{
+    AccessStatusRejection, AuthenticatedSettingsAccessSource, OwnedVerifiedSettingsAccess,
+    SettingsAccessStatusIntent,
+};
 use command::SettingsCommandOutcome;
 pub(crate) use command::{
     AuthenticatedSettingsCommandSource, CommandRejection, CommittedSettingsCommandSource,
