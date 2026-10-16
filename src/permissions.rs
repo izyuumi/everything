@@ -46,7 +46,7 @@ pub enum ExecutionMode {
     FullHost,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExecutionAuthority {
     conversation_id: String,
     task_id: String,
@@ -144,6 +144,10 @@ impl ExecutionAuthority {
         }
         self.allowed_tools = Some(Arc::new(allowed_tools));
         Ok(self)
+    }
+
+    pub(crate) fn allowed_tools(&self) -> Option<&BTreeSet<String>> {
+        self.allowed_tools.as_deref()
     }
 
     pub fn permits_tool(&self, name: &str) -> bool {

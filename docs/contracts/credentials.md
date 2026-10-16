@@ -1,0 +1,15 @@
+# Native credentials
+
+`credentials` is independent of selectors, models and transport. `CredentialKey::new(service, account)` accepts bounded nonsecret identifiers. `CredentialSecret::new(Vec<u8>)` takes ownership of 1–8192 bytes in zeroizing storage. It has no Debug, Clone or serialization implementation. `expose` lends bytes only to trusted native consumers. Do not put secrets in identifier fields.
+
+`NativeCredentialStore` selects an explicit real native credential implementation, never a global default builder: macOS Keychain (`MacCredential`) or Linux Secret Service (`SsCredential`). Unsupported platforms return an explicit error. There is no environment-variable, plaintext file, Linux kernel-only, or mock fallback. Linux needs a working session D-Bus and Secret Service daemon; vendored libdbus permits compilation without system development headers, not runtime service emulation.
+
+`read(key, cancellation)` runs the native call on a blocking worker and stops waiting after three seconds or cancellation. One owned semaphore permit admits a single native operation across store clones. It remains with the worker until the OS call actually finishes; timed-out work cannot accumulate through the same store. A late secret result is dropped and its owned buffer zeroized. Locked stores may prompt through the platform; OS prompt/call termination is not promised.
+
+Owner-only `store(key, secret)` and `delete(key)` await actual native completion and return a sanitized error on failure. They do not have an artificial mutation timeout. Dropping their future cannot undo a native mutation already in flight; the host must retain and observe mutation tasks. Missing entries are `None` for reads and successful idempotent deletion. Native error text, backend metadata, rejected bytes and response bodies are never formatted into application errors.
+
+These methods are trusted library APIs, not model tools or durable command handlers. Host/Apple owner setup must pass ephemeral secret bytes directly into this boundary. Never place secret setup in command-line arguments, TOML, logs, events, conversation checkpoints, permission payloads, remote command journals, or relay messages. Owner access enforcement belongs to the authenticated host surface; possession of a selector configuration file is insufficient.
+
+System One's key derivation lives in its own module. `SystemOneSettings::credential_key` hashes a versioned domain, exact canonical endpoint including query, and opaque UUID reference into the native account. Keys for one endpoint cannot be looked up by a different configured endpoint. Provider integrations may define their own domain-specific keys without importing the selector.
+
+The application-owned buffer is zeroized, and bearer header values are marked sensitive. Native keyring and HTTP libraries can make internal memory copies; this API does not claim universal heap zeroization. Native store access controls are part of the OS user security boundary, not protection against a compromised process running as that user.
