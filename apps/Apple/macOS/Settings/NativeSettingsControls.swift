@@ -31,6 +31,17 @@ struct NativeSettingsControls: View {
                         .foregroundStyle(.secondary)
                 }
             }
+            switch section {
+            case .models:
+                Section("Native credential entry") {
+                    NativeCredentialEntryControls(store: store, purpose: .model, connectionEdited: connectionEdited)
+                }
+            case .toolSelection:
+                Section("Native credential entry") {
+                    NativeCredentialEntryControls(store: store, purpose: .systemOne, connectionEdited: connectionEdited)
+                }
+            case .memory: EmptyView()
+            }
             operationControls
         }
         .formStyle(.grouped)
