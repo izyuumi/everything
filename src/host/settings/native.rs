@@ -93,6 +93,16 @@ pub enum NativeSettingsOperation {
 impl NativeSettingsOperation {
     pub fn validate(&self) -> Result<(), &'static str> {
         match self {
+            Self::PairDevice { request, .. }
+                if !matches!(&request.action, SettingsDeviceAction::Pair) =>
+            {
+                return Err("invalid native pairing action");
+            }
+            Self::RevokeDevice { request, .. }
+                if !matches!(&request.action, SettingsDeviceAction::Revoke { .. }) =>
+            {
+                return Err("invalid native revocation action");
+            }
             Self::Devices { limit, .. } if *limit == 0 || *limit > MAX_SETTINGS_DEVICE_PAGE => {
                 return Err("invalid native device page limit");
             }
