@@ -188,7 +188,7 @@ impl<'de> Deserialize<'de> for MessageKind {
     }
 }
 
-fn canonical_uuid<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Uuid, D::Error> {
+pub(super) fn canonical_uuid<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Uuid, D::Error> {
     let encoded = String::deserialize(deserializer)?;
     let uuid = Uuid::parse_str(&encoded)
         .map_err(|_| serde::de::Error::custom("invalid Settings identifier"))?;
@@ -198,7 +198,9 @@ fn canonical_uuid<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Uuid, D:
     Ok(uuid)
 }
 
-fn object<'de, T: Deserialize<'de>, D: Deserializer<'de>>(deserializer: D) -> Result<T, D::Error> {
+pub(super) fn object<'de, T: Deserialize<'de>, D: Deserializer<'de>>(
+    deserializer: D,
+) -> Result<T, D::Error> {
     Object::deserialize(deserializer).map(|Object(value)| value)
 }
 

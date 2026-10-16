@@ -1,3 +1,4 @@
+mod command;
 mod wire;
 pub(super) mod work;
 
@@ -25,6 +26,10 @@ use crate::storage::{
     StoredSettingsBindReply, TransportInboxMetadata, TransportInboxRejection,
 };
 
+pub(crate) use command::{
+    AuthenticatedSettingsCommandSource, CommandRejection, OwnedVerifiedSettingsCommand,
+    SettingsCommandIntent, SettingsParentReference, SettingsUpdateIntent,
+};
 pub(crate) use wire::{BindingGeneration, BindingIntent};
 pub(crate) use work::{PendingSettingsReceipt, SettingsReceiveDrain, SettingsReceiveWitness};
 
@@ -84,6 +89,11 @@ pub(super) struct ReceiveContext {
 
 pub(crate) struct AuthenticatedSettingsSource {
     intent: BindingIntent,
+    envelope: VerifiedSettingsEnvelope,
+    history: Arc<BindingHistory>,
+}
+
+struct VerifiedSettingsEnvelope {
     context: Arc<ReceiveContext>,
     connection: Arc<SettingsConnectionIdentity>,
     pin: PeerRegistration,
@@ -96,7 +106,6 @@ pub(crate) struct AuthenticatedSettingsSource {
     outer_expires_at: u64,
     clock: ClockFloor,
     guard_active: Arc<AtomicBool>,
-    history: Arc<BindingHistory>,
 }
 
 pub(crate) struct OwnedVerifiedSettingsPacket {
@@ -193,8 +202,8 @@ impl ClockFloor {
     }
 }
 
-impl AuthenticatedSettingsSource {
-    pub(crate) fn matches_context(
+impl VerifiedSettingsEnvelope {
+    fn matches_context(
         &self,
         agent: &Agent,
         endpoint: &DeviceEndpoint,
@@ -210,12 +219,85 @@ impl AuthenticatedSettingsSource {
             && Arc::ptr_eq(&self.context.mutation, mutation)
     }
 
-    pub(crate) fn connection(&self) -> &Arc<SettingsConnectionIdentity> {
+    fn connection(&self) -> &Arc<SettingsConnectionIdentity> {
         &self.connection
     }
 
-    pub(crate) fn verified_peer_keys(&self) -> &DevicePublicKeys {
+    fn verified_peer_keys(&self) -> &DevicePublicKeys {
         &self.pin.keys
+    }
+
+    fn check_precommit(
+        &self,
+        store: &Store,
+        host_id: DeviceId,
+        generation: &BindingGeneration,
+        issued_at: u64,
+        expires_at: u64,
+    ) -> Result<(UnixMillis, Instant), BindRejection> {
+        if !self.guard_active.load(Ordering::Acquire)
+            || !self.connection.is_live()
+            || !self.context.endpoint.shares_store(store)
+            || !self.context.agent.store().shares_connection(store)
+            || self.context.endpoint.role() != &EndpointRole::Host
+            || host_id != self.connection.host_identity().host_id()
+            || generation.host_epoch != self.connection.host_identity().host_epoch()
+            || generation.connection_epoch != self.connection.connection_epoch()
+            || self.outer_expires_at <= self.outer_created_at
+            || self.outer_expires_at - self.outer_created_at > 30_000
+            || self.outer_expires_at > expires_at
+        {
+            return Err(BindRejection::OutsideScope);
+        }
+        let observed = self.clock.observe()?;
+        if observed.0.get() < issued_at
+            || observed.0.get() >= expires_at
+            || observed.0.get() >= self.outer_expires_at
+            || observed.1 >= self.clock.deadline(expires_at)?
+            || observed.1 >= self.clock.deadline(self.outer_expires_at)?
+        {
+            return Err(BindRejection::Expired);
+        }
+        Ok(observed)
+    }
+
+    fn receipt_metadata(&self) -> Result<TransportInboxMetadata<'_>, BindRejection> {
+        Ok(TransportInboxMetadata {
+            message_id: &self.message_id,
+            sender: &self.sender,
+            recipient: &self.recipient,
+            envelope_digest: &self.envelope_digest,
+            received_at: i64::try_from(self.clock.wall.get())
+                .map_err(|_| BindRejection::Expired)?,
+            expires_at: i64::try_from(self.outer_expires_at).map_err(|_| BindRejection::Expired)?,
+        })
+    }
+
+    fn pinned_identity(&self) -> &Value {
+        &self.pinned_identity
+    }
+}
+
+impl AuthenticatedSettingsSource {
+    pub(crate) fn matches_context(
+        &self,
+        agent: &Agent,
+        endpoint: &DeviceEndpoint,
+        mutation: &Arc<AsyncMutex<()>>,
+    ) -> bool {
+        self.envelope.matches_context(agent, endpoint, mutation)
+    }
+    pub(crate) fn connection(&self) -> &Arc<SettingsConnectionIdentity> {
+        self.envelope.connection()
+    }
+    pub(crate) fn verified_peer_keys(&self) -> &DevicePublicKeys {
+        self.envelope.verified_peer_keys()
+    }
+    pub(crate) fn receipt_metadata(&self) -> Result<TransportInboxMetadata<'_>, BindRejection> {
+        self.envelope.receipt_metadata()
+    }
+    pub(crate) fn pinned_identity(&self) -> &Value {
+        self.envelope.pinned_identity()
     }
 
     pub(crate) fn check_precommit(
@@ -223,31 +305,16 @@ impl AuthenticatedSettingsSource {
         store: &Store,
         intent: &BindingIntent,
     ) -> Result<(UnixMillis, Instant), BindRejection> {
-        if intent != &self.intent
-            || !self.guard_active.load(Ordering::Acquire)
-            || !self.connection.is_live()
-            || !self.context.endpoint.shares_store(store)
-            || !self.context.agent.store().shares_connection(store)
-            || self.context.endpoint.role() != &EndpointRole::Host
-            || intent.host_id != self.connection.host_identity().host_id()
-            || intent.generation.host_epoch != self.connection.host_identity().host_epoch()
-            || intent.generation.connection_epoch != self.connection.connection_epoch()
-            || self.outer_expires_at <= self.outer_created_at
-            || self.outer_expires_at - self.outer_created_at > 30_000
-            || self.outer_expires_at > intent.expires_at
-        {
+        if intent != &self.intent {
             return Err(BindRejection::OutsideScope);
         }
-        let observed = self.clock.observe()?;
-        if observed.0.get() < intent.issued_at
-            || observed.0.get() >= intent.expires_at
-            || observed.0.get() >= self.outer_expires_at
-            || observed.1 >= self.clock.deadline(intent.expires_at)?
-            || observed.1 >= self.clock.deadline(self.outer_expires_at)?
-        {
-            return Err(BindRejection::Expired);
-        }
-        Ok(observed)
+        self.envelope.check_precommit(
+            store,
+            intent.host_id,
+            &intent.generation,
+            intent.issued_at,
+            intent.expires_at,
+        )
     }
 
     pub(crate) fn parent_lifetime(
@@ -264,8 +331,8 @@ impl AuthenticatedSettingsSource {
                     .ok_or(BindRejection::Expired)?,
             )
             .min(grant_expires_at.get());
-        let (wall, monotonic) = self.clock.observe()?;
-        let deadline = self.clock.deadline(expires)?;
+        let (wall, monotonic) = self.envelope.clock.observe()?;
+        let deadline = self.envelope.clock.deadline(expires)?;
         if wall.get() >= expires || monotonic >= deadline {
             return Err(BindRejection::Expired);
         }
@@ -273,22 +340,6 @@ impl AuthenticatedSettingsSource {
             expires_at: UnixMillis::try_from(expires).map_err(|_| BindRejection::Expired)?,
             deadline,
         })
-    }
-
-    pub(crate) fn receipt_metadata(&self) -> Result<TransportInboxMetadata<'_>, BindRejection> {
-        Ok(TransportInboxMetadata {
-            message_id: &self.message_id,
-            sender: &self.sender,
-            recipient: &self.recipient,
-            envelope_digest: &self.envelope_digest,
-            received_at: i64::try_from(self.clock.wall.get())
-                .map_err(|_| BindRejection::Expired)?,
-            expires_at: i64::try_from(self.outer_expires_at).map_err(|_| BindRejection::Expired)?,
-        })
-    }
-
-    pub(crate) fn pinned_identity(&self) -> &Value {
-        &self.pinned_identity
     }
 
     pub(crate) fn reserve_binding(
@@ -300,7 +351,7 @@ impl AuthenticatedSettingsSource {
                 BindRejection::OutsideScope,
             ));
         }
-        if !Arc::ptr_eq(&self.history.connection, &self.connection) {
+        if !Arc::ptr_eq(&self.history.connection, &self.envelope.connection) {
             self.history.ledger.fail();
             return Err(SettingsBindAdmissionError::Bookkeeping);
         }
@@ -308,7 +359,7 @@ impl AuthenticatedSettingsSource {
             self.history.ledger.fail();
             SettingsBindAdmissionError::Bookkeeping
         })?;
-        let key = (self.pin.keys.device_id, intent.binding_request_id);
+        let key = (self.envelope.pin.keys.device_id, intent.binding_request_id);
         if let Some(original) = cells.get(&key) {
             return Err(SettingsBindAdmissionError::Rejected(
                 if original.intent == *intent {
@@ -321,7 +372,7 @@ impl AuthenticatedSettingsSource {
         if cells.len() >= 32
             || cells
                 .keys()
-                .filter(|(peer, _)| *peer == self.pin.keys.device_id)
+                .filter(|(peer, _)| *peer == self.envelope.pin.keys.device_id)
                 .count()
                 >= 4
         {
@@ -524,6 +575,36 @@ impl OwnedReplay<'_> {
         CryptoError::ReplayStorage(STORAGE_FAILURE.into())
     }
 
+    fn verified_envelope(
+        &mut self,
+        record: &ReplayRecord,
+        now_ms: u64,
+    ) -> Result<VerifiedSettingsEnvelope, CryptoError> {
+        let envelope = &self.input.envelope;
+        if record.message_id != envelope.header.message_id
+            || record.sender != self.peer.keys.device_id
+            || record.recipient != envelope.header.recipient
+            || record.expires_at_ms != envelope.header.expires_at_ms
+            || now_ms != self.clock.wall.get()
+        {
+            return Err(self.fail(SettingsReceiveError::Bookkeeping));
+        }
+        Ok(VerifiedSettingsEnvelope {
+            context: Arc::clone(&self.input.context),
+            connection: Arc::clone(&self.input.connection),
+            pin: self.peer.clone(),
+            pinned_identity: self.pinned_identity.clone(),
+            message_id: record.message_id.to_string(),
+            sender: record.sender.to_string(),
+            recipient: record.recipient.to_string(),
+            envelope_digest: self.digest.clone(),
+            outer_created_at: envelope.header.created_at_ms,
+            outer_expires_at: record.expires_at_ms,
+            clock: self.clock,
+            guard_active: self.input.guard.active(),
+        })
+    }
+
     fn bind(
         &mut self,
         record: ReplayRecord,
@@ -544,32 +625,13 @@ impl OwnedReplay<'_> {
                         Ok(witness) => witness,
                         Err(error) => return Err(self.fail(error)),
                     };
-                    let envelope = &self.input.envelope;
-                    if record.message_id != envelope.header.message_id
-                        || record.sender != self.peer.keys.device_id
-                        || record.recipient != envelope.header.recipient
-                        || record.expires_at_ms != envelope.header.expires_at_ms
-                        || now_ms != self.clock.wall.get()
-                    {
-                        return Err(self.fail(SettingsReceiveError::Bookkeeping));
-                    }
+                    let envelope = self.verified_envelope(&record, now_ms)?;
                     let source_intent = intent.clone();
                     let verified = OwnedVerifiedSettingsPacket {
                         intent,
                         source: AuthenticatedSettingsSource {
                             intent: source_intent,
-                            context: Arc::clone(&self.input.context),
-                            connection: Arc::clone(&self.input.connection),
-                            pin: self.peer.clone(),
-                            pinned_identity: self.pinned_identity.clone(),
-                            message_id: record.message_id.to_string(),
-                            sender: record.sender.to_string(),
-                            recipient: record.recipient.to_string(),
-                            envelope_digest: self.digest.clone(),
-                            outer_created_at: envelope.header.created_at_ms,
-                            outer_expires_at: record.expires_at_ms,
-                            clock: self.clock,
-                            guard_active: self.input.guard.active(),
+                            envelope,
                             history: Arc::clone(&self.input.history),
                         },
                         _witness: witness,
