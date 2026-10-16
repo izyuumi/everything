@@ -449,8 +449,9 @@ final class ThisDeviceSettingsStore {
     func drainSurface() async {
         let cancelledObserver = observerTask?.isCancelled == true ? observerTask : nil
         let tasks = [openingTask, cancelledObserver, refreshTask, snapshotReadTask?.task, writeTask, inspectionTask, authorizationTask, authorizationObservationTask].compactMap { $0 }
+        let delivery = deliveryReadTask?.task
         for task in tasks { await task.value }
-        if let deliveryReadTask { _ = await deliveryReadTask.task.value }
+        if let delivery { _ = await delivery.value }
     }
 
     func notificationDeliveryPreferences() async throws -> DevicePreferenceSnapshot {
