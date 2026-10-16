@@ -77,10 +77,6 @@ impl OwnerCommand {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum OwnerQuery {
-    Schedule {
-        query: crate::scheduling::controls::ScheduleQuery,
-    },
-    ScheduleEngine,
     Conversations {
         limit: usize,
     },
@@ -105,7 +101,18 @@ pub enum OwnerQuery {
         lookup: ApprovalLookup,
     },
     Settings,
+    Composition,
     Publication,
+    ScheduleEngine,
+    Schedule {
+        query: crate::scheduling::controls::ScheduleQuery,
+    },
+    MemoryJob {
+        job_id: String,
+    },
+    RetrieveMemory {
+        question: String,
+    },
     Identity,
     Runtime,
     ToolRecovery,
@@ -178,6 +185,36 @@ pub enum OwnerOperation {
     AcknowledgeScheduledUnknown {
         request: crate::scheduling::acknowledgements::UnknownAcknowledgementRequest,
     },
+    PrepareSelection {
+        command: serde_json::Value,
+    },
+    ApproveSelection {
+        ticket: uuid::Uuid,
+        command: serde_json::Value,
+    },
+    DiscardSelection {
+        ticket: uuid::Uuid,
+    },
+    MemoryEnqueue {
+        job_id: String,
+        request: crate::memory::consolidate::MaintenanceRequest,
+    },
+    MemoryCancel {
+        job_id: String,
+    },
+    MemoryRetry {
+        job_id: String,
+    },
+    ApplyMemoryPlan {
+        job_id: String,
+        plan: crate::memory::consolidate::ConsolidationPlan,
+    },
+    #[cfg(feature = "local-embeddings")]
+    RebuildEmbeddings {
+        max_chunks: usize,
+        max_elapsed_ms: u64,
+        fresh: bool,
+    },
     DiscardUnapplied {
         command_id: CommandId,
         expected_accepted_at: UnixMillis,
@@ -186,7 +223,7 @@ pub enum OwnerOperation {
     },
     ReplaceSettings {
         expected_revision: u64,
-        settings: crate::host::settings::HostSettings,
+        settings: Box<crate::host::settings::HostSettings>,
     },
     Credential {
         operation: crate::host::credentials::CredentialOperation,
@@ -228,6 +265,14 @@ pub enum OwnerOperation {
 impl OwnerOperation {
     pub fn validate(&self) -> Result<(), &'static str> {
         match self {
+            #[cfg(feature = "local-embeddings")]
+            Self::RebuildEmbeddings {
+                max_chunks,
+                max_elapsed_ms,
+                ..
+            } if !(1..=1024).contains(max_chunks) || !(1..=300_000).contains(max_elapsed_ms) => {
+                Err("invalid embedding rebuild budget")
+            }
             Self::DiscardUnapplied {
                 expected_accepted_at,
                 operator,
@@ -333,7 +378,18 @@ pub enum OwnerQueryResult {
         approval: Option<crate::permissions::ApprovalView>,
     },
     Settings {
-        settings: crate::host::settings::HostSettings,
+        settings: Box<crate::host::settings::HostSettings>,
+    },
+    Composition {
+        status: Box<crate::host::composition::CompositionStatus>,
+    },
+    MemoryJob {
+        job: crate::memory::consolidate::MaintenanceJob,
+    },
+    RetrievedMemory {
+        excerpts: Vec<crate::context::MemoryExcerpt>,
+        retrieval: crate::memory::search::RetrievalSummary,
+        omitted_hits: usize,
     },
     Identity {
         keys: crate::crypto::DevicePublicKeys,
@@ -466,7 +522,12 @@ impl OwnerQueryResult {
                     }
             }),
             (OwnerQuery::Settings, Self::Settings { .. }) => true,
+            (OwnerQuery::Composition, Self::Composition { .. }) => true,
             (OwnerQuery::Publication, Self::Publication { .. }) => true,
+            (OwnerQuery::MemoryJob { job_id }, Self::MemoryJob { job }) => job.id == *job_id,
+            (OwnerQuery::RetrieveMemory { .. }, Self::RetrievedMemory { excerpts, .. }) => {
+                excerpts.len() <= 16
+            }
             (OwnerQuery::Transport, Self::Transport { .. }) => true,
             (OwnerQuery::Runtime, Self::Runtime { .. }) => true,
             (
@@ -552,12 +613,26 @@ pub enum OwnerOperationResult {
     ScheduledUnknownAcknowledged {
         acknowledgement: crate::scheduling::acknowledgements::UnknownAcknowledgement,
     },
+    SelectionPrepared {
+        preparation: Box<crate::host::selection::PreparedSelectionTicket>,
+    },
+    SelectionApproved {
+        ticket: uuid::Uuid,
+        selection: crate::host::selection::SelectionSummary,
+    },
+    MemoryJob {
+        job: crate::memory::consolidate::MaintenanceJob,
+    },
+    #[cfg(feature = "local-embeddings")]
+    EmbeddingsRebuilt {
+        report: crate::memory::search::BuildReport,
+    },
     Command {
         receipt: CommandReceipt,
     },
     Applied,
     Settings {
-        settings: crate::host::settings::HostSettings,
+        settings: Box<crate::host::settings::HostSettings>,
         restart_required: bool,
     },
     PairingInvitation {
@@ -584,6 +659,32 @@ impl OwnerOperationResult {
                 OwnerOperation::AcknowledgeScheduledUnknown { request },
                 Self::ScheduledUnknownAcknowledged { acknowledgement },
             ) => acknowledgement.request == *request,
+            (
+                OwnerOperation::PrepareSelection { command },
+                Self::SelectionPrepared { preparation },
+            ) => command
+                .get("command_id")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|id| {
+                    id.parse::<CommandId>()
+                        .is_ok_and(|id| id == preparation.binding.command_id)
+                }),
+            (
+                OwnerOperation::ApproveSelection { ticket, .. },
+                Self::SelectionApproved {
+                    ticket: returned, ..
+                },
+            ) => ticket == returned,
+            (OwnerOperation::DiscardSelection { .. }, Self::Applied) => true,
+            (
+                OwnerOperation::MemoryEnqueue { job_id, .. }
+                | OwnerOperation::MemoryCancel { job_id }
+                | OwnerOperation::MemoryRetry { job_id }
+                | OwnerOperation::ApplyMemoryPlan { job_id, .. },
+                Self::MemoryJob { job },
+            ) => job.id == *job_id,
+            #[cfg(feature = "local-embeddings")]
+            (OwnerOperation::RebuildEmbeddings { .. }, Self::EmbeddingsRebuilt { .. }) => true,
             (
                 OwnerOperation::DiscardUnapplied {
                     command_id,

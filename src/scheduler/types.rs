@@ -136,7 +136,7 @@ impl ExecutionPolicy {
         Ok(captured)
     }
 
-    pub(super) fn authority(
+    pub(crate) fn authority(
         &self,
         conversation_id: ConversationId,
         task_id: TaskId,

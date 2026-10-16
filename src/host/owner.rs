@@ -149,10 +149,35 @@ impl HostInner {
             OwnerQuery::Publication => Ok(OwnerQueryResult::Publication {
                 status: self.publication.borrow().clone(),
             }),
+            OwnerQuery::Composition => {
+                let desired = self.blocking(|host| Ok(host.settings.snapshot()?)).await?;
+                Ok(OwnerQueryResult::Composition {
+                    status: Box::new(self.composition.status(&desired).await?),
+                })
+            }
+            OwnerQuery::MemoryJob { job_id } => {
+                let _admission = self.composition.enter().await?;
+                Ok(OwnerQueryResult::MemoryJob {
+                    job: self.composition.memory.consolidator().job(job_id).await?,
+                })
+            }
+            OwnerQuery::RetrieveMemory { question } => {
+                let _admission = self.composition.enter().await?;
+                let memory = self
+                    .composition
+                    .memory
+                    .retrieve(question, cancellation.clone())
+                    .await?;
+                Ok(OwnerQueryResult::RetrievedMemory {
+                    excerpts: memory.excerpts,
+                    retrieval: memory.retrieval,
+                    omitted_hits: memory.omitted_hits,
+                })
+            }
             OwnerQuery::Settings => {
                 self.blocking(|host| {
                     Ok(OwnerQueryResult::Settings {
-                        settings: host.settings.snapshot()?,
+                        settings: Box::new(host.settings.snapshot()?),
                     })
                 })
                 .await
@@ -283,6 +308,84 @@ impl HostInner {
                 self.schedule_engine.wake();
                 Ok(OwnerOperationResult::ScheduledUnknownAcknowledged { acknowledgement })
             }
+            OwnerOperation::PrepareSelection { command } => {
+                Ok(OwnerOperationResult::SelectionPrepared {
+                    preparation: Box::new(self.prepare_selection(command, cancellation).await?),
+                })
+            }
+            OwnerOperation::ApproveSelection { ticket, command } => {
+                Ok(OwnerOperationResult::SelectionApproved {
+                    ticket,
+                    selection: self
+                        .approve_selection(ticket, command, cancellation)
+                        .await?,
+                })
+            }
+            OwnerOperation::DiscardSelection { ticket } => {
+                let _admission = self.composition.enter().await?;
+                self.discard_selection(ticket)?;
+                Ok(OwnerOperationResult::Applied)
+            }
+            OwnerOperation::MemoryEnqueue { job_id, request } => {
+                let _admission = self.composition.enter().await?;
+                Ok(OwnerOperationResult::MemoryJob {
+                    job: self
+                        .composition
+                        .memory
+                        .consolidator()
+                        .enqueue(job_id, request)
+                        .await?,
+                })
+            }
+            OwnerOperation::MemoryCancel { job_id } => {
+                let _admission = self.composition.enter().await?;
+                Ok(OwnerOperationResult::MemoryJob {
+                    job: self
+                        .composition
+                        .memory
+                        .consolidator()
+                        .cancel(job_id)
+                        .await?,
+                })
+            }
+            OwnerOperation::MemoryRetry { job_id } => {
+                let _admission = self.composition.enter().await?;
+                Ok(OwnerOperationResult::MemoryJob {
+                    job: self.composition.memory.consolidator().retry(job_id).await?,
+                })
+            }
+            OwnerOperation::ApplyMemoryPlan { job_id, plan } => {
+                let _admission = self.composition.enter().await?;
+                Ok(OwnerOperationResult::MemoryJob {
+                    job: self
+                        .composition
+                        .memory
+                        .consolidator()
+                        .apply_host_plan(job_id, plan)
+                        .await?,
+                })
+            }
+            #[cfg(feature = "local-embeddings")]
+            OwnerOperation::RebuildEmbeddings {
+                max_chunks,
+                max_elapsed_ms,
+                fresh,
+            } => {
+                let _admission = self.composition.enter().await?;
+                let report = self
+                    .composition
+                    .memory
+                    .rebuild_semantic(
+                        crate::memory::search::BuildBudget {
+                            max_chunks,
+                            max_elapsed: std::time::Duration::from_millis(max_elapsed_ms),
+                        },
+                        fresh,
+                        cancellation.clone(),
+                    )
+                    .await?;
+                Ok(OwnerOperationResult::EmbeddingsRebuilt { report })
+            }
             OwnerOperation::DiscardUnapplied {
                 command_id,
                 expected_accepted_at,
@@ -337,6 +440,16 @@ impl HostInner {
                 Ok(OwnerOperationResult::ToolRecovery { report })
             }
             OwnerOperation::Credential { operation } => {
+                if matches!(
+                    &operation,
+                    super::credentials::CredentialOperation::StoreMcp { binding, .. }
+                        if binding.storage == super::settings::CredentialStorage::Session
+                ) {
+                    return Err(HostError::Invalid(
+                        "MCP session credentials must be supplied before startup with serve --mcp-credential-environment-file",
+                    ));
+                }
+
                 let _mutation = self.mutation.lock().await;
                 self.ensure_accepting()?;
                 self.credentials.apply(operation).await?;
@@ -349,10 +462,14 @@ impl HostInner {
                 let _mutation = self.mutation.lock().await;
                 self.ensure_accepting()?;
                 let old = self.blocking(|host| Ok(host.settings.snapshot()?)).await?;
-                let restart_required = old.relay_origin != settings.relay_origin;
+                let active = self.composition.status(&settings).await?;
+                let restart_required = old.relay_origin != settings.relay_origin
+                    || active.restart_required.memory
+                    || active.restart_required.mcp
+                    || active.restart_required.selection;
                 self.blocking(move |host| {
                     Ok(OwnerOperationResult::Settings {
-                        settings: host.settings.replace(settings, expected_revision)?,
+                        settings: Box::new(host.settings.replace(*settings, expected_revision)?),
                         restart_required,
                     })
                 })

@@ -1,27 +1,72 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
+#[cfg(unix)]
+use std::io::Read;
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
+use async_trait::async_trait;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use thiserror::Error;
 use tokio_util::sync::CancellationToken;
+#[cfg(unix)]
+use zeroize::Zeroizing;
 
 use crate::agent::{ConversationConfig, ProviderEndpoint, ProviderKind};
 use crate::credentials::{CredentialError, CredentialSecret, NativeCredentialStore};
 
+use super::mcp::{
+    McpEnvironmentBinding, McpEnvironmentResolver, McpLaunchAuthorization, McpSettings,
+};
 use super::settings::{CredentialStorage, HostSettings, ModelCredentialReference};
+
+const MAX_SESSION_CREDENTIALS: usize = 128;
+const MAX_MODEL_SESSION_CREDENTIALS: usize = 16;
+#[cfg(unix)]
+const MAX_BOOTSTRAP_FILE_BYTES: usize = 64 * 1_024;
+const MAX_BOOTSTRAP_SECRET_BYTES: usize = 256 * 1_024;
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct McpSessionBootstrap {
+    pub bindings: Vec<McpSessionEnvironmentSource>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct McpSessionEnvironmentSource {
+    pub binding: McpEnvironmentBinding,
+    pub source_environment_variable: String,
+}
+
+#[derive(Debug, Error)]
+pub enum McpSessionBootstrapError {
+    #[error("invalid MCP session bootstrap: {0}")]
+    Invalid(&'static str),
+    #[error("MCP session binding file must be an owner-controlled regular single-link file")]
+    File,
+    #[error("MCP session binding file exceeds 64 KiB")]
+    FileTooLarge,
+    #[error("MCP session binding file is malformed")]
+    Malformed,
+    #[error("MCP session binding does not match an authorized server manifest")]
+    Unauthorized,
+    #[error("an explicitly named MCP source environment variable is missing")]
+    MissingEnvironment,
+    #[error("MCP session environment values exceed 256 KiB")]
+    SecretCapacity,
+    #[error("MCP session bootstrap worker failed")]
+    Worker,
+    #[error(transparent)]
+    Credential(#[from] CredentialError),
+}
 
 #[derive(Clone)]
 pub struct SecretTransfer(Arc<CredentialSecret>);
 
 impl SecretTransfer {
     pub fn new(value: String) -> Result<Self, CredentialError> {
-        let secret = CredentialSecret::new(value.into_bytes())?;
-        let text =
-            std::str::from_utf8(secret.expose()).map_err(|_| CredentialError::InvalidSecret)?;
-        if text.trim().is_empty() || text.chars().any(char::is_control) {
-            return Err(CredentialError::InvalidSecret);
-        }
-        Ok(Self(Arc::new(secret)))
+        printable_secret(value.into_bytes()).map(|secret| Self(Arc::new(secret)))
     }
 }
 
@@ -53,6 +98,13 @@ pub enum CredentialOperation {
     },
     Remove {
         binding: ModelCredentialReference,
+    },
+    StoreMcp {
+        binding: McpEnvironmentBinding,
+        secret: SecretTransfer,
+    },
+    RemoveMcp {
+        binding: McpEnvironmentBinding,
     },
 }
 
@@ -94,27 +146,82 @@ impl CredentialVault {
         }
     }
 
+    pub async fn bootstrap_mcp_session_from_file(
+        &self,
+        path: PathBuf,
+        settings: McpSettings,
+        cancellation: CancellationToken,
+    ) -> Result<usize, McpSessionBootstrapError> {
+        let token = cancellation.child_token();
+        let _cancel_on_drop = token.clone().drop_guard();
+        if token.is_cancelled() {
+            return Err(CredentialError::Cancelled.into());
+        }
+        let vault = self.clone();
+        tokio::task::spawn_blocking(move || {
+            if token.is_cancelled() {
+                return Err(CredentialError::Cancelled.into());
+            }
+            let bootstrap = read_mcp_bootstrap(path)?;
+            let sources = validate_mcp_bootstrap(bootstrap, &settings)?;
+            let mut staged = BTreeMap::new();
+            let mut secret_bytes = 0_usize;
+            for (key, source) in sources {
+                if token.is_cancelled() {
+                    return Err(CredentialError::Cancelled.into());
+                }
+                let value =
+                    std::env::var_os(source).ok_or(McpSessionBootstrapError::MissingEnvironment)?;
+                let secret = printable_secret(value.into_encoded_bytes())?;
+                secret_bytes = secret_bytes
+                    .checked_add(secret.expose().len())
+                    .filter(|total| *total <= MAX_BOOTSTRAP_SECRET_BYTES)
+                    .ok_or(McpSessionBootstrapError::SecretCapacity)?;
+                staged.insert(key, Arc::new(secret));
+            }
+            let mut session = vault
+                .session
+                .lock()
+                .map_err(|_| CredentialError::Unavailable)?;
+            if token.is_cancelled() {
+                return Err(CredentialError::Cancelled.into());
+            }
+            let additions = staged
+                .keys()
+                .filter(|key| !session.contains_key(*key))
+                .count();
+            if session
+                .len()
+                .checked_add(additions)
+                .is_none_or(|total| total > MAX_SESSION_CREDENTIALS)
+            {
+                return Err(CredentialError::Busy.into());
+            }
+            let count = staged.len();
+            session.extend(staged);
+            Ok(count)
+        })
+        .await
+        .map_err(|_| McpSessionBootstrapError::Worker)?
+    }
+
     pub async fn apply(&self, operation: CredentialOperation) -> Result<(), CredentialError> {
-        let binding = match &operation {
+        match &operation {
             CredentialOperation::Store { binding, .. }
-            | CredentialOperation::Remove { binding } => binding,
-        };
-        binding
-            .validate()
-            .map_err(|_| CredentialError::InvalidKey)?;
+            | CredentialOperation::Remove { binding } => {
+                binding
+                    .validate()
+                    .map_err(|_| CredentialError::InvalidKey)?;
+            }
+            CredentialOperation::StoreMcp { binding, .. }
+            | CredentialOperation::RemoveMcp { binding } => {
+                binding.scope_key()?;
+            }
+        }
         match operation {
             CredentialOperation::Store { binding, secret } => match binding.storage {
                 CredentialStorage::Session => {
-                    let mut session = self
-                        .session
-                        .lock()
-                        .map_err(|_| CredentialError::Unavailable)?;
-                    let key = binding.scope_key();
-                    if !session.contains_key(&key) && session.len() >= 16 {
-                        return Err(CredentialError::Busy);
-                    }
-                    session.insert(key, secret.0);
-                    Ok(())
+                    self.store_session(format!("model:{}", binding.scope_key()), secret.0, true)
                 }
                 CredentialStorage::Native => {
                     self.native
@@ -130,12 +237,64 @@ impl CredentialVault {
                     self.session
                         .lock()
                         .map_err(|_| CredentialError::Unavailable)?
-                        .remove(&binding.scope_key());
+                        .remove(&format!("model:{}", binding.scope_key()));
+                    Ok(())
+                }
+                CredentialStorage::Native => self.native.delete(binding.credential_key()?).await,
+            },
+            CredentialOperation::StoreMcp { binding, secret } => match binding.storage {
+                CredentialStorage::Session => {
+                    self.store_session(format!("mcp:{}", binding.scope_key()?), secret.0, false)
+                }
+                CredentialStorage::Native => {
+                    self.native
+                        .store(
+                            binding.credential_key()?,
+                            CredentialSecret::new(secret.0.expose().to_vec())?,
+                        )
+                        .await
+                }
+            },
+            CredentialOperation::RemoveMcp { binding } => match binding.storage {
+                CredentialStorage::Session => {
+                    self.session
+                        .lock()
+                        .map_err(|_| CredentialError::Unavailable)?
+                        .remove(&format!("mcp:{}", binding.scope_key()?));
                     Ok(())
                 }
                 CredentialStorage::Native => self.native.delete(binding.credential_key()?).await,
             },
         }
+    }
+
+    pub fn native_store(&self) -> NativeCredentialStore {
+        self.native.clone()
+    }
+
+    fn store_session(
+        &self,
+        key: String,
+        secret: Arc<CredentialSecret>,
+        model: bool,
+    ) -> Result<(), CredentialError> {
+        let mut session = self
+            .session
+            .lock()
+            .map_err(|_| CredentialError::Unavailable)?;
+        if !session.contains_key(&key)
+            && (session.len() >= MAX_SESSION_CREDENTIALS
+                || model
+                    && session
+                        .keys()
+                        .filter(|key| key.starts_with("model:"))
+                        .count()
+                        >= MAX_MODEL_SESSION_CREDENTIALS)
+        {
+            return Err(CredentialError::Busy);
+        }
+        session.insert(key, secret);
+        Ok(())
     }
 
     pub async fn resolve(
@@ -169,8 +328,162 @@ impl CredentialVault {
                 .session
                 .lock()
                 .map_err(|_| CredentialError::Unavailable)?
-                .get(&binding.scope_key())
+                .get(&format!("model:{}", binding.scope_key()))
                 .cloned()),
+            CredentialStorage::Native => self
+                .native
+                .read(binding.credential_key()?, cancellation)
+                .await
+                .map(|secret| secret.map(Arc::new)),
+        }
+    }
+}
+
+fn printable_secret(bytes: Vec<u8>) -> Result<CredentialSecret, CredentialError> {
+    let secret = CredentialSecret::new(bytes)?;
+    let text = std::str::from_utf8(secret.expose()).map_err(|_| CredentialError::InvalidSecret)?;
+    if text.trim().is_empty() || text.chars().any(char::is_control) {
+        return Err(CredentialError::InvalidSecret);
+    }
+    Ok(secret)
+}
+
+fn validate_mcp_bootstrap(
+    bootstrap: McpSessionBootstrap,
+    settings: &McpSettings,
+) -> Result<Vec<(String, String)>, McpSessionBootstrapError> {
+    settings
+        .validate()
+        .map_err(|_| McpSessionBootstrapError::Invalid("invalid MCP settings"))?;
+    if bootstrap.bindings.len() > MAX_SESSION_CREDENTIALS {
+        return Err(McpSessionBootstrapError::Invalid(
+            "at most 128 bindings are supported",
+        ));
+    }
+    let mut destinations = BTreeSet::new();
+    let mut source_names = BTreeSet::new();
+    let mut sources = Vec::with_capacity(bootstrap.bindings.len());
+    for source in bootstrap.bindings {
+        if source.binding.storage != CredentialStorage::Session {
+            return Err(McpSessionBootstrapError::Invalid(
+                "bootstrap requires session storage",
+            ));
+        }
+        if !valid_source_environment_name(&source.source_environment_variable) {
+            return Err(McpSessionBootstrapError::Invalid(
+                "invalid source environment variable name",
+            ));
+        }
+        let key = source.binding.scope_key()?;
+        let server = settings
+            .servers
+            .iter()
+            .find(|server| server.server_id == source.binding.server_id)
+            .ok_or(McpSessionBootstrapError::Unauthorized)?;
+        let expected = server
+            .environment_binding(&source.binding.variable)
+            .map_err(|_| McpSessionBootstrapError::Unauthorized)?;
+        if source.binding != expected
+            || !matches!(
+                &server.launch_authorization,
+                Some(McpLaunchAuthorization::FullHost { manifest_fingerprint })
+                    if manifest_fingerprint == &expected.manifest_fingerprint
+            )
+        {
+            return Err(McpSessionBootstrapError::Unauthorized);
+        }
+        if !destinations.insert(key.clone()) {
+            return Err(McpSessionBootstrapError::Invalid(
+                "duplicate destination binding",
+            ));
+        }
+        if !source_names.insert(source.source_environment_variable.clone()) {
+            return Err(McpSessionBootstrapError::Invalid(
+                "source environment variables must be unique",
+            ));
+        }
+        sources.push((format!("mcp:{key}"), source.source_environment_variable));
+    }
+    Ok(sources)
+}
+
+fn valid_source_environment_name(value: &str) -> bool {
+    let mut bytes = value.bytes();
+    !value.is_empty()
+        && value.len() <= 128
+        && bytes
+            .next()
+            .is_some_and(|byte| byte.is_ascii_alphabetic() || byte == b'_')
+        && bytes.all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+}
+
+#[cfg(unix)]
+fn read_mcp_bootstrap(path: PathBuf) -> Result<McpSessionBootstrap, McpSessionBootstrapError> {
+    use rustix::fs::{FileType, Mode, OFlags};
+
+    if path.as_os_str().is_empty()
+        || path.as_os_str().as_encoded_bytes().len() > 4096
+        || path.as_os_str().as_encoded_bytes().contains(&0)
+    {
+        return Err(McpSessionBootstrapError::Invalid(
+            "invalid binding file path",
+        ));
+    }
+    let descriptor = rustix::fs::open(
+        &path,
+        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .map_err(|_| McpSessionBootstrapError::File)?;
+    let metadata = rustix::fs::fstat(&descriptor).map_err(|_| McpSessionBootstrapError::File)?;
+    if FileType::from_raw_mode(metadata.st_mode) != FileType::RegularFile
+        || metadata.st_uid != rustix::process::geteuid().as_raw()
+        || metadata.st_mode & 0o022 != 0
+        || metadata.st_nlink != 1
+    {
+        return Err(McpSessionBootstrapError::File);
+    }
+    if metadata.st_size < 0 || metadata.st_size as u64 > MAX_BOOTSTRAP_FILE_BYTES as u64 {
+        return Err(McpSessionBootstrapError::FileTooLarge);
+    }
+    let mut bytes = Zeroizing::new(Vec::new());
+    std::fs::File::from(descriptor)
+        .take((MAX_BOOTSTRAP_FILE_BYTES + 1) as u64)
+        .read_to_end(&mut bytes)
+        .map_err(|_| McpSessionBootstrapError::File)?;
+    if bytes.len() > MAX_BOOTSTRAP_FILE_BYTES {
+        return Err(McpSessionBootstrapError::FileTooLarge);
+    }
+    serde_json::from_slice(&bytes).map_err(|_| McpSessionBootstrapError::Malformed)
+}
+
+#[cfg(not(unix))]
+fn read_mcp_bootstrap(_path: PathBuf) -> Result<McpSessionBootstrap, McpSessionBootstrapError> {
+    Err(CredentialError::Unsupported.into())
+}
+
+#[async_trait]
+impl McpEnvironmentResolver for CredentialVault {
+    async fn resolve(
+        &self,
+        binding: &McpEnvironmentBinding,
+        cancellation: CancellationToken,
+    ) -> Result<Option<Arc<CredentialSecret>>, CredentialError> {
+        if cancellation.is_cancelled() {
+            return Err(CredentialError::Cancelled);
+        }
+        let key = binding.scope_key()?;
+        match binding.storage {
+            CredentialStorage::Session => {
+                let session = self
+                    .session
+                    .lock()
+                    .map_err(|_| CredentialError::Unavailable)?;
+                if cancellation.is_cancelled() {
+                    return Err(CredentialError::Cancelled);
+                }
+                Ok(session.get(&format!("mcp:{key}")).cloned())
+            }
             CredentialStorage::Native => self
                 .native
                 .read(binding.credential_key()?, cancellation)
