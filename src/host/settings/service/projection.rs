@@ -14,6 +14,7 @@ impl SettingsService {
         &self,
         caller: SettingsCaller,
     ) -> Result<SettingRegistry, SettingsServiceError> {
+        let _work = self.invocation_guard(&caller, SettingsToolName::List, None)?;
         self.core
             .authority
             .require_tool(&caller, SettingsToolName::List)?;
@@ -34,6 +35,7 @@ impl SettingsService {
         caller: SettingsCaller,
         scope: SettingsScope,
     ) -> Result<SettingsSnapshot, SettingsServiceError> {
+        let _work = self.invocation_guard(&caller, SettingsToolName::Get, None)?;
         self.core
             .authority
             .require_tool(&caller, SettingsToolName::Get)?;

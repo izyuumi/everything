@@ -6,6 +6,7 @@ pub mod native;
 mod operations;
 pub mod service;
 
+pub(crate) use authority::SettingsAgentBinding;
 pub use authority::{
     NativeSessionOpened, NativeSessionProof, SettingsAgentSession, SettingsCaller,
     SettingsOperationOrigin,
@@ -14,6 +15,7 @@ pub use operations::{
     SettingsApplicationState, SettingsOperationInspection, SettingsOperationPhase,
     SettingsWriteInspection, SettingsWriteResolution,
 };
+pub(crate) use service::{SettingsInvocationCompletion, SettingsInvocationDisposition};
 
 use std::fs::File;
 use std::io::{self, Read, Write};
