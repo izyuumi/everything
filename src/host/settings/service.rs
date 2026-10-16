@@ -268,6 +268,13 @@ impl SettingsService {
         self.core.authority.owner(call)
     }
 
+    pub(crate) fn local_owner_cleanup_caller(
+        &self,
+        call: &LocalCall,
+    ) -> Result<SettingsCaller, SettingsServiceError> {
+        self.core.authority.cleanup_owner(call)
+    }
+
     pub(crate) async fn startup_context(
         &self,
     ) -> Result<SettingsStartupContext, SettingsServiceError> {
@@ -351,10 +358,12 @@ impl SettingsService {
         caller: SettingsCaller,
         request_id: CommandId,
     ) -> Result<SettingsOperationInspection, SettingsServiceError> {
-        self.core.authority.validate(&caller, false)?;
+        self.core.check_operation_reader(&caller)?;
         self.blocking(move |core| {
-            core.authority.validate(&caller, false)?;
-            core.expire_unadmitted()?;
+            core.check_operation_reader(&caller)?;
+            if !matches!(caller.source, CallerSource::LocalOwner { .. }) {
+                core.expire_unadmitted()?;
+            }
             let record = core.repository.get(request_id)?;
             core.check_principal(&caller, &record.identity)?;
             Ok(record.inspection())
@@ -971,6 +980,13 @@ impl SettingsService {
 }
 
 impl ServiceCore {
+    fn check_operation_reader(&self, caller: &SettingsCaller) -> Result<(), SettingsServiceError> {
+        match caller.source {
+            CallerSource::LocalOwner { .. } => self.authority.validate_owner_cleanup(caller),
+            _ => self.authority.validate(caller, false),
+        }
+    }
+
     fn operation_session(
         &self,
         caller: &SettingsCaller,
