@@ -299,8 +299,13 @@ enum NativeSettingsWire {
                 try Self.validate(result, requestID: request.requestID, scope: request.scope)
             case (.pairDevice(let request), .prepared(let result)), (.revokeDevice(let request), .prepared(let result)):
                 try Self.validate(result, requestID: request.requestID, scope: request.scope)
-            case (.details(let id, _), .details(let operation, let target)):
+            case (.details(let id, let reference), .details(let operation, let target)):
                 try Self.validate(operation, target: target, operationID: id, proof: proof)
+                switch (operation.phase, reference) {
+                case (.awaitingConfirmation(let actual), .confirmation(let expected)) where actual == expected: break
+                case (.awaitingAction(let actual), .action(let expected)) where actual == expected: break
+                default: throw NativeSettingsWireError.invalidResponse
+                }
             case (.admit(let invocation), .admitted(let operation, let target)):
                 try Self.validate(operation, target: target, operationID: invocation.operationID, proof: proof)
                 guard case .inFlight(let id) = operation.phase, id == invocation.nativeRequestID,
@@ -314,11 +319,9 @@ enum NativeSettingsWire {
                  (.confirmDevice(let invocation), .deviceConfirmed(.revoked(let operation))),
                  (.submitCredential(let invocation, _), .inspected(let operation)),
                  (.finalize(let invocation, _), .inspected(let operation)):
-                guard operation.binding.requestID == invocation.operationID else { throw NativeSettingsWireError.invalidResponse }
-                try Self.validate(operation, proof: proof)
+                try Self.validate(operation, invocation: invocation, proof: proof)
             case (.confirmDevice(let invocation), .deviceConfirmed(.pairing(let creation))):
-                guard creation.operation.binding.requestID == invocation.operationID else { throw NativeSettingsWireError.invalidResponse }
-                try Self.validate(creation.operation, proof: proof)
+                try Self.validate(creation.operation, invocation: invocation, proof: proof)
             case (.pairing(let id), .pairing(let creation)), (.cancelPairing(let id), .pairing(let creation)):
                 guard creation.operation.binding.requestID == id else { throw NativeSettingsWireError.invalidResponse }
                 try Self.validate(creation.operation, proof: proof)
@@ -335,6 +338,14 @@ enum NativeSettingsWire {
         private static func validate(_ result: SettingsOperationResult, requestID: UUID, scope: SettingsScope) throws {
             try result.validate()
             guard result.requestID == requestID, result.scope == scope else { throw NativeSettingsWireError.invalidResponse }
+        }
+
+        private static func validate(_ operation: SettingsOperationInspection, invocation: NativeActionInvocation, proof: Proof?) throws {
+            guard operation.binding.requestID == invocation.operationID else { throw NativeSettingsWireError.invalidResponse }
+            if case .inFlight(let nativeRequestID) = operation.phase {
+                guard nativeRequestID == invocation.nativeRequestID else { throw NativeSettingsWireError.invalidResponse }
+            }
+            try validate(operation, proof: proof)
         }
 
         private static func validate(_ operation: SettingsOperationInspection, target: SettingsActionTarget, operationID: UUID, proof: Proof?) throws {
