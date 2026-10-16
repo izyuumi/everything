@@ -2,6 +2,7 @@ mod external;
 pub(crate) mod settings_agent;
 mod settings_grants;
 pub(crate) mod settings_originals;
+mod settings_transport;
 mod transport;
 pub(crate) use external::ExternalTaskStateUpdate;
 pub(crate) use settings_grants::settings_grant_head_on;
@@ -17,7 +18,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 use thiserror::Error;
 
-const SCHEMA_VERSION: i64 = 16;
+const SCHEMA_VERSION: i64 = 17;
 const MAX_JSON_BYTES: usize = 1_048_576;
 const MAX_APPEND_EVENTS: usize = 256;
 const MAX_STATE_BYTES: usize = 8 * MAX_JSON_BYTES;
@@ -391,6 +392,9 @@ impl Store {
         }
         if version < 16 {
             transaction.execute_batch(include_str!("../migrations/0016_settings_originals.sql"))?;
+        }
+        if version < 17 {
+            transaction.execute_batch(include_str!("../migrations/0017_settings_transport.sql"))?;
         }
         transaction.pragma_update(None, "user_version", SCHEMA_VERSION)?;
         transaction.commit()?;
@@ -1331,6 +1335,11 @@ impl Store {
             Some(Some(_)) => return Err(StorageError::RevokedDevice(message.device_id.clone())),
             Some(None) => {}
         }
+        settings_transport::check_outbox_capacity(
+            &transaction,
+            &message.device_id,
+            message.envelope.len(),
+        )?;
         transaction.execute(
             "INSERT INTO outbox(id, device_id, envelope, created_at, not_before) VALUES (?1, ?2, ?3, ?4, ?5)",
             params![message.id, message.device_id, message.envelope, message.created_at, message.not_before],
@@ -1344,7 +1353,7 @@ impl Store {
         validate_limit(limit)?;
         let connection = self.connection()?;
         let mut statement = connection.prepare(
-            "SELECT o.id, o.device_id, o.envelope, o.created_at, o.not_before, o.attempts, o.delivered_at FROM outbox o JOIN devices d ON d.id = o.device_id WHERE o.delivered_at IS NULL AND o.not_before <= ?1 AND d.revoked_at IS NULL ORDER BY o.not_before, o.created_at, o.id LIMIT ?2",
+            "SELECT o.id, o.device_id, o.envelope, o.created_at, o.not_before, o.attempts, o.delivered_at FROM outbox o JOIN devices d ON d.id = o.device_id WHERE o.delivered_at IS NULL AND o.not_before <= ?1 AND d.revoked_at IS NULL AND NOT EXISTS (SELECT 1 FROM settings_transport_private_outbox AS p WHERE p.message_id=o.id) ORDER BY o.not_before, o.created_at, o.id LIMIT ?2",
         )?;
         collect_rows(statement.query_map(params![now, limit as i64], outbox_row)?)
     }
@@ -1362,7 +1371,9 @@ impl Store {
     pub fn acknowledge_outbox(&self, id: &str, delivered_at: i64) -> StorageResult<()> {
         validate_id(id)?;
         validate_time(delivered_at)?;
-        let changed = self.connection()?.execute(
+        let connection = self.connection()?;
+        settings_transport::require_ordinary_outbox(&connection, id)?;
+        let changed = connection.execute(
             "UPDATE outbox SET delivered_at = ?2 WHERE id = ?1 AND delivered_at IS NULL AND created_at <= ?2 AND EXISTS (SELECT 1 FROM devices d WHERE d.id = outbox.device_id AND d.revoked_at IS NULL)",
             params![id, delivered_at],
         )?;
