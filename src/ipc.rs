@@ -489,9 +489,7 @@ impl OwnerQueryResult {
             (
                 OwnerQuery::SettingsOperation { request_id },
                 Self::SettingsOperation { operation },
-            ) => {
-                operation.binding.request_id == *request_id && operation.binding.validate().is_ok()
-            }
+            ) => operation.binding.request_id == *request_id && operation.validate().is_ok(),
             (OwnerQuery::WorkerCoordinator { query }, Self::WorkerCoordinator { result }) => {
                 result.validate_for(query).is_ok()
             }

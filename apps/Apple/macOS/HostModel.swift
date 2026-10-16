@@ -467,7 +467,7 @@ final class HostModel {
 
     private func adoptSettings(_ value: JSONValue) throws {
         guard value["schema_version"].unsigned == 1, let revision = value["revision"].unsigned,
-              revision > 0, revision < UInt64(Int64.max),
+              revision > 0, revision <= UInt64(Int64.max),
               let tools = value["tools_enabled"].bool, let tokens = value["context_tokens"].unsigned else { throw OwnerClientError.invalidResponse }
         workspace = try value.requiringString("workspace_root")
         executionMode = try value.requiringString("execution_mode", maximum: 32)
@@ -479,8 +479,12 @@ final class HostModel {
 
     func saveSettings() async {
         guard let revision = settings["revision"].unsigned, let tokens = UInt64(contextTokens),
-              tokens > 0, workspace.hasPrefix("/"), workspace.utf8.count <= 4096 else {
+              revision > 0, tokens > 0, workspace.hasPrefix("/"), workspace.utf8.count <= 4096 else {
             message = "Choose an existing physical workspace and a valid context token limit."
+            return
+        }
+        guard revision < UInt64(Int64.max) else {
+            message = "The settings revision limit has been reached. Another edit cannot be accepted."
             return
         }
         do {
