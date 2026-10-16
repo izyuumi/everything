@@ -35,7 +35,56 @@ pub enum SettingsActionTarget {
     Patch(SettingsPatch),
     Native(SettingsActionRequest),
     Device(SettingsDeviceRequest),
+    PairingApproval(Box<PairingApprovalIdentity>),
     OwnerReplacement(OwnerReplacementIdentity),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PairingApprovalIdentity {
+    pub request_id: CommandId,
+    pub native_request_id: CommandId,
+    pub scope: SettingsScope,
+    pub creation_operation_id: CommandId,
+    pub pairing_id: MessageId,
+    pub responder: crate::crypto::DevicePublicKeys,
+    pub request_sha256: String,
+    pub label: String,
+    pub expected_fingerprint: String,
+    pub access: crate::devices::DeviceAccess,
+    pub invitation_expires_at: UnixMillis,
+}
+
+impl PairingApprovalIdentity {
+    pub(super) fn validate(&self) -> Result<(), SettingsServiceError> {
+        super::operations::validate_digest(&self.request_sha256)?;
+        self.responder
+            .validate()
+            .map_err(crate::devices::DeviceError::from)?;
+        crate::devices::PairingApproval::new(
+            self.label.clone(),
+            self.expected_fingerprint.clone(),
+            self.access.clone(),
+        )?;
+        if self.request_id.as_uuid().is_nil()
+            || self.native_request_id.as_uuid().is_nil()
+            || self.native_request_id == self.request_id
+            || self.native_request_id == self.creation_operation_id
+            || self.creation_operation_id.as_uuid().is_nil()
+            || self.request_id == self.creation_operation_id
+            || self.pairing_id.as_uuid().is_nil()
+            || !matches!(self.scope, SettingsScope::Host { host_id } if !host_id.as_uuid().is_nil() && host_id != self.responder.device_id)
+            || self.expected_fingerprint != self.responder.fingerprint()
+            || self.invitation_expires_at.get() == 0
+            || serde_json::to_vec(self)
+                .map_err(|_| SettingsServiceError::Encoding)?
+                .len()
+                > 8192
+        {
+            return Err(SettingsServiceError::Invalid("pairing approval identity"));
+        }
+        Ok(())
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -60,6 +109,7 @@ impl SettingsActionTarget {
             }
             Self::Native(request) => request.validate()?,
             Self::Device(request) => request.validate()?,
+            Self::PairingApproval(request) => request.validate()?,
             Self::OwnerReplacement(request) => {
                 super::operations::validate_digest(&request.exact_settings_sha256)?;
                 if !matches!(request.scope, SettingsScope::Host { .. })
@@ -87,6 +137,7 @@ impl SettingsActionTarget {
             Self::Patch(request) => request.request_id,
             Self::Native(request) => request.request_id,
             Self::Device(request) => request.request_id,
+            Self::PairingApproval(request) => request.request_id,
             Self::OwnerReplacement(request) => request.request_id,
         }
     }
@@ -96,6 +147,7 @@ impl SettingsActionTarget {
             Self::Patch(request) => &request.scope,
             Self::Native(request) => &request.scope,
             Self::Device(request) => &request.scope,
+            Self::PairingApproval(request) => &request.scope,
             Self::OwnerReplacement(request) => &request.scope,
         }
     }
@@ -104,7 +156,7 @@ impl SettingsActionTarget {
         match self {
             Self::Patch(request) => Some(request.expected_revision),
             Self::Native(request) => Some(request.expected_revision),
-            Self::Device(_) => None,
+            Self::Device(_) | Self::PairingApproval(_) => None,
             Self::OwnerReplacement(request) => Some(request.expected_revision),
         }
     }
@@ -382,6 +434,15 @@ pub(super) struct PendingPairingLease {
 pub(super) struct PendingPairingState {
     pub lifecycle: NativePairingLifecycle,
     pub invitation: Option<SecretTransfer>,
+    pub approval: Option<PendingPairingApproval>,
+}
+
+pub(super) struct PendingPairingApproval {
+    pub operation_id: CommandId,
+    pub native_request_id: CommandId,
+    pub identity: PairingApprovalIdentity,
+    pub delivery_closed: bool,
+    pub acceptance: Option<super::service::NativePairingAcceptance>,
 }
 
 impl PendingPairingLease {
@@ -391,6 +452,10 @@ impl PendingPairingLease {
                 .state
                 .lock()
                 .map_err(|_| SettingsServiceError::Poisoned)?;
+            if let Some(approval) = &mut state.approval {
+                approval.delivery_closed = true;
+                approval.acceptance = None;
+            }
             match state.lifecycle {
                 NativePairingLifecycle::Retained | NativePairingLifecycle::CancellationPending => {
                     state.lifecycle = NativePairingLifecycle::CancellationPending
