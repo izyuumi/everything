@@ -138,6 +138,8 @@ impl super::SettingsService {
             core.check_principal(&caller, &record.identity)?;
             let write = record.write().ok_or(SettingsServiceError::Conflict)?;
             if write.resolution.is_some() {
+                core.release_file_resources(&record.identity, &write.intent)?;
+                core.authority.validate(&caller, cleanup)?;
                 return Ok(record.inspection());
             }
             core.repository
@@ -207,46 +209,74 @@ impl super::ServiceCore {
                 repair_error: None,
             })?;
         if resolution.is_some() {
-            let cleanup = (|| {
-                let claim = self
-                    .claims
+            self.release_file_resources(identity, intent)?;
+        }
+        Ok(inspection)
+    }
+    fn release_file_resources(
+        &self,
+        identity: &super::super::operations::OperationIdentity,
+        intent: &SettingsWriteIntent,
+    ) -> Result<(), SettingsServiceError> {
+        let cleanup = (|| {
+            let claim = self
+                .claims
+                .lock()
+                .map_err(|_| SettingsServiceError::Poisoned)?
+                .get(&identity.binding.request_id)
+                .cloned();
+            if let Some(claim) = claim {
+                if claim.identity != *identity
+                    || Some(claim.native.native_request_id) != intent.native_request_id
+                {
+                    return Err(SettingsServiceError::Conflict);
+                }
+                claim.close()?;
+                let session = claim
+                    .session
                     .lock()
                     .map_err(|_| SettingsServiceError::Poisoned)?
-                    .remove(&identity.binding.request_id);
-                if let Some(claim) = claim {
-                    claim.close()?;
-                    let session = claim
-                        .session
-                        .lock()
-                        .map_err(|_| SettingsServiceError::Poisoned)?
-                        .take();
-                    drop(session);
-                }
-                let retained = {
-                    let mut active = self
-                        .active_write
+                    .take();
+                drop(session);
+                let removed = {
+                    let mut claims = self
+                        .claims
                         .lock()
                         .map_err(|_| SettingsServiceError::Poisoned)?;
-                    if active
-                        .as_ref()
-                        .is_some_and(|active| active.request_id == identity.binding.request_id)
+                    if claims
+                        .get(&identity.binding.request_id)
+                        .is_some_and(|current| std::sync::Arc::ptr_eq(current, &claim))
                     {
-                        active.take()
+                        claims.remove(&identity.binding.request_id)
                     } else {
                         None
                     }
                 };
-                drop(retained);
-                Ok::<(), SettingsServiceError>(())
-            })();
-            if let Err(cause) = cleanup {
-                return Err(SettingsServiceError::OutcomeUnknown {
-                    request_id: identity.binding.request_id,
-                    cause: Box::new(cause),
-                    repair_error: None,
-                });
+                drop(removed);
             }
-        }
-        Ok(inspection)
+            let retained = {
+                let mut active = self
+                    .active_write
+                    .lock()
+                    .map_err(|_| SettingsServiceError::Poisoned)?;
+                if let Some(current) = active.as_ref()
+                    && current.request_id == identity.binding.request_id
+                {
+                    if current.client_session_id != identity.binding.client_session_id {
+                        return Err(SettingsServiceError::Conflict);
+                    }
+                    active.take()
+                } else {
+                    None
+                }
+            };
+            drop(retained);
+            Ok::<(), SettingsServiceError>(())
+        })();
+        cleanup.map_err(|cause| SettingsServiceError::OutcomeUnknown {
+            request_id: identity.binding.request_id,
+            cause: Box::new(cause),
+            repair_error: None,
+        })
     }
 }
