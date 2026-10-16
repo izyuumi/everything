@@ -9,11 +9,13 @@ use uuid::Uuid;
 
 use crate::crypto::DevicePublicKeys;
 use crate::devices::{
-    BindingHistoryState, BindingIntent, BindingLifetime, OwnedCommittedSettingsBind,
-    SettingsConnectionIdentity, SettingsHostIdentity,
+    AuthenticatedSettingsCommandSource, BindingHistoryState, BindingIntent, BindingLifetime,
+    OwnedCommittedSettingsBind, SettingsConnectionIdentity, SettingsHostIdentity,
 };
 use crate::protocol::{DeviceId, UnixMillis};
+use crate::storage::Store;
 
+use super::super::grants::SettingsGrantOwner;
 use super::super::service::SettingsServiceError;
 use super::Authority;
 
@@ -275,5 +277,98 @@ impl Authority {
         }
         parent.record.cancellation.cancel();
         Ok(())
+    }
+}
+
+impl Authority {
+    pub(in crate::host::settings) fn paired_receipt_owner(
+        &self,
+        host: &Arc<SettingsHostIdentity>,
+    ) -> Result<SettingsGrantOwner, SettingsServiceError> {
+        let sessions = self
+            .sessions
+            .lock()
+            .map_err(|_| SettingsServiceError::Poisoned)?;
+        if sessions.closed {
+            return Err(SettingsServiceError::Stopped);
+        }
+        if host.host_id() != self.host_id
+            || !host.is_live()
+            || sessions
+                .paired
+                .host
+                .as_ref()
+                .is_none_or(|registered| !Arc::ptr_eq(registered, host))
+        {
+            return Err(SettingsServiceError::OutsideScope);
+        }
+        Ok(SettingsGrantOwner {
+            host_id: self.host_id,
+            principal_id: self.owner_principal,
+        })
+    }
+
+    pub(in crate::host::settings) fn check_paired_command(
+        &self,
+        host: &Arc<SettingsHostIdentity>,
+        store: &Store,
+        source: &AuthenticatedSettingsCommandSource,
+        stop: &CancellationToken,
+    ) -> Result<(SettingsGrantOwner, UnixMillis, Instant), SettingsServiceError> {
+        let mut sessions = self
+            .sessions
+            .lock()
+            .map_err(|_| SettingsServiceError::Poisoned)?;
+        if sessions.closed || stop.is_cancelled() {
+            return Err(SettingsServiceError::Stopped);
+        }
+        if sessions
+            .paired
+            .host
+            .as_ref()
+            .is_none_or(|registered| !Arc::ptr_eq(registered, host))
+            || !Arc::ptr_eq(source.connection().host_identity(), host)
+            || host.host_id() != self.host_id
+            || !host.is_live()
+        {
+            return Err(SettingsServiceError::OutsideScope);
+        }
+        let (wall, monotonic) = source.check_precommit(store)?;
+        let intent = source.intent();
+        if intent.host_id != self.host_id {
+            return Err(SettingsServiceError::OutsideScope);
+        }
+        let entry = sessions
+            .paired
+            .entries
+            .values_mut()
+            .find(|entry| entry.record.id == intent.parent.parent_id)
+            .ok_or(SettingsServiceError::OutsideScope)?;
+        let record = &entry.record;
+        if record.intent.host_id != intent.host_id
+            || record.intent.generation != intent.parent.generation
+            || record.peer != *source.verified_peer_keys()
+            || !Arc::ptr_eq(&record.connection, source.connection())
+            || !record.connection.is_live()
+            || record.cancellation.is_cancelled()
+            || intent.expires_at > record.lifetime.expires_at
+            || wall < entry.observed_wall
+            || monotonic < entry.observed_monotonic
+        {
+            return Err(SettingsServiceError::OutsideScope);
+        }
+        if wall >= record.lifetime.expires_at || monotonic >= record.lifetime.deadline {
+            return Err(SettingsServiceError::Expired);
+        }
+        entry.observed_wall = wall;
+        entry.observed_monotonic = monotonic;
+        Ok((
+            SettingsGrantOwner {
+                host_id: self.host_id,
+                principal_id: self.owner_principal,
+            },
+            wall,
+            monotonic,
+        ))
     }
 }

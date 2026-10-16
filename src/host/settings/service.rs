@@ -16,7 +16,9 @@ mod writes;
 pub use changes::{SettingsChangeHint, SettingsChangePage, SettingsChangeState};
 pub use devices::NativeDeviceActionResult;
 #[cfg(unix)]
-pub(crate) use paired::{PairedParentAdmission, PairedSettingsParent};
+pub(crate) use paired::{
+    PairedParentAdmission, PairedSettingsParent, QualifiedSettingsCommand, SettingsReceiptAuthority,
+};
 pub use pairing::{
     NativePairingAcceptance, NativePairingAccess, NativePairingApprovalInput,
     NativePairingApprovalResult, NativePairingConversationAccess, NativePairingPinState,
