@@ -112,3 +112,68 @@ enum DevicePreferenceError: Error, LocalizedError, Sendable {
 extension UUID {
     fileprivate static let zeroDevicePreferenceID = UUID(uuid: (0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0))
 }
+
+enum DeviceAppearance: String, Codable, CaseIterable, Sendable {
+    case system
+    case light
+    case dark
+}
+
+struct DeviceAppearancePatch: Equatable, Sendable {
+    let requestID: UUID
+    let deviceID: UUID
+    let expectedRevision: UInt64
+    let appearance: DeviceAppearance
+
+    func validate() throws {
+        guard requestID != .zeroDevicePreferenceID, deviceID != .zeroDevicePreferenceID,
+              expectedRevision > 0, expectedRevision <= UInt64(Int64.max) else {
+            throw DevicePreferenceError.invalidRequest
+        }
+    }
+
+    func encodedIdentity() throws -> Data {
+        try validate()
+        let value = Identity(contractVersion: 1, requestID: requestID, scope: Scope(deviceID: deviceID),
+                             expectedRevision: expectedRevision, appearance: appearance)
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        let bytes = try encoder.encode(value)
+        guard bytes.count <= 16 * 1024 else { throw DevicePreferenceError.invalidRequest }
+        return bytes
+    }
+
+    private struct Scope: Encodable {
+        let kind = "device_preferences"
+        let deviceID: UUID
+
+        enum CodingKeys: String, CodingKey {
+            case kind
+            case deviceID = "device_id"
+        }
+    }
+
+    private struct Identity: Encodable {
+        let kind = "appearance"
+        let contractVersion: UInt16
+        let requestID: UUID
+        let scope: Scope
+        let expectedRevision: UInt64
+        let appearance: DeviceAppearance
+
+        enum CodingKeys: String, CodingKey {
+            case kind
+            case contractVersion = "contract_version"
+            case requestID = "request_id"
+            case scope
+            case expectedRevision = "expected_revision"
+            case appearance
+        }
+    }
+}
+
+struct DeviceAppearanceSnapshot: Equatable, Sendable {
+    let deviceID: UUID
+    let revision: UInt64
+    let appearance: DeviceAppearance
+}
