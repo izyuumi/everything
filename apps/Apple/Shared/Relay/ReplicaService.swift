@@ -26,6 +26,8 @@ actor ReplicaService {
     private var selectedConversation: UUID?
     private var preferSelectedSync = true
     private var syncPosition = 0
+    private var notificationPosition = 0
+    private var claimingNotifications = false
     private var pendingInvitation: PairingInvitation?
     private var pendingCompletion: PairingInvitation?
     private var pairingEpoch = UUID()
@@ -107,6 +109,30 @@ actor ReplicaService {
 
     func events(conversation: UUID, before: UInt64? = nil) async throws -> [WireEvent] {
         try await store.events(conversation: conversation, before: before)
+    }
+
+    func claimNotifications() async throws -> ReplicaNotificationPage {
+        guard !claimingNotifications, !disabling, stopping == nil else { throw WireError.unavailable }
+        claimingNotifications = true
+        defer { claimingNotifications = false }
+        let captured = epoch
+        try await store.checkActive()
+        guard let host = try await store.host() else { throw WireError.identity }
+        let conversations = try await store.synchronizationConversations()
+        guard !conversations.isEmpty else { return ReplicaNotificationPage(notices: [], hasMore: false) }
+        let conversation = conversations[notificationPosition % conversations.count]
+        notificationPosition = (notificationPosition + 1) % conversations.count
+        guard captured == epoch, !disabling, stopping == nil, !Task.isCancelled else { throw CancellationError() }
+        let result = try await store.claimNotifications(conversation: conversation, host: host,
+            localID: identity.publicKeys.deviceID, now: WireID.now())
+        guard captured == epoch, !disabling, stopping == nil, !Task.isCancelled else { throw CancellationError() }
+        return result
+    }
+
+    func validateNotificationScope(host: DevicePublicKeys, localID: UUID) async throws {
+        guard !disabling, stopping == nil, identity.publicKeys.deviceID == localID else { throw WireError.identity }
+        try await store.checkActive(host: host)
+        guard !disabling, stopping == nil, try await store.identityID() == localID else { throw WireError.identity }
     }
 
     func sendMessage(conversation: UUID, text: String) async throws {

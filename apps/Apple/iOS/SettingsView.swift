@@ -37,7 +37,8 @@ struct SettingsView: View {
             Section("This iPhone") {
                 NavigationLink("Appearance and notifications", value: ClientSettingsDestination.thisDevice)
                 if let issue = model.localSettingsIssue { Text(issue).foregroundStyle(.red) }
-                Text("Local preferences remain available while the Host is offline. Completion and attention notification delivery is currently unavailable.").font(.footnote)
+                Text("Local preferences remain available while the Host is offline. New committed completions and permission requests can trigger generic notifications while synchronization is enabled in the active app, using saved choices and current OS permission. Historical catch-up is silent; skipped or failed attempts are not replayed.").font(.footnote)
+                if let status = model.notificationDeliveryStatus { Text(status).font(.footnote).foregroundStyle(.secondary) }
             }
             Section("Local privacy") {
                 Text("Identity secrets use unlocked-only, non-synchronizing ThisDeviceOnly Keychain storage. Local history uses complete file protection. These Curve25519 keys are not Secure Enclave keys.").font(.footnote)

@@ -105,6 +105,7 @@ final class ThisDeviceSettingsStore {
     @ObservationIgnored private var openingTask: Task<Void, Never>?
     @ObservationIgnored private var refreshTask: Task<Void, Never>?
     @ObservationIgnored private var snapshotReadTask: (id: UUID, task: Task<Void, Never>)?
+    @ObservationIgnored private var deliveryReadTask: (id: UUID, task: Task<Result<DevicePreferenceSnapshot, DevicePreferenceError>, Never>)?
     @ObservationIgnored private var writeTask: Task<Void, Never>?
     @ObservationIgnored private var inspectionTask: Task<Void, Never>?
     @ObservationIgnored private var authorizationTask: Task<Void, Never>?
@@ -449,6 +450,29 @@ final class ThisDeviceSettingsStore {
         let cancelledObserver = observerTask?.isCancelled == true ? observerTask : nil
         let tasks = [openingTask, cancelledObserver, refreshTask, snapshotReadTask?.task, writeTask, inspectionTask, authorizationTask, authorizationObservationTask].compactMap { $0 }
         for task in tasks { await task.value }
+        if let deliveryReadTask { _ = await deliveryReadTask.task.value }
+    }
+
+    func notificationDeliveryPreferences() async throws -> DevicePreferenceSnapshot {
+        guard !isClosed, sceneActive, UIApplication.shared.applicationState == .active,
+              let preferences else { throw DevicePreferenceError.uncertain }
+        let reading: (id: UUID, task: Task<Result<DevicePreferenceSnapshot, DevicePreferenceError>, Never>)
+        if let deliveryReadTask { reading = deliveryReadTask }
+        else {
+            reading = (UUID(), Task<Result<DevicePreferenceSnapshot, DevicePreferenceError>, Never> { [preferences] in
+                do { return .success(try await preferences.snapshot()) }
+                catch { return .failure(error as? DevicePreferenceError ?? .storage) }
+            })
+            deliveryReadTask = reading
+        }
+        let result = await reading.task.value
+        if deliveryReadTask?.id == reading.id { deliveryReadTask = nil }
+        guard !isClosed, sceneActive, UIApplication.shared.applicationState == .active else {
+            throw DevicePreferenceError.uncertain
+        }
+        let saved = try result.get()
+        guard saved.deviceID == deviceID else { throw DevicePreferenceError.wrongDevice }
+        return saved
     }
 
     private var retainedRecordCount: Int { preferenceRecords.count + appearanceRecords.count + notificationRecords.count }

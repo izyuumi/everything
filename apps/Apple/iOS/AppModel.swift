@@ -25,6 +25,7 @@ final class AppModel {
     var connectionEnabled = false
     private(set) var localSettings: ThisDeviceSettingsStore?
     private(set) var localSettingsIssue: String?
+    private(set) var notificationDeliveryStatus: String?
     private(set) var selectedTab: ClientTab = .chat
     private(set) var settingsPath: [ClientSettingsDestination] = []
     var pairing: PairingSummary?
@@ -43,10 +44,15 @@ final class AppModel {
     @ObservationIgnored private var localDrainTask: Task<Void, Never>?
     @ObservationIgnored private var localDrainPending = false
     @ObservationIgnored private var localPermanentDrain = false
+    @ObservationIgnored private var notificationGeneration = UUID()
+    @ObservationIgnored private var notificationDeliveryTask: Task<Void, Never>?
+    @ObservationIgnored private var notificationDeliveryPending = false
 
     func scene(active: Bool) async {
         if !active {
+            retireNotificationDelivery()
             await service?.stop()
+            if let notificationDeliveryTask { await notificationDeliveryTask.value }
             await refresh()
             return
         }
@@ -83,7 +89,11 @@ final class AppModel {
             guard refreshEpoch == captured, !Task.isCancelled else { return }
             if selectedConversation == nil { selectedConversation = updated.snapshot.conversations.first?.id }
             adoptLocalSettings(identity: updated.identity)
+            if state?.snapshot.host != updated.snapshot.host || updated.snapshot.revoked {
+                retireNotificationDelivery()
+            }
             state = updated
+            requestNotificationDelivery()
             let conversation = selectedConversation
             await service.selectConversation(conversation)
             let updatedEvents: [WireEvent]
@@ -123,7 +133,9 @@ final class AppModel {
 
     func disconnect() async {
         connectionEnabled = false
+        retireNotificationDelivery()
         await service?.stop()
+        if let notificationDeliveryTask { await notificationDeliveryTask.value }
         await refresh()
     }
 
@@ -208,11 +220,13 @@ final class AppModel {
     }
 
     func disable() async {
+        retireNotificationDelivery()
         await perform {
             guard let service else { throw WireError.unavailable }
             try await service.disable()
             connectionEnabled = false
         }
+        if let notificationDeliveryTask { await notificationDeliveryTask.value }
     }
 
     func localSceneChanged(active: Bool) {
@@ -282,6 +296,7 @@ final class AppModel {
         if let localDeviceID {
             guard localDeviceID != identity.deviceID, !localIdentityInvalid else { return }
             localIdentityInvalid = true
+            retireNotificationDelivery()
             localSettingsIssue = "The local preference identity changed. Existing work has been retained; reopen the app to inspect storage."
             localSettings?.invalidate()
             requestLocalDrain(permanent: true)
@@ -303,6 +318,7 @@ final class AppModel {
     }
 
     private func updateLocalEligibility() {
+        if !localSceneActive || !platformActive { retireNotificationDelivery() }
         guard let localSettings else { return }
         let active = localSceneActive && platformActive
         let visible = selectedTab == .settings && localDestinationVisible && localCovers.isEmpty
@@ -320,6 +336,9 @@ final class AppModel {
         localDrainTask = Task { [self, owner] in
             while localDrainPending {
                 localDrainPending = false
+                if localPermanentDrain || !localSceneActive || !platformActive {
+                    if let notificationDeliveryTask { await notificationDeliveryTask.value }
+                }
                 if localPermanentDrain { await owner.drain() }
                 else { await owner.drainSurface() }
             }
@@ -330,5 +349,83 @@ final class AppModel {
     private func present(_ error: Error) {
         localCoverChanged(.globalError, presented: true)
         self.error = (error as? WireError)?.localizedDescription ?? "The operation could not be completed. Existing local work has been preserved."
+    }
+
+    private func notificationEligible(service expectedService: ReplicaService, owner: ThisDeviceSettingsStore,
+                                      host: DevicePublicKeys, generation: UUID) -> Bool {
+        service === expectedService && localSettings === owner && !owner.isClosed && !localIdentityInvalid
+            && localDeviceID == owner.deviceID && state?.identity.deviceID == owner.deviceID
+            && state?.snapshot.host == host && state?.snapshot.revoked == false && connectionEnabled
+            && localSceneActive && platformActive && UIApplication.shared.applicationState == .active
+            && notificationGeneration == generation
+    }
+
+    private func requestNotificationDelivery() {
+        guard let service, let owner = localSettings, let host = state?.snapshot.host else { return }
+        let generation = notificationGeneration
+        guard notificationEligible(service: service, owner: owner, host: host, generation: generation) else { return }
+        notificationDeliveryPending = true
+        guard notificationDeliveryTask == nil else { return }
+        notificationDeliveryTask = Task { [self, service, owner, host] in
+            while notificationDeliveryPending && !Task.isCancelled
+                && notificationEligible(service: service, owner: owner, host: host, generation: generation) {
+                notificationDeliveryPending = false
+                do {
+                    let page = try await service.claimNotifications()
+                    guard !Task.isCancelled,
+                          notificationEligible(service: service, owner: owner, host: host, generation: generation) else { break }
+                    for notice in page.notices {
+                        guard !Task.isCancelled,
+                              notificationEligible(service: service, owner: owner, host: host, generation: generation) else { break }
+                        let outcome = try await notifications.deliver(notice, prepare: { [self, service, owner, host] in
+                            let saved: DevicePreferenceSnapshot
+                            do { saved = try await owner.notificationDeliveryPreferences() }
+                            catch {
+                                notificationDeliveryStatus = "A claimed notification was skipped because saved preferences were unavailable."
+                                return false
+                            }
+                            guard !Task.isCancelled,
+                                  notificationEligible(service: service, owner: owner, host: host, generation: generation) else { return false }
+                            let enabled: Bool
+                            switch notice.category {
+                            case .completion: enabled = saved.completion
+                            case .attention: enabled = saved.attention
+                            }
+                            guard enabled else {
+                                notificationDeliveryStatus = "Claimed notifications follow the saved completion and attention choices. Disabled notices are skipped."
+                                return false
+                            }
+                            try await service.validateNotificationScope(host: host, localID: owner.deviceID)
+                            return !Task.isCancelled && notificationEligible(service: service, owner: owner, host: host, generation: generation)
+                        }, isEligible: { [self, service, owner, host] in
+                            notificationEligible(service: service, owner: owner, host: host, generation: generation)
+                        })
+                        switch outcome {
+                        case .submitted:
+                            notificationDeliveryStatus = "The OS accepted the latest notification request. Presentation is not guaranteed."
+                        case .suppressedPermission:
+                            notificationDeliveryStatus = "A claimed notification was skipped because current OS settings do not allow alerts. No permission prompt was opened."
+                        case .suppressedPreparation: break
+                        case .suppressedEligibility:
+                            notificationDeliveryStatus = "A claimed notification was skipped because its original foreground or device context changed."
+                        case .retiredAfterSubmission:
+                            notificationDeliveryStatus = "Notification submission finished after foreground retirement. Pending removal was requested; presentation may already have occurred."
+                        }
+                    }
+                } catch is CancellationError {
+                    break
+                } catch {
+                    notificationDeliveryStatus = "A notification attempt failed. Claimed events will not be retried; preference saves are separate."
+                    break
+                }
+            }
+            notificationDeliveryTask = nil
+        }
+    }
+
+    private func retireNotificationDelivery() {
+        notificationGeneration = UUID()
+        notificationDeliveryPending = false
+        notificationDeliveryTask?.cancel()
     }
 }
