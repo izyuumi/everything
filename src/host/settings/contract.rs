@@ -296,7 +296,8 @@ pub struct SettingDescriptor {
     pub apply_behavior: SettingApplyBehavior,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SettingRegistry {
     pub contract_version: u16,
     pub descriptors: Vec<SettingDescriptor>,

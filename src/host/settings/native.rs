@@ -12,8 +12,9 @@ use super::actions::{
     NativeActionReference, NativePairingCreation, SettingsActionTarget,
 };
 use super::contract::{
-    MAX_SETTINGS_DEVICE_PAGE, NativeSettingsAction, SettingsActionRequest, SettingsDeviceAction,
-    SettingsDevicePage, SettingsDeviceRequest, SettingsOperationResult, SettingsScope,
+    MAX_SETTINGS_DEVICE_PAGE, NativeSettingsAction, SettingRegistry, SettingsActionRequest,
+    SettingsDeviceAction, SettingsDevicePage, SettingsDeviceRequest, SettingsOperationResult,
+    SettingsPatch, SettingsScope, SettingsSnapshot,
 };
 use super::service::NativeDeviceActionResult;
 use super::{
@@ -33,6 +34,30 @@ pub struct NativeSettingsInput {
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum NativeSettingsOperation {
     Open,
+    Describe {
+        proof: NativeSessionProof,
+    },
+    Get {
+        proof: NativeSessionProof,
+        scope: SettingsScope,
+    },
+    Update {
+        proof: NativeSessionProof,
+        patch: SettingsPatch,
+    },
+    ConfirmPatch {
+        proof: NativeSessionProof,
+        invocation: NativeActionInvocation,
+    },
+    Changes {
+        proof: NativeSessionProof,
+        after_sequence: Option<u64>,
+        limit: usize,
+    },
+    Reconcile {
+        proof: NativeSessionProof,
+        operation_id: CommandId,
+    },
     RequestAction {
         proof: NativeSessionProof,
         request: SettingsActionRequest,
@@ -98,6 +123,21 @@ pub enum NativeSettingsOperation {
 impl NativeSettingsOperation {
     pub fn validate(&self) -> Result<(), &'static str> {
         match self {
+            Self::Changes {
+                after_sequence,
+                limit,
+                ..
+            } if *limit == 0
+                || *limit > 128
+                || after_sequence.is_some_and(|value| value > i64::MAX as u64) =>
+            {
+                return Err("invalid native settings change page");
+            }
+            Self::Update { patch, .. } => {
+                patch
+                    .validate()
+                    .map_err(|_| "invalid native settings patch")?;
+            }
             Self::PairDevice { request, .. }
                 if !matches!(&request.action, SettingsDeviceAction::Pair) =>
             {
@@ -136,6 +176,10 @@ impl NativeSettingsOperation {
         matches!(
             self,
             Self::Inspect { .. }
+                | Self::Describe { .. }
+                | Self::Get { .. }
+                | Self::Changes { .. }
+                | Self::Reconcile { .. }
                 | Self::Finalize { .. }
                 | Self::Cancel { .. }
                 | Self::Close { .. }
@@ -148,6 +192,15 @@ impl NativeSettingsOperation {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum NativeSettingsResult {
+    Described {
+        registry: SettingRegistry,
+    },
+    Snapshot {
+        snapshot: SettingsSnapshot,
+    },
+    Changes {
+        page: super::service::SettingsChangePage,
+    },
     Devices {
         page: SettingsDevicePage,
     },
@@ -182,6 +235,31 @@ pub enum NativeSettingsResult {
 impl NativeSettingsResult {
     pub fn validate_for(&self, request: &NativeSettingsOperation) -> Result<(), &'static str> {
         match (request, self) {
+            (NativeSettingsOperation::Describe { .. }, Self::Described { registry }) => {
+                validate_registry(registry)
+            }
+            (NativeSettingsOperation::Get { scope, .. }, Self::Snapshot { snapshot })
+                if &snapshot.scope == scope =>
+            {
+                snapshot
+                    .validate()
+                    .map_err(|_| "invalid native settings snapshot")
+            }
+            (NativeSettingsOperation::Update { patch, .. }, Self::Inspected { operation })
+                if operation.binding.request_id == patch.request_id
+                    && operation.binding.scope == patch.scope
+                    && operation.binding.expected_revision == Some(patch.expected_revision) =>
+            {
+                validate_inspection(operation)
+            }
+            (
+                NativeSettingsOperation::Changes {
+                    after_sequence,
+                    limit,
+                    ..
+                },
+                Self::Changes { page },
+            ) => validate_changes(page, *after_sequence, *limit),
             (
                 NativeSettingsOperation::Devices {
                     scope: SettingsScope::Host { host_id },
@@ -264,6 +342,7 @@ impl NativeSettingsResult {
             }
             (
                 NativeSettingsOperation::Admit { invocation, .. }
+                | NativeSettingsOperation::ConfirmPatch { invocation, .. }
                 | NativeSettingsOperation::SubmitCredential { invocation, .. }
                 | NativeSettingsOperation::Finalize { invocation, .. },
                 Self::Inspected { operation },
@@ -272,6 +351,7 @@ impl NativeSettingsResult {
             }
             (
                 NativeSettingsOperation::Inspect { operation_id, .. }
+                | NativeSettingsOperation::Reconcile { operation_id, .. }
                 | NativeSettingsOperation::Cancel { operation_id, .. },
                 Self::Inspected { operation },
             ) if operation.binding.request_id == *operation_id => validate_inspection(operation),
@@ -282,18 +362,82 @@ impl NativeSettingsResult {
 
 fn validate_inspection(operation: &SettingsOperationInspection) -> Result<(), &'static str> {
     operation
-        .binding
         .validate()
-        .map_err(|_| "invalid settings operation binding")?;
-    if let SettingsOperationPhase::Finished { result } = &operation.phase {
-        result
-            .validate()
-            .map_err(|_| "invalid settings operation result")?;
-        if result.request_id != operation.binding.request_id
-            || result.scope != operation.binding.scope
+        .map_err(|_| "invalid settings operation inspection")
+}
+
+fn validate_registry(registry: &SettingRegistry) -> Result<(), &'static str> {
+    let expected = SettingRegistry::from_profile(None);
+    if registry.contract_version != expected.contract_version
+        || registry.descriptors.len() != expected.descriptors.len()
+    {
+        return Err("invalid native settings descriptions");
+    }
+    for (actual, mut expected) in registry.descriptors.iter().zip(expected.descriptors) {
+        if let super::contract::SettingConstraints::OptionalDimensions { choices } =
+            &actual.constraints
         {
-            return Err("settings operation result does not match its binding");
+            if !matches!(
+                expected.constraints,
+                super::contract::SettingConstraints::OptionalDimensions { .. }
+            ) {
+                return Err("invalid native settings constraint type");
+            }
+            if choices.as_ref().is_some_and(|choices| {
+                choices.is_empty()
+                    || choices.len() > 256
+                    || choices.iter().any(|value| *value == 0 || *value > 65_536)
+                    || !choices.windows(2).all(|pair| pair[0] < pair[1])
+            }) {
+                return Err("invalid native embedding dimension choices");
+            }
+            expected.constraints = actual.constraints.clone();
         }
+        if actual != &expected {
+            return Err("invalid native settings descriptor");
+        }
+    }
+    Ok(())
+}
+
+fn validate_changes(
+    page: &super::service::SettingsChangePage,
+    after_sequence: Option<u64>,
+    limit: usize,
+) -> Result<(), &'static str> {
+    if page.contract_version != super::contract::SETTINGS_CONTRACT_VERSION
+        || page.changes.len() > limit
+        || limit == 0
+        || limit > 128
+        || page.changes.iter().any(|change| {
+            change.sequence <= after_sequence.unwrap_or(0)
+                || change.sequence > i64::MAX as u64
+                || change.changed_keys.len() > super::contract::SettingKey::ALL.len()
+                || change
+                    .changed_keys
+                    .iter()
+                    .any(|key| key.scope() != change.scope.kind())
+                || !change.changed_keys.windows(2).all(|pair| pair[0] < pair[1])
+        })
+        || !page
+            .changes
+            .windows(2)
+            .all(|pair| pair[0].sequence < pair[1].sequence)
+        || page.next_sequence.is_some_and(|sequence| {
+            sequence <= after_sequence.unwrap_or(0)
+                || sequence > i64::MAX as u64
+                || page
+                    .changes
+                    .last()
+                    .is_some_and(|change| change.sequence > sequence)
+        })
+        || !page.changes.is_empty() && page.next_sequence.is_none()
+        || serde_json::to_vec(page)
+            .map_err(|_| "invalid native settings change encoding")?
+            .len()
+            > 32 * 1024
+    {
+        return Err("invalid native settings change page");
     }
     Ok(())
 }
@@ -339,6 +483,55 @@ impl HostInner {
         }
         let service = &self.settings_service;
         match operation {
+            NativeSettingsOperation::Describe { proof } => {
+                let caller = service.native_caller(call, &proof)?;
+                Ok(NativeSettingsResult::Described {
+                    registry: service.describe(caller).await?,
+                })
+            }
+            NativeSettingsOperation::Get { proof, scope } => {
+                let caller = service.native_caller(call, &proof)?;
+                Ok(NativeSettingsResult::Snapshot {
+                    snapshot: service.get(caller, scope).await?,
+                })
+            }
+            NativeSettingsOperation::Update { proof, patch } => {
+                let caller = service.native_caller(call, &proof)?;
+                Ok(NativeSettingsResult::Inspected {
+                    operation: service
+                        .update(caller, patch, call.cancellation.clone())
+                        .await?,
+                })
+            }
+            NativeSettingsOperation::ConfirmPatch { proof, invocation } => {
+                let caller = service.native_cleanup_caller(call, &proof)?;
+                Ok(NativeSettingsResult::Inspected {
+                    operation: service
+                        .confirm_patch(caller, invocation, call.cancellation.clone())
+                        .await?,
+                })
+            }
+            NativeSettingsOperation::Changes {
+                proof,
+                after_sequence,
+                limit,
+            } => {
+                let caller = service.native_caller(call, &proof)?;
+                Ok(NativeSettingsResult::Changes {
+                    page: service.changes(caller, after_sequence, limit).await?,
+                })
+            }
+            NativeSettingsOperation::Reconcile {
+                proof,
+                operation_id,
+            } => {
+                let caller = service.native_cleanup_caller(call, &proof)?;
+                Ok(NativeSettingsResult::Inspected {
+                    operation: service
+                        .reconcile_write(caller, operation_id, call.cancellation.clone())
+                        .await?,
+                })
+            }
             NativeSettingsOperation::Devices {
                 proof,
                 scope,

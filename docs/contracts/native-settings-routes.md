@@ -1,0 +1,11 @@
+# Authenticated native Settings routes
+
+The private native owner pipe carries the existing closed `NativeSettingsOperation` enum. Open mints a session proof only from the actual verified owner ingress. Describe, Get, Update, ConfirmPatch, Changes and Reconcile use that same proof and the same SettingsService as the restricted service callers. Their arguments never create a caller from public UUIDs or a Boolean. The generic file-backed owner request path does not accept native Settings frames.
+
+Describe returns the shared bounded registry with actual cached embedding choices. Get returns a validated revisioned Host snapshot; device preferences remain in their independent native store, and unsupported Host/device bridges fail explicitly. Update validates a whole typed batch through the service. ConfirmPatch uses the original native invocation and the service's exact protected-diff admission; inspecting or replaying an admitted invocation does not approve another mutation.
+
+Changes returns bounded redacted hints with a monotonic cursor, known key names and original operation state. It contains no setting values, credentials, invitations, artifact paths or session proofs. Native response validation checks its sequence, key/scope and page bounds. Consumers must read authoritative snapshots after a missed hint or reconnect; the page is not another settings authority.
+
+Reconcile reads the original file intent and actual pre/post fingerprint through the existing service. It never rewrites the file or reapplies a backend. Its cleanup caller remains bound to the original native session. The Host-owned application worker separately advances an original durable known-applied receipt. Inspect and other cleanup routes retain their original semantics; no request expiration is renewed.
+
+All returned operation inspections use the shared pure metadata validator. Registry decoding is data-only and does not grant tool or caller authority. Transport limits and the original pipe supervisor remain unchanged. This route source does not establish Apple client composition, secure credential enrollment, foreground notification behavior or integrated runtime acceptance. Deferred automated verification remains [#32](https://github.com/izyuumi/everything/issues/32).
