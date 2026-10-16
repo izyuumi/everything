@@ -1,3 +1,7 @@
+mod replies;
+
+pub(crate) use replies::{QualifiedBindReply, SettingsReplyProjectionError};
+
 use std::fmt;
 use std::sync::Arc;
 use std::time::Instant;

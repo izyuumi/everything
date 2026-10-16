@@ -655,3 +655,80 @@ impl Authority {
         ))
     }
 }
+
+impl Authority {
+    pub(in crate::host::settings) fn observe_paired_bind_reply(
+        &self,
+        host: &Arc<SettingsHostIdentity>,
+        request: &OwnedCommittedSettingsBind,
+        parent: &PairedSettingsParent,
+        stop: &CancellationToken,
+    ) -> Result<(SettingsGrantOwner, UnixMillis, Instant), SettingsServiceError> {
+        if !std::ptr::eq(self, Arc::as_ptr(&parent.authority)) {
+            return Err(SettingsServiceError::OutsideScope);
+        }
+        let committed = request.committed_source();
+        let source = committed.authority_source();
+        let connection = source.connection();
+        let lifetime = committed.lifetime();
+        let intent = request.binding_intent();
+        let mut sessions = self
+            .sessions
+            .lock()
+            .map_err(|_| SettingsServiceError::Poisoned)?;
+        if sessions.closed || stop.is_cancelled() {
+            return Err(SettingsServiceError::Stopped);
+        }
+        let wall = UnixMillis::now()?;
+        let monotonic = Instant::now();
+        if sessions
+            .paired
+            .host
+            .as_ref()
+            .is_none_or(|registered| !Arc::ptr_eq(registered, host))
+            || !Arc::ptr_eq(connection.host_identity(), host)
+            || host.host_id() != self.host_id
+            || intent.host_id != self.host_id
+            || intent.generation.host_epoch != host.host_epoch()
+            || intent.generation.connection_epoch != connection.connection_epoch()
+            || !host.is_live()
+            || !connection.is_live()
+        {
+            return Err(SettingsServiceError::OutsideScope);
+        }
+        let entry = sessions
+            .paired
+            .entries
+            .values_mut()
+            .find(|entry| Arc::ptr_eq(&entry.record, &parent.record))
+            .ok_or(SettingsServiceError::OutsideScope)?;
+        let record = &entry.record;
+        if record.intent != *intent
+            || record.peer != *source.verified_peer_keys()
+            || !Arc::ptr_eq(&record.creation, committed.creation_identity())
+            || !Arc::ptr_eq(&record.connection, connection)
+            || record.lifetime.expires_at != lifetime.expires_at
+            || record.lifetime.deadline != lifetime.deadline
+            || record.cancellation.is_cancelled()
+            || wall < entry.observed_wall
+            || monotonic < entry.observed_monotonic
+            || wall < committed.reply_reservation().created_at
+            || wall.get() < intent.issued_at
+        {
+            return Err(SettingsServiceError::OutsideScope);
+        }
+        if wall >= record.lifetime.expires_at || monotonic >= record.lifetime.deadline {
+            return Err(SettingsServiceError::Expired);
+        }
+        entry.observed_wall = wall;
+        entry.observed_monotonic = monotonic;
+        Ok((
+            SettingsGrantOwner {
+                host_id: self.host_id,
+                principal_id: self.owner_principal,
+            },
+            wall,
+            monotonic,
+        ))
+    }
+}
