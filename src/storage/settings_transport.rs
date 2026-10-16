@@ -150,7 +150,7 @@ pub(super) fn reserve_bind_reply_in(
         .checked_add(60_000)
         .ok_or(SettingsBindAdmissionError::Rejected(BindRejection::Expired))?
         .min(lifetime.expires_at.get());
-    let expires_at = UnixMillis::new(expires)
+    let expires_at = UnixMillis::try_from(expires)
         .map_err(|_| SettingsBindAdmissionError::Rejected(BindRejection::Expired))?;
     let provenance = serde_json::to_string(&HostBindProvenance {
         side: "host",

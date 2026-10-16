@@ -270,7 +270,7 @@ impl AuthenticatedSettingsSource {
             return Err(BindRejection::Expired);
         }
         Ok(BindingLifetime {
-            expires_at: UnixMillis::new(expires).map_err(|_| BindRejection::Expired)?,
+            expires_at: UnixMillis::try_from(expires).map_err(|_| BindRejection::Expired)?,
             deadline,
         })
     }
@@ -530,6 +530,9 @@ impl OwnedReplay<'_> {
         plaintext: &[u8],
         now_ms: u64,
     ) -> Result<bool, CryptoError> {
+        if plaintext.len() > wire::MAX_PRIVATE_REQUEST_BYTES {
+            return Err(self.fail(SettingsReceiveError::Capacity));
+        }
         let reason =
             match wire::decode(plaintext) {
                 wire::DecodedBind::Bind(intent) => {
