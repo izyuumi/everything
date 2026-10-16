@@ -109,19 +109,32 @@ actor NativeSettingsSession {
     struct AssistantDetailsReceipt: Sendable {
         let original: AssistantOperationHandle
         let details: Details
+        private let retainedBounds: (expiresAt: UInt64, deadline: ContinuousClock.Instant)?
 
-        fileprivate init(original: AssistantOperationHandle, details: Details) {
+        fileprivate init(original: AssistantOperationHandle, details: Details,
+                         bounds: (expiresAt: UInt64, deadline: ContinuousClock.Instant)?) {
             self.original = original
             self.details = details
+            retainedBounds = bounds
         }
 
         func presentationBounds() throws -> (expiresAt: UInt64, deadline: ContinuousClock.Instant) {
-            try original.chat.actionBounds(details, operationID: original.operationID)
+            guard let retainedBounds else { throw NativeSettingsSessionError.invalidRequest }
+            let child = try original.chat.actionBounds(details, operationID: original.operationID)
+            let expiresAt = min(retainedBounds.expiresAt, child.expiresAt)
+            let deadline = min(retainedBounds.deadline, child.deadline)
+            guard try NativeSettingsGate.wallTime() < expiresAt, ContinuousClock.now < deadline else {
+                throw NativeSettingsSessionError.expired
+            }
+            return (expiresAt, deadline)
         }
 
         @MainActor
         func capturePresentation(for gate: NativeSettingsGate) throws -> NativeSettingsGate.Capture {
-            try original.chat.captureAction(details, operationID: original.operationID, gate: gate)
+            let bounds = try presentationBounds()
+            let captured = try original.chat.captureAction(details, operationID: original.operationID, gate: gate)
+            return NativeSettingsGate.Capture(generation: captured.generation, expiresAt: min(captured.expiresAt, bounds.expiresAt),
+                                              deadline: min(captured.deadline, bounds.deadline))
         }
     }
 
@@ -289,6 +302,7 @@ actor NativeSettingsSession {
         var invitationRetired = false
         var invitationIdentity: InvitationIdentity?
         var assistantDeadline: ContinuousClock.Instant?
+        var assistantExpiresAt: UInt64?
     }
 
     private struct InvitationIdentity: Sendable {
@@ -514,12 +528,48 @@ actor NativeSettingsSession {
             assistantSends[original.turnID]?.materialized.insert(id)
         }
         try accept(operation, id: id)
-        let receipt = AssistantDetailsReceipt(original: original, details: Details(operation: operation, target: target))
-        if case .device = target {
-            let bounds = try receipt.presentationBounds()
-            records[id]?.assistantDeadline = min(records[id]?.assistantDeadline ?? bounds.deadline, bounds.deadline)
+        let details = Details(operation: operation, target: target)
+        let bounds: (expiresAt: UInt64, deadline: ContinuousClock.Instant)?
+        switch target {
+        case .device: bounds = try retainAssistantActionBounds(original, details: details, reference: reference)
+        case .native(let request):
+            guard case .openSection = request.action else { throw NativeSettingsSessionError.invalidResponse }
+            bounds = try retainAssistantActionBounds(original, details: details, reference: reference)
+        default: bounds = nil
         }
-        return receipt
+        return AssistantDetailsReceipt(original: original, details: details, bounds: bounds)
+    }
+
+    private func retainAssistantActionBounds(_ original: AssistantOperationHandle, details: Details,
+                                             reference: NativeActionReference) throws -> (expiresAt: UInt64, deadline: ContinuousClock.Instant) {
+        guard let turn = assistantSends[original.turnID], turn.admission.chat === original.chat,
+              reference.expiresAt > details.operation.binding.issuedAt,
+              reference.expiresAt - details.operation.binding.issuedAt <= 300_000 else {
+            throw NativeSettingsSessionError.invalidResponse
+        }
+        let child = try original.chat.actionBounds(details, operationID: original.operationID)
+        let now = try NativeSettingsGate.wallTime()
+        guard child.expiresAt > now else { throw NativeSettingsSessionError.expired }
+        let id = original.operationID
+        if let retainedDeadline = records[id]?.assistantDeadline, let retainedExpiry = records[id]?.assistantExpiresAt {
+            let deadline = min(retainedDeadline, child.deadline)
+            let expiresAt = min(retainedExpiry, child.expiresAt)
+            guard now < expiresAt, ContinuousClock.now < deadline else { throw NativeSettingsSessionError.expired }
+            return (expiresAt, deadline)
+        }
+        guard records[id]?.assistantDeadline == nil, records[id]?.assistantExpiresAt == nil else {
+            throw NativeSettingsSessionError.invalidResponse
+        }
+        let interval = reference.expiresAt - details.operation.binding.issuedAt
+        let originalDeadline = turn.admission.started.advanced(by: .milliseconds(Int64(interval)))
+        let observedDeadline = ContinuousClock.now.advanced(by: .milliseconds(Int64(min(child.expiresAt - now, 300_000))))
+        let candidate = min(child.deadline, min(turn.admission.capture.deadline, min(originalDeadline, observedDeadline)))
+        let deadline = candidate
+        let expiresAt = child.expiresAt
+        records[id]?.assistantDeadline = deadline
+        records[id]?.assistantExpiresAt = expiresAt
+        guard ContinuousClock.now < deadline else { throw NativeSettingsSessionError.expired }
+        return (expiresAt, deadline)
     }
 
     private func retainAssistantOpen(_ admission: NativeSettingsAssistantOpenAdmission) throws {

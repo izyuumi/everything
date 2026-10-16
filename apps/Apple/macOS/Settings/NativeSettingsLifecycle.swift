@@ -238,6 +238,7 @@ final class NativeSettingsAssistantSendAdmission: @unchecked Sendable, CustomStr
     let turnID = UUID()
     let chat: NativeSettingsSession.AssistantHandle
     let capture: NativeSettingsGate.Capture
+    let started: ContinuousClock.Instant
     private let consent: NativeSettingsAssistantConsent
     private let owner: NativeSettingsGate
     private let lock = NSLock()
@@ -248,7 +249,8 @@ final class NativeSettingsAssistantSendAdmission: @unchecked Sendable, CustomStr
     var debugDescription: String { description }
 
     fileprivate init(chat: NativeSettingsSession.AssistantHandle, consent: NativeSettingsAssistantConsent,
-                     owner: NativeSettingsGate, capture: NativeSettingsGate.Capture, text: String) {
+                     owner: NativeSettingsGate, capture: NativeSettingsGate.Capture, started: ContinuousClock.Instant, text: String) {
+        self.started = started
         self.chat = chat
         self.consent = consent
         self.owner = owner
@@ -403,8 +405,9 @@ final class NativeSettingsLifecycle {
         try consent.validate(chat, gate: gate)
         guard text.utf8.count <= 8192, !text.contains("\0"),
               !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { throw NativeSettingsSessionError.invalidRequest }
+        let started = ContinuousClock.now
         let admission = NativeSettingsAssistantSendAdmission(chat: chat, consent: consent, owner: gate,
-            capture: try gate.capture(expiresAt: chat.opened.expiresAt), text: text)
+            capture: try gate.capture(expiresAt: chat.opened.expiresAt), started: started, text: text)
         guard assistantSends[admission.turnID] == nil, assistantOpens[admission.turnID] == nil,
               admissions[admission.turnID] == nil else { throw NativeSettingsSessionError.requestReused }
         assistantSends[admission.turnID] = admission
