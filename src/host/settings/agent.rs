@@ -727,19 +727,29 @@ impl SettingsAgentSupervisor {
 
     async fn close_session(&mut self, session: Arc<Session>) -> Result<(), HostError> {
         session.profile.retire();
-        self.core
-            .service
-            .close_settings_agent(&session.child)
-            .await?;
         let entry = self
             .sessions
             .get_mut(&session.id)
             .ok_or(HostError::Worker)?;
         entry.closing = true;
-        if entry.running {
+        entry.local_idle = false;
+        let running = entry.running;
+        if running {
             entry.status.phase = SettingsChatPhase::Closing;
+        }
+        self.core
+            .service
+            .close_settings_agent(&session.child)
+            .await?;
+        if running {
             return Ok(());
         }
+        session
+            .profile
+            .accounting
+            .close_and_wait()
+            .await
+            .map_err(crate::agent::AgentError::from)?;
         session.profile.close_broker_and_wait().await?;
         let _invocations = self.core.tools.finish_turn(session.id).await?;
         let report = self
