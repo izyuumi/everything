@@ -6,7 +6,7 @@ import Observation
 final class HostModel {
     var executable: String
     var stateDirectory: String
-    var connectionVersion = UUID()
+    var connectionVersion: UUID
     @ObservationIgnored private var activeConnection: OwnerConnection
     var connected = false
     var draining = false
@@ -51,22 +51,29 @@ final class HostModel {
     var serviceStatus: String?
     var pendingAction: OwnerRequest?
     var pendingActionLabel = ""
-    @ObservationIgnored private let client = OwnerIPCClient()
+    @ObservationIgnored private let client: OwnerIPCClient
     @ObservationIgnored private let defaults = UserDefaults.standard
     @ObservationIgnored let settingsSurfaceID = UUID()
     let thisMacSettings: ThisMacSettingsStore?
+    let nativeSettings: NativeSettingsStore
     @ObservationIgnored private var surfaceDrain: Task<Void, Never>?
     @ObservationIgnored private var surfaceDrainRequested = false
 
     init() {
         let executable = UserDefaults.standard.string(forKey: "hostExecutable") ?? ""
         let directory = UserDefaults.standard.string(forKey: "hostStateDirectory") ?? NSHomeDirectory() + "/.everything"
+        let client = OwnerIPCClient()
+        let connection = OwnerConnection(executable: executable, stateDirectory: directory)
+        let connectionKey = UUID()
+        self.client = client
         self.executable = executable
         stateDirectory = directory
-        activeConnection = OwnerConnection(executable: executable, stateDirectory: directory)
+        activeConnection = connection
+        connectionVersion = connectionKey
         thisMacSettings = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first.map {
             ThisMacSettingsStore(directory: $0.appendingPathComponent("Everything", isDirectory: true).appendingPathComponent("DevicePreferences", isDirectory: true))
         }
+        nativeSettings = NativeSettingsStore(client: client, connection: connection, connectionKey: connectionKey)
     }
 
     var connection: OwnerConnection { activeConnection }
@@ -80,8 +87,10 @@ final class HostModel {
         let selected = OwnerConnection(executable: executable, stateDirectory: stateDirectory)
         do { try selected.validate() }
         catch { message = error.localizedDescription; return }
+        let connectionKey = UUID()
+        nativeSettings.replaceConnection(selected, connectionKey: connectionKey)
         activeConnection = selected
-        connectionVersion = UUID()
+        connectionVersion = connectionKey
         defaults.set(executable, forKey: "hostExecutable")
         defaults.set(stateDirectory, forKey: "hostStateDirectory")
         connected = false
@@ -519,17 +528,28 @@ final class HostModel {
     }
 
     func settingsWindowChanged(visible: Bool, active: Bool) {
-        guard !closing else { thisMacSettings?.setSurfaceVisible(false); return }
-        if !visible { thisMacSettings?.setSurfaceVisible(false) }
+        guard !closing else {
+            thisMacSettings?.setSurfaceVisible(false)
+            nativeSettings.setSurfaceVisible(false)
+            return
+        }
+        if !visible {
+            thisMacSettings?.setSurfaceVisible(false)
+            nativeSettings.setSurfaceVisible(false)
+        }
         thisMacSettings?.setApplicationActive(active)
+        nativeSettings.setApplicationActive(active)
         if visible {
             thisMacSettings?.setSurfaceVisible(true)
             thisMacSettings?.open()
+            nativeSettings.setSurfaceVisible(true)
         }
     }
 
     func settingsWindowClosed() {
         thisMacSettings?.setSurfaceVisible(false)
+        nativeSettings.setSurfaceVisible(false)
+        nativeSettings.close()
         guard !closing, let store = thisMacSettings else { return }
         surfaceDrainRequested = true
         guard surfaceDrain == nil else { return }
@@ -544,9 +564,12 @@ final class HostModel {
 
     func shutdownClient() async {
         closing = true
+        nativeSettings.invalidate()
         thisMacSettings?.invalidate()
         if let surfaceDrain { await surfaceDrain.value }
         if let store = thisMacSettings { await store.drain() }
+        let reports = await nativeSettings.drain()
+        if reports.contains(where: { $0.hasIssues }) { message = "Native Settings drain reported issues. Original session reports were retained until app shutdown." }
         await client.shutdown()
     }
 }
