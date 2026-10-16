@@ -4,7 +4,7 @@ Read [AGENTS.md](../AGENTS.md), then [implementation status](status/implementati
 
 For embedding control integration, read [live memory application](architecture/memory-live-application.md).
 
-For Settings implementation, read the [typed contract](contracts/settings.md), [service and journal](contracts/settings-service.md), [startup and application driver](contracts/host-settings-startup.md), [owner receipts](contracts/settings-owner-routes.md), [private native routes](contracts/native-settings-routes.md), [Apple metadata](contracts/apple-settings-wire.md), [credential effects](contracts/native-credential-actions.md), [device effects](contracts/device-settings.md), [This Mac controls](contracts/this-mac-settings.md), [native client foundations](architecture/native-settings-actions.md) and [actual validation](development/settings-validation.md).
+For Settings implementation, read the [typed contract](contracts/settings.md), [service and journal](contracts/settings-service.md), [startup and application driver](contracts/host-settings-startup.md), [owner receipts](contracts/settings-owner-routes.md), [private native routes](contracts/native-settings-routes.md), [Apple metadata](contracts/apple-settings-wire.md), [native macOS Session](contracts/apple-native-settings-session.md), [credential effects](contracts/native-credential-actions.md), [device effects](contracts/device-settings.md), [This Mac controls](contracts/this-mac-settings.md), [native client foundations](architecture/native-settings-actions.md) and [actual validation](development/settings-validation.md).
 
 ## Architecture
 
