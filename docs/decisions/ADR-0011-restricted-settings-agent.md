@@ -1,6 +1,6 @@
 # ADR-0011: Restricted Settings uses the same kernel and a private state view
 
-Status: Accepted design; source integration and combined validation in progress.
+Status: Accepted; implementation merged in #143 after exact-tree compilation/static/release checks. Disposable behavior validation remains pending.
 
 ## Context
 
@@ -18,4 +18,4 @@ Retire provider-only locally drained interruptions/unusable responses with disti
 
 ## Consequences
 
-Native controls and Host lifetime remain independent of the optional chat/UI and provider availability. A closed or lost-RAM chat cannot resume. Unknown work consumes bounded live/closing capacity until reconciliation; lifetime tombstones are bounded and never silently evicted. SQLite page and encoded-value ceilings do not bound total process RSS. The design still requires exact-source compilation, disposable failure/privacy validation, supported Apple verification and later automated/security review before broader readiness claims.
+Native controls and Host lifetime remain independent of the optional chat/UI and provider availability. A closed or lost-RAM chat cannot resume. Unknown work consumes bounded live/closing capacity until reconciliation; lifetime tombstones are bounded and never silently evicted. SQLite page and encoded-value ceilings do not bound total process RSS. Later changes require their own exact-source compilation. Disposable failure/privacy validation, supported Apple verification and later automated/security review still gate broader readiness claims.
