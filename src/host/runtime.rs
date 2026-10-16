@@ -913,7 +913,7 @@ impl HostInner {
             LocalRequestPayload::Query {
                 query: crate::ipc::OwnerQuery::SettingsOperation { request_id },
             } => {
-                let caller = self.settings_service.local_owner_caller(call)?;
+                let caller = self.settings_service.local_owner_cleanup_caller(call)?;
                 Ok(LocalResponsePayload::QueryResult {
                     result: crate::ipc::OwnerQueryResult::SettingsOperation {
                         operation: self.settings_service.operation(caller, *request_id).await?,
@@ -926,7 +926,7 @@ impl HostInner {
             LocalRequestPayload::OwnerOperation {
                 operation: crate::ipc::OwnerOperation::ReconcileSettings { operation_id },
             } => {
-                let caller = self.settings_service.local_owner_caller(call)?;
+                let caller = self.settings_service.local_owner_cleanup_caller(call)?;
                 let operation = self
                     .settings_service
                     .reconcile_write(caller, *operation_id, call.cancellation.clone())

@@ -208,9 +208,10 @@ pub(super) fn owner_difference(
     let selection_changed = before.selection != after.selection
         || before.preference_overrides.system_one_enabled
             != after.preference_overrides.system_one_enabled;
-    let mut retained_memory = before.memory.clone();
-    retained_memory.embeddings = after.memory.embeddings.clone();
-    let restart_required = !same_value(&retained_memory, &after.memory)?
+    let restart_required = before
+        .memory
+        .requires_restart(&after.memory)
+        .map_err(|_| SettingsServiceError::Encoding)?
         || !same_value(&before.mcp, &after.mcp)?
         || before.worker != after.worker
         || before.relay_origin != after.relay_origin;

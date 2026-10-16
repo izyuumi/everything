@@ -269,8 +269,7 @@ impl Composition {
             active_memory: self.effective.memory.clone(),
             active_mcp: self.effective.mcp.clone(),
             restart_required: RestartRequired {
-                memory: serde_json::to_value(&desired.memory)?
-                    != serde_json::to_value(&self.effective.memory)?,
+                memory: self.effective.memory.requires_restart(&desired.memory)?,
                 mcp: serde_json::to_value(&desired.mcp)?
                     != serde_json::to_value(&self.effective.mcp)?,
                 selection: desired.selection != selection_configuration.settings,
