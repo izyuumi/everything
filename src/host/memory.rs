@@ -822,6 +822,27 @@ impl MemoryService {
         Ok(generation)
     }
 
+    pub fn restore_semantics(&self, generation: &SemanticGeneration) -> Result<(), MemoryError> {
+        self.ensure_accepting()?;
+        let core = &self.owner.core;
+        let control = core.embeddings.lock().map_err(|_| MemoryError::Worker)?;
+        if control
+            .application
+            .as_ref()
+            .is_some_and(|application| application.snapshot.generation == generation.generation())
+            || control.active == Some(generation.generation())
+        {
+            return Err(MemoryError::BindingChanged);
+        }
+        if core.closing.load(Ordering::Acquire) {
+            return Err(MemoryError::Draining);
+        }
+        core.consolidator.restore_semantics(generation)?;
+        drop(control);
+        core.embedding_changes.notify_waiters();
+        Ok(())
+    }
+
     pub fn embedding_metadata(&self) -> Result<EmbeddingMetadata, MemoryError> {
         let core = &self.owner.core;
         let control = core.embeddings.lock().map_err(|_| MemoryError::Worker)?;

@@ -18,6 +18,12 @@ The original capture is rechecked after real semaphore/state admission, during s
 
 Existing MaintenanceState serialization still spans synchronous inference/IPC. The new gate and application metadata locks remain short and do not span SQL, file/model operations, awaits or displaced-backend cleanup. Public low-level backend setters retain their signatures and invalidate prior captures. Internal live installation checks the exact originating generation and leaves queries closed until real compatible readiness.
 
+## Proven no-file-effect restoration
+
+Only after the Settings writer proves the exact original pre-file snapshot, `restore_semantics(&original_generation)` may restore prior admission without applying embeddings. The opaque ticket privately retains the actual pre-suspend query flag. Restore requires its exact live originating gate, operation and epoch, and rejects any bound or started same-generation application. It preserves the actual backend, process, status and cached profile; it performs no helper/model/vector/provider/SQL work and never retries a failed backend. An originally closed gate remains closed. A backend that became unavailable remains unavailable.
+
+Restore advances to another checked fresh epoch and retires the supplied ticket, so neither pre-suspension nor suspension-era captures revive. Repeating the retired ticket fails instead of creating another restoration. Exact command replay must read the durable original no-effect outcome and must not call suspend/restore again. A later generation, application binding, permanent close or exhaustion rejects restoration. This trusted control API does not establish pre-file proof itself; the facade owns that proof and invokes restoration outside reads and client replay.
+
 ## Bounded original-operation application
 
 `apply_embeddings(generation, EmbeddingApplyRequest)` validates the positive original settings revision, canonical lowercase SHA-256 request identity and complete private capture, bounded to 32 KiB. Its generation must belong to this service and exact original operation. A changed request on the same generation conflicts. One owned application step may be active; admission returns Started, Observed or Deferred without creating an unbounded waiting-task queue. A dropped response does not drop admitted work.

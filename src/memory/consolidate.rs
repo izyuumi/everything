@@ -214,6 +214,7 @@ pub struct ConsolidationConfig {
 pub struct SemanticGeneration {
     capture: SemanticCapture,
     operation_id: CommandId,
+    prior_queries: bool,
 }
 
 #[derive(Clone)]
@@ -228,6 +229,7 @@ struct SemanticGate {
     generation: u64,
     operation_id: Option<CommandId>,
     queries: bool,
+    prior_queries: bool,
     closed: bool,
     cancellation: CancellationToken,
 }
@@ -352,6 +354,7 @@ impl Consolidator {
             return Err(ConsolidationError::SemanticClosed);
         }
         if gate.operation_id != Some(operation_id) {
+            gate.prior_queries = gate.queries;
             gate.queries = false;
             gate.cancellation.cancel();
             let Some(next) = gate.generation.checked_add(1) else {
@@ -370,7 +373,43 @@ impl Consolidator {
                 cancellation: gate.cancellation.clone(),
             },
             operation_id,
+            prior_queries: gate.prior_queries,
         })
+    }
+
+    pub(crate) fn restore_semantics(
+        &self,
+        generation: &SemanticGeneration,
+    ) -> Result<(), ConsolidationError> {
+        if !Arc::ptr_eq(&self.inner.semantics, &generation.capture.gate) {
+            return Err(ConsolidationError::SemanticBinding);
+        }
+        let mut gate = self
+            .inner
+            .semantics
+            .lock()
+            .map_err(|_| ConsolidationError::SemanticClosed)?;
+        if gate.closed {
+            return Err(ConsolidationError::SemanticClosed);
+        }
+        if gate.generation != generation.capture.generation
+            || gate.operation_id != Some(generation.operation_id)
+            || generation.capture.cancellation.is_cancelled()
+        {
+            return Err(ConsolidationError::SemanticBinding);
+        }
+        gate.queries = false;
+        gate.cancellation.cancel();
+        let Some(next) = gate.generation.checked_add(1) else {
+            gate.closed = true;
+            return Err(ConsolidationError::SemanticClosed);
+        };
+        gate.generation = next;
+        gate.operation_id = None;
+        gate.prior_queries = false;
+        gate.cancellation = CancellationToken::new();
+        gate.queries = generation.prior_queries;
+        Ok(())
     }
 
     pub(crate) fn validate_semantics(
@@ -443,6 +482,7 @@ impl Consolidator {
         };
         gate.generation = next;
         gate.operation_id = None;
+        gate.prior_queries = false;
         gate.cancellation = CancellationToken::new();
         Ok(SemanticCapture {
             gate: Arc::clone(&self.inner.semantics),
@@ -544,6 +584,7 @@ impl Consolidator {
                     generation: 0,
                     operation_id: None,
                     queries: false,
+                    prior_queries: false,
                     closed: false,
                     cancellation: CancellationToken::new(),
                 })),
