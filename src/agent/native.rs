@@ -1447,9 +1447,9 @@ impl Agent {
             .map(move |(index, invocation)| {
                 let broker = broker.clone();
                 let token = child.clone();
-                let owner = retained_owner.clone();
                 let observed_wall = Arc::clone(&call_observed_wall);
                 let admission_stopped = Arc::clone(&admission_stopped);
+                let owner = retained_owner.clone();
                 async move {
                     let now = UnixMillis::now()?.get();
                     let floor = observed_wall.fetch_max(now, Ordering::AcqRel);
