@@ -1,6 +1,7 @@
 mod external;
 pub(crate) mod settings_agent;
 mod settings_grants;
+pub(crate) mod settings_originals;
 mod transport;
 pub(crate) use external::ExternalTaskStateUpdate;
 pub use transport::*;
@@ -15,7 +16,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 use thiserror::Error;
 
-const SCHEMA_VERSION: i64 = 15;
+const SCHEMA_VERSION: i64 = 16;
 const MAX_JSON_BYTES: usize = 1_048_576;
 const MAX_APPEND_EVENTS: usize = 256;
 const MAX_STATE_BYTES: usize = 8 * MAX_JSON_BYTES;
@@ -386,6 +387,9 @@ impl Store {
         }
         if version < 15 {
             transaction.execute_batch(include_str!("../migrations/0015_settings_grants.sql"))?;
+        }
+        if version < 16 {
+            transaction.execute_batch(include_str!("../migrations/0016_settings_originals.sql"))?;
         }
         transaction.pragma_update(None, "user_version", SCHEMA_VERSION)?;
         transaction.commit()?;
