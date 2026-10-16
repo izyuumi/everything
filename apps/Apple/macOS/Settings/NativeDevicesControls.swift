@@ -85,8 +85,14 @@ struct NativeDevicesControls: View {
             Text(NativeSettingsText.operation(value.operation))
             Text("Host: \(value.request.scope.identifier.uuidString.lowercased())").font(.caption.monospaced())
             Text("Operation: \(value.id.uuidString.lowercased())").font(.caption.monospaced())
-            if value.retired { Text("Private presentation retired. Already admitted effects are not assumed rolled back.").font(.caption).foregroundStyle(.secondary) }
+            if value.retired { Text("Dismissal requested and private fields cleared. Sheet cleanup and admitted effects remain owned until joined.").font(.caption).foregroundStyle(.secondary) }
+            if let lifecycle = value.pairingLifecycle {
+                Text("Last Host invitation state: " + lifecycle.rawValue.replacingOccurrences(of: "_", with: " ")).font(.caption)
+            }
             if let issue = value.issue ?? value.operation.issue { Text(issue.errorDescription ?? "Inspect the original operation.").foregroundStyle(.red) }
+            if let cleanup = value.cleanupIssue {
+                Text("Pending-use cancellation remains unconfirmed: " + (cleanup.errorDescription ?? "Original cleanup is uncertain.")).foregroundStyle(.orange)
+            }
             Button("Inspect original device operation") { store.inspectDeviceOperation(value.handle) }
                 .disabled(!store.canInspectDeviceOperation(value.handle) || connectionEdited)
             if let approvalID = value.approvalID {

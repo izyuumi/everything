@@ -54,7 +54,9 @@ final class NativeSettingsStore {
         let approvalID: UUID?
         let approval: NativeSettingsSession.PairingApprovalStatus?
         let approvalWorking: Bool
+        let pairingLifecycle: NativeSettingsWire.PairingLifecycle?
         let issue: NativeSettingsSessionError?
+        let cleanupIssue: NativeSettingsSessionError?
     }
 
     @MainActor
@@ -71,7 +73,9 @@ final class NativeSettingsStore {
         var approvalWorking = false
         var invitationPresented = false
         var retired = false
+        var pairingLifecycle: NativeSettingsWire.PairingLifecycle?
         var issue: NativeSettingsSessionError?
+        var cleanupIssue: NativeSettingsSessionError?
 
         init(handle: DeviceHandle, request: SettingsDeviceRequest, capture: CredentialCapture, ceremony: NativeDeviceCeremony) {
             self.handle = handle
@@ -723,6 +727,7 @@ final class NativeSettingsStore {
                     case .prepared: throw NativeSettingsSessionError.invalidResponse
                     case .inspected(let inspection): try owner.operations[handle.id]?.adopt(inspection)
                     case .pairing(let status):
+                        context.pairingLifecycle = status.lifecycle
                         try owner.operations[handle.id]?.adopt(status.operation)
                         guard context.request.action == .pair, status.invitationAvailable else { throw NativeSettingsSessionError.expired }
                         context.invitationPresented = true
@@ -730,16 +735,29 @@ final class NativeSettingsStore {
                         let final = try await owner.lifecycle.session.showInvitation(admission) { [context] presentation in
                             try await context.ceremony.showInvitation(presentation)
                         }
-                        try owner.operations[handle.id]?.adopt(final.operation)
+                        try adoptPairingRetirement(final, owner: owner, context: context)
                     }
                     if !context.invitationPresented {
                         guard case .finished = owner.operations[handle.id]?.inspection?.phase else { throw NativeSettingsSessionError.operationUncertain }
                         context.ceremony.completed()
                     }
                 } catch {
-                    context.issue = sanitize(error)
-                    owner.operations[handle.id]?.issue = sanitize(error)
-                    context.ceremony.failure(sanitize(error))
+                    let original = sanitize(error)
+                    context.issue = original
+                    context.ceremony.failure(original)
+                    if context.request.action == .pair {
+                        context.retired = true
+                        context.ceremony.retire()
+                        context.approval?.cancel()
+                        admission.cancel()
+                        publishDevices()
+                        await context.ceremony.waitForRetirement()
+                        do {
+                            let cancellation = try await owner.lifecycle.session.cancelPairing(operationID: handle.id)
+                            try adoptPairingRetirement(cancellation, owner: owner, context: context)
+                        } catch { context.cleanupIssue = sanitize(error) }
+                    }
+                    owner.operations[handle.id]?.issue = original
                 }
                 owner.operations[handle.id]?.isWorking = false
                 owner.effects[handle.id] = nil
@@ -904,6 +922,15 @@ final class NativeSettingsStore {
         }
     }
 
+    private func adoptPairingRetirement(_ status: NativeSettingsSession.PairingStatus, owner: Owner, context: DeviceContext) throws {
+        context.pairingLifecycle = status.lifecycle
+        try owner.operations[context.handle.id]?.adopt(status.operation)
+        switch status.lifecycle {
+        case .cancelled, .expired, .noLongerPending: context.cleanupIssue = nil
+        case .retained, .cancellationPending, .unavailable: throw NativeSettingsSessionError.operationUncertain
+        }
+    }
+
     private func runPairingApproval(_ owner: Owner, context: DeviceContext, inspecting: Bool) {
         guard let admission = context.approval else { return }
         let id = admission.review.operationID
@@ -935,7 +962,7 @@ final class NativeSettingsStore {
     }
 
     private func deviceApprovalsNeedRecovery(_ owner: Owner) -> Bool {
-        owner.devices.values.contains { deviceApprovalNeedsRecovery($0) }
+        owner.devices.values.contains { $0.cleanupIssue != nil || deviceApprovalNeedsRecovery($0) }
     }
 
     private func deviceApprovalNeedsRecovery(_ context: DeviceContext) -> Bool {
@@ -959,7 +986,8 @@ final class NativeSettingsStore {
                 return DeviceOperation(id: context.handle.id, handle: context.handle, request: context.request,
                     operation: operation, retired: context.retired, approvalID: context.approval?.review.operationID,
                     approval: context.approvalStatus, approvalWorking: context.approvalWorking,
-                    issue: context.approvalIssue ?? context.issue)
+                    pairingLifecycle: context.pairingLifecycle, issue: context.approvalIssue ?? context.issue,
+                    cleanupIssue: context.cleanupIssue)
             }
         }.sorted { $0.id.uuidString < $1.id.uuidString }
     }
@@ -1403,6 +1431,13 @@ final class NativeSettingsStore {
                 unresolved.insert(link.plan.ownerRequest.id.value)
             }
             if link.issue != nil { failures.append(.operationUncertain) }
+        }
+        for context in owner.devices.values {
+            if let cleanupIssue = context.cleanupIssue {
+                if let original = context.issue { failures.append(original) }
+                failures.append(cleanupIssue)
+                unresolved.insert(context.handle.id)
+            }
         }
         return NativeSettingsSession.DrainReport(failures: failures,
             unresolvedOperationIDs: unresolved.sorted { $0.uuidString < $1.uuidString })
