@@ -1,48 +1,29 @@
 name: Validate
 on:
   push:
+    branches: [main]
   pull_request:
   workflow_dispatch:
-    inputs:
-      retain_runtime_artifact:
-        description: Retain the default Linux CLI for separate manual verification
-        required: false
-        default: false
-        type: boolean
 permissions:
   contents: read
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 jobs:
   rust:
+    timeout-minutes: 25
     strategy:
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        os: [ubuntu-latest]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --all --check
-      - run: cargo check --workspace --all-targets --locked
-      - run: cargo check --workspace --all-targets --all-features --locked
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
-      - run: cargo build --workspace --release --locked
-      - name: Retain default Linux CLI
-        if: ${{ matrix.os == 'ubuntu-latest' && github.event_name == 'workflow_dispatch' && inputs.retain_runtime_artifact }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: everything-linux-default-${{ github.sha }}
-          path: target/release/everything
-          retention-days: 3
-          if-no-files-found: error
-          compression-level: 6
-      - run: cargo build --workspace --release --all-features --locked
-  msrv:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.88.0
-      - uses: Swatinem/rust-cache@v2
-      - run: cargo check --workspace --all-targets --all-features --locked

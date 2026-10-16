@@ -1,14 +1,12 @@
 name: Local embedding benchmark
 on:
   workflow_dispatch:
-  pull_request:
-    paths:
-      - 'src/memory/embedding/**'
-      - 'src/bin/everything-embedding-bench.rs'
-      - '.github/workflows/embedding-benchmark.yml'
 permissions:
   contents: read
   checks: write
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: true
 jobs:
   embedding:
     runs-on: macos-latest
@@ -17,6 +15,8 @@ jobs:
       ORT_DISABLE_TELEMETRY: "1"
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - uses: actions/setup-python@v5
@@ -60,10 +60,9 @@ jobs:
           )
           /usr/bin/time -l target/release/everything-embedding-bench --runtime-library "$runtime_library" --model-dir "$MODEL_ROOT" --threads 2 --max-tokens 2048 --repetitions 3 --warmup-iterations 1 --inference-timeout-seconds 30 --load-timeout-seconds 120 --deadline-seconds 600 > embedding-report.json 2> embedding-process.txt
       - name: Publish public measurement summary
-        if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
         env:
           GH_TOKEN: ${{ github.token }}
-          BENCHMARK_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          BENCHMARK_HEAD_SHA: ${{ github.sha }}
         run: |
           python - <<'PY'
           import json

@@ -1,15 +1,15 @@
 # Manual runtime artifacts
 
-The [Validate workflow](../../.github/workflows/validate.yml) can retain the default-feature Linux CLI from a manually dispatched run. The `retain_runtime_artifact` boolean defaults to `false`; push and pull-request runs never upload this artifact. Both operating-system jobs and all existing formatting, check, Clippy, release-build and Rust 1.88 validation commands still run.
+The manual [Extended validation workflow](../../.github/workflows/extended-validation.yml) can retain the default-feature Linux CLI. The `retain_runtime_artifact` boolean defaults to `false`; it moved from Validate when normal POC checks were reduced to formatting and strict Clippy. The manual workflow runs Linux/macOS strict default/all-feature Clippy and release builds plus the Rust 1.88 check. Normal pushes and pull requests never upload this artifact. See [POC CI](poc-ci.md) for the separate normal and manual gates.
 
 On `ubuntu-latest`, an opted-in manual run uploads only `target/release/everything` immediately after the default-feature release build and before the all-feature release build can replace it. The artifact is named `everything-linux-default-<full commit SHA>`, uses compression level 6, expires after three days, and fails its upload step if the binary is absent. No library directory, workspace data, Host state, keys or model files are included. This is a compiled public-source artifact, not an Apple application or an all-feature executable.
 
 ## Request and identify a build
 
-After this workflow is available on the repository's default branch, open **Actions → Validate → Run workflow**, choose the intended ref and enable `retain_runtime_artifact`. The equivalent explicit dispatch is:
+After this workflow is available on the repository's default branch, open **Actions → Extended validation → Run workflow**, choose the intended ref and enable `retain_runtime_artifact`. The equivalent explicit dispatch is:
 
 ```sh
-gh workflow run validate.yml --repo izyuumi/everything --ref <ref> -F retain_runtime_artifact=true
+gh workflow run extended-validation.yml --repo izyuumi/everything --ref <ref> -F retain_runtime_artifact=true
 ```
 
 Dispatching does not identify a successful build by itself. Locate the actual manual run in Actions, verify its ref and full commit SHA, and record its URL, run ID, attempt number and final conclusion. If several runs target the same commit, select the intended run and attempt explicitly; the artifact name alone does not distinguish them. The Linux upload happens before later validation finishes, so an artifact can exist even when the complete run fails. Inspect the Linux default release-build and upload steps separately from the remaining validation results.
