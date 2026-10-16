@@ -234,6 +234,18 @@ pub struct SelectionPreflightStatus {
     pub reserved_bytes: usize,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SelectionGeneration(u64);
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SelectionConfigurationStatus {
+    pub generation: u64,
+    pub suspended: bool,
+    pub remote_enabled: bool,
+    pub settings: SelectionSettings,
+}
+
 #[derive(Debug, Error)]
 pub enum SelectionPreflightError {
     #[error("selection settings are invalid")]
@@ -277,23 +289,35 @@ pub struct SelectionPreflight {
 }
 
 struct PreflightInner {
-    agent: Agent,
-    selector: SystemOneSelector,
+    local: SystemOneSelector,
+    credentials: NativeCredentialStore,
     catalog: SelectionCatalog,
     lifetime: Duration,
     shutdown: CancellationToken,
     state: Mutex<PreflightState>,
     settled: Notify,
+    agent: Agent,
 }
 
 struct PreflightState {
     closed: bool,
+    generation: SelectionGeneration,
+    suspended: bool,
+    configuration: Arc<ConfiguredSelection>,
     tickets: BTreeMap<Uuid, Ticket>,
     active: BTreeMap<Uuid, usize>,
     bytes: usize,
 }
 
+struct ConfiguredSelection {
+    selector: SystemOneSelector,
+    settings: SelectionSettings,
+    remote_enabled: bool,
+}
+
 struct Ticket {
+    generation: SelectionGeneration,
+    remote: bool,
     binding: SelectionBinding,
     authority: ExecutionAuthority,
     expires_at: Instant,
@@ -323,23 +347,102 @@ impl SelectionPreflight {
         let configuration = settings
             .configuration()
             .map_err(SelectionPreflightError::Configuration)?;
+        let remote_enabled = matches!(settings, SelectionSettings::SystemOne { .. });
+        let selector =
+            SystemOneSelector::new(local, configuration).with_credential_store(credentials.clone());
+        let local = selector.reconfigured(SelectionConfig::Local, credentials.clone());
         Ok(Self {
             inner: Arc::new(PreflightInner {
-                agent,
-                selector: SystemOneSelector::new(local, configuration)
-                    .with_credential_store(credentials),
+                local,
+                credentials,
                 catalog,
                 lifetime,
                 shutdown: CancellationToken::new(),
                 state: Mutex::new(PreflightState {
                     closed: false,
+                    generation: SelectionGeneration(1),
+                    suspended: false,
+                    configuration: Arc::new(ConfiguredSelection {
+                        selector,
+                        settings: settings.clone(),
+                        remote_enabled,
+                    }),
                     tickets: BTreeMap::new(),
                     active: BTreeMap::new(),
                     bytes: 0,
                 }),
                 settled: Notify::new(),
+                agent,
             }),
         })
+    }
+
+    pub fn suspend_remote(&self) -> Result<SelectionGeneration, SelectionPreflightError> {
+        let mut state = self.lock()?;
+        if state.closed {
+            return Err(SelectionPreflightError::Draining);
+        }
+        state.suspended = true;
+        state.remove_all();
+        let Some(generation) = state.generation.0.checked_add(1) else {
+            state.closed = true;
+            self.inner.shutdown.cancel();
+            return Err(SelectionPreflightError::Capacity);
+        };
+        state.generation = SelectionGeneration(generation);
+        Ok(state.generation)
+    }
+
+    pub fn configure_remote(
+        &self,
+        generation: SelectionGeneration,
+        settings: SelectionSettings,
+        enabled: bool,
+    ) -> Result<SelectionConfigurationStatus, SelectionPreflightError> {
+        let remote_enabled = enabled && matches!(settings, SelectionSettings::SystemOne { .. });
+        let previous = {
+            let state = self.lock()?;
+            state.require_generation(generation)?;
+            if !state.suspended {
+                if state.configuration.settings != settings
+                    || state.configuration.remote_enabled != remote_enabled
+                {
+                    return Err(SelectionPreflightError::BindingChanged);
+                }
+                return Ok(state.configuration_status());
+            }
+            Arc::clone(&state.configuration)
+        };
+        let configuration = settings
+            .configuration()
+            .map_err(SelectionPreflightError::Configuration)?;
+        let replacement = Arc::new(ConfiguredSelection {
+            selector: previous
+                .selector
+                .reconfigured(configuration, self.inner.credentials.clone()),
+            settings,
+            remote_enabled,
+        });
+        let mut state = self.lock()?;
+        state.require_generation(generation)?;
+        if !state.suspended {
+            if state.configuration.settings != replacement.settings
+                || state.configuration.remote_enabled != remote_enabled
+            {
+                return Err(SelectionPreflightError::BindingChanged);
+            }
+            return Ok(state.configuration_status());
+        }
+        state.remove_all();
+        state.configuration = replacement;
+        state.suspended = false;
+        Ok(state.configuration_status())
+    }
+
+    pub fn configuration_status(
+        &self,
+    ) -> Result<SelectionConfigurationStatus, SelectionPreflightError> {
+        Ok(self.lock()?.configuration_status())
     }
 
     pub async fn prepare(
@@ -375,7 +478,7 @@ impl SelectionPreflight {
         let expires_at = Instant::now()
             .checked_add(self.inner.lifetime)
             .ok_or(SelectionPreflightError::InvalidLifetime)?;
-        {
+        let (generation, configuration, remote) = {
             let mut state = self.lock()?;
             state.prune();
             if state.closed {
@@ -387,9 +490,14 @@ impl SelectionPreflight {
             {
                 return Err(SelectionPreflightError::Capacity);
             }
+            let generation = state.generation;
+            let configuration = Arc::clone(&state.configuration);
+            let remote = !state.suspended && configuration.remote_enabled;
             state.tickets.insert(
                 ticket,
                 Ticket {
+                    generation,
+                    remote,
                     binding: binding.clone(),
                     authority: authority.clone(),
                     expires_at,
@@ -399,7 +507,8 @@ impl SelectionPreflight {
             );
             state.active.insert(ticket, charge);
             state.bytes += charge;
-        }
+            (generation, configuration, remote)
+        };
         let this = self.clone();
         let request_guard = RequestGuard {
             inner: Arc::clone(&this.inner),
@@ -407,12 +516,16 @@ impl SelectionPreflight {
         };
         let worker = tokio::spawn(async move {
             let _request = request_guard;
-            let selector = this.inner.selector.clone();
+            let local = this.inner.local.clone();
             let agent = this.inner.agent.clone();
             let current = authority.clone();
             let prepared = tokio::task::spawn_blocking(move || {
                 let _agent = agent;
-                selector.prepare(&current, &query, limit)
+                if remote {
+                    configuration.selector.prepare(&current, &query, limit)
+                } else {
+                    local.prepare(&current, &query, limit)
+                }
             })
             .await
             .map_err(|_| SelectionPreflightError::Worker)?
@@ -452,6 +565,7 @@ impl SelectionPreflight {
                 }
             };
             let mut state = this.lock()?;
+            state.require_generation(generation)?;
             let stored = state
                 .tickets
                 .get_mut(&ticket)
@@ -486,12 +600,17 @@ impl SelectionPreflight {
             return Err(SelectionPreflightError::Cancelled);
         }
         let request_cancellation = self.inner.shutdown.child_token();
-        let (disclosure, expires_at) = {
+        let (disclosure, expires_at, generation, configuration) = {
             let mut state = self.lock()?;
             if state.closed {
                 return Err(SelectionPreflightError::Draining);
             }
             state.require(ticket, &binding, &authority, &self.inner.catalog)?;
+            if state.suspended || !state.configuration.remote_enabled {
+                return Err(SelectionPreflightError::NotReady);
+            }
+            let generation = state.generation;
+            let configuration = Arc::clone(&state.configuration);
             if state.active.len() >= MAX_TICKETS {
                 return Err(SelectionPreflightError::Capacity);
             }
@@ -511,7 +630,7 @@ impl SelectionPreflight {
             let expires_at = stored.expires_at;
             let charge = stored.charge;
             state.active.insert(ticket, charge);
-            (disclosure, expires_at)
+            (disclosure, expires_at, generation, configuration)
         };
         let this = self.clone();
         let request_guard = RequestGuard {
@@ -527,7 +646,7 @@ impl SelectionPreflight {
             let approved = disclosure
                 .approve(remaining)
                 .map_err(SelectionPreflightError::from)?;
-            let request = this.inner.selector.select_approved(
+            let request = configuration.selector.select_approved(
                 &authority,
                 approved,
                 request_cancellation.clone(),
@@ -553,6 +672,7 @@ impl SelectionPreflight {
             validate_result(&result)?;
             let summary = SelectionSummary::from(&result);
             let mut state = this.lock()?;
+            state.require_generation(generation)?;
             state.require(ticket, &binding, &authority, &this.inner.catalog)?;
             if state.closed {
                 return Err(SelectionPreflightError::Draining);
@@ -610,10 +730,7 @@ impl SelectionPreflight {
             let mut state = self.lock()?;
             state.closed = true;
             self.inner.shutdown.cancel();
-            let tickets = state.tickets.keys().copied().collect::<Vec<_>>();
-            for ticket in tickets {
-                state.remove(ticket);
-            }
+            state.remove_all();
         }
         loop {
             let settled = self.inner.settled.notified();
@@ -635,6 +752,35 @@ impl SelectionPreflight {
 }
 
 impl PreflightState {
+    fn configuration_status(&self) -> SelectionConfigurationStatus {
+        SelectionConfigurationStatus {
+            generation: self.generation.0,
+            suspended: self.suspended,
+            remote_enabled: !self.closed && !self.suspended && self.configuration.remote_enabled,
+            settings: self.configuration.settings.clone(),
+        }
+    }
+
+    fn require_generation(
+        &self,
+        generation: SelectionGeneration,
+    ) -> Result<(), SelectionPreflightError> {
+        if self.closed {
+            return Err(SelectionPreflightError::Draining);
+        }
+        if self.generation != generation {
+            return Err(SelectionPreflightError::BindingChanged);
+        }
+        Ok(())
+    }
+
+    fn remove_all(&mut self) {
+        let tickets = self.tickets.keys().copied().collect::<Vec<_>>();
+        for ticket in tickets {
+            self.remove(ticket);
+        }
+    }
+
     fn remove(&mut self, ticket: Uuid) -> Option<Ticket> {
         let removed = self.tickets.remove(&ticket)?;
         if !self.active.contains_key(&ticket) {
@@ -675,7 +821,11 @@ impl PreflightState {
             .tickets
             .get(&ticket)
             .ok_or(SelectionPreflightError::Unavailable)?;
-        let result = if Instant::now() >= stored.expires_at {
+        let result = if stored.generation != self.generation
+            || (stored.remote && (self.suspended || !self.configuration.remote_enabled))
+        {
+            Err(SelectionPreflightError::BindingChanged)
+        } else if Instant::now() >= stored.expires_at {
             Err(SelectionPreflightError::Expired)
         } else if &stored.binding != binding || &stored.authority != authority {
             Err(SelectionPreflightError::BindingChanged)

@@ -17,8 +17,9 @@ use super::mcp::{McpService, McpServiceStatus};
 use super::memory::{MemoryService, MemoryStatus};
 use super::runtime::{HostError, HostInner};
 use super::selection::{
-    PreparedSelectionTicket, SelectionBinding, SelectionCatalog, SelectionPreflight,
-    SelectionPreflightStatus, SelectionPreparation, SelectionSummary,
+    PreparedSelectionTicket, SelectionBinding, SelectionCatalog, SelectionConfigurationStatus,
+    SelectionGeneration, SelectionPreflight, SelectionPreflightStatus, SelectionPreparation,
+    SelectionSettings, SelectionSummary,
 };
 use super::settings::HostSettings;
 use crate::permissions::ExecutionAuthority;
@@ -32,6 +33,7 @@ pub struct CompositionStatus {
     pub memory: MemoryStatus,
     pub mcp: McpServiceStatus,
     pub selection: SelectionPreflightStatus,
+    pub selection_configuration: SelectionConfigurationStatus,
     pub restart_required: RestartRequired,
     pub active_memory: super::memory::MemorySettings,
     pub active_mcp: super::mcp::McpSettings,
@@ -103,6 +105,29 @@ impl Composition {
 
     pub(super) fn close(&self) {
         self.closed.store(true, Ordering::Release);
+    }
+
+    pub(super) fn suspend_selection(&self) -> Result<SelectionGeneration, HostError> {
+        if self.closed.load(Ordering::Acquire) {
+            return Err(HostError::Draining);
+        }
+        let generation = self.selection.suspend_remote()?;
+        self.handoffs.lock().map_err(|_| HostError::Worker)?.clear();
+        Ok(generation)
+    }
+
+    pub(super) fn configure_selection(
+        &self,
+        generation: SelectionGeneration,
+        settings: SelectionSettings,
+        enabled: bool,
+    ) -> Result<SelectionConfigurationStatus, HostError> {
+        if self.closed.load(Ordering::Acquire) {
+            return Err(HostError::Draining);
+        }
+        Ok(self
+            .selection
+            .configure_remote(generation, settings, enabled)?)
     }
 
     fn selection_binding(
@@ -226,19 +251,21 @@ impl Composition {
         &self,
         desired: &HostSettings,
     ) -> Result<CompositionStatus, HostError> {
+        let selection_configuration = self.selection.configuration_status()?;
         Ok(CompositionStatus {
             memory: self.memory.status(),
             mcp: self.mcp.status().await,
             selection: self.selection.status()?,
+            active_selection: selection_configuration.settings.clone(),
+            selection_configuration: selection_configuration.clone(),
             active_memory: self.effective.memory.clone(),
             active_mcp: self.effective.mcp.clone(),
-            active_selection: self.effective.selection.clone(),
             restart_required: RestartRequired {
                 memory: serde_json::to_value(&desired.memory)?
                     != serde_json::to_value(&self.effective.memory)?,
                 mcp: serde_json::to_value(&desired.mcp)?
                     != serde_json::to_value(&self.effective.mcp)?,
-                selection: desired.selection != self.effective.selection,
+                selection: desired.selection != selection_configuration.settings,
             },
         })
     }

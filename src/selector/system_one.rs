@@ -320,6 +320,23 @@ impl SystemOneSelector {
         self
     }
 
+    pub(crate) fn reconfigured(
+        &self,
+        configuration: SelectionConfig,
+        credentials: NativeCredentialStore,
+    ) -> Self {
+        let credentials =
+            matches!(&configuration, SelectionConfig::SystemOne(_)).then_some(credentials);
+        Self {
+            identity: Uuid::new_v4(),
+            local: self.local.clone(),
+            configuration,
+            credentials,
+            configuration_failure: None,
+            admission: Arc::clone(&self.admission),
+        }
+    }
+
     pub fn prepare(
         &self,
         authority: &ExecutionAuthority,
