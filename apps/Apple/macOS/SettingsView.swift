@@ -65,7 +65,7 @@ struct SettingsView: View {
                     Button("Save defaults") { Task { await model.saveSettings() } }
                         .disabled(!model.canMutate || model.settings == .null)
                 }
-                Text("Existing tasks keep their captured authority. Other settings and credential references are preserved by revision-checked updates; credentials are managed through the CLI.")
+                Text("Existing tasks keep their captured authority. Other settings and credential references are preserved by revision-checked updates. Use Models or Tool Selection for native credential entry.")
                     .font(.caption).foregroundStyle(.secondary)
             }.disabled(!model.connected || model.draining)
             Section("Per-user background service") {
@@ -178,7 +178,11 @@ private struct NativeHostSettingsPane: View {
                     ForEach(store.cleanup) { cleanup in
                         VStack(alignment: .leading, spacing: 4) {
                             if let report = cleanup.report {
-                                Text("Earlier session cleanup reported issues. Its original state is retained.")
+                                if cleanup.hasIssues {
+                                    Text("Earlier session cleanup reported issues. Its original state is retained.")
+                                } else {
+                                    Text("The original native cleanup report is retained.")
+                                }
                                 ForEach(Array(report.failures.prefix(4).enumerated()), id: \.offset) { _, failure in
                                     Text(failure.errorDescription ?? "The original drain has an unconfirmed outcome.")
                                         .font(.caption)
@@ -186,6 +190,11 @@ private struct NativeHostSettingsPane: View {
                                 if report.failures.count > 4 { Text("\(report.failures.count) total drain issues are retained.").font(.caption) }
                                 if !report.unresolvedOperationIDs.isEmpty { Text("\(report.unresolvedOperationIDs.count) original operations remain unresolved.").font(.caption) }
                             } else { ProgressView("Closing the original Host session…") }
+                            if !cleanup.unlinkedCredentialOperationIDs.isEmpty {
+                                Text("Unlinked initial storage receipts: \(cleanup.unlinkedCredentialOperationIDs.count)")
+                                Text("Original storage completed without an observed metadata link. Review its record in Models or Tool Selection. A historical receipt does not establish current key presence.")
+                                    .font(.caption).foregroundStyle(.secondary)
+                            }
                             Text("Original connection: \(cleanup.connectionKey.uuidString.lowercased())").font(.caption).textSelection(.enabled)
                         }
                     }

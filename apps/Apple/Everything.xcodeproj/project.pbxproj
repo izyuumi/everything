@@ -288,6 +288,26 @@
             "isa" = "PBXBuildFile";
             "fileRef" = "7EF555A5776C8697BD385639";
         };
+        "67760B4C40D0E024DE5E3660" = {
+            "isa" = "PBXFileReference";
+            "lastKnownFileType" = "sourcecode.swift";
+            "path" = "NativeCredentialEntry.swift";
+            "sourceTree" = "<group>";
+        };
+        "7050C019B8826A6B562E6C8B" = {
+            "isa" = "PBXBuildFile";
+            "fileRef" = "67760B4C40D0E024DE5E3660";
+        };
+        "0A337230134DAA8722D393C4" = {
+            "isa" = "PBXFileReference";
+            "lastKnownFileType" = "sourcecode.swift";
+            "path" = "NativeCredentialEntryView.swift";
+            "sourceTree" = "<group>";
+        };
+        "CCCB026149B99186971190C7" = {
+            "isa" = "PBXBuildFile";
+            "fileRef" = "0A337230134DAA8722D393C4";
+        };
         "EE990A23EDFE368C266222DC" = {
             "isa" = "PBXGroup";
             "children" = (
@@ -302,6 +322,8 @@
                 "A64AF72E31D5E9D03F451318",
                 "45499036740741814E10D348",
                 "CA5BAA9EA21332F2292E9231",
+                "67760B4C40D0E024DE5E3660",
+                "0A337230134DAA8722D393C4",
             );
             "path" = "Settings";
             "sourceTree" = "<group>";
@@ -430,6 +452,8 @@
                 "9A366DE20CFD9B8E254752CF",
                 "BFEC0EC93EFD77227B071563",
                 "23879FBD469F2CB181AA5704",
+                "7050C019B8826A6B562E6C8B",
+                "CCCB026149B99186971190C7",
             );
             "runOnlyForDeploymentPostprocessing" = "0";
         };
