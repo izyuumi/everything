@@ -35,8 +35,8 @@ pub(crate) use settings_ingress::work::{
 };
 #[cfg(unix)]
 pub(crate) use settings_ingress::{
-    AccessStatusRejection, AuthenticatedSettingsAccessSource, OwnedVerifiedSettingsAccess,
-    SettingsAccessStatusIntent,
+    AccessStatusRejection, AuthenticatedSettingsAccessSource, OwnedCommittedSettingsAccess,
+    OwnedVerifiedSettingsAccess, SettingsAccessStatusIntent,
 };
 #[cfg(unix)]
 pub(crate) use settings_ingress::{
