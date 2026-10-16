@@ -156,17 +156,7 @@ impl Store {
         validate_owner(owner)?;
         let mut connection = self.connection()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Deferred)?;
-        let host_revoked = host_state(&transaction, owner)?;
-        let head = read_head(&transaction, owner, device_id)?
-            .map(|grant| -> StorageResult<SettingsGrantHead> {
-                let peer_revoked = peer_state(&transaction, &grant.change.peer_keys)?;
-                Ok(SettingsGrantHead {
-                    grant,
-                    peer_revoked,
-                    host_revoked,
-                })
-            })
-            .transpose()?;
+        let head = super::settings_grant_head_on(&transaction, owner, device_id)?;
         transaction.commit()?;
         Ok(head)
     }
@@ -217,6 +207,25 @@ impl Store {
         transaction.commit()?;
         Ok(receipt)
     }
+}
+
+pub(crate) fn settings_grant_head_on(
+    connection: &Connection,
+    owner: SettingsGrantOwner,
+    device_id: DeviceId,
+) -> StorageResult<Option<SettingsGrantHead>> {
+    validate_owner(owner)?;
+    let host_revoked = host_state(connection, owner)?;
+    read_head(connection, owner, device_id)?
+        .map(|grant| -> StorageResult<SettingsGrantHead> {
+            let peer_revoked = peer_state(connection, &grant.change.peer_keys)?;
+            Ok(SettingsGrantHead {
+                grant,
+                peer_revoked,
+                host_revoked,
+            })
+        })
+        .transpose()
 }
 
 fn check_capacity(

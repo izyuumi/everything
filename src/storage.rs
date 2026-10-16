@@ -3,6 +3,7 @@ pub(crate) mod settings_agent;
 mod settings_grants;
 mod transport;
 pub(crate) use external::ExternalTaskStateUpdate;
+pub(crate) use settings_grants::settings_grant_head_on;
 pub use transport::*;
 pub(crate) use transport::{TransportInboxMetadata, TransportInboxRejection};
 
