@@ -550,7 +550,7 @@ pub struct SettingsRequestBinding {
     pub principal_id: Uuid,
     pub client_session_id: Uuid,
     pub scope: SettingsScope,
-    pub expected_revision: u64,
+    pub expected_revision: Option<u64>,
     pub exact_request_sha256: String,
     pub issued_at: UnixMillis,
     pub expires_at: UnixMillis,
@@ -560,7 +560,9 @@ impl SettingsRequestBinding {
     pub fn validate(&self) -> Result<(), SettingsContractError> {
         non_nil(self.principal_id)?;
         non_nil(self.client_session_id)?;
-        revision(self.expected_revision)?;
+        if let Some(value) = self.expected_revision {
+            revision(value)?;
+        }
         if self.expires_at.get() <= self.issued_at.get()
             || self.expires_at.get() - self.issued_at.get() > MAX_SETTINGS_ACTION_LIFETIME_MS
             || self.exact_request_sha256.len() != 64
@@ -669,14 +671,12 @@ pub struct SettingsDeviceRequest {
     pub contract_version: u16,
     pub request_id: CommandId,
     pub scope: SettingsScope,
-    pub expected_revision: u64,
     pub action: SettingsDeviceAction,
 }
 
 impl SettingsDeviceRequest {
     pub fn validate(&self) -> Result<(), SettingsContractError> {
         version(self.contract_version)?;
-        revision(self.expected_revision)?;
         if self.scope.kind() != SettingScopeKind::Host {
             return Err(SettingsContractError::Invalid("device management scope"));
         }
@@ -711,7 +711,7 @@ pub struct SettingsDeviceSummary {
 pub struct SettingsDevicePage {
     pub contract_version: u16,
     pub host_id: DeviceId,
-    pub revision: u64,
+    pub observed_at: UnixMillis,
     pub devices: Vec<SettingsDeviceSummary>,
     pub next_after: Option<DeviceId>,
 }
@@ -719,7 +719,6 @@ pub struct SettingsDevicePage {
 impl SettingsDevicePage {
     pub fn validate(&self) -> Result<(), SettingsContractError> {
         version(self.contract_version)?;
-        revision(self.revision)?;
         if self.devices.len() > MAX_SETTINGS_DEVICE_PAGE
             || !self
                 .devices
@@ -734,7 +733,7 @@ impl SettingsDevicePage {
             return Err(SettingsContractError::Invalid("device page or cursor"));
         }
         for device in &self.devices {
-            bounded_text(&device.label, 128)?;
+            bounded_text(&device.label, 256)?;
             if device.device_id != device.public_keys.device_id {
                 return Err(SettingsContractError::Invalid("device identity"));
             }
