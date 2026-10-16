@@ -1,4 +1,4 @@
-use crate::host::memory::{EmbeddingMetadata, EmbeddingStatus};
+use crate::host::memory::{EmbeddingMetadata, EmbeddingStatus, MemoryWorkerStatus};
 use crate::protocol::UnixMillis;
 
 use super::super::HostSettings;
@@ -70,7 +70,31 @@ impl SettingsService {
                     selection.suspended,
                 ),
             ];
-            entries.extend(memory_entries(&settings, &metadata));
+            let fingerprint = super::persistence::file_fingerprint(&settings)?;
+            let (pending_semantics, pending_selection) = core
+                .repository
+                .pending_applications()?
+                .into_iter()
+                .filter_map(|record| {
+                    record
+                        .write()
+                        .filter(|write| write.intent.after == fingerprint)
+                        .map(|write| (write.intent.memory_changed, write.intent.selection_changed))
+                })
+                .fold((false, false), |current, pending| {
+                    (current.0 || pending.0, current.1 || pending.1)
+                });
+            if !pending_selection && entries[1].state != SettingState::Effective {
+                entries[1].state = SettingState::Unavailable;
+                entries[1].unavailable_reason =
+                    Some(SettingsUnavailableReason::ProviderUnavailable);
+            }
+            entries.extend(memory_entries(
+                &settings,
+                &metadata,
+                &composition.memory.status().worker,
+                pending_semantics,
+            ));
             let snapshot = SettingsSnapshot {
                 contract_version: SETTINGS_CONTRACT_VERSION,
                 scope,
@@ -102,7 +126,12 @@ impl ServiceCore {
     }
 }
 
-fn memory_entries(settings: &HostSettings, metadata: &EmbeddingMetadata) -> Vec<SettingEntry> {
+fn memory_entries(
+    settings: &HostSettings,
+    metadata: &EmbeddingMetadata,
+    worker: &MemoryWorkerStatus,
+    pending_semantics: bool,
+) -> Vec<SettingEntry> {
     let desired_enabled = updates::embeddings_enabled(settings);
     let current_enabled =
         matches!(metadata.status, EmbeddingStatus::Enabled { .. }) && metadata.accepting_semantics;
@@ -110,12 +139,26 @@ fn memory_entries(settings: &HostSettings, metadata: &EmbeddingMetadata) -> Vec<
         value: updates::embedding_dimensions(settings),
     };
     let unavailable = matches!(metadata.status, EmbeddingStatus::Unavailable { .. });
-    let pending = metadata.application.as_ref().is_some_and(|application| {
+    let current_application = metadata
+        .application
+        .as_ref()
+        .filter(|application| application.generation == metadata.generation);
+    let pending = pending_semantics
+        || current_application.is_some_and(|application| {
+            matches!(
+                application.phase,
+                crate::host::memory::EmbeddingApplyPhase::Pending { .. }
+            )
+        });
+    let terminal_failure = current_application.is_some_and(|application| {
         matches!(
             application.phase,
-            crate::host::memory::EmbeddingApplyPhase::Pending { .. }
+            crate::host::memory::EmbeddingApplyPhase::Unavailable { .. }
+                | crate::host::memory::EmbeddingApplyPhase::Failed { .. }
+                | crate::host::memory::EmbeddingApplyPhase::Stopped
+                | crate::host::memory::EmbeddingApplyPhase::Superseded
         )
-    });
+    }) || matches!(worker, MemoryWorkerStatus::Stopped { .. });
     let mut enabled = preference(
         SettingKey::EmbeddingsEnabled,
         SettingValue::Boolean {
@@ -124,14 +167,14 @@ fn memory_entries(settings: &HostSettings, metadata: &EmbeddingMetadata) -> Vec<
         SettingValue::Boolean {
             value: current_enabled,
         },
-        pending || desired_enabled != current_enabled,
+        pending,
     );
-    if unavailable && desired_enabled && !pending {
+    if terminal_failure || !pending && (unavailable || desired_enabled != current_enabled) {
         enabled.state = SettingState::Unavailable;
         enabled.unavailable_reason = Some(SettingsUnavailableReason::EmbeddingBoundaryUnavailable);
     }
     let dimension = match metadata.profile.as_ref() {
-        Some(profile) if current_enabled => {
+        Some(profile) if current_enabled && !terminal_failure => {
             let selected = profile.dimensions() as u32;
             let value = if updates::embedding_dimensions(settings).is_none()
                 && settings.memory.embeddings.backend_default_dimensions()
@@ -141,12 +184,25 @@ fn memory_entries(settings: &HostSettings, metadata: &EmbeddingMetadata) -> Vec<
             } else {
                 Some(selected)
             };
-            preference(
-                SettingKey::EmbeddingsDimensions,
-                desired_dimensions,
-                SettingValue::Dimensions { value },
-                pending,
-            )
+            let current = SettingValue::Dimensions { value };
+            if !pending && desired_dimensions != current {
+                SettingEntry {
+                    key: SettingKey::EmbeddingsDimensions,
+                    desired: Some(desired_dimensions),
+                    effective: Some(current),
+                    state: SettingState::Unavailable,
+                    unavailable_reason: Some(
+                        SettingsUnavailableReason::EmbeddingBoundaryUnavailable,
+                    ),
+                }
+            } else {
+                preference(
+                    SettingKey::EmbeddingsDimensions,
+                    desired_dimensions,
+                    current,
+                    pending,
+                )
+            }
         }
         _ => SettingEntry {
             key: SettingKey::EmbeddingsDimensions,

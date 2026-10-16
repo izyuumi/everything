@@ -1,9 +1,11 @@
+mod application;
 mod changes;
 mod credentials;
 mod devices;
 mod persistence;
 mod projection;
 mod updates;
+mod writes;
 
 pub use changes::{SettingsChangeHint, SettingsChangePage, SettingsChangeState};
 pub use devices::NativeDeviceActionResult;
@@ -37,10 +39,10 @@ use super::authority::{
     SettingsCaller, SettingsOperationOrigin,
 };
 use super::contract::{
-    AgentMutability, SETTINGS_CONTRACT_VERSION, SettingsActionReference, SettingsActionRequest,
+    SETTINGS_CONTRACT_VERSION, SettingsActionReference, SettingsActionRequest,
     SettingsConfirmationReference, SettingsContractError, SettingsDeviceAction,
-    SettingsDeviceRequest, SettingsOperationResult, SettingsOperationState, SettingsPatch,
-    SettingsRequestBinding, SettingsScope, SettingsToolName, SettingsUnavailableReason,
+    SettingsDeviceRequest, SettingsOperationResult, SettingsOperationState, SettingsRequestBinding,
+    SettingsScope, SettingsToolName, SettingsUnavailableReason,
 };
 use super::operations::{
     NativeRequest, OperationIdentity, OperationRecord, OperationRepository,
@@ -99,6 +101,8 @@ pub enum SettingsServiceError {
     Settings(#[from] super::SettingsError),
     #[error(transparent)]
     Device(#[from] DeviceError),
+    #[error("optional settings application failed: {0}")]
+    Application(#[source] Box<crate::host::runtime::HostError>),
     #[error(transparent)]
     Memory(#[from] crate::host::memory::MemoryError),
     #[error(transparent)]
@@ -163,6 +167,8 @@ struct ServiceCore {
     endpoint: DeviceEndpoint,
     active_write: Mutex<Option<Arc<ActiveSettingsWrite>>>,
     composition: Mutex<Option<Arc<crate::host::composition::Composition>>>,
+    applications: Mutex<BTreeMap<CommandId, writes::ApplicationCapture>>,
+    application_stop: CancellationToken,
     agent: Agent,
 }
 
@@ -193,6 +199,8 @@ impl SettingsService {
                 endpoint: endpoint.clone(),
                 active_write: Mutex::new(None),
                 composition: Mutex::new(None),
+                applications: Mutex::new(BTreeMap::new()),
+                application_stop: CancellationToken::new(),
                 agent,
             }),
         };
@@ -406,26 +414,6 @@ impl SettingsService {
         };
         self.core.authority.require_tool(&caller, tool)?;
         self.prepare(caller, SettingsActionTarget::Device(request), cancellation)
-            .await
-    }
-
-    pub(crate) async fn prepare_protected_patch(
-        &self,
-        caller: SettingsCaller,
-        request: SettingsPatch,
-        cancellation: CancellationToken,
-    ) -> Result<SettingsOperationResult, SettingsServiceError> {
-        self.core
-            .authority
-            .require_tool(&caller, SettingsToolName::Update)?;
-        if !request.changes.iter().any(|change| {
-            change.key.agent_mutability() == AgentMutability::RequiresNativeConfirmation
-        }) {
-            return Err(SettingsServiceError::Invalid(
-                "patch does not require native confirmation",
-            ));
-        }
-        self.prepare(caller, SettingsActionTarget::Patch(request), cancellation)
             .await
     }
 
@@ -925,6 +913,7 @@ impl SettingsService {
     }
 
     pub(crate) fn stop_intake(&self) -> Result<(), SettingsServiceError> {
+        self.core.application_stop.cancel();
         self.core.authority.close()
     }
 
