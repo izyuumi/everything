@@ -84,6 +84,7 @@ struct EncryptedEnvelope: Sendable {
 
 protocol DurableEnvelopeInbox: Sendable {
     func acceptAuthenticated(_ envelope: EncryptedEnvelope, plaintext: Data, host: DevicePublicKeys, localID: UUID) async throws -> Bool
+    func rejectAuthenticated(_ envelope: EncryptedEnvelope, host: DevicePublicKeys, localID: UUID) async throws -> Bool
 }
 
 actor DeviceIdentity {
@@ -132,7 +133,12 @@ actor DeviceIdentity {
         let box = try ChaChaPoly.SealedBox(nonce: ChaChaPoly.Nonce(data: envelope.header.nonce), ciphertext: ciphertext, tag: tag)
         let plaintext = try ChaChaPoly.open(box, using: key(peer: host, header: envelope.header), authenticating: envelope.header.canonical)
         guard !plaintext.isEmpty, plaintext.count <= 1_048_576 else { throw WireError.size }
-        return try await inbox.acceptAuthenticated(envelope, plaintext: plaintext, host: host, localID: publicKeys.deviceID)
+        switch DevicePackets.routing(plaintext) {
+        case .ordinary:
+            return try await inbox.acceptAuthenticated(envelope, plaintext: plaintext, host: host, localID: publicKeys.deviceID)
+        case .rejected:
+            return try await inbox.rejectAuthenticated(envelope, host: host, localID: publicKeys.deviceID)
+        }
     }
 }
 
