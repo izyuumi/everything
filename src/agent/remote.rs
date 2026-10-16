@@ -158,6 +158,9 @@ impl Agent {
         &self,
         completion: RemoteResultCommit,
     ) -> Result<RemoteResultReceipt, AgentError> {
+        if self.settings_profile.is_some() {
+            return Err(AgentError::ConfigurationMismatch);
+        }
         completion.validate_owner(self)?;
         let conversation_id = completion.conversation_id();
         let admission = self.admit(conversation_id)?;

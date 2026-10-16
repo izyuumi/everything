@@ -196,15 +196,17 @@ impl WorkerManifest {
                 "hard OS resource guarantees are unavailable",
             ));
         }
-        if self.mode == crate::permissions::ExecutionMode::FullHost
-            || self.allowed_tools.iter().any(|tool| {
-                !matches!(
-                    tool.as_str(),
-                    "read_file" | "write_file" | "search_files" | "search_tools"
-                )
-            })
-            || self.allowed_tools.contains("write_file")
-                && self.mode == crate::permissions::ExecutionMode::ReadOnly
+        if matches!(
+            self.mode,
+            crate::permissions::ExecutionMode::FullHost
+                | crate::permissions::ExecutionMode::SettingsRestricted
+        ) || self.allowed_tools.iter().any(|tool| {
+            !matches!(
+                tool.as_str(),
+                "read_file" | "write_file" | "search_files" | "search_tools"
+            )
+        }) || self.allowed_tools.contains("write_file")
+            && self.mode == crate::permissions::ExecutionMode::ReadOnly
         {
             return Err(WorkerError::Unsupported(
                 "only explicit workspace file tools and offline discovery are supported",

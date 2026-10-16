@@ -2,6 +2,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt;
 use std::io::{self, Write};
 use std::net::{IpAddr, SocketAddr};
+use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -15,6 +16,7 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 use tokio_util::sync::CancellationToken;
 
+use super::accounting::{ProviderAccounting, ProviderWork};
 use super::{
     ContentBlock, MAX_CONTENT_BLOCKS, MAX_CONTINUATION_BYTES, MAX_JSON_BYTES, MAX_REQUEST_BYTES,
     MAX_TEXT_BYTES, Message, MessageRole, ModelError, ModelEvent, ModelProvider, ModelRequest,
@@ -36,6 +38,7 @@ pub struct OpenAiConfig {
     connect_timeout: Duration,
     request_timeout: Duration,
     idle_timeout: Duration,
+    accounting: Option<Arc<ProviderAccounting>>,
 }
 
 impl OpenAiConfig {
@@ -59,7 +62,13 @@ impl OpenAiConfig {
             connect_timeout: Duration::from_secs(10),
             request_timeout: Duration::from_secs(600),
             idle_timeout: Duration::from_secs(120),
+            accounting: None,
         })
+    }
+
+    pub(crate) fn with_accounting(mut self, accounting: Arc<ProviderAccounting>) -> Self {
+        self.accounting = Some(accounting);
+        self
     }
 
     pub fn with_endpoint(mut self, endpoint: &str) -> Result<Self, ModelError> {
@@ -180,17 +189,26 @@ impl ModelProvider for OpenAiProvider {
         if cancellation.is_cancelled() {
             return Err(ModelError::Cancelled);
         }
+        let mut request = ProviderWork::new(request, self.config.accounting.as_ref())?;
+        request.fork_preparation()?;
         let preparation = tokio::task::spawn_blocking(move || {
-            request.validate()?;
-            let continuation = read_continuation(&request)?;
-            let body = prepare_request(&request, &continuation)?;
-            Ok::<_, ModelError>((request, continuation, body))
+            request.prepare(|request| {
+                request.validate()?;
+                let continuation = read_continuation(&request)?;
+                let body = prepare_request(&request, &continuation)?;
+                Ok::<_, ModelError>((request, continuation, body))
+            })
         });
-        let (request, continuation, body) = tokio::select! {
+        let ProviderWork {
+            value,
+            root,
+            preparation,
+        } = tokio::select! {
             biased;
             _ = cancellation.cancelled() => return Err(ModelError::Cancelled),
-            prepared = preparation => prepared.map_err(|_| transport("request preparation failed"))??,
+            prepared = preparation => prepared.map_err(|_| transport("request preparation failed"))?,
         };
+        let (request, continuation, body) = value?;
         if cancellation.is_cancelled() {
             return Err(ModelError::Cancelled);
         }
@@ -223,6 +241,7 @@ impl ModelProvider for OpenAiProvider {
             return Err(protocol("stream body exceeds its byte limit"));
         }
         let idle_timeout = self.config.idle_timeout;
+        let accounting = self.config.accounting.clone();
         let raw = async_stream::try_stream! {
             let mut bytes = response.bytes_stream();
             let mut limits = RawLimits::default();
@@ -252,6 +271,9 @@ impl ModelProvider for OpenAiProvider {
                 if event.data.len() > MAX_SSE_EVENT_BYTES {
                     Err(protocol("server-sent event exceeds its byte limit"))?;
                 }
+                if let Some(accounting) = &accounting {
+                    observe_terminal_usage(&event.data, accounting)?;
+                }
                 let frame: WireFrame = serde_json::from_str(&event.data)
                     .map_err(|_| protocol("invalid server-sent event JSON"))?;
                 if event.event != "message" && !event.event.is_empty() && frame.event.kind().is_some_and(|kind| event.event != kind) {
@@ -266,6 +288,9 @@ impl ModelProvider for OpenAiProvider {
                 }
                 if let Some(response) = progress.response {
                     let response = finish_response(response, &request, continuation, &state)?;
+                    if let Some(accounting) = &accounting {
+                        accounting.observe(&response.usage, true, true)?;
+                    }
                     for (index, block) in response.message.content.iter().enumerate() {
                         if cancellation.is_cancelled() {
                             Err(ModelError::Cancelled)?;
@@ -284,7 +309,12 @@ impl ModelProvider for OpenAiProvider {
                 }
             }
         };
-        Ok(Box::pin(stream))
+        Ok(ProviderWork {
+            value: Box::pin(stream) as ProviderStream,
+            root,
+            preparation,
+        }
+        .into_stream())
     }
 }
 
@@ -1489,6 +1519,102 @@ fn check_block_kind(kind: &PendingKind, refusal: Option<bool>) -> Result<(), Mod
     } else {
         Err(protocol("stream content block type changed"))
     }
+}
+
+#[derive(Deserialize)]
+struct AccountingEventKind {
+    #[serde(rename = "type")]
+    kind: String,
+}
+
+#[derive(Deserialize)]
+struct AccountingEnvelope {
+    response: Option<AccountingResponse>,
+}
+
+#[derive(Deserialize)]
+struct AccountingResponse {
+    status: Option<Value>,
+    usage: Option<AccountingUsage>,
+}
+
+#[derive(Deserialize)]
+struct AccountingUsage {
+    input_tokens: Option<Value>,
+    output_tokens: Option<Value>,
+    total_tokens: Option<Value>,
+    input_tokens_details: Option<AccountingInputDetails>,
+    output_tokens_details: Option<AccountingOutputDetails>,
+}
+
+#[derive(Deserialize)]
+struct AccountingInputDetails {
+    cached_tokens: Option<Value>,
+}
+
+#[derive(Deserialize)]
+struct AccountingOutputDetails {
+    reasoning_tokens: Option<Value>,
+}
+
+fn observe_terminal_usage(data: &str, accounting: &ProviderAccounting) -> Result<(), ModelError> {
+    let kind: AccountingEventKind =
+        serde_json::from_str(data).map_err(|_| protocol("invalid provider accounting event"))?;
+    let expected_status = match kind.kind.as_str() {
+        "response.completed" => "completed",
+        "response.incomplete" => "incomplete",
+        "response.failed" => "failed",
+        _ => return Ok(()),
+    };
+    let envelope: AccountingEnvelope = match serde_json::from_str(data) {
+        Ok(envelope) => envelope,
+        Err(_) => {
+            accounting.invalidate(true)?;
+            return Err(protocol("invalid terminal provider accounting envelope"));
+        }
+    };
+    let Some(response) = envelope.response else {
+        accounting.invalidate(true)?;
+        return Err(protocol("terminal response has no accounting envelope"));
+    };
+    let Some(usage) = response.usage else {
+        accounting.invalidate(true)?;
+        return Err(protocol("terminal response has no token usage"));
+    };
+    let input = usage.input_tokens.as_ref().and_then(Value::as_u64);
+    let output = usage.output_tokens.as_ref().and_then(Value::as_u64);
+    let total = usage.total_tokens.as_ref().and_then(Value::as_u64);
+    let mut invalid = input.is_none() || output.is_none() || total.is_none();
+    let mut detail = |value: Option<Value>| match value.as_ref().and_then(Value::as_u64) {
+        Some(tokens) => Some(tokens),
+        None => {
+            invalid = true;
+            None
+        }
+    };
+    let cached_input_tokens = usage
+        .input_tokens_details
+        .and_then(|details| detail(details.cached_tokens));
+    let reasoning_tokens = usage
+        .output_tokens_details
+        .and_then(|details| detail(details.reasoning_tokens));
+    let observed = TokenUsage {
+        input_tokens: input.unwrap_or(0),
+        output_tokens: output.unwrap_or(0),
+        cached_input_tokens,
+        reasoning_tokens,
+    };
+    accounting.observe(&observed, true, false)?;
+    if invalid
+        || input.and_then(|input| output.and_then(|output| input.checked_add(output))) != total
+        || response.status.as_ref().and_then(Value::as_str) != Some(expected_status)
+    {
+        accounting.invalidate(true)?;
+        return Err(protocol(
+            "terminal provider accounting is malformed or inconsistent",
+        ));
+    }
+    Ok(())
 }
 
 fn finish_response(
