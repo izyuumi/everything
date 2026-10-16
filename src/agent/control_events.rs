@@ -474,7 +474,7 @@ fn decision_identity(
     ))
 }
 
-fn identities(value: &impl Serialize) -> Result<(CommandId, EventId), AgentError> {
+pub(super) fn identities(value: &impl Serialize) -> Result<(CommandId, EventId), AgentError> {
     let mut hash = Sha256::new();
     hash.update(b"everything.control-event.command.v1\0");
     hash.update(serde_json::to_vec(value).map_err(|_| AgentError::Worker)?);
