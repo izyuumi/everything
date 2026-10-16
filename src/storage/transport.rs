@@ -1264,3 +1264,160 @@ fn transport_digest(domain: &[u8], bytes: &[u8]) -> String {
     hash.update(bytes);
     format!("{:x}", hash.finalize())
 }
+
+#[cfg(unix)]
+impl Store {
+    pub(crate) fn admit_settings_access(
+        &self,
+        request: &crate::devices::OwnedVerifiedSettingsAccess,
+    ) -> Result<
+        super::settings_transport::SettingsAccessReceiptCommit,
+        super::settings_transport::SettingsAccessAdmissionError,
+    > {
+        use super::settings_transport::{
+            SettingsAccessAdmissionError, SettingsAccessReceiptCommit, check_access_reply_on,
+            reserve_access_reply_in,
+        };
+        use crate::host::settings::service::SettingsAccessQualificationError;
+
+        let source = request.authority_source();
+        source
+            .check_precommit(self)
+            .map_err(SettingsAccessQualificationError::from)?;
+        let receipt = source
+            .receipt_metadata()
+            .map_err(SettingsAccessQualificationError::from)?;
+        validate_inbox_metadata(&receipt)?;
+        let mut connection = self.connection()?;
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(StorageError::from)?;
+        let result = (|| {
+            check_receipt_receiver(&transaction, &receipt, source.pinned_identity())?;
+            if access_receipt_duplicate_on(&transaction, &receipt)? {
+                source
+                    .check_precommit(self)
+                    .map_err(SettingsAccessQualificationError::from)?;
+                return Ok(SettingsAccessReceiptCommit::Duplicate);
+            }
+            transaction
+                .execute(
+                    "DELETE FROM transport_inbox WHERE expires_at <= ?1 AND state != 'pending'",
+                    [receipt.received_at],
+                )
+                .map_err(StorageError::from)?;
+            let markers: i64 = transaction
+                .query_row("SELECT count(*) FROM transport_inbox", [], |row| row.get(0))
+                .map_err(StorageError::from)?;
+            if markers >= 100_000 {
+                return Err(SettingsAccessAdmissionError::ReplayCapacity(
+                    StorageError::TransportCapacity("durable receiver inbox"),
+                ));
+            }
+            let authority = request.receipt_authority();
+            let plan = authority.check_access_receipt_on(self, &transaction, request)?;
+            let reply = reserve_access_reply_in(&transaction, plan.reservation_spec())?;
+            transaction.execute(
+                "INSERT INTO transport_inbox(message_id,sender,recipient,envelope_digest,payload,received_at,expires_at,state,command_id,detail) VALUES(?1,?2,?3,?4,NULL,?5,?6,'processed',NULL,NULL)",
+                params![receipt.message_id,receipt.sender,receipt.recipient,receipt.envelope_digest,receipt.received_at,receipt.expires_at],
+            ).map_err(StorageError::from)?;
+            check_access_marker_on(&transaction, &receipt)?;
+            check_access_reply_on(&transaction, &reply)?;
+            check_receipt_receiver(&transaction, &receipt, source.pinned_identity())?;
+            authority.recheck_access_receipt_on(self, &transaction, &plan)?;
+            Ok(SettingsAccessReceiptCommit::Fresh { reply })
+        })();
+        let committed = match result {
+            Ok(committed) => committed,
+            Err(cause) => return Err(rollback_access_receipt(transaction, cause)),
+        };
+        if let Err(error) = transaction.execute_batch("COMMIT") {
+            return Err(rollback_access_receipt(
+                transaction,
+                SettingsAccessAdmissionError::Commit(StorageError::from(error)),
+            ));
+        }
+        drop(transaction);
+        Ok(committed)
+    }
+}
+
+#[cfg(unix)]
+fn rollback_access_receipt(
+    mut transaction: rusqlite::Transaction<'_>,
+    cause: super::settings_transport::SettingsAccessAdmissionError,
+) -> super::settings_transport::SettingsAccessAdmissionError {
+    transaction.set_drop_behavior(rusqlite::DropBehavior::Ignore);
+    match transaction.rollback() {
+        Ok(()) => cause,
+        Err(error) => super::settings_transport::SettingsAccessAdmissionError::Rollback {
+            cause: Box::new(cause),
+            rollback: StorageError::from(error),
+        },
+    }
+}
+
+#[cfg(unix)]
+fn access_receipt_duplicate_on(
+    connection: &Connection,
+    receipt: &TransportInboxMetadata<'_>,
+) -> Result<bool, super::settings_transport::SettingsAccessAdmissionError> {
+    use super::settings_transport::access_reply_text;
+
+    let mut statement = connection
+        .prepare("SELECT sender,recipient,envelope_digest FROM transport_inbox WHERE message_id=?1")
+        .map_err(StorageError::from)?;
+    let mut rows = statement
+        .query([receipt.message_id])
+        .map_err(StorageError::from)?;
+    let Some(row) = rows.next().map_err(StorageError::from)? else {
+        return Ok(false);
+    };
+    if access_reply_text(row, 0, 36)? != receipt.sender
+        || access_reply_text(row, 1, 36)? != receipt.recipient
+        || access_reply_text(row, 2, 64)? != receipt.envelope_digest
+    {
+        return Err(StorageError::TransportConflict(receipt.message_id.into()).into());
+    }
+    Ok(true)
+}
+
+#[cfg(unix)]
+fn check_access_marker_on(
+    connection: &Connection,
+    receipt: &TransportInboxMetadata<'_>,
+) -> Result<(), super::settings_transport::SettingsAccessAdmissionError> {
+    use super::settings_transport::{SettingsAccessAdmissionError, access_reply_text};
+
+    let mut statement = connection.prepare("SELECT message_id,sender,recipient,envelope_digest,payload,received_at,expires_at,state,command_id,detail FROM transport_inbox WHERE message_id=?1").map_err(StorageError::from)?;
+    let mut rows = statement
+        .query([receipt.message_id])
+        .map_err(StorageError::from)?;
+    let row = rows
+        .next()
+        .map_err(StorageError::from)?
+        .ok_or(SettingsAccessAdmissionError::Bookkeeping)?;
+    if access_reply_text(row, 0, 36)? != receipt.message_id
+        || access_reply_text(row, 1, 36)? != receipt.sender
+        || access_reply_text(row, 2, 36)? != receipt.recipient
+        || access_reply_text(row, 3, 64)? != receipt.envelope_digest
+        || !matches!(
+            row.get_ref(4).map_err(StorageError::from)?,
+            rusqlite::types::ValueRef::Null
+        )
+        || row.get::<_, i64>(5).map_err(StorageError::from)? != receipt.received_at
+        || row.get::<_, i64>(6).map_err(StorageError::from)? != receipt.expires_at
+        || access_reply_text(row, 7, 9)? != "processed"
+        || !matches!(
+            row.get_ref(8).map_err(StorageError::from)?,
+            rusqlite::types::ValueRef::Null
+        )
+        || !matches!(
+            row.get_ref(9).map_err(StorageError::from)?,
+            rusqlite::types::ValueRef::Null
+        )
+    {
+        return Err(SettingsAccessAdmissionError::Bookkeeping);
+    }
+    Ok(())
+}
