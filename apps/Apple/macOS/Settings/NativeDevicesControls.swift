@@ -91,7 +91,7 @@ struct NativeDevicesControls: View {
             }
             if let issue = value.issue ?? value.operation.issue { Text(issue.errorDescription ?? "Inspect the original operation.").foregroundStyle(.red) }
             if let cleanup = value.cleanupIssue {
-                Text("Pending-use cancellation remains unconfirmed: " + (cleanup.errorDescription ?? "Original cleanup is uncertain.")).foregroundStyle(.orange)
+                Text("Original native cleanup remains unconfirmed: " + (cleanup.errorDescription ?? "Original cleanup is uncertain.")).foregroundStyle(.orange)
             }
             Button("Inspect original device operation") { store.inspectDeviceOperation(value.handle) }
                 .disabled(!store.canInspectDeviceOperation(value.handle) || connectionEdited)

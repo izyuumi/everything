@@ -59,6 +59,8 @@ final class NativeSettingsStore {
         let cleanupIssue: NativeSettingsSessionError?
     }
 
+    private enum DeviceCleanupKind: Equatable { case action, pairing }
+
     @MainActor
     private final class DeviceContext {
         let handle: DeviceHandle
@@ -76,6 +78,7 @@ final class NativeSettingsStore {
         var pairingLifecycle: NativeSettingsWire.PairingLifecycle?
         var issue: NativeSettingsSessionError?
         var cleanupIssue: NativeSettingsSessionError?
+        var cleanupKind: DeviceCleanupKind?
 
         init(handle: DeviceHandle, request: SettingsDeviceRequest, capture: CredentialCapture, ceremony: NativeDeviceCeremony) {
             self.handle = handle
@@ -746,6 +749,7 @@ final class NativeSettingsStore {
                     context.issue = original
                     context.ceremony.failure(original)
                     if context.request.action == .pair {
+                        context.cleanupKind = .pairing
                         context.retired = true
                         context.ceremony.retire()
                         context.approval?.cancel()
@@ -802,8 +806,10 @@ final class NativeSettingsStore {
     }
 
     func inspectDeviceOperation(_ handle: DeviceHandle) {
-        guard let (owner, _) = device(handle), isCurrent(owner), owner.retirement == nil else { return }
-        recover(handle.id, reconciliation: false, cancellation: false)
+        guard let (owner, context) = device(handle), isCurrent(owner), owner.retirement == nil else { return }
+        if context.cleanupIssue != nil, context.cleanupKind == .pairing {
+            startEffect(owner, id: handle.id) { .pairing(try await owner.lifecycle.session.pairing(operationID: handle.id)) }
+        } else { recover(handle.id, reconciliation: false, cancellation: false) }
     }
 
     func canInspectDeviceOperation(_ handle: DeviceHandle) -> Bool {
@@ -913,12 +919,18 @@ final class NativeSettingsStore {
             let deadline = min(context.capture.deadline, context.capture.started.advanced(by: .milliseconds(Int64(min(lifetime, 300_000)))))
             try context.ceremony.confirmation(expiresAt: reference.expiresAt, deadline: deadline)
         } catch {
+            let original = error
             context.retired = true
-            context.issue = sanitize(error)
+            context.issue = sanitize(original)
+            context.cleanupKind = .action
             context.ceremony.retire()
-            let cancelled = try await owner.lifecycle.session.cancel(operationID: context.handle.id)
-            try owner.operations[context.handle.id]?.adopt(cancelled)
-            throw error
+            do {
+                let cancelled = try await owner.lifecycle.session.cancel(operationID: context.handle.id)
+                try owner.operations[context.handle.id]?.adopt(cancelled)
+                if case .finished(let result) = cancelled.phase, result.state != .unknown { context.cleanupIssue = nil }
+                else { context.cleanupIssue = .operationUncertain }
+            } catch { context.cleanupIssue = sanitize(error) }
+            throw original
         }
     }
 
@@ -1158,8 +1170,21 @@ final class NativeSettingsStore {
                     owner.operations[id]?.prepared = result
                     let inspection = try await owner.lifecycle.session.inspect(operationID: id)
                     try owner.operations[id]?.adopt(inspection)
-                case .inspected(let inspection): try owner.operations[id]?.adopt(inspection)
-                case .pairing(let status): try owner.operations[id]?.adopt(status.operation)
+                case .inspected(let inspection):
+                    try owner.operations[id]?.adopt(inspection)
+                    if let context = owner.devices[id], context.cleanupKind == .action,
+                       case .finished(let result) = inspection.phase, result.state != .unknown { context.cleanupIssue = nil }
+                case .pairing(let status):
+                    try owner.operations[id]?.adopt(status.operation)
+                    if let context = owner.devices[id] {
+                        context.pairingLifecycle = status.lifecycle
+                        if context.cleanupKind == .pairing {
+                            switch status.lifecycle {
+                            case .cancelled, .expired, .noLongerPending: context.cleanupIssue = nil
+                            case .retained, .cancellationPending, .unavailable: context.cleanupIssue = .operationUncertain
+                            }
+                        }
+                    }
                 }
                 if let context = owner.credentials[id], context.details == nil {
                     if context.retired, case .awaitingAction = owner.operations[id]?.inspection?.phase {
@@ -1173,10 +1198,15 @@ final class NativeSettingsStore {
                         try owner.operations[id]?.adopt(cancelled)
                     } else if !context.retired { try await prepareDeviceConfirmation(owner, context: context) }
                 }
-                owner.devices[id]?.issue = nil
+                if let context = owner.devices[id], !context.retired { context.issue = nil }
             } catch {
-                owner.operations[id]?.issue = sanitize(error)
-                if let context = owner.devices[id] { context.issue = sanitize(error); context.ceremony.failure(sanitize(error)) }
+                let failure = sanitize(error)
+                owner.operations[id]?.issue = failure
+                if let context = owner.devices[id] {
+                    if context.retired { context.issue = context.issue ?? failure }
+                    else { context.issue = failure }
+                    context.ceremony.failure(context.issue ?? failure)
+                }
             }
             owner.operations[id]?.isWorking = false
             owner.effects[id] = nil
