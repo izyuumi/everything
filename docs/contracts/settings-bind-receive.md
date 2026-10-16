@@ -1,6 +1,6 @@
 # Owned fresh Bind receipt foundation
 
-This is held, unactivated Unix source for #116. The public `receive_envelope` and existing relay Delivery path still use metadata-only private rejection. The connected owner has a fresh Bind producer, but Delivery does not call it. Same-Authority parent installation, known-parent Bind observations, commands, publication, complete protocol cleanup and exact-head compiler/CI validation remain prerequisites to activation.
+This is held, unactivated Unix source for #116. The public `receive_envelope` and existing relay Delivery path still use metadata-only private rejection. The connected owner has a fresh Bind producer, but Delivery does not call it. Same-Authority parent installation and Update command receipt/effect have separate held implementations, but actual Supervisor dispatch, known-parent Bind observations, publication, complete protocol cleanup and exact-head compiler/CI validation remain prerequisites to activation.
 
 Read [connection lifetime](settings-connection-lifetime.md), [private rejection](private-settings-ingress.md), [transport storage](settings-transport-storage.md) and [paired operations](paired-settings-operations.md) for the separate boundaries. The relay remains blind to plaintext.
 

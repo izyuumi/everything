@@ -16,6 +16,8 @@ For Settings implementation, start at [Settings architecture](architecture/setti
 
 Local iPhone controls: [Identity, original saves and OS admission](contracts/apple-local-device-controls.md). [Committed notification attempts](contracts/ios-notification-delivery.md). [Private-packet refusal before ordinary caching](contracts/apple-private-settings-ingress.md). [Inactive presentation cover](contracts/ios-presentation-privacy.md).
 
+Scoped Settings transport foundations, with public accepted dispatch still disabled: [Originals](contracts/settings-originals.md) · [Outbox accounting](contracts/settings-transport-storage.md) · [Connection ownership](contracts/settings-connection-lifetime.md) · [Bind receipt](contracts/settings-bind-receive.md) · [Command receipt](contracts/settings-command-receive.md) · [Paired authority](contracts/paired-settings-authority.md) · [Operation journal](contracts/paired-settings-operations.md) · [Original reply data](contracts/settings-original-replies.md).
+
 Worker contracts: [Endpoint and capabilities](contracts/worker.md) · [Staging](contracts/worker-staging.md) · [Revocation](contracts/worker-revocation.md) · [Executor](contracts/worker-executor.md) · [Native root lane](contracts/remote-tasks.md) · [Neutral reports](contracts/remote-results.md) · [Verified result admission](contracts/remote-result-admission.md) · [Bridge](contracts/worker-bridge.md) · [Terminal sources](contracts/worker-terminal-sources.md) · [External storage](contracts/external-task-storage.md) · [Binding lookup](contracts/remote-binding-lookup.md) · [Host DTOs](contracts/host-worker.md) · [Host admission](contracts/host-worker-admission.md) · [Host service](contracts/host-worker-service.md).
 
 ## Development

@@ -1,6 +1,6 @@
 # DirectUpdate receipt and owned handoff
 
-This is held, unactivated Unix source for #116. The internal owned receive callback now has a genuine DirectUpdate receipt producer behind the actual same-ServiceCore capability. Public relay Delivery still uses its fixed private rejection; Root composition, accepted delivery, effect callers and publication remain separate gates. A committed receipt is neither a setting change nor a successful reply. Read [Bind receipt](settings-bind-receive.md), [paired Authority](paired-settings-authority.md) and [paired operation metadata](paired-settings-operations.md) for adjacent boundaries.
+This is held, unactivated Unix source for #116. The internal owned receive callback now has a genuine DirectUpdate receipt producer behind the actual same-ServiceCore capability. Public relay Delivery still uses its fixed private rejection. The private paired-direct effect is separate held source; actual Root supervision, accepted dispatch and publication remain unfinished. A committed receipt is neither a setting change nor a successful reply. Read [Bind receipt](settings-bind-receive.md), [paired Authority](paired-settings-authority.md) and [paired operation metadata](paired-settings-operations.md) for adjacent boundaries.
 
 ## Closed Update data
 
@@ -50,4 +50,4 @@ Actual Root capability construction/delivery composition and public accepted rou
 
 Send child/provider proof, ChatOpen, queries, known-Bind exception, reducing Close, private projection/build/seal/SQL transfer/send and full Host activation remain separate real gates. A reducing known Close must not acquire new command/query/output capacity or mandatory reply quota; this stage supplies no fake close producer. No new queue, harness adapter, cryptography, dependency or compatibility layer is introduced.
 
-Validation here is direct Rust1.88 formatting/parsing, diff/static factoring/source preservation and documentation links only. No Cargo/compiler/typecheck, database/SQL engine, crypto/runtime/provider or Apple verification was performed. Held declarations require genuine consumers and strict exact-head CI before publication; no lint suppression or fake use is added. No source comments or new tests/fixtures/mocks were created. Issue #116 remains open.
+Validation here is direct Rust1.88 formatting/parsing, diff/static factoring/source preservation and documentation links only. No Cargo/compiler/typecheck, database/SQL engine, crypto/runtime/provider or Apple verification was performed. Held declarations require genuine consumers and strict exact-head CI before main integration and activation; no lint suppression or fake use is added. No source comments or new tests/fixtures/mocks were created. Issue #116 remains open.

@@ -1,6 +1,6 @@
 # Committed-Bind paired Authority
 
-This held, uncompiled source adds a paired parent to the existing SettingsService/Authority. The actual Host registers its transport with that same service before spawning its relay worker; parent installation calls remain unwired. It enables no accepted public Delivery, paired SettingsCaller, command, child, tool, effect or reply publication. The [Settings contract](settings.md), [historical paired operation metadata](paired-settings-operations.md) and [owned Bind receive contract](settings-bind-receive.md) remain separate boundaries.
+This held, uncompiled source adds a paired parent to the existing SettingsService/Authority. The actual Host registers its transport with that same service before spawning its relay worker; parent installation calls remain unwired. The later sections describe the held command qualification and private paired-direct caller/effect. No accepted public Delivery, paired Agent child/tool execution or reply publication is enabled. The [Settings contract](settings.md), [historical paired operation metadata](paired-settings-operations.md) and [owned Bind receive contract](settings-bind-receive.md) remain separate boundaries.
 
 The native-v1 caller enum, NativeUi parent/child factories, operation identity and serialized reservation/fence/cleanup are preserved. A paired parent is a separate private type and map in the original Authority Sessions mutex. It never places a paired UUID into native session fields.
 
@@ -34,7 +34,7 @@ Only direct Rust1.88 formatting/parsing, focused diff/static preservation and do
 
 ## DirectUpdate transaction qualification
 
-A second held source slice now declares SettingsReceiptAuthority and QualifiedSettingsCommand in the same service/paired descendant. It is not compiler-validated or connected to a command receiver. The only creator, SettingsService.paired_receipt_authority, is Host-only and requires the actual already attached HostSettingsTransport, original root service and open intake. The concrete capability privately retains that same ServiceCore and lean Host identity; it has no public/serialized constructor and creates no Caller or parent. Its internal Clone retains the same Core, not another service.
+A second held source slice now declares SettingsReceiptAuthority and QualifiedSettingsCommand in the same service/paired descendant. It is not compiler-validated; the separate internal command receipt producer now borrows this qualification, while public command dispatch remains disabled. The only creator, SettingsService.paired_receipt_authority, is Host-only and requires the actual already attached HostSettingsTransport, original root service and open intake. The concrete capability privately retains that same ServiceCore and lean Host identity; it has no public/serialized constructor and creates no Caller or parent. Its internal Clone retains the same Core, not another service.
 
 Root's actual run stack and registered pending/job/output may retain this capability through real joins. It must not be put in DeviceEndpoint, a shared ledger, Source/context/lean identity, parent map or a HostInner callback. Core and endpoint must have no back edge to the receive owner. That final ownership graph is a Stage3 composition review gate, not established by these uncalled methods.
 
@@ -50,7 +50,7 @@ The final recheck accepts only that SAME qualification/capability/invocation, re
 
 Source's closed Expired/OutsideScope errors remain those existing service categories; Unavailable maps to Worker and Bookkeeping to Poisoned, never logical capacity or successful refusal. Real Storage/SQLite errors are propagated. No error or absent row implies NoEffects or retry permission. Actual service revision/CAS, candidate/profile validation, operation linkage and authoritative service receipt remain later boundaries; this gate executes no write.
 
-Current source retains native-v1 types/factories/reservation/fence/hash/cleanup byte semantics. It adds no storage wrapper, accepted receipt, command callback, paired Caller/effect, response publication or queue. Strict current-head compiler/Clippy, actual Stage3 wrapper, independent source review and disposable transported/manual/security acceptance remain required; #116 stays open and automated coverage remains deferred to #32.
+This qualification slice retains native-v1 types/factories/reservation/fence/hash/cleanup byte semantics and executes no effect itself. The separate [command receipt producer](settings-command-receive.md) and held DirectUpdate effect below are now implemented source; actual dispatch/publication, strict integrated compiler/Clippy and disposable transported/manual/security acceptance remain required. #116 stays open and automated coverage remains deferred to #32.
 
 ## Held DirectUpdate effect caller
 
