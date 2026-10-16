@@ -18,7 +18,7 @@ use super::{
     EnvelopeAcceptance, PeerRegistration, SettingsConnectionIdentity,
 };
 use crate::agent::Agent;
-use crate::crypto::{CryptoError, DevicePublicKeys, EncryptedEnvelope, ReplayGuard, ReplayRecord};
+use crate::crypto::{CryptoError, DevicePublicKeys, ReplayGuard, ReplayRecord};
 use crate::host::settings::SettingsGrantHead;
 use crate::protocol::{DeviceId, MessageId, UnixMillis};
 use crate::storage::{
@@ -396,10 +396,7 @@ impl AuthenticatedSettingsSource {
 }
 
 impl BindingHistory {
-    pub(super) fn new(
-        connection: Arc<SettingsConnectionIdentity>,
-        ledger: Arc<work::Ledger>,
-    ) -> Self {
+    fn new(connection: Arc<SettingsConnectionIdentity>, ledger: Arc<work::Ledger>) -> Self {
         Self {
             connection,
             ledger,
@@ -536,7 +533,7 @@ pub(super) struct WorkCompletion {
 enum ReplayOutcome {
     Unobserved,
     Legacy,
-    Committed(OwnedCommittedSettingsBind),
+    Committed(Box<OwnedCommittedSettingsBind>),
     Command,
     Duplicate,
     Failure(SettingsReceiveError),
@@ -666,15 +663,16 @@ impl OwnedReplay<'_> {
                             lifetime,
                             creator,
                         }) => {
-                            self.outcome = ReplayOutcome::Committed(OwnedCommittedSettingsBind {
-                                verified,
-                                commit: BindCommit {
-                                    reservation,
-                                    grant,
-                                    lifetime,
-                                    creator,
-                                },
-                            });
+                            self.outcome =
+                                ReplayOutcome::Committed(Box::new(OwnedCommittedSettingsBind {
+                                    verified,
+                                    commit: BindCommit {
+                                        reservation,
+                                        grant: *grant,
+                                        lifetime,
+                                        creator,
+                                    },
+                                }));
                             return Ok(true);
                         }
                         Err(SettingsBindAdmissionError::Rejected(_)) => {
@@ -781,7 +779,7 @@ impl OwnedReplay<'_> {
     }
 }
 
-pub(super) fn execute(
+fn execute(
     input: &work::WorkerInput,
     command: &mut work::CommandWorkState,
 ) -> Result<WorkCompletion, SettingsReceiveError> {
@@ -818,7 +816,7 @@ pub(super) fn execute(
             drop(raw);
             Ok(WorkCompletion {
                 receipt: SettingsTransportReceipt::PrivateCommitted { message_id: id },
-                bind: Some(bind),
+                bind: Some(*bind),
             })
         }
         (Ok(raw), ReplayOutcome::Command) => {

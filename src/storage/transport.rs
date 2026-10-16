@@ -359,7 +359,7 @@ impl Store {
         creator.committed(lifetime)?;
         Ok(SettingsBindReceiptCommit::Fresh {
             reservation,
-            grant,
+            grant: Box::new(grant),
             lifetime,
             creator,
         })

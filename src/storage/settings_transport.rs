@@ -207,7 +207,7 @@ pub(crate) enum SettingsBindReceiptCommit {
     Duplicate,
     Fresh {
         reservation: StoredSettingsBindReply,
-        grant: SettingsGrantHead,
+        grant: Box<SettingsGrantHead>,
         lifetime: BindingLifetime,
         creator: BindingCreator,
     },
