@@ -1,3 +1,4 @@
+mod credentials;
 mod devices;
 
 pub use devices::NativeDeviceActionResult;
