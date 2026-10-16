@@ -1,6 +1,6 @@
 # Agents and task scheduling
 
-The background host composes one Agent, one ToolRegistry/Authorizer/global ToolBroker, and one Scheduler. Primary tasks and subagents use the same native kernel. The scheduler owns durable admission, task lifecycle, parent/child relationships, worker cancellation and restart decisions; the host owns authenticated command acceptance, provider credentials, state lease and service lifetime. There is no second host inference loop.
+The Scheduler composes a caller-provided shared Agent, ToolRegistry/Authorizer, and global ToolBroker. Primary tasks and subagents use the same native kernel. The scheduler owns durable admission, task lifecycle, parent/child relationships, worker cancellation and restart decisions; its host caller owns authenticated command acceptance, provider credentials, state lease and service lifetime. Production background-host composition remains separate work in #18/#68. There is no second host inference loop.
 
 `scheduler/types.rs` defines captured execution policy, provider construction, submissions, snapshots and bounded scheduler limits. `repository.rs` owns scheduler TaskRow encoding and state transitions over the shared Store. Insert uses an immediate transaction for identity replay, conversation ownership and capacity. All subsequent state mutations run through the sole control actor. Other host modules may read snapshots, accept commands or invoke public scheduler methods; they must not write scheduler-owned TaskRows directly.
 
