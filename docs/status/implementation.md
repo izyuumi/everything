@@ -130,7 +130,6 @@ The whole-Agent scheduled publisher and bounded partial delivery-capacity progre
 | [#53](https://github.com/izyuumi/everything/issues/53) | Add schedule CLI and native tool controls | #5, #11, #50, #51, #52 | Current-main owner CLI and eight native tool controls implemented with exact scope/CAS/replay and owned drain; source review/formatting pass, fresh exact-head CI/runtime pending |
 | [#54](https://github.com/izyuumi/everything/issues/54) | Deliver schedule status and encrypted client notifications | #22, #27, #28, #52, #53 | Backlog |
 | [#55](https://github.com/izyuumi/everything/issues/55) | Document schedule behavior, contracts and decisions | #50–#54 | Incremental documentation; final reconciliation pending |
-
 | [#81](https://github.com/izyuumi/everything/issues/81) | Retain validated SQLite handles through connection lifetime | Store and Host ownership; optional worker #29 | Store/Agent #76 and actual Host #79 merged after full CI; optional worker correction and current live-WAL/clone/restart acceptance pending |
 
 The roadmap gained scheduling issues #50–#55 during implementation; all six and updated #30 have been read. The latest #17 covers offline discovery only and gates #20, a configurable generic System One classifier with TypeSafe preset and approved custom endpoints. Their implementations and PRs are separate. #31 owns the embedding contract. The roadmap's waves are scheduling guidance; explicit prerequisites take precedence (for example #19 requires #14).
