@@ -7,6 +7,11 @@ private enum PreferenceSQLValue {
     case bytes(Data)
 }
 
+private enum PreferenceIdentity {
+    case bound(UUID)
+    case local
+}
+
 private final class PreferenceDatabase: @unchecked Sendable {
     let handle: OpaquePointer
     private let transient = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
@@ -104,9 +109,25 @@ actor DevicePreferenceStore {
     private static let maximumRequests = 8_192
 
     init(directory: URL, deviceID: UUID) throws {
+        let opened = try Self.open(directory: directory, identity: .bound(deviceID))
+        database = opened.database
+        self.deviceID = opened.deviceID
+    }
+
+    static func local(directory: URL) throws -> DevicePreferenceStore {
+        try DevicePreferenceStore(localDirectory: directory)
+    }
+
+    private init(localDirectory directory: URL) throws {
+        let opened = try Self.open(directory: directory, identity: .local)
+        database = opened.database
+        deviceID = opened.deviceID
+    }
+
+    private static func open(directory: URL, identity: PreferenceIdentity) throws -> (database: PreferenceDatabase, deviceID: UUID) {
         let zero = UUID(uuid: (0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0))
-        guard directory.isFileURL, deviceID != zero else { throw DevicePreferenceError.invalidRequest }
-        self.deviceID = deviceID
+        guard directory.isFileURL else { throw DevicePreferenceError.invalidRequest }
+        if case .bound(let deviceID) = identity, deviceID == zero { throw DevicePreferenceError.invalidRequest }
         let manager = FileManager.default
         var attributes: [FileAttributeKey: Any] = [.posixPermissions: 0o700]
         #if os(iOS)
@@ -119,7 +140,7 @@ actor DevicePreferenceStore {
         var excluded = directory
         try excluded.setResourceValues(values)
         let url = directory.appendingPathComponent("device-preferences-v1.sqlite3")
-        database = try PreferenceDatabase(url: url)
+        let database = try PreferenceDatabase(url: url)
         let version = try database.rows("PRAGMA user_version") { sqlite3_column_int64($0, 0) }.first ?? 0
         guard version == 0 || version == 1 else { throw DevicePreferenceError.unsupportedVersion }
         for sql in [
@@ -127,18 +148,47 @@ actor DevicePreferenceStore {
             "PRAGMA max_page_count=2048",
             "PRAGMA journal_mode=WAL",
             "PRAGMA wal_autocheckpoint=128",
-            "PRAGMA synchronous=FULL",
-            "CREATE TABLE IF NOT EXISTS preferences(id INTEGER PRIMARY KEY CHECK(id=1),device TEXT NOT NULL,revision INTEGER NOT NULL CHECK(revision>0),completion INTEGER NOT NULL CHECK(completion IN (0,1)),attention INTEGER NOT NULL CHECK(attention IN (0,1)))",
-            "CREATE TABLE IF NOT EXISTS requests(id TEXT PRIMARY KEY,original BLOB NOT NULL,outcome TEXT NOT NULL CHECK(outcome IN ('applied','conflict')),revision INTEGER NOT NULL CHECK(revision>0))"
+            "PRAGMA synchronous=FULL"
         ] { try database.execute(sql) }
-        try database.transaction {
+        let deviceID = try database.transaction {
+            let version = try database.rows("PRAGMA user_version") { sqlite3_column_int64($0, 0) }.first ?? 0
+            guard version == 0 || version == 1 else { throw DevicePreferenceError.unsupportedVersion }
+            let initializeSchema = switch identity {
+            case .bound: true
+            case .local: version == 0
+            }
+            if initializeSchema {
+                for sql in [
+                    "CREATE TABLE IF NOT EXISTS preferences(id INTEGER PRIMARY KEY CHECK(id=1),device TEXT NOT NULL,revision INTEGER NOT NULL CHECK(revision>0),completion INTEGER NOT NULL CHECK(completion IN (0,1)),attention INTEGER NOT NULL CHECK(attention IN (0,1)))",
+                    "CREATE TABLE IF NOT EXISTS requests(id TEXT PRIMARY KEY,original BLOB NOT NULL,outcome TEXT NOT NULL CHECK(outcome IN ('applied','conflict')),revision INTEGER NOT NULL CHECK(revision>0))"
+                ] { try database.execute(sql) }
+            }
             let identities = try database.rows("SELECT device FROM preferences WHERE id=1") { try PreferenceDatabase.text($0, 0, maximumBytes: 36) }
-            if let identity = identities.first {
-                guard identity == deviceID.uuidString.lowercased() else { throw DevicePreferenceError.wrongDevice }
-            } else {
+            let deviceID: UUID
+            switch identity {
+            case .bound(let expected):
+                if let existing = identities.first {
+                    guard existing == expected.uuidString.lowercased() else { throw DevicePreferenceError.wrongDevice }
+                }
+                deviceID = expected
+            case .local:
+                let preferenceCount = try database.rows("SELECT COUNT(*) FROM preferences") { sqlite3_column_int64($0, 0) }.first ?? 0
+                let requestCount = try database.rows("SELECT COUNT(*) FROM requests") { sqlite3_column_int64($0, 0) }.first ?? 0
+                if let existing = identities.first {
+                    guard version == 1, preferenceCount == 1, let parsed = UUID(uuidString: existing), parsed != zero,
+                          parsed.uuidString.lowercased() == existing else { throw DevicePreferenceError.storage }
+                    _ = try Self.readSnapshot(database: database, deviceID: parsed)
+                    deviceID = parsed
+                } else {
+                    guard version == 0, preferenceCount == 0, requestCount == 0 else { throw DevicePreferenceError.storage }
+                    deviceID = UUID()
+                }
+            }
+            if identities.isEmpty {
                 try database.execute("INSERT INTO preferences(id,device,revision,completion,attention) VALUES(1,?,1,0,0)", [.text(deviceID.uuidString.lowercased())])
             }
             try database.execute("PRAGMA user_version=1")
+            return deviceID
         }
         for name in [url.lastPathComponent, url.lastPathComponent + "-wal", url.lastPathComponent + "-shm"] {
             let path = directory.appendingPathComponent(name).path
@@ -150,6 +200,7 @@ actor DevicePreferenceStore {
                 try manager.setAttributes(attributes, ofItemAtPath: path)
             }
         }
+        return (database: database, deviceID: deviceID)
     }
 
     func snapshot() throws -> DevicePreferenceSnapshot {
@@ -200,6 +251,10 @@ actor DevicePreferenceStore {
     }
 
     private func readSnapshot() throws -> DevicePreferenceSnapshot {
+        try Self.readSnapshot(database: database, deviceID: deviceID)
+    }
+
+    private static func readSnapshot(database: PreferenceDatabase, deviceID: UUID) throws -> DevicePreferenceSnapshot {
         let snapshots = try database.rows("SELECT device,revision,completion,attention FROM preferences WHERE id=1") { row in
             let revision = sqlite3_column_int64(row, 1)
             let completion = sqlite3_column_int64(row, 2)
