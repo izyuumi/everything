@@ -222,6 +222,8 @@ pub enum MemoryDiagnostic {
     MaintenanceProviderUnavailable,
     EmbeddingFeatureUnavailable,
     EmbeddingTelemetrySuppressionRequired,
+    EmbeddingIsolationUnavailable,
+    EmbeddingProcessUnavailable,
     EmbeddingInitializationFailed,
     MaintenanceWorkerFailed,
     QuiescenceFailed,
@@ -281,6 +283,8 @@ struct MemoryCore {
     consolidator: Consolidator,
     maintenance: MaintenanceStatus,
     embeddings: EmbeddingStatus,
+    #[cfg(feature = "local-embeddings")]
+    embedding_process: Option<Arc<crate::memory::embedding::isolated::IsolatedEmbeddingGemma2>>,
     worker: watch::Receiver<MemoryWorkerStatus>,
     stop: CancellationToken,
     closing: AtomicBool,
@@ -396,7 +400,10 @@ impl MemoryService {
         )
         .await?;
         if cancellation.is_cancelled() {
-            consolidator.wait_idle().await?;
+            let idle = consolidator.wait_idle().await;
+            #[cfg(feature = "local-embeddings")]
+            stop_embeddings(embeddings.process, agent.clone()).await?;
+            idle?;
             return Err(MemoryError::Cancelled);
         }
         let (updates, worker) = watch::channel(MemoryWorkerStatus::Running);
@@ -404,7 +411,9 @@ impl MemoryService {
             settings,
             consolidator,
             maintenance,
-            embeddings,
+            embeddings: embeddings.status,
+            #[cfg(feature = "local-embeddings")]
+            embedding_process: embeddings.process,
             worker,
             stop: cancellation.child_token(),
             closing: AtomicBool::new(false),
@@ -414,7 +423,17 @@ impl MemoryService {
         tokio::spawn(async move {
             let result = supervisor.consolidator.run(supervisor.stop.clone()).await;
             supervisor.closing.store(true, Ordering::Release);
-            let diagnostic = if supervisor.consolidator.wait_idle().await.is_err() {
+            let idle_failed = supervisor.consolidator.wait_idle().await.is_err();
+            #[cfg(feature = "local-embeddings")]
+            let isolation_failed = stop_embeddings(
+                supervisor.embedding_process.clone(),
+                supervisor._agent.clone(),
+            )
+            .await
+            .is_err();
+            #[cfg(not(feature = "local-embeddings"))]
+            let isolation_failed = false;
+            let diagnostic = if idle_failed || isolation_failed {
                 Some(MemoryDiagnostic::QuiescenceFailed)
             } else if result.is_err() {
                 Some(MemoryDiagnostic::MaintenanceWorkerFailed)
@@ -439,10 +458,25 @@ impl MemoryService {
 
     pub fn status(&self) -> MemoryStatus {
         let core = &self.owner.core;
+        #[cfg(feature = "local-embeddings")]
+        let embeddings = if matches!(core.embeddings, EmbeddingStatus::Enabled { .. })
+            && core
+                .embedding_process
+                .as_ref()
+                .is_some_and(|process| !process.is_available())
+        {
+            EmbeddingStatus::Unavailable {
+                diagnostic: MemoryDiagnostic::EmbeddingProcessUnavailable,
+            }
+        } else {
+            core.embeddings.clone()
+        };
+        #[cfg(not(feature = "local-embeddings"))]
+        let embeddings = core.embeddings.clone();
         MemoryStatus {
             retrieval_enabled: core.settings.retrieval_enabled,
             maintenance: core.maintenance.clone(),
-            embeddings: core.embeddings.clone(),
+            embeddings,
             worker: core.worker.borrow().clone(),
         }
     }
@@ -612,25 +646,25 @@ async fn configure_embeddings(
     settings: &EmbeddingSettings,
     directory: PathBuf,
     cancellation: CancellationToken,
-) -> Result<EmbeddingStatus, MemoryError> {
+) -> Result<ConfiguredEmbeddings, MemoryError> {
     let EmbeddingSettings::EmbeddingGemma2(configuration) = settings else {
-        return Ok(EmbeddingStatus::Disabled);
+        return Ok(ConfiguredEmbeddings {
+            status: EmbeddingStatus::Disabled,
+            #[cfg(feature = "local-embeddings")]
+            process: None,
+        });
     };
     #[cfg(not(feature = "local-embeddings"))]
     {
         let _ = (agent, consolidator, configuration, directory, cancellation);
-        Ok(EmbeddingStatus::Unavailable {
-            diagnostic: MemoryDiagnostic::EmbeddingFeatureUnavailable,
+        Ok(ConfiguredEmbeddings {
+            status: EmbeddingStatus::Unavailable {
+                diagnostic: MemoryDiagnostic::EmbeddingFeatureUnavailable,
+            },
         })
     }
     #[cfg(feature = "local-embeddings")]
     {
-        if let Err(error) = crate::memory::embedding::embeddinggemma2::EmbeddingRuntime::require_telemetry_suppression() {
-            consolidator.set_hybrid_search_result(Err(error.into())).await?;
-            return Ok(EmbeddingStatus::Unavailable {
-                diagnostic: MemoryDiagnostic::EmbeddingTelemetrySuppressionRequired,
-            });
-        }
         let configuration = configuration.clone();
         let dimensions = configuration.dimensions;
         let retained_agent = agent.clone();
@@ -640,16 +674,62 @@ async fn configure_embeddings(
         })
         .await
         .map_err(|_| MemoryError::Worker)?;
-        let available = construction.is_ok();
-        consolidator.set_hybrid_search_result(construction).await?;
-        Ok(if available {
-            EmbeddingStatus::Enabled { dimensions }
-        } else {
-            EmbeddingStatus::Unavailable {
-                diagnostic: MemoryDiagnostic::EmbeddingInitializationFailed,
+        let (hybrid, process, status) = match construction {
+            Ok(BuiltEmbeddings { hybrid, process }) => (
+                Ok(hybrid),
+                Some(process),
+                EmbeddingStatus::Enabled { dimensions },
+            ),
+            Err(error) => {
+                let diagnostic = match &error {
+                    crate::memory::vector::VectorError::Embedding(error)
+                        if crate::memory::embedding::isolated::is_unavailable(error) =>
+                    {
+                        MemoryDiagnostic::EmbeddingIsolationUnavailable
+                    }
+                    _ => MemoryDiagnostic::EmbeddingInitializationFailed,
+                };
+                (
+                    Err(error),
+                    None,
+                    EmbeddingStatus::Unavailable { diagnostic },
+                )
             }
-        })
+        };
+        if let Err(error) = consolidator.set_hybrid_search_result(hybrid).await {
+            stop_embeddings(process, agent.clone()).await?;
+            return Err(error.into());
+        }
+        Ok(ConfiguredEmbeddings { status, process })
     }
+}
+
+struct ConfiguredEmbeddings {
+    status: EmbeddingStatus,
+    #[cfg(feature = "local-embeddings")]
+    process: Option<Arc<crate::memory::embedding::isolated::IsolatedEmbeddingGemma2>>,
+}
+
+#[cfg(feature = "local-embeddings")]
+struct BuiltEmbeddings {
+    hybrid: crate::memory::search::HybridSearch,
+    process: Arc<crate::memory::embedding::isolated::IsolatedEmbeddingGemma2>,
+}
+
+#[cfg(feature = "local-embeddings")]
+async fn stop_embeddings(
+    process: Option<Arc<crate::memory::embedding::isolated::IsolatedEmbeddingGemma2>>,
+    agent: Agent,
+) -> Result<(), MemoryError> {
+    tokio::task::spawn_blocking(move || {
+        let _retained_agent = agent;
+        match process {
+            Some(process) => process.shutdown().map_err(|_| MemoryError::Worker),
+            None => Ok(()),
+        }
+    })
+    .await
+    .map_err(|_| MemoryError::Worker)?
 }
 
 #[cfg(feature = "local-embeddings")]
@@ -657,78 +737,31 @@ fn build_embeddings(
     configuration: EmbeddingGemma2Settings,
     directory: PathBuf,
     cancellation: CancellationToken,
-) -> Result<crate::memory::search::HybridSearch, crate::memory::vector::VectorError> {
-    use std::io::Read;
-
-    use sha2::{Digest, Sha256};
-
+) -> Result<BuiltEmbeddings, crate::memory::vector::VectorError> {
     use crate::memory::embedding::EmbeddingError;
-    use crate::memory::embedding::embeddinggemma2::{
-        EmbeddingGemma2, EmbeddingGemma2Options, EmbeddingRuntime,
-    };
+    use crate::memory::embedding::isolated::{IsolatedEmbeddingGemma2, IsolationConfiguration};
+    use crate::memory::embedding::wire::WorkerConfiguration;
     use crate::memory::search::HybridSearch;
     use crate::memory::vector::{VectorError, VectorIndex, VectorLimits};
 
     if cancellation.is_cancelled() {
         return Err(VectorError::Cancelled);
     }
-    EmbeddingRuntime::require_telemetry_suppression()?;
-    let descriptor = rustix::fs::open(
-        &configuration.runtime_library,
-        OFlags::RDONLY | OFlags::NONBLOCK | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-        Mode::empty(),
-    )
-    .map_err(|_| VectorError::Invalid("verified embedding runtime is unavailable"))?;
-    let library = std::fs::File::from(descriptor);
-    let metadata = library
-        .metadata()
-        .map_err(|_| VectorError::Invalid("verified embedding runtime metadata is unavailable"))?;
-    if !metadata.is_file() || metadata.len() > 256 * 1024 * 1024 {
-        return Err(VectorError::Invalid(
-            "verified embedding runtime size or file type",
-        ));
-    }
-    let mut reader = library.take(256 * 1024 * 1024 + 1);
-    let mut digest = Sha256::new();
-    let mut buffer = [0_u8; 64 * 1024];
-    loop {
-        if cancellation.is_cancelled() {
-            return Err(VectorError::Cancelled);
-        }
-        let bytes = reader
-            .read(&mut buffer)
-            .map_err(|_| VectorError::Invalid("verified embedding runtime could not be read"))?;
-        if bytes == 0 {
-            break;
-        }
-        digest.update(&buffer[..bytes]);
-    }
-    if !format!("{:x}", digest.finalize()).eq_ignore_ascii_case(&configuration.runtime_sha256) {
-        return Err(VectorError::Invalid(
-            "verified embedding runtime digest does not match",
-        ));
-    }
-    let runtime = EmbeddingRuntime::initialize(&configuration.runtime_library)?;
-    if !runtime
-        .library_sha256()
-        .eq_ignore_ascii_case(&configuration.runtime_sha256)
-    {
-        return Err(VectorError::Invalid(
-            "verified embedding runtime changed during initialization",
-        ));
-    }
-    let model = EmbeddingGemma2::load(
-        runtime,
-        &configuration.model_bundle,
-        EmbeddingGemma2Options {
-            threads: configuration.execution.threads,
-            max_tokens: configuration.execution.max_tokens,
-            inference_timeout: Duration::from_millis(configuration.execution.inference_timeout_ms),
-            load_timeout: Duration::from_millis(configuration.execution.load_timeout_ms),
+    let model = IsolatedEmbeddingGemma2::load(
+        IsolationConfiguration {
+            runtime_library: configuration.runtime_library,
+            model_bundle: configuration.model_bundle,
+            worker: WorkerConfiguration {
+                runtime_sha256: configuration.runtime_sha256,
+                dimensions: configuration.dimensions,
+                threads: configuration.execution.threads,
+                max_tokens: configuration.execution.max_tokens,
+                inference_timeout_ms: configuration.execution.inference_timeout_ms,
+                load_timeout_ms: configuration.execution.load_timeout_ms,
+            },
         },
         &cancellation,
-    )?
-    .with_dimensions(configuration.dimensions)?;
+    )?;
     if cancellation.is_cancelled() {
         return Err(VectorError::Embedding(EmbeddingError::Cancelled));
     }
@@ -740,7 +773,14 @@ fn build_embeddings(
         directory.path.join("vectors.sqlite3"),
         VectorLimits::default(),
     )?;
-    HybridSearch::new(index, Arc::new(model))
+    let hybrid = HybridSearch::new(
+        index,
+        Arc::clone(&model) as Arc<dyn crate::memory::embedding::Embedder>,
+    )?;
+    Ok(BuiltEmbeddings {
+        hybrid,
+        process: model,
+    })
 }
 
 fn truncate(value: &mut String, maximum: usize) {
