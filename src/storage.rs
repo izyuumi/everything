@@ -10,7 +10,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 use thiserror::Error;
 
-const SCHEMA_VERSION: i64 = 7;
+const SCHEMA_VERSION: i64 = 8;
 const MAX_JSON_BYTES: usize = 1_048_576;
 const MAX_APPEND_EVENTS: usize = 256;
 const MAX_STATE_BYTES: usize = 8 * MAX_JSON_BYTES;
@@ -351,6 +351,9 @@ impl Store {
         }
         if version < 7 {
             transaction.execute_batch(include_str!("../migrations/0007_host_commands.sql"))?;
+        }
+        if version < 8 {
+            transaction.execute_batch(include_str!("../migrations/0008_scheduled_attempts.sql"))?;
         }
         transaction.pragma_update(None, "user_version", SCHEMA_VERSION)?;
         transaction.commit()?;

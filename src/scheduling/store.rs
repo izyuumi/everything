@@ -12,7 +12,7 @@ const MAX_HISTORY_BYTES: i64 = 256 * 1_048_576;
 
 #[derive(Clone)]
 pub struct ScheduleRepository {
-    store: crate::storage::Store,
+    pub(super) store: crate::storage::Store,
 }
 
 impl ScheduleRepository {
@@ -165,6 +165,31 @@ impl ScheduleRepository {
         )
     }
 
+    pub(super) fn due_excluding(
+        &self,
+        now: UnixMillis,
+        excluded: &[ScheduledJobId],
+        limit: usize,
+    ) -> ScheduleResult<Vec<ScheduledJob>> {
+        validate_limit(limit)?;
+        if excluded.len() > 4096 {
+            return Err(ScheduleError::Capacity("blocked job identities"));
+        }
+        let connection = self.store.connection()?;
+        let mut query=connection.prepare(&format!("SELECT {JOB_COLUMNS} FROM scheduled_jobs WHERE enabled=1 AND deleted_at IS NULL AND next_run_at IS NOT NULL AND next_run_at<=?1 AND id NOT IN (SELECT value FROM json_each(?2)) ORDER BY next_run_at,id LIMIT ?3"))?;
+        collect(
+            query.query_map(
+                params![
+                    timestamp(now)?,
+                    serde_json::to_string(excluded)?,
+                    limit as i64
+                ],
+                job_row,
+            )?,
+            validate_job,
+        )
+    }
+
     pub fn earliest_due(&self) -> ScheduleResult<Option<UnixMillis>> {
         let connection = self.store.connection()?;
         Ok(connection.query_row(
@@ -184,7 +209,6 @@ impl ScheduleRepository {
         }
         let job = required_job(&transaction, claim.job_id)?;
         check_revision(job.revision, claim.expected_revision)?;
-        check_time(now, job.updated_at)?;
         if !job.enabled
             || job.deleted_at.is_some()
             || job.next_run_at != Some(claim.scheduled_for)
@@ -192,6 +216,24 @@ impl ScheduleRepository {
         {
             return Err(ScheduleError::NotDue);
         }
+        let recorded_at = now.max(job.updated_at);
+        let forced_outcome = match claim.disposition {
+            DueDisposition::Dispatch => None,
+            DueDisposition::SkipMissedRange { through } => {
+                timestamp(through)?;
+                if through < claim.scheduled_for
+                    || through > now
+                    || claim.next_run_at.is_some_and(|next| next <= through)
+                    || matches!(job.definition.schedule, ScheduleSpec::Once { .. })
+                        && through != claim.scheduled_for
+                {
+                    return Err(ScheduleError::Invalid(
+                        "missed range must cover only elapsed schedule time",
+                    ));
+                }
+                Some(RunOutcome::SkippedMissedRange { through })
+            }
+        };
         job.definition.schedule.validate_next(claim.next_run_at)?;
         if claim
             .next_run_at
@@ -213,15 +255,19 @@ impl ScheduleRepository {
         let run = insert_run(
             &transaction,
             &job,
-            claim.occurrence_id,
-            claim.scheduled_for,
-            RunTrigger::Scheduled,
-            &digest,
-            now,
+            RunAdmission {
+                occurrence_id: claim.occurrence_id,
+                claimed_at: now,
+                scheduled_for: claim.scheduled_for,
+                trigger: RunTrigger::Scheduled,
+                digest: &digest,
+                forced_outcome,
+            },
+            recorded_at,
         )?;
         transaction.execute(
             "UPDATE scheduled_jobs SET next_run_at=?2,last_run_at=?3,updated_at=?3,revision=?4 WHERE id=?1",
-            params![job.id.to_string(),optional_time(claim.next_run_at)?,timestamp(now)?,increment(job.revision)?],
+            params![job.id.to_string(),optional_time(claim.next_run_at)?,timestamp(recorded_at)?,increment(job.revision)?],
         )?;
         transaction.commit()?;
         Ok(ClaimOutcome {
@@ -269,12 +315,16 @@ impl ScheduleRepository {
         let run = insert_run(
             &transaction,
             &job,
-            claim.occurrence_id,
-            now,
-            RunTrigger::Manual {
-                command_id: claim.command_id,
+            RunAdmission {
+                occurrence_id: claim.occurrence_id,
+                claimed_at: now,
+                scheduled_for: now,
+                trigger: RunTrigger::Manual {
+                    command_id: claim.command_id,
+                },
+                digest: &digest,
+                forced_outcome: None,
             },
-            &digest,
             now,
         )?;
         transaction.execute(
@@ -464,24 +514,41 @@ fn check_job_capacity(
     Ok(())
 }
 
+struct RunAdmission<'a> {
+    occurrence_id: OccurrenceId,
+    claimed_at: UnixMillis,
+    scheduled_for: UnixMillis,
+    trigger: RunTrigger,
+    digest: &'a str,
+    forced_outcome: Option<RunOutcome>,
+}
+
 fn insert_run(
     connection: &Connection,
     job: &ScheduledJob,
-    occurrence_id: OccurrenceId,
-    scheduled_for: UnixMillis,
-    trigger: RunTrigger,
-    digest: &str,
+    admission: RunAdmission<'_>,
     now: UnixMillis,
 ) -> ScheduleResult<ScheduledRun> {
+    let RunAdmission {
+        occurrence_id,
+        claimed_at,
+        scheduled_for,
+        trigger,
+        digest,
+        forced_outcome,
+    } = admission;
     let active: i64 = connection.query_row(
         "SELECT count(*) FROM scheduled_runs WHERE job_id=?1 AND state IN ('claimed','running','unknown')",
         [job.id.to_string()],
         |row| row.get(0),
     )?;
-    let skipped = active >= i64::from(job.definition.policies.overlap.limit()?);
-    let outcome = skipped.then_some(RunOutcome::Skipped {
-        reason: SkipReason::Overlap,
+    let overlap_limit = job.definition.policies.overlap.limit()?;
+    let outcome = forced_outcome.or_else(|| {
+        (active >= i64::from(overlap_limit)).then_some(RunOutcome::Skipped {
+            reason: SkipReason::Overlap,
+        })
     });
+    let skipped = outcome.is_some();
     let outcome_json = outcome
         .as_ref()
         .map(|value| encode(value, MAX_RUN_OUTCOME_BYTES))
@@ -523,8 +590,8 @@ fn insert_run(
         RunState::Claimed
     };
     connection.execute(
-        "INSERT INTO scheduled_runs(occurrence_id,job_id,generation,definition,scheduled_for,trigger,manual_command_id,initial_task_id,claim_digest,state,revision,claimed_at,finished_at,updated_at,outcome) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,1,?11,?12,?11,?13)",
-        params![occurrence_id.to_string(),job.id.to_string(),job.generation,definition,timestamp(scheduled_for)?,kind,manual_command,initial_task_id.to_string(),digest,state.as_str(),timestamp(now)?,if skipped { Some(timestamp(now)?) } else { None },outcome_json],
+        "INSERT INTO scheduled_runs(occurrence_id,job_id,generation,definition,scheduled_for,trigger,manual_command_id,initial_task_id,claim_digest,state,revision,claimed_at,finished_at,updated_at,outcome) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,1,?11,?12,?14,?13)",
+        params![occurrence_id.to_string(),job.id.to_string(),job.generation,definition,timestamp(scheduled_for)?,kind,manual_command,initial_task_id.to_string(),digest,state.as_str(),timestamp(claimed_at)?,if skipped { Some(timestamp(now)?) } else { None },outcome_json,timestamp(now)?],
     )?;
     required_run(connection, occurrence_id)
 }
@@ -599,7 +666,10 @@ fn read_run(connection: &Connection, id: OccurrenceId) -> ScheduleResult<Option<
         .transpose()
 }
 
-fn required_run(connection: &Connection, id: OccurrenceId) -> ScheduleResult<ScheduledRun> {
+pub(super) fn required_run(
+    connection: &Connection,
+    id: OccurrenceId,
+) -> ScheduleResult<ScheduledRun> {
     read_run(connection, id)?.ok_or_else(|| ScheduleError::NotFound {
         entity: "run",
         id: id.to_string(),
@@ -621,6 +691,13 @@ fn validate_run(run: &ScheduledRun) -> ScheduleResult<()> {
     timestamp(run.updated_at)?;
     if let Some(outcome) = &run.outcome {
         outcome.validate()?;
+        if let RunOutcome::SkippedMissedRange { through } = outcome
+            && (*through < run.scheduled_for || *through > run.claimed_at)
+        {
+            return Err(ScheduleError::Invalid(
+                "stored missed range is outside the occurrence bounds",
+            ));
+        }
         if outcome.state() != run.state {
             return Err(ScheduleError::Invalid(
                 "stored run state and outcome disagree",

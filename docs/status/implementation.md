@@ -50,6 +50,12 @@ PR #77 normally merges reviewed Host prerequisite `97accd57a5e4450aa6d20db794cdc
 
 This layer provides synchronous durable admission, bounded original/origin/snapshot identity, settings and owner IPC contracts. It does not start the production Host; PR #79 supplies that composition and must retain the actual Agent/lease through each blocking worker, use owner-preserving broker startup and the validated Store opener, and preserve the pending-remote archival guard. Optional memory/MCP/selector composition remains #68. The current inbox union and archival correction have source and Rust 1.88 formatting inspection only; exact-head compilation, strict Clippy, CI and new boundary runtime checks remain pending. Prior disposable schema-six-to-seven observations are qualified in the [inbox contract](../contracts/host-inbox.md); successful live inference, native credential persistence and Apple service behavior are not claimed. Automated assertions remain deferred to #32.
 
+## Scheduling calculation integration checkpoint, 2026-10-16
+
+The #51 replacement extracts the reviewed calendar, due timer, atomic missed-range claim and immutable first-attempt ledger onto Host-admission prerequisite `60f4fbf10bb7301ea6e408115ab5dd90da87ab57`. It imports no legacy PR #71 aggregate ancestry. Migration eight follows schemas five, six and seven once; existing clock dependencies and all unrelated source/manifests remain unchanged. The engine retains its complete Agent through actual blocking workers, filters every native Scheduler control including `wait_agents`, and checks exact native identity/policy plus immutable Running/Unknown tool journals and typed child uncertainty before any terminal mapping.
+
+Rust 1.88 formatting, source preservation and documentation-link inspection apply to this replacement. Exact-head compilation, required CI, lifecycle/clock/runtime observations and integration remain pending. The [engine contract](../contracts/scheduling-engine.md#validation) distinguishes earlier calendar and refused-loopback observations from this source; successful inference, actual OS clock changes and exhaustive forced-crash recovery are unverified. Production Host activation and owner controls remain separate work; retries, cumulative cross-attempt accounting and result delivery remain #52. Automated coverage is deferred to [#32](https://github.com/izyuumi/everything/issues/32).
+
 ## Dependency graph and ownership
 
 | Issue | Objective | Prerequisites | State |
@@ -87,7 +93,7 @@ This layer provides synchronous durable admission, bounded original/origin/snaps
 | [#31](https://github.com/izyuumi/everything/issues/31) | Define generic embedding contract and index fingerprints | #1, #6 | Merged (#42) |
 | [#72](https://github.com/izyuumi/everything/issues/72) | Prevent outbound telemetry from local embeddings | #12, #21, #68 | Strict production embedding-only boundary in progress separately; no production-locality acceptance claimed here |
 | [#50](https://github.com/izyuumi/everything/issues/50) | Persist scheduled jobs and immutable run history | #2, #3, #10; migration order after #22/private checkpoints | Merged (#67) after current-head production CI; occurrence/replay observations qualified and automated assertions deferred to #32 |
-| [#51](https://github.com/izyuumi/everything/issues/51) | Calculate timezone-aware occurrences and dispatch due work | #24, #50 | Backlog |
+| [#51](https://github.com/izyuumi/everything/issues/51) | Calculate timezone-aware occurrences and dispatch due work | #24, #50 | Focused replacement for legacy PR #71 prepared; exact-head CI and integration pending |
 | [#52](https://github.com/izyuumi/everything/issues/52) | Enforce isolated scheduled execution and run policies | #24, #25, #50, #51 | Backlog |
 | [#53](https://github.com/izyuumi/everything/issues/53) | Add schedule CLI and native tool controls | #5, #11, #50, #51, #52 | Backlog |
 | [#54](https://github.com/izyuumi/everything/issues/54) | Deliver schedule status and encrypted client notifications | #22, #27, #28, #52, #53 | Backlog |

@@ -1,3 +1,6 @@
+pub mod attempts;
+pub mod clock;
+pub mod engine;
 pub mod store;
 
 use std::collections::BTreeSet;
@@ -536,6 +539,7 @@ pub enum RunOutcome {
     Failed { code: String, message: String },
     Cancelled { reason: String },
     Skipped { reason: SkipReason },
+    SkippedMissedRange { through: UnixMillis },
     Unknown { reason: String },
 }
 
@@ -545,7 +549,7 @@ impl RunOutcome {
             Self::Succeeded { .. } => RunState::Succeeded,
             Self::Failed { .. } => RunState::Failed,
             Self::Cancelled { .. } => RunState::Cancelled,
-            Self::Skipped { .. } => RunState::Skipped,
+            Self::Skipped { .. } | Self::SkippedMissedRange { .. } => RunState::Skipped,
             Self::Unknown { .. } => RunState::Unknown,
         }
     }
@@ -566,6 +570,10 @@ impl RunOutcome {
             }
             Self::Cancelled { reason } | Self::Unknown { reason } => reason,
             Self::Skipped { .. } => return Ok(()),
+            Self::SkippedMissedRange { through } => {
+                timestamp(*through)?;
+                return Ok(());
+            }
         };
         if text.len() > 16_384 || text.contains('\0') {
             return Err(ScheduleError::Invalid(
@@ -602,6 +610,24 @@ pub struct DueClaim {
     pub occurrence_id: OccurrenceId,
     pub scheduled_for: UnixMillis,
     pub next_run_at: Option<UnixMillis>,
+    #[serde(default, skip_serializing_if = "DueDisposition::is_dispatch")]
+    pub disposition: DueDisposition,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum DueDisposition {
+    #[default]
+    Dispatch,
+    SkipMissedRange {
+        through: UnixMillis,
+    },
+}
+
+impl DueDisposition {
+    fn is_dispatch(&self) -> bool {
+        matches!(self, Self::Dispatch)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
