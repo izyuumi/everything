@@ -404,10 +404,10 @@ impl ToolBroker {
         if !journals.contains_key(&profile.session_id()) && journals.len() >= 2 {
             return Err(BrokerError::Busy);
         }
-        if let Some(existing) = journals.get(&profile.session_id()) {
-            if !Arc::ptr_eq(existing, &profile) {
-                return Err(restricted_error());
-            }
+        if let Some(existing) = journals.get(&profile.session_id())
+            && !Arc::ptr_eq(existing, &profile)
+        {
+            return Err(restricted_error());
         }
         journals.insert(profile.session_id(), Arc::clone(&profile));
         Ok(TaskToolBroker {
