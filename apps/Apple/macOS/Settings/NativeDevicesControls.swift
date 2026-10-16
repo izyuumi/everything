@@ -45,9 +45,11 @@ struct NativeDevicesControls: View {
                             Text(row.publicKeys.fingerprint).font(.caption.monospaced()).textSelection(.enabled)
                             if row.thisDevice { Text("Host endpoint identity").font(.caption) }
                             Text(row.revoked ? "Observed revoked" : "Observed active")
-                            Button("Request revocation…", role: .destructive) {
+                            Button("Request revocation for \(row.label)…", role: .destructive) {
                                 store.requestDeviceRevocation(row, parent: parent.window)
-                            }.disabled(!store.canRevokeDevice(row) || connectionEdited || parent.window == nil)
+                            }
+                            .accessibilityLabel("Request revocation for \(row.label), device \(row.deviceID.uuidString.lowercased())")
+                            .disabled(!store.canRevokeDevice(row) || connectionEdited || parent.window == nil)
                         }.padding(.vertical, 6)
                     }
                 } else { Text("Read the first device page through an explicitly opened Host session.").foregroundStyle(.secondary) }

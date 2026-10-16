@@ -24,9 +24,19 @@ struct NativeCredentialEntryControls: View {
                             .disabled(!store.canEnterCredential || connectionEdited)
                     }
                     ForEach(Array(metadata.modelCredentials.enumerated()), id: \.offset) { _, binding in
-                        Button("Replace \(binding.provider.rawValue) credential…") { store.beginCredentialEntry(.configuredModel(binding)) }
+                        VStack(alignment: .leading, spacing: 4) {
+                            Button("Replace \(binding.provider.rawValue) credential for \(endpoint(binding.endpoint))…") {
+                                store.beginCredentialEntry(.configuredModel(binding))
+                            }
                             .disabled(!store.canEnterCredential || connectionEdited)
-                            .help("Replaces the exact configured reference and storage shown above; no metadata write.")
+                            .accessibilityLabel("Replace \(binding.provider.rawValue) credential for \(endpoint(binding.endpoint))")
+                            .accessibilityValue("Reference \(binding.reference.uuidString.lowercased()); storage \(binding.storage.rawValue)")
+                            .accessibilityHint("Opens secure entry for this configured reference without changing Host settings.")
+                            .help("Replaces this exact configured reference and storage; no metadata write.")
+                            Text("Reference: \(binding.reference.uuidString.lowercased())")
+                                .font(.caption.monospaced()).textSelection(.enabled)
+                            Text("Storage: \(binding.storage.rawValue)").font(.caption).foregroundStyle(.secondary)
+                        }
                     }
                 case .systemOne:
                     if let configured = metadata.systemOne {
