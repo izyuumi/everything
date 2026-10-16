@@ -50,11 +50,16 @@ actor NativeSettingsSession {
         }
 
         @MainActor
-        func transferData() throws -> Data {
+        fileprivate func validateDelivery() throws {
             try admission.validatePresentation(gate)
             guard try NativeSettingsGate.wallTime() < expiresAt, ContinuousClock.now < deadline else {
                 throw NativeSettingsSessionError.expired
             }
+        }
+
+        @MainActor
+        func transferData() throws -> Data {
+            try validateDelivery()
             return value
         }
     }
@@ -490,16 +495,15 @@ actor NativeSettingsSession {
             let presentation = PairingAcceptancePresentation(operationID: admission.review.operationID, pairingID: acceptance.pairingID,
                                                            expiresAt: acceptance.expiresAt, value: bytes, admission: admission,
                                                            gate: gate, deadline: min(original.deadline, sessionDeadline))
-            try await Self.invokePairingAcceptance(admission, gate: gate, presentation: presentation, presenter: presenter)
+            try await Self.invokePairingAcceptance(presentation: presentation, presenter: presenter)
             return .success(status)
         } catch { return .failure(sanitize(error)) }
     }
 
     @MainActor
-    private static func invokePairingAcceptance(_ admission: NativePairingApprovalAdmission, gate: NativeSettingsGate,
-                                                presentation: PairingAcceptancePresentation,
+    private static func invokePairingAcceptance(presentation: PairingAcceptancePresentation,
                                                 presenter: @MainActor @Sendable (PairingAcceptancePresentation) async throws -> Void) async throws {
-        try admission.validatePresentation(gate)
+        try presentation.validateDelivery()
         try await presenter(presentation)
     }
 

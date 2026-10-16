@@ -109,7 +109,6 @@ enum NativeSettingsWire {
     enum DeviceResult: Decodable, Sendable {
         case existing(SettingsOperationInspection)
         case pairing(PairingCreation)
-        case pairingApproved(PairingApprovalResult)
         case revoked(SettingsOperationInspection)
 
         var operation: SettingsOperationInspection {
@@ -125,9 +124,6 @@ enum NativeSettingsWire {
             case "existing":
                 try fields.only(["kind", "operation"])
                 self = .existing(try fields.required(SettingsOperationInspection.self, "operation"))
-            case "pairing_approved":
-                try fields.only(["kind", "result"])
-                self = .pairingApproved(try fields.required(PairingApprovalResult.self, "result"))
             case "pairing":
                 try fields.only(["kind", "creation"])
                 self = .pairing(try fields.required(PairingCreation.self, "creation"))
@@ -236,6 +232,7 @@ enum NativeSettingsWire {
         case devices(SettingsDevicePage)
         case deviceConfirmed(DeviceResult)
         case pairing(PairingCreation)
+        case pairingApproved(PairingApprovalResult)
         case opened(Opened)
         case prepared(SettingsOperationResult)
         case details(SettingsOperationInspection, SettingsActionTarget)
@@ -261,6 +258,9 @@ enum NativeSettingsWire {
             case "device_confirmed":
                 try fields.only(["kind", "result"])
                 self = .deviceConfirmed(try fields.required(DeviceResult.self, "result"))
+            case "pairing_approved":
+                try fields.only(["kind", "result"])
+                self = .pairingApproved(try fields.required(PairingApprovalResult.self, "result"))
             case "pairing":
                 try fields.only(["kind", "creation"])
                 self = .pairing(try fields.required(PairingCreation.self, "creation"))
