@@ -1,4 +1,4 @@
-use std::io::{self, IsTerminal, Read};
+use std::io::{self, Read};
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::Arc;
@@ -27,7 +27,7 @@ use everything::tools::{
 use futures_util::StreamExt;
 use serde::Serialize;
 use thiserror::Error;
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio_util::sync::CancellationToken;
 use zeroize::Zeroizing;
 
@@ -298,6 +298,8 @@ enum CliError {
     OwnerInput,
     #[error("native settings and credential input require the private stdin route")]
     SensitiveOwnerInput,
+    #[error("private owner input or output was cancelled or exceeded its deadline")]
+    SensitiveOwnerCancelled,
     #[error(transparent)]
     Service(#[from] everything::service::ServiceError),
     #[error(transparent)]
@@ -459,40 +461,35 @@ async fn owner_cli(
     cancellation: CancellationToken,
 ) -> Result<(), CliError> {
     if arguments.sensitive_stdin {
-        if io::stdin().is_terminal() || io::stdout().is_terminal() {
-            return Err(CliError::SensitiveOwnerInput);
-        }
-        let input = tokio::task::spawn_blocking(|| {
-            use everything::host::settings::native::MAX_NATIVE_SETTINGS_INPUT_BYTES;
-            let mut bytes = Zeroizing::new(Vec::new());
-            io::stdin()
-                .take((MAX_NATIVE_SETTINGS_INPUT_BYTES + 1) as u64)
-                .read_to_end(&mut bytes)?;
-            if bytes.is_empty() || bytes.len() > MAX_NATIVE_SETTINGS_INPUT_BYTES {
-                return Err(CliError::SensitiveOwnerInput);
-            }
-            serde_json::from_slice::<SensitiveOwnerInput>(&bytes)
-                .map_err(|_| CliError::SensitiveOwnerInput)
-        })
-        .await
-        .map_err(|_| CliError::Worker)??;
+        let input_descriptor = rustix::io::fcntl_dupfd_cloexec(io::stdin(), 3)
+            .map_err(|_| CliError::SensitiveOwnerInput)?;
+        let output_descriptor = rustix::io::fcntl_dupfd_cloexec(io::stdout(), 3)
+            .map_err(|_| CliError::SensitiveOwnerInput)?;
+        let input = tokio::net::unix::pipe::Receiver::from_owned_fd(input_descriptor)
+            .map_err(|_| CliError::SensitiveOwnerInput)?;
+        let output = tokio::net::unix::pipe::Sender::from_owned_fd(output_descriptor)
+            .map_err(|_| CliError::SensitiveOwnerInput)?;
+        let input = read_sensitive_input(input, cancellation.clone()).await?;
         let client = everything::host::client::HostClient::new(state)?;
         return match input {
             SensitiveOwnerInput::NativeSettings { input } => {
-                write_sensitive_json(client.native_settings(input, cancellation).await?).await
+                let result = client.native_settings(input, cancellation.clone()).await?;
+                write_sensitive_json(output, result, cancellation).await
             }
             SensitiveOwnerInput::Credential {
                 request_id,
                 operation,
             } => {
                 write_sensitive_json(
+                    output,
                     client
                         .operate(
                             everything::ipc::OwnerOperation::Credential { operation },
                             request_id,
-                            cancellation,
+                            cancellation.clone(),
                         )
                         .await?,
+                    cancellation,
                 )
                 .await
             }
@@ -1564,19 +1561,44 @@ async fn write_json(value: impl Serialize + Send + 'static) -> Result<(), CliErr
     Ok(())
 }
 
-async fn write_sensitive_json(value: impl Serialize + Send + 'static) -> Result<(), CliError> {
-    let bytes = tokio::task::spawn_blocking(move || {
-        serde_json::to_vec(&value)
-            .map(Zeroizing::new)
-            .map_err(|_| CliError::Serialization)
-    })
-    .await
-    .map_err(|_| CliError::Worker)??;
-    let mut output = tokio::io::stdout();
-    output.write_all(&bytes).await?;
-    output.write_all(b"\n").await?;
-    output.flush().await?;
-    Ok(())
+async fn read_sensitive_input(
+    input: tokio::net::unix::pipe::Receiver,
+    cancellation: CancellationToken,
+) -> Result<SensitiveOwnerInput, CliError> {
+    use everything::host::settings::native::MAX_NATIVE_SETTINGS_INPUT_BYTES;
+    let mut bytes = Zeroizing::new(Vec::new());
+    let mut input = input.take((MAX_NATIVE_SETTINGS_INPUT_BYTES + 1) as u64);
+    tokio::select! {
+        biased;
+        _ = cancellation.cancelled() => return Err(CliError::SensitiveOwnerCancelled),
+        result = tokio::time::timeout(std::time::Duration::from_secs(15), input.read_to_end(&mut bytes)) => {
+            result.map_err(|_| CliError::SensitiveOwnerCancelled)??;
+        }
+    }
+    if bytes.is_empty() || bytes.len() > MAX_NATIVE_SETTINGS_INPUT_BYTES {
+        return Err(CliError::SensitiveOwnerInput);
+    }
+    serde_json::from_slice(&bytes).map_err(|_| CliError::SensitiveOwnerInput)
+}
+
+async fn write_sensitive_json(
+    mut output: tokio::net::unix::pipe::Sender,
+    value: impl Serialize,
+    cancellation: CancellationToken,
+) -> Result<(), CliError> {
+    let bytes = Zeroizing::new(serde_json::to_vec(&value).map_err(|_| CliError::Serialization)?);
+    let write = async {
+        output.write_all(&bytes).await?;
+        output.write_all(b"\n").await?;
+        output.flush().await
+    };
+    tokio::select! {
+        biased;
+        _ = cancellation.cancelled() => Err(CliError::SensitiveOwnerCancelled),
+        result = tokio::time::timeout(std::time::Duration::from_secs(15), write) => {
+            result.map_err(|_| CliError::SensitiveOwnerCancelled)?.map_err(CliError::Io)
+        }
+    }
 }
 
 async fn print_message(message: &ConversationMessage) -> Result<(), CliError> {
