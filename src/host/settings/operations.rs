@@ -846,6 +846,25 @@ impl OperationRepository {
         Ok(changes)
     }
 
+    pub fn pending_applications(&self) -> Result<Vec<OperationRecord>, SettingsServiceError> {
+        let connection = self.store.connection()?;
+        Ok(write_history(&connection)?
+            .into_iter()
+            .filter(|record| {
+                record.application().is_none()
+                    && matches!(
+                        record.phase(),
+                        SettingsOperationPhase::Finished {
+                            result: SettingsOperationResult {
+                                state: SettingsOperationState::PendingApplication { .. },
+                                ..
+                            }
+                        }
+                    )
+            })
+            .collect())
+    }
+
     pub fn unresolved_write(&self) -> Result<Option<OperationRecord>, SettingsServiceError> {
         let connection = self.store.connection()?;
         unresolved_write(&connection)
@@ -1032,22 +1051,33 @@ fn pending_count(connection: &rusqlite::Connection) -> Result<i64, SettingsServi
     )?)
 }
 
+fn write_history(
+    connection: &rusqlite::Connection,
+) -> Result<Vec<OperationRecord>, SettingsServiceError> {
+    let mut statement = connection.prepare("SELECT o.request_id FROM settings_operations o WHERE EXISTS(SELECT 1 FROM settings_operation_updates h WHERE h.request_id=o.request_id AND json_type(h.record,'$.write')='object') ORDER BY o.request_id LIMIT 1025")?;
+    let mut rows = statement.query([])?;
+    let mut records = Vec::new();
+    while let Some(row) = rows.next()? {
+        if records.len() == MAX_IDENTITIES as usize {
+            return Err(SettingsServiceError::CorruptJournal);
+        }
+        let request_id = bounded_text(row, 0, 36)?.parse()?;
+        let record = read(connection, request_id)?.ok_or(SettingsServiceError::CorruptJournal)?;
+        record.write().ok_or(SettingsServiceError::CorruptJournal)?;
+        records.push(record);
+    }
+    Ok(records)
+}
+
 fn unresolved_write(
     connection: &rusqlite::Connection,
 ) -> Result<Option<OperationRecord>, SettingsServiceError> {
-    let mut statement = connection.prepare("SELECT o.request_id FROM settings_operations o WHERE EXISTS(SELECT 1 FROM settings_operation_updates h WHERE h.request_id=o.request_id AND json_type(h.record,'$.write')='object') ORDER BY o.request_id LIMIT 1025")?;
-    let mut rows = statement.query([])?;
     let mut found = None;
-    let mut inspected = 0;
-    while let Some(row) = rows.next()? {
-        if inspected == MAX_IDENTITIES {
-            return Err(SettingsServiceError::CorruptJournal);
-        }
-        inspected += 1;
-        let request_id = bounded_text(row, 0, 36)?.parse()?;
-        let record = read(connection, request_id)?.ok_or(SettingsServiceError::CorruptJournal)?;
-        let write = record.write().ok_or(SettingsServiceError::CorruptJournal)?;
-        if write.resolution.is_none() {
+    for record in write_history(connection)? {
+        if record
+            .write()
+            .is_some_and(|write| write.resolution.is_none())
+        {
             if found.is_some() {
                 return Err(SettingsServiceError::CorruptJournal);
             }

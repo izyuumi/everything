@@ -114,6 +114,13 @@ pub enum SettingsStartupPolicy {
     OptionalFeaturesSuspended { operation_id: CommandId },
 }
 
+#[derive(Clone, Debug)]
+pub(crate) struct SettingsStartupContext {
+    pub settings: super::HostSettings,
+    pub policy: SettingsStartupPolicy,
+    pub pending_application: Option<SettingsOperationInspection>,
+}
+
 struct ActiveSettingsWrite {
     request_id: CommandId,
     client_session_id: Uuid,
@@ -228,18 +235,50 @@ impl SettingsService {
         self.core.authority.owner(call)
     }
 
-    pub(crate) async fn startup_policy(
+    pub(crate) async fn startup_context(
         &self,
-    ) -> Result<SettingsStartupPolicy, SettingsServiceError> {
+    ) -> Result<SettingsStartupContext, SettingsServiceError> {
         self.blocking(|core| {
-            Ok(match core.repository.unresolved_write()? {
-                Some(operation) => SettingsStartupPolicy::OptionalFeaturesSuspended {
-                    operation_id: operation.identity.binding.request_id,
+            let settings = core.settings.observed_snapshot()?;
+            let fingerprint = persistence::file_fingerprint(&settings)?;
+            let unresolved = core.repository.unresolved_write()?;
+            let mut pending_application = None;
+            for operation in core.repository.pending_applications()? {
+                if operation
+                    .write()
+                    .is_some_and(|write| write.intent.after == fingerprint)
+                {
+                    if pending_application.is_some() {
+                        return Err(SettingsServiceError::CorruptJournal);
+                    }
+                    pending_application = Some(operation.inspection());
+                }
+            }
+            let operation_id = unresolved
+                .map(|record| record.identity.binding.request_id)
+                .or_else(|| {
+                    pending_application
+                        .as_ref()
+                        .map(|record| record.binding.request_id)
+                });
+            Ok(SettingsStartupContext {
+                settings,
+                policy: match operation_id {
+                    Some(operation_id) => {
+                        SettingsStartupPolicy::OptionalFeaturesSuspended { operation_id }
+                    }
+                    None => SettingsStartupPolicy::Ready,
                 },
-                None => SettingsStartupPolicy::Ready,
+                pending_application,
             })
         })
         .await
+    }
+
+    pub(crate) async fn startup_policy(
+        &self,
+    ) -> Result<SettingsStartupPolicy, SettingsServiceError> {
+        Ok(self.startup_context().await?.policy)
     }
 
     pub(crate) fn open_native_session(
@@ -985,6 +1024,26 @@ impl ServiceCore {
         };
         identity.validate()?;
         Ok((identity, deadline))
+    }
+
+    fn check_write_origin(
+        &self,
+        identity: &OperationIdentity,
+        deadline: Instant,
+        cancellation: &CancellationToken,
+        request_cancellation: &CancellationToken,
+    ) -> Result<(), SettingsServiceError> {
+        self.authority.check_origin(&identity.origin)?;
+        self.check_scope(&identity.binding.scope)?;
+        if cancellation.is_cancelled() || request_cancellation.is_cancelled() {
+            return Err(SettingsServiceError::Cancelled);
+        }
+        if UnixMillis::now()?.get() >= identity.binding.expires_at.get()
+            || Instant::now() >= deadline
+        {
+            return Err(SettingsServiceError::Expired);
+        }
+        Ok(())
     }
 
     fn require_resolved_file(&self) -> Result<(), SettingsServiceError> {
