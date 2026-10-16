@@ -15,7 +15,8 @@ use crate::tools::ToolDescriptor;
 
 use super::repository;
 use super::types::{
-    ResumeTarget, SchedulerError, SchedulerServices, StoredTask, WaitingReason, store,
+    ResumeTarget, SchedulerError, SchedulerServices, StoredTask, TaskPreparation,
+    TaskPreparationRequest, WaitingReason, store,
 };
 
 const MAX_OUTPUT_BYTES: usize = 8_192;
@@ -48,9 +49,18 @@ pub(super) async fn execute(
     cancellation: CancellationToken,
     resume: Option<ResumeTarget>,
     changed: tokio::sync::watch::Sender<u64>,
+    preparation: Option<Arc<dyn TaskPreparation>>,
 ) -> ExecutionOutcome {
     let task_id = task.definition.initial.id;
-    let stop = run(&services, &task, &cancellation, resume, &changed).await;
+    let stop = run(
+        &services,
+        &task,
+        &cancellation,
+        resume,
+        &changed,
+        preparation,
+    )
+    .await;
     changed.send_modify(|revision| *revision = revision.wrapping_add(1));
     ExecutionOutcome { task_id, stop }
 }
@@ -61,6 +71,7 @@ async fn run(
     cancellation: &CancellationToken,
     resume: Option<ResumeTarget>,
     changed: &tokio::sync::watch::Sender<u64>,
+    preparation_service: Option<Arc<dyn TaskPreparation>>,
 ) -> ExecutionStop {
     let conversation_id = task.definition.initial.conversation_id;
     let command_id = task.checkpoint.active_command;
@@ -100,7 +111,7 @@ async fn run(
         })
         .await
     };
-    let (setup, _discovery) = match preparation {
+    let (mut setup, _discovery) = match preparation {
         Ok(Ok(prepared)) => prepared,
         Ok(Err(error)) => {
             return saved_stop(&conversation, task, false, Some(error.to_string()));
@@ -109,6 +120,56 @@ async fn run(
             return waiting(WaitingReason::Interrupted, error.to_string());
         }
     };
+
+    let fresh = conversation
+        .native_run()
+        .is_none_or(|run| run.command_id != command_id);
+    if let Some(preparation) = preparation_service.filter(|_| fresh) {
+        let request = TaskPreparationRequest {
+            conversation_id,
+            task_id: task.definition.initial.id,
+            command_id,
+            instruction: setup.task.objective.clone(),
+            execution: task.definition.execution.clone(),
+            authority: setup.broker.authority().clone(),
+            selected_tools: setup.selected_tools.clone(),
+        };
+        let prepared = match preparation
+            .prepare(request, cancellation.child_token())
+            .await
+        {
+            Ok(prepared) => prepared,
+            Err(error) => return waiting(WaitingReason::Interrupted, error.to_string()),
+        };
+        setup.memory = prepared.memory;
+        setup.selected_tools = prepared.selected_tools;
+    }
+    let captured = services
+        .agent
+        .capture_tools_setup(
+            conversation_id,
+            command_id,
+            setup.clone(),
+            cancellation.child_token(),
+        )
+        .await;
+    match captured {
+        Ok(run)
+            if matches!(
+                run.status,
+                LoopStatus::Paused {
+                    reason: PauseReason::DurationLimit
+                }
+            ) =>
+        {
+            return waiting(
+                WaitingReason::Limit,
+                "native execution deadline elapsed before provider construction",
+            );
+        }
+        Ok(_) => {}
+        Err(error) => return waiting(WaitingReason::Interrupted, error.to_string()),
+    }
 
     let factory_cancellation = cancellation.child_token();
     let _cancel_factory_on_drop = factory_cancellation.clone().drop_guard();

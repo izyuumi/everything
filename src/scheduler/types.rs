@@ -9,8 +9,8 @@ use thiserror::Error;
 use tokio_util::sync::CancellationToken;
 
 use crate::agent::{Agent, AgentError, ConversationConfig, LoopLimits, LoopStatus};
-use crate::context::{ContextBudget, ContextBuilder};
-use crate::model::ModelProvider;
+use crate::context::{ContextBudget, ContextBuilder, MemoryExcerpt};
+use crate::model::{ModelProvider, ToolDefinition};
 use crate::permissions::{ExecutionAuthority, ExecutionMode, PermissionError};
 use crate::protocol::{CommandId, ConversationId, TaskId, TaskRecord, UnixMillis};
 use crate::selector::{SearchTools, SelectorError, ToolSelector};
@@ -167,6 +167,30 @@ pub trait TaskProviderFactory: Send + Sync {
         configuration: &ConversationConfig,
         cancellation: CancellationToken,
     ) -> Result<Arc<dyn ModelProvider>, SchedulerError>;
+}
+
+pub struct TaskPreparationRequest {
+    pub conversation_id: ConversationId,
+    pub task_id: TaskId,
+    pub command_id: CommandId,
+    pub instruction: String,
+    pub execution: ExecutionPolicy,
+    pub authority: ExecutionAuthority,
+    pub selected_tools: Vec<ToolDefinition>,
+}
+
+pub struct PreparedTaskInputs {
+    pub memory: Vec<MemoryExcerpt>,
+    pub selected_tools: Vec<ToolDefinition>,
+}
+
+#[async_trait]
+pub trait TaskPreparation: Send + Sync {
+    async fn prepare(
+        &self,
+        request: TaskPreparationRequest,
+        cancellation: CancellationToken,
+    ) -> Result<PreparedTaskInputs, SchedulerError>;
 }
 
 #[derive(Clone)]
@@ -337,6 +361,16 @@ pub(super) struct TaskCheckpoint {
     pub resumes: Vec<ResumeAudit>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub child_wait: Option<ChildWaitSet>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_retirement: Option<ProviderRetirement>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct ProviderRetirement {
+    pub request_id: CommandId,
+    pub command_id: CommandId,
+    pub retired_at: UnixMillis,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
