@@ -45,3 +45,9 @@ All four private databases were inventoried before immutable/query_only reads at
 The walkthrough does not establish successful model/classifier inference, the restricted Settings model runtime, active-task provider/context capture, Apple UI/OS/Keychain behavior, different-UID rejection, unknown-file crash repair, every cancellation race or security readiness. The plans supplied to Wiki maintenance were explicit observer input, not model output. Automated verification remains deferred to [#32](https://github.com/izyuumi/everything/issues/32).
 
 See the [service](../contracts/settings-service.md), [startup](../contracts/host-settings-startup.md), [owner receipts](../contracts/settings-owner-routes.md), [native routes](../contracts/native-settings-routes.md) and [live memory controls](../architecture/memory-live-application.md).
+
+## Initial credential admission increment
+
+The initial-storage predicate is a separate source increment after the artifacts above. It preserves configured replacement and requires an original NativeUi operation, the already selected exact model/SystemOne endpoint, no existing binding and a non-nil reference absent from model, SystemOne and MCP metadata. The same predicate runs at preflight and immediately before the existing owned vault call. A genuine Completed storage receipt leaves HostSettings unchanged; metadata linking, failure/conflict presentation and secure-entry UI remain separate work.
+
+The source checkpoint `e77b1e88a75fa814ee3549b2d0b9835b720da764` passed Rust 1.88 formatting, default/all-feature workspace all-target checks and both strict Clippy forms. This is source/static verification; its own optimized build, disposable unconfigured/replay/conflict observations and public CI remain pending. The earlier configured Session walkthrough does not verify these new predicates. No new automated tests were created, and OS credential-store/UI behavior remains unverified.
