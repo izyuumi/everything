@@ -28,11 +28,11 @@ Rust 1.99.0 is installed. Apple SDKs and Mac hardware are unavailable locally; G
 | [#12](https://github.com/izyuumi/everything/issues/12) | Implement local EmbeddingGemma 2 inference spike | #31 | Actual native inference and release benchmarks verified on Linux/macOS; integration validation |
 | [#13](https://github.com/izyuumi/everything/issues/13) | Implement E2EE relay transport server | #7 | Merged (#45) |
 | [#14](https://github.com/izyuumi/everything/issues/14) | Implement Tool Broker execution journal | #3, #5, #11 | Implemented; native loop integration remains #23 |
-| [#15](https://github.com/izyuumi/everything/issues/15) | Implement shell and filesystem tools | #14 | Implemented on this branch; actual broker/manual checks passed |
+| [#15](https://github.com/izyuumi/everything/issues/15) | Implement shell and filesystem tools | #14 | Merged (#62); scoped filesystem and explicitly trusted shell implementation; automated assertions deferred to #32 |
 | [#16](https://github.com/izyuumi/everything/issues/16) | Implement context builder and compaction | #2, #3, #4, #6 | Merged (#46) |
-| [#17](https://github.com/izyuumi/everything/issues/17) | Implement offline permission-aware discovery | #5, #11, #16 | Implemented on this branch; integration validation |
+| [#17](https://github.com/izyuumi/everything/issues/17) | Implement offline permission-aware discovery | #5, #11, #16 | Merged (#61); offline permission-aware discovery |
 | [#18](https://github.com/izyuumi/everything/issues/18) | Implement native macOS background host service | #1, #2, #3 | Library merged (#48); CLI integration pending |
-| [#19](https://github.com/izyuumi/everything/issues/19) | Implement MCP client tool adapter | #5, #14, #17 | Implemented; native server walkthrough passed; Actions billing blocks integration |
+| [#19](https://github.com/izyuumi/everything/issues/19) | Implement MCP client tool adapter | #5, #14, #17 | Implemented in PR #63; native server walkthrough passed; current Linux/macOS and minimum-version validation is recorded on the PR; automated assertions remain deferred to #32 |
 | [#20](https://github.com/izyuumi/everything/issues/20) | Implement optional configurable System One classification | #5, #11, #16, #17 | Separate implementation required by edited issue |
 | [#21](https://github.com/izyuumi/everything/issues/21) | Implement sqlite-vec hybrid retrieval and index switching | #6, #12, #31 | Backlog |
 | [#22](https://github.com/izyuumi/everything/issues/22) | Implement device pairing and client sync | #2, #3, #7, #13 | In progress |
