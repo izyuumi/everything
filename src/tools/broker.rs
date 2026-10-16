@@ -228,6 +228,7 @@ struct BrokerInner {
     quarantined: AtomicBool,
     restart_required: AtomicBool,
     recovered_operations: usize,
+    _retained_owner: Option<RetainedToolOwner>,
 }
 
 #[derive(Serialize)]
@@ -311,7 +312,7 @@ impl ToolBroker {
             None,
         ))?;
         let recovery_store = store.clone();
-        let (recovered_operations, recovery_report) = blocking(owner, move || {
+        let (recovered_operations, recovery_report) = blocking(owner.clone(), move || {
             let recovered = recovery_store.mark_running_tool_calls_unknown(&recovery, now()?)?;
             Ok((recovered, inspect_cleanup(&recovery_store, recovered)?))
         })
@@ -328,6 +329,7 @@ impl ToolBroker {
                 quarantined: AtomicBool::new(recovery_report.quarantined),
                 restart_required: AtomicBool::new(false),
                 recovered_operations,
+                _retained_owner: owner,
             }),
         })
     }

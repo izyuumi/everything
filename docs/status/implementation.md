@@ -20,6 +20,12 @@ Production semantic acceptance remains blocked by [#72](https://github.com/izyuu
 
 The #23 branch includes actual main `1ce2e3fee68c5e0ff12b2b4387db69c2d8fac63f` and reviewed hybrid prerequisite `a7142be9a4ff66ccde2462ac6fcf70bf989912c7`. The native loop preserves its reviewed provider/tool identities, exact saved authority, continuation state, limits, and durable recovery semantics. Its latest corrections retain the complete Agent through blocking SQL, tool validation, filesystem work and broker startup, and bound the constructed provider timeout while rechecking the saved start/deadline before admission. These corrections have source and formatting inspection only; the combined head requires fresh CI, and caller-drop or wall-clock runtime behavior has not been newly exercised. See the [agent contract](../contracts/agent.md) and [runtime validation](../architecture/runtime.md#validation-performed) for qualified earlier disposable observations. No successful live provider inference or deferred automated acceptance criterion is claimed.
 
+## Host prerequisite ownership checkpoint, 2026-10-16
+
+The #18/#68 prerequisite branch normally merges main `389f4b2fabcab0a341d7c39dbf6399968d864540`. It preserves the native per-invocation Agent ownership, blocking SQL retention, startup retention and bounded provider timeout alongside the prerequisite steering and observed-clock checks. `start_with_owner` now retains the actual Agent in shared Broker state, including blocking report, cleanup and drain recovery workers after caller drop. Raw `start` retains its caller-owned lease contract; retained lifetime never authorizes execution or establishes cleanup.
+
+The stable Store/Agent descriptor ownership from [PR #84](https://github.com/izyuumi/everything/pull/84) is extracted here for [#81](https://github.com/izyuumi/everything/issues/81), preserving private-file validation and SQLite-before-descriptor destruction across Store clones. Application Host startup is absent from these prerequisites; it still requires the validated-descriptor constructor and an actual Agent owner when its Broker is integrated. These changes have source, ownership and Rust 1.88 formatting inspection only. Fresh required CI, compilation/static gates and disposable caller-drop/SQLite-lock/runtime checks remain pending; historical runtime observations do not verify this union. macOS launchd/login behavior remains unverified and automated assertions remain deferred to #32.
+
 ## Dependency graph and ownership
 
 | Issue | Objective | Prerequisites | State |
