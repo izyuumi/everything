@@ -21,6 +21,7 @@ use super::{
 };
 use crate::credentials::{CredentialError, CredentialKey, CredentialSecret, NativeCredentialStore};
 use crate::permissions::ExecutionAuthority;
+use crate::tools::RetainedToolOwner;
 
 const MAX_CONFIG_BYTES: usize = 16 * 1_024;
 const MAX_REQUEST_BYTES: usize = 512 * 1_024;
@@ -286,6 +287,7 @@ pub struct SystemOneSelector {
     credentials: Option<NativeCredentialStore>,
     configuration_failure: Option<ConfigurationError>,
     admission: Arc<Semaphore>,
+    _retained_owner: Option<RetainedToolOwner>,
 }
 
 impl SystemOneSelector {
@@ -299,6 +301,7 @@ impl SystemOneSelector {
             credentials,
             configuration_failure: None,
             admission: Arc::new(Semaphore::new(4)),
+            _retained_owner: None,
         }
     }
 
@@ -320,6 +323,11 @@ impl SystemOneSelector {
         self
     }
 
+    pub(crate) fn with_retained_owner(mut self, owner: RetainedToolOwner) -> Self {
+        self._retained_owner = Some(owner);
+        self
+    }
+
     pub(crate) fn reconfigured(
         &self,
         configuration: SelectionConfig,
@@ -334,6 +342,7 @@ impl SystemOneSelector {
             credentials,
             configuration_failure: None,
             admission: Arc::clone(&self.admission),
+            _retained_owner: self._retained_owner.clone(),
         }
     }
 

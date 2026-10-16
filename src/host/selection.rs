@@ -20,6 +20,7 @@ use crate::selector::system_one::{
     SystemOneSelector,
 };
 use crate::selector::{SEARCH_TOOLS_NAME, SelectionMethod, ToolSelection, ToolSelector};
+use crate::tools::RetainedToolOwner;
 use crate::tools::ToolRegistry;
 
 const MAX_TICKETS: usize = 16;
@@ -351,8 +352,9 @@ impl SelectionPreflight {
             .configuration()
             .map_err(SelectionPreflightError::Configuration)?;
         let remote_enabled = matches!(settings, SelectionSettings::SystemOne { .. });
-        let selector =
-            SystemOneSelector::new(local, configuration).with_credential_store(credentials.clone());
+        let selector = SystemOneSelector::new(local, configuration)
+            .with_credential_store(credentials.clone())
+            .with_retained_owner(RetainedToolOwner::new(agent.clone()));
         let local = selector.reconfigured(SelectionConfig::Local, credentials.clone());
         Ok(Self {
             inner: Arc::new(PreflightInner {
