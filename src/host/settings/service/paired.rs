@@ -32,8 +32,8 @@ use super::{ServiceCore, SettingsService, SettingsServiceError};
 pub(crate) use super::super::authority::PairedSettingsParent;
 
 pub(crate) struct PairedParentAdmission {
-    request: OwnedCommittedSettingsBind,
     parent: Result<PairedSettingsParent, SettingsServiceError>,
+    request: OwnedCommittedSettingsBind,
 }
 
 impl fmt::Debug for PairedParentAdmission {
@@ -46,10 +46,10 @@ impl PairedParentAdmission {
     pub(crate) fn into_parts(
         self,
     ) -> (
-        OwnedCommittedSettingsBind,
         Result<PairedSettingsParent, SettingsServiceError>,
+        OwnedCommittedSettingsBind,
     ) {
-        (self.request, self.parent)
+        (self.parent, self.request)
     }
 }
 

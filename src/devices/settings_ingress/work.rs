@@ -18,6 +18,10 @@ use super::{
 };
 use crate::crypto::EncryptedEnvelope;
 use crate::devices::SettingsConnectionIdentity;
+use crate::host::settings::agent::{
+    PairedControlSendError, PairedHandoffReadError, PairedResultCorrelation, PairedResultHandoff,
+    SettingsAgentRuntime,
+};
 use crate::host::settings::service::{PairedSettingsParent, SettingsReceiptAuthority};
 use crate::protocol::{DeviceId, UnixMillis};
 use crate::storage::{StoredSettingsBindReply, StoredSettingsCommandReply};
@@ -171,7 +175,7 @@ pub(crate) struct ReplyBuildPermit {
     armed: bool,
 }
 
-pub(in crate::devices) enum SettingsReplyBuildRequest {
+pub(crate) enum SettingsReplyBuildRequest {
     Bind {
         parent: PairedSettingsParent,
         request: Box<OwnedCommittedSettingsBind>,
@@ -197,8 +201,30 @@ pub(in crate::devices) struct PendingSettingsReplyBuild {
     slot: Arc<()>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(in crate::devices) enum PairedResultAdmissionReason {
+    Receive(ReplyBuildAdmissionReason),
+    RejectedBind,
+}
+
+pub(in crate::devices) struct PairedResultAdmissionFailure {
+    pub(in crate::devices) reason: PairedResultAdmissionReason,
+    pub(in crate::devices) handoff: PairedResultHandoff,
+}
+
+pub(crate) struct PairedWorkAdoption {
+    correlation: PairedResultCorrelation,
+}
+
+enum RegisteredReplyBuildOwner {
+    Direct(SettingsReplyBuildRequest),
+    Supervised(Box<PairedResultHandoff>),
+}
+
 struct RegisteredReplyBuild {
-    request: SettingsReplyBuildRequest,
+    adoption: Option<PairedWorkAdoption>,
+    adoption_sent: bool,
+    request: RegisteredReplyBuildOwner,
     permit: ReplyBuildPermit,
 }
 
@@ -416,6 +442,24 @@ impl fmt::Debug for ReplyBuildAdmissionFailure {
 impl fmt::Debug for PendingSettingsReplyBuild {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str("PendingSettingsReplyBuild([retained work])")
+    }
+}
+
+impl fmt::Debug for PairedResultAdmissionFailure {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("PairedResultAdmissionFailure([retained handoff])")
+    }
+}
+
+impl PairedWorkAdoption {
+    pub(crate) fn correlation(&self) -> &PairedResultCorrelation {
+        &self.correlation
+    }
+}
+
+impl fmt::Debug for PairedWorkAdoption {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("PairedWorkAdoption([registered custody])")
     }
 }
 
@@ -678,8 +722,94 @@ impl SettingsReceiveWork {
             Err(reason) => return Err(ReplyBuildAdmissionFailure { reason, request }),
         };
         let slot = Arc::clone(&permit.slot);
-        self.build = Some(RegisteredReplyBuild { request, permit });
+        self.build = Some(RegisteredReplyBuild {
+            adoption: None,
+            adoption_sent: true,
+            request: RegisteredReplyBuildOwner::Direct(request),
+            permit,
+        });
         Ok(PendingSettingsReplyBuild { slot })
+    }
+
+    pub(in crate::devices) fn try_adopt_paired_result(
+        &mut self,
+        connection: &Arc<SettingsConnectionIdentity>,
+        mut handoff: PairedResultHandoff,
+    ) -> Result<PendingSettingsReplyBuild, PairedResultAdmissionFailure> {
+        let request = match handoff.reply_request_mut() {
+            Ok(request) => request,
+            Err(error) => {
+                let reason = match error {
+                    PairedHandoffReadError::Closed => {
+                        PairedResultAdmissionReason::Receive(ReplyBuildAdmissionReason::Closed)
+                    }
+                    PairedHandoffReadError::RejectedBind => {
+                        PairedResultAdmissionReason::RejectedBind
+                    }
+                    PairedHandoffReadError::Bookkeeping => {
+                        self.ledger.fail();
+                        PairedResultAdmissionReason::Receive(ReplyBuildAdmissionReason::Bookkeeping)
+                    }
+                };
+                return Err(PairedResultAdmissionFailure { reason, handoff });
+            }
+        };
+        let permit = match self.reserve_reply_build(connection, request) {
+            Ok(permit) => permit,
+            Err(reason) => {
+                return Err(PairedResultAdmissionFailure {
+                    reason: PairedResultAdmissionReason::Receive(reason),
+                    handoff,
+                });
+            }
+        };
+        let slot = Arc::clone(&permit.slot);
+        self.build = Some(RegisteredReplyBuild {
+            adoption: None,
+            adoption_sent: false,
+            request: RegisteredReplyBuildOwner::Supervised(Box::new(handoff)),
+            permit,
+        });
+        Ok(PendingSettingsReplyBuild { slot })
+    }
+
+    pub(in crate::devices) fn try_ack_paired_adoption(
+        &mut self,
+        runtime: &SettingsAgentRuntime,
+    ) -> Result<bool, SettingsReceiveError> {
+        self.ledger.check_admission()?;
+        let Some(record) = self.build.as_mut() else {
+            return Ok(true);
+        };
+        if record.adoption_sent {
+            return Ok(true);
+        }
+        let RegisteredReplyBuildOwner::Supervised(handoff) = &record.request else {
+            return Err(self.ledger.fail());
+        };
+        let proof = match record.adoption.take() {
+            Some(proof) => proof,
+            None => {
+                let correlation = handoff
+                    .adoption_correlation()
+                    .ok_or_else(|| self.ledger.fail())?;
+                PairedWorkAdoption { correlation }
+            }
+        };
+        match runtime.try_ack_paired_adoption(proof) {
+            Ok(()) => {
+                record.adoption_sent = true;
+                Ok(true)
+            }
+            Err(PairedControlSendError::Full(proof)) => {
+                record.adoption = Some(proof);
+                Ok(false)
+            }
+            Err(PairedControlSendError::Closed(proof)) => {
+                record.adoption = Some(proof);
+                Err(SettingsReceiveError::Closed)
+            }
+        }
     }
 
     fn reserve_reply_build(
@@ -766,14 +896,17 @@ impl SettingsReceiveWork {
                 Err(self.ledger.fail())
             };
         };
-        let witness = record.request.witness();
+        let RegisteredReplyBuildOwner::Direct(request) = &record.request else {
+            return Err(self.ledger.fail());
+        };
+        let witness = request.witness();
         let joined = witness.build.as_ref().ok_or_else(|| self.ledger.fail())?;
         if !record.permit.armed
             || !Arc::ptr_eq(&record.permit.ledger, &self.ledger)
             || !Arc::ptr_eq(&witness.ledger, &self.ledger)
             || !Arc::ptr_eq(&joined.association, &record.permit.association)
             || joined.claim != ReplyBuildClaim::Claimed
-            || !record.request.matches_association(&joined.association)
+            || !request.matches_association(&joined.association)
             || counts.build.as_ref().is_none_or(|slot| {
                 !Arc::ptr_eq(&slot.identity, &record.permit.slot)
                     || !Arc::ptr_eq(&slot.association, &record.permit.association)
@@ -781,14 +914,25 @@ impl SettingsReceiveWork {
         {
             return Err(self.ledger.fail());
         }
-        let mut record = self.build.take().ok_or_else(|| self.ledger.fail())?;
-        counts.build = None;
-        record.permit.armed = false;
-        drop(counts);
-        let RegisteredReplyBuild { request, permit } = record;
-        drop(permit);
-        self.ledger.changed.notify_waiters();
-        Ok(Some(request))
+        let record = self.build.take().ok_or_else(|| self.ledger.fail())?;
+        match record {
+            RegisteredReplyBuild {
+                request: RegisteredReplyBuildOwner::Direct(request),
+                mut permit,
+                ..
+            } => {
+                counts.build = None;
+                permit.armed = false;
+                drop(counts);
+                drop(permit);
+                self.ledger.changed.notify_waiters();
+                Ok(Some(request))
+            }
+            record => {
+                self.build = Some(record);
+                Err(self.ledger.fail())
+            }
+        }
     }
 
     pub(in crate::devices) fn admit(

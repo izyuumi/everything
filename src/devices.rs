@@ -28,7 +28,9 @@ pub(crate) use settings_access_reply::{
 #[cfg(unix)]
 pub(crate) use settings_bind_reply::{SettingsBindReplyContractError, SettingsBindReplyPacket};
 #[cfg(unix)]
-pub(crate) use settings_ingress::work::ReplyBuildPermit;
+pub(crate) use settings_ingress::work::{
+    PairedWorkAdoption, ReplyBuildPermit, SettingsReplyBuildRequest,
+};
 #[cfg(unix)]
 pub(crate) use settings_ingress::{
     AccessStatusRejection, AuthenticatedSettingsAccessSource, OwnedVerifiedSettingsAccess,
