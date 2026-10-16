@@ -26,6 +26,7 @@ const SESSION_LIFETIME: Duration = Duration::from_secs(300);
 pub struct SettingsCaller {
     pub(super) authority: Arc<Authority>,
     pub(super) source: CallerSource,
+    agent_identity: Option<Arc<()>>,
 }
 
 #[derive(Clone, Copy)]
@@ -56,9 +57,22 @@ pub enum SettingsOperationOrigin {
     },
 }
 
+#[derive(Clone)]
+pub(crate) struct SettingsAgentBinding {
+    pub(crate) host_id: DeviceId,
+    pub(crate) principal_id: Uuid,
+    pub(crate) native_session_id: Uuid,
+    pub(crate) session_id: Uuid,
+    pub(crate) expires_at: UnixMillis,
+    pub(crate) deadline: Instant,
+    pub(crate) cancellation: CancellationToken,
+}
+
 pub struct SettingsAgentSession {
     authority: Arc<Authority>,
     id: Uuid,
+    native_session_id: Uuid,
+    identity: Arc<()>,
     cancellation: CancellationToken,
 }
 
@@ -162,6 +176,7 @@ struct Sessions {
 
 struct AgentSession {
     native_session_id: Uuid,
+    identity: Arc<()>,
     cancellation: CancellationToken,
 }
 
@@ -228,6 +243,7 @@ impl Authority {
             source: CallerSource::LocalOwner {
                 request_id: call.request.request_id,
             },
+            agent_identity: None,
         })
     }
 
@@ -241,6 +257,7 @@ impl Authority {
             source: CallerSource::LocalOwner {
                 request_id: call.request.request_id,
             },
+            agent_identity: None,
         })
     }
 
@@ -336,6 +353,7 @@ impl Authority {
         Ok(SettingsCaller {
             authority: Arc::clone(self),
             source: CallerSource::NativeUi(proof.session_id),
+            agent_identity: None,
         })
     }
 
@@ -379,6 +397,10 @@ impl Authority {
                     .get(&native_session_id)
                     .ok_or(SettingsServiceError::OutsideScope)?;
                 if agent.native_session_id != native_session_id
+                    || caller
+                        .agent_identity
+                        .as_ref()
+                        .is_none_or(|identity| !Arc::ptr_eq(identity, &agent.identity))
                     || agent.cancellation.is_cancelled()
                     || native.closed
                     || !native.live(now)
@@ -433,10 +455,12 @@ impl Authority {
         }
         let cancellation = native.cancellation.child_token();
         let id = Uuid::new_v4();
+        let identity = Arc::new(());
         match sessions.agents.entry(id) {
             std::collections::btree_map::Entry::Vacant(entry) => {
                 entry.insert(AgentSession {
                     native_session_id,
+                    identity: Arc::clone(&identity),
                     cancellation: cancellation.clone(),
                 });
             }
@@ -447,6 +471,8 @@ impl Authority {
         Ok(SettingsAgentSession {
             authority: Arc::clone(self),
             id,
+            native_session_id,
+            identity,
             cancellation,
         })
     }
@@ -474,9 +500,108 @@ impl Authority {
                 native_session_id,
                 tool,
             },
+            agent_identity: Some(Arc::clone(&session.identity)),
         };
         self.validate(&caller, false)?;
         Ok(caller)
+    }
+
+    pub(super) fn agent_binding(
+        self: &Arc<Self>,
+        session: &SettingsAgentSession,
+    ) -> Result<SettingsAgentBinding, SettingsServiceError> {
+        if !Arc::ptr_eq(self, &session.authority) || session.cancellation.is_cancelled() {
+            return Err(SettingsServiceError::OutsideScope);
+        }
+        let sessions = self
+            .sessions
+            .lock()
+            .map_err(|_| SettingsServiceError::Poisoned)?;
+        let child = sessions
+            .agents
+            .get(&session.id)
+            .ok_or(SettingsServiceError::OutsideScope)?;
+        let parent = sessions
+            .values
+            .get(&child.native_session_id)
+            .ok_or(SettingsServiceError::OutsideScope)?;
+        if sessions.closed
+            || child.native_session_id != session.native_session_id
+            || !Arc::ptr_eq(&child.identity, &session.identity)
+            || child.cancellation.is_cancelled()
+            || parent.closed
+            || !parent.live(UnixMillis::now()?)
+        {
+            return Err(SettingsServiceError::OutsideScope);
+        }
+        Ok(SettingsAgentBinding {
+            host_id: self.host_id,
+            principal_id: self.owner_principal,
+            native_session_id: child.native_session_id,
+            session_id: session.id,
+            expires_at: parent.expires_at,
+            deadline: parent.deadline,
+            cancellation: child.cancellation.clone(),
+        })
+    }
+
+    pub(super) fn close_agent(
+        self: &Arc<Self>,
+        session: &SettingsAgentSession,
+    ) -> Result<(Uuid, Uuid), SettingsServiceError> {
+        if !Arc::ptr_eq(self, &session.authority) {
+            return Err(SettingsServiceError::OutsideScope);
+        }
+        let sessions = self
+            .sessions
+            .lock()
+            .map_err(|_| SettingsServiceError::Poisoned)?;
+        if let Some(child) = sessions.agents.get(&session.id) {
+            if child.native_session_id != session.native_session_id
+                || !Arc::ptr_eq(&child.identity, &session.identity)
+            {
+                return Err(SettingsServiceError::OutsideScope);
+            }
+            child.cancellation.cancel();
+        } else if !session.cancellation.is_cancelled() {
+            return Err(SettingsServiceError::OutsideScope);
+        }
+        session.cancellation.cancel();
+        Ok((session.id, session.native_session_id))
+    }
+
+    pub(super) fn agent_cancellation(
+        &self,
+        caller: &SettingsCaller,
+    ) -> Result<Option<CancellationToken>, SettingsServiceError> {
+        if !std::ptr::eq(self, Arc::as_ptr(&caller.authority)) {
+            return Err(SettingsServiceError::OutsideScope);
+        }
+        let CallerSource::SettingsAgent {
+            session_id,
+            native_session_id,
+            ..
+        } = caller.source
+        else {
+            return Ok(None);
+        };
+        let sessions = self
+            .sessions
+            .lock()
+            .map_err(|_| SettingsServiceError::Poisoned)?;
+        let child = sessions
+            .agents
+            .get(&session_id)
+            .ok_or(SettingsServiceError::OutsideScope)?;
+        if child.native_session_id != native_session_id
+            || caller
+                .agent_identity
+                .as_ref()
+                .is_none_or(|identity| !Arc::ptr_eq(identity, &child.identity))
+        {
+            return Err(SettingsServiceError::OutsideScope);
+        }
+        Ok(Some(child.cancellation.clone()))
     }
 
     pub fn require_tool(

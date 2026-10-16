@@ -30,6 +30,7 @@ struct PairingInvitation: Sendable {
         try inviter.verify(signature, message: canonical)
     }
 
+    #if os(iOS)
     func request(identity: DeviceIdentity, confirmedFingerprint: String, now: UInt64) async throws -> WireValue {
         let responder = identity.publicKeys
         guard expires > now, confirmedFingerprint == inviter.fingerprint,
@@ -42,6 +43,7 @@ struct PairingInvitation: Sendable {
         let signature = try await identity.sign(proofBytes + proof)
         return .object(["version": .unsigned(1), "pairing_id": .id(id), "inviter": .id(inviter.deviceID), "responder": responder.wire, "expires_at_ms": .unsigned(expires), "proof": .bytes(proof), "signature": .bytes(signature)])
     }
+    #endif
 
     func finish(_ data: Data, responder: DevicePublicKeys, now: UInt64) throws -> DevicePublicKeys {
         let fields = try WireValue.parse(data, maximum: 4_096).object(keys: ["version", "pairing_id", "inviter", "responder", "expires_at_ms", "signature"], required: ["version", "pairing_id", "inviter", "responder", "expires_at_ms", "signature"])

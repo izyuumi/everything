@@ -1,6 +1,6 @@
 # Native credential entry and reference linking
 
-The macOS Models and Tool Selection sections use a native SecureField sheet backed by the same app-owned `NativeSettingsStore`, native Session and owner client as [Host controls](apple-native-settings-controls.md). The source uses existing [private native credential submission](native-credential-actions.md) and the [owner metadata helper](apple-owner-settings-metadata.md). It creates no second client, model dependency, proof store or credential backend. Target registration and supported-platform validation are integration gates; source parsing does not establish a successful key entry or OS-vault operation.
+The macOS Models and Tool Selection sections use a native SecureField sheet backed by the same app-owned `NativeSettingsStore`, native Session and owner client as [Host controls](apple-native-settings-controls.md). The source uses existing [private native credential submission](native-credential-actions.md) and the [owner metadata helper](apple-owner-settings-metadata.md). It creates no second client, model dependency, proof store or credential backend. Both new leaves are registered only in macOS Sources; all other project objects and iOS membership are preserved. Supported-platform validation remains an integration gate; source parsing does not establish a successful key entry or OS-vault operation.
 
 ## Exact original binding
 
@@ -46,7 +46,7 @@ Window/connection retirement invalidates the old native lifecycle synchronously,
 
 `Cleanup.unlinkedCredentialOperationIDs` is separate historical metadata, not a fabricated Unknown/failure. A known initial storage Completed without an observed successful original metadata link retains its exact receipt, purpose/reference and Host ID after window close under the same eight-owner bound. Retired owners cannot submit another key or link candidate; an already attempted original owner CAS remains inspectable/reconcilable through its original handle/connection. No automatic eviction, key deletion or rollback hides an unlinked result. Reaching eight retained owners visibly refuses a new Open. These in-memory histories do not promise durable UI history or current key presence.
 
-The native credential history displays these original Host/reference/operation identities, including when no new Host draft is available. The coordinator must integrate the additive read-only cleanup label for the new typed field alongside source registration; it must not label historical unlinked storage as current presence or native Unknown.
+The native credential history displays these original Host/reference/operation identities, including when no new Host draft is available. The Host-settings cleanup pane uses the new typed field for a read-only unlinked-storage label and directs the user to the original Models/Tool Selection record. A known clean native report is not labelled an issue merely because a historical unlinked reference is retained; current presence and native Unknown remain distinct.
 
 ## Validation boundary
 
