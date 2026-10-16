@@ -1,5 +1,6 @@
 mod credentials;
 mod devices;
+mod persistence;
 
 pub use devices::NativeDeviceActionResult;
 
