@@ -12,6 +12,13 @@ struct ReplicaViewState: Sendable {
     let connection: String
 }
 
+final class ReplicaSettingsRequestHandle: Sendable, CustomStringConvertible, CustomDebugStringConvertible {
+    fileprivate init() {}
+
+    var description: String { "ReplicaSettingsRequestHandle([redacted])" }
+    var debugDescription: String { description }
+}
+
 actor ReplicaService {
     private let store: ReplicaStore
     private let identity: DeviceIdentity
@@ -34,6 +41,78 @@ actor ReplicaService {
     private var processingInbox = false
     private var inflight: [UUID: ContinuousClock.Instant] = [:]
     private var acknowledgements = Set<UUID>()
+    private var settingsScope: SettingsConnectionScope?
+    private var pendingSettingsAccess: PendingSettingsAccess?
+    private var settingsReceive: SettingsReceiveTicket?
+
+    private final class SettingsConnectionScope: Sendable, CustomStringConvertible, CustomDebugStringConvertible {
+        let socket: RelayConnection
+        let host: DevicePublicKeys
+        let localID: UUID
+        let epoch: UUID
+
+        init(socket: RelayConnection, host: DevicePublicKeys, localID: UUID, epoch: UUID) {
+            self.socket = socket
+            self.host = host
+            self.localID = localID
+            self.epoch = epoch
+        }
+
+        var description: String { "SettingsConnectionScope([redacted])" }
+        var debugDescription: String { description }
+    }
+
+    private enum SettingsAccessPreparation: CustomStringConvertible, CustomDebugStringConvertible {
+        case waiting
+        case preparing
+        case prepared(EncryptedEnvelope)
+
+        var description: String { "SettingsAccessPreparation([redacted])" }
+        var debugDescription: String { description }
+    }
+
+    private final class PendingSettingsAccess: CustomStringConvertible, CustomDebugStringConvertible {
+        let handle: ReplicaSettingsRequestHandle
+        let scope: SettingsConnectionScope
+        let request: RemoteSettingsAccessRequest
+        let wallFloor: UInt64
+        let monotonicFloor: ContinuousClock.Instant
+        let deadline: ContinuousClock.Instant
+        var phase = SettingsAccessPreparation.waiting
+        var retired = false
+
+        init(handle: ReplicaSettingsRequestHandle, scope: SettingsConnectionScope,
+             request: RemoteSettingsAccessRequest, wallFloor: UInt64,
+             monotonicFloor: ContinuousClock.Instant, deadline: ContinuousClock.Instant) {
+            self.handle = handle
+            self.scope = scope
+            self.request = request
+            self.wallFloor = wallFloor
+            self.monotonicFloor = monotonicFloor
+            self.deadline = deadline
+        }
+
+        var description: String { "PendingSettingsAccess([redacted])" }
+        var debugDescription: String { description }
+    }
+
+    private final class SettingsReceiveTicket: Sendable, CustomStringConvertible, CustomDebugStringConvertible {
+        let scope: SettingsConnectionScope
+
+        init(scope: SettingsConnectionScope) { self.scope = scope }
+
+        var description: String { "SettingsReceiveTicket([redacted])" }
+        var debugDescription: String { description }
+    }
+
+    private struct SettingsReceiveFailure: Error, LocalizedError, CustomStringConvertible, CustomDebugStringConvertible {
+        let receive: any Error
+        let settlement: any Error
+
+        var errorDescription: String? { "The received operation and its ownership settlement failed." }
+        var description: String { "SettingsReceiveFailure([redacted])" }
+        var debugDescription: String { description }
+    }
 
     private init(store: ReplicaStore, identity: DeviceIdentity) {
         self.store = store
@@ -51,6 +130,29 @@ actor ReplicaService {
 
     func viewState() async throws -> ReplicaViewState {
         ReplicaViewState(snapshot: try await store.snapshot(), identity: identity.publicKeys, connection: status)
+    }
+
+    func requestSettingsAccess() throws -> ReplicaSettingsRequestHandle {
+        try Task.checkCancellation()
+        guard let scope = settingsScope, isCurrentSettingsScope(scope) else { throw WireError.unavailable }
+        guard pendingSettingsAccess == nil else { throw WireError.queueFull }
+        let monotonicFloor = ContinuousClock.now
+        let wallFloor = try WireID.now()
+        let expires = wallFloor.addingReportingOverflow(30_000)
+        guard !expires.overflow, expires.partialValue <= UInt64(Int64.max) else { throw WireError.expired }
+        let time = try RemoteSettingsRequestTime(issuedAt: wallFloor, expiresAt: expires.partialValue)
+        let request = try RemoteSettingsAccessRequest(hostID: scope.host.deviceID, queryID: UUID(), time: time)
+        let handle = ReplicaSettingsRequestHandle()
+        pendingSettingsAccess = PendingSettingsAccess(
+            handle: handle, scope: scope, request: request, wallFloor: wallFloor,
+            monotonicFloor: monotonicFloor, deadline: monotonicFloor.advanced(by: .milliseconds(30_000))
+        )
+        return handle
+    }
+
+    func cancelSettings(_ handle: ReplicaSettingsRequestHandle) {
+        guard let pending = pendingSettingsAccess, pending.handle === handle else { return }
+        retirePendingSettingsAccess(pending)
     }
 
     func configureRelay(_ value: String) async throws {
@@ -203,6 +305,7 @@ actor ReplicaService {
     }
 
     func stop() async {
+        retireSettingsScope()
         epoch = UUID()
         starting = nil
         if let stopping {
@@ -234,6 +337,7 @@ actor ReplicaService {
     }
 
     func disable() async throws {
+        retireSettingsScope()
         disabling = true
         cancelPairing()
         await stop()
@@ -242,14 +346,20 @@ actor ReplicaService {
     }
 
     private func run(origin: RelayOrigin, epoch captured: UUID) async {
+        defer { retireSettingsScope() }
         var attempt = 0
         while !Task.isCancelled && epoch == captured {
             do {
                 _ = try await drainInbox()
                 status = "Connecting"
                 let socket = try await RelayConnection.connect(origin: origin, identity: identity)
-                guard epoch == captured, !Task.isCancelled else { await socket.close(); return }
+                guard epoch == captured, !Task.isCancelled else {
+                    retireSettingsScope(socket: socket)
+                    await socket.close()
+                    return
+                }
                 connection = socket
+                try await installSettingsScope(socket: socket, epoch: captured)
                 inflight.removeAll()
                 acknowledgements.removeAll()
                 reconnectForCapacity = false
@@ -257,9 +367,17 @@ actor ReplicaService {
                 try await withThrowingTaskGroup(of: Void.self) { group in
                     group.addTask { [weak self] in
                         while !Task.isCancelled {
-                            let frame = try await socket.receive()
                             guard let self else { throw CancellationError() }
-                            try await self.handle(frame, socket: socket)
+                            let ticket = try await self.claimSettingsReceive(socket: socket)
+                            do {
+                                try await self.receiveSettingsOwnedFrame(socket: socket, ticket: ticket)
+                            } catch {
+                                await self.retireSettingsScope(socket: socket)
+                                do { try await self.finishSettingsReceive(ticket) }
+                                catch let settlement { throw SettingsReceiveFailure(receive: error, settlement: settlement) }
+                                throw error
+                            }
+                            try await self.finishSettingsReceive(ticket)
                         }
                     }
                     group.addTask { [weak self] in
@@ -274,9 +392,11 @@ actor ReplicaService {
                     }
                     do {
                         _ = try await group.next()
+                        retireSettingsScope(socket: socket)
                         group.cancelAll()
                         await socket.close()
                     } catch {
+                        retireSettingsScope(socket: socket)
                         group.cancelAll()
                         await socket.close()
                         throw error
@@ -288,6 +408,7 @@ actor ReplicaService {
             } catch let error as WireError {
                 if Task.isCancelled || epoch != captured { break }
                 if error != .network && error != .timeout {
+                    retireSettingsScope()
                     await connection?.close()
                     connection = nil
                     status = error.localizedDescription
@@ -299,12 +420,14 @@ actor ReplicaService {
                 if Task.isCancelled || epoch != captured { break }
                 status = "Connection interrupted; retrying"
             } catch {
+                retireSettingsScope()
                 await connection?.close()
                 connection = nil
                 status = "Device operation failed; inspection is required"
                 runner = nil
                 return
             }
+            retireSettingsScope()
             await connection?.close()
             connection = nil
             attempt = min(attempt + 1, 5)
@@ -315,6 +438,7 @@ actor ReplicaService {
 
     private func pump(socket: RelayConnection, synchronize refresh: Bool) async throws {
         try Task.checkCancellation()
+        try await preparePendingSettingsAccess(socket: socket)
         try await store.checkActive()
         let inboxDrained = try await drainInbox()
         if refresh, inboxDrained {
@@ -421,11 +545,137 @@ actor ReplicaService {
                     let own = identity.publicKeys
                     guard try fields.required("device_id").identifier == own.deviceID else { throw WireError.identity }
                     _ = try WireID.timestamp(fields.required("revoked_at"))
+                    retireSettingsScope()
                     try await store.disable(messageID: record.id, host: host)
                     throw WireError.revoked
                 default: throw WireError.invalid
                 }
             }
         }
+    }
+
+    private func checkSettingsConnection(socket: RelayConnection, epoch captured: UUID) throws {
+        try Task.checkCancellation()
+        guard epoch == captured, connection === socket, stopping == nil, !disabling else { throw WireError.unavailable }
+    }
+
+    private func isCurrentSettingsScope(_ scope: SettingsConnectionScope) -> Bool {
+        settingsScope === scope && connection === scope.socket && epoch == scope.epoch
+            && stopping == nil && !disabling && !Task.isCancelled
+    }
+
+    private func installSettingsScope(socket: RelayConnection, epoch captured: UUID) async throws {
+        try checkSettingsConnection(socket: socket, epoch: captured)
+        let host = try await store.host()
+        try checkSettingsConnection(socket: socket, epoch: captured)
+        guard let host else { throw WireError.identity }
+        try await store.checkActive(host: host)
+        try checkSettingsConnection(socket: socket, epoch: captured)
+        let localID = try await store.identityID()
+        try checkSettingsConnection(socket: socket, epoch: captured)
+        guard localID == identity.publicKeys.deviceID else { throw WireError.identity }
+        try await store.checkActive(host: host)
+        try checkSettingsConnection(socket: socket, epoch: captured)
+        guard settingsScope == nil, pendingSettingsAccess == nil, settingsReceive == nil else { throw WireError.queueFull }
+        settingsScope = SettingsConnectionScope(socket: socket, host: host, localID: identity.publicKeys.deviceID, epoch: captured)
+    }
+
+    private func retirePendingSettingsAccess(_ pending: PendingSettingsAccess) {
+        pending.retired = true
+        if case .preparing = pending.phase { return }
+        if pendingSettingsAccess === pending { pendingSettingsAccess = nil }
+    }
+
+    private func retireSettingsScope(socket: RelayConnection? = nil) {
+        if let scope = settingsScope, socket == nil || scope.socket === socket {
+            settingsScope = nil
+        }
+        if let pending = pendingSettingsAccess, socket == nil || pending.scope.socket === socket {
+            retirePendingSettingsAccess(pending)
+        }
+    }
+
+    private func isCurrentSettingsOriginal(_ pending: PendingSettingsAccess) throws -> Bool {
+        guard pendingSettingsAccess === pending, !pending.retired, isCurrentSettingsScope(pending.scope) else { return false }
+        let monotonic = ContinuousClock.now
+        let wall = try WireID.now()
+        return wall >= pending.wallFloor && wall < pending.request.time.expiresAt
+            && monotonic >= pending.monotonicFloor && monotonic < pending.deadline
+    }
+
+    private func checkSettingsStore(_ pending: PendingSettingsAccess) async throws -> Bool {
+        guard try isCurrentSettingsOriginal(pending) else { return false }
+        let scope = pending.scope
+        try await store.checkActive(host: scope.host)
+        guard try isCurrentSettingsOriginal(pending) else { return false }
+        let localID = try await store.identityID()
+        guard try isCurrentSettingsOriginal(pending) else { return false }
+        guard localID == scope.localID else { throw WireError.identity }
+        return true
+    }
+
+    private func prepareSettingsAccessEnvelope(_ pending: PendingSettingsAccess) async throws -> EncryptedEnvelope? {
+        guard try isCurrentSettingsOriginal(pending) else { return nil }
+        guard try await checkSettingsStore(pending), try isCurrentSettingsOriginal(pending) else { return nil }
+        let envelope = try await identity.sealSettings(pending.request, recipient: pending.scope.host)
+        guard try isCurrentSettingsOriginal(pending) else { return nil }
+        guard try await checkSettingsStore(pending), try isCurrentSettingsOriginal(pending) else { return nil }
+        guard envelope.header.sender == pending.scope.localID,
+              envelope.header.recipient == pending.request.hostID,
+              envelope.header.expires == pending.request.time.expiresAt,
+              envelope.header.created >= pending.wallFloor,
+              envelope.header.expires > envelope.header.created,
+              envelope.header.expires - envelope.header.created <= 30_000 else { throw WireError.identity }
+        return envelope
+    }
+
+    private func preparePendingSettingsAccess(socket: RelayConnection) async throws {
+        guard let pending = pendingSettingsAccess, pending.scope.socket === socket else { return }
+        guard try isCurrentSettingsOriginal(pending) else {
+            retirePendingSettingsAccess(pending)
+            return
+        }
+        guard case .waiting = pending.phase else { return }
+        pending.phase = .preparing
+        do {
+            do {
+                let envelope = try await prepareSettingsAccessEnvelope(pending)
+                if let envelope, try isCurrentSettingsOriginal(pending) {
+                    pending.phase = .prepared(envelope)
+                }
+            }
+            if case .preparing = pending.phase {
+                pending.phase = .waiting
+                retirePendingSettingsAccess(pending)
+            }
+        } catch {
+            pending.phase = .waiting
+            retirePendingSettingsAccess(pending)
+            throw error
+        }
+    }
+
+    private func claimSettingsReceive(socket: RelayConnection) throws -> SettingsReceiveTicket {
+        try Task.checkCancellation()
+        guard let scope = settingsScope, scope.socket === socket, isCurrentSettingsScope(scope) else { throw WireError.unavailable }
+        guard settingsReceive == nil else { throw WireError.queueFull }
+        let ticket = SettingsReceiveTicket(scope: scope)
+        settingsReceive = ticket
+        return ticket
+    }
+
+    private func receiveSettingsOwnedFrame(socket: RelayConnection, ticket: SettingsReceiveTicket) async throws {
+        let frame = try await socket.receive()
+        guard settingsReceive === ticket, ticket.scope.socket === socket,
+              isCurrentSettingsScope(ticket.scope) else { throw WireError.unavailable }
+        try await handle(frame, socket: socket)
+    }
+
+    private func finishSettingsReceive(_ ticket: SettingsReceiveTicket) throws {
+        guard settingsReceive === ticket else {
+            retireSettingsScope(socket: ticket.scope.socket)
+            throw WireError.conflict
+        }
+        settingsReceive = nil
     }
 }
