@@ -455,7 +455,13 @@ final class ThisMacSettingsStore {
     }
 
     private var latestKnownRevision: UInt64 {
-        max(max(snapshot?.revision ?? 0, appearanceSnapshot?.revision ?? 0), max(revision(of: lastPreferenceResult), revision(of: lastAppearanceResult)))
+        var known = max(max(snapshot?.revision ?? 0, appearanceSnapshot?.revision ?? 0), max(revision(of: lastPreferenceResult), revision(of: lastAppearanceResult)))
+        for record in notificationRecords.values {
+            if let result = record.result, case .conflict(let observedRevision) = result.outcome {
+                known = max(known, observedRevision)
+            }
+        }
+        return known
     }
 
     private func revision(of result: DevicePreferenceResult?) -> UInt64 {
