@@ -336,9 +336,22 @@ enum CliError {
     ToolOptions(&'static str),
 }
 
-#[tokio::main]
-async fn main() -> ExitCode {
+fn main() -> ExitCode {
     let arguments = Arguments::parse();
+    let runtime = match tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(runtime) => runtime,
+        Err(error) => {
+            eprintln!("everything: could not start async runtime: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
+    runtime.block_on(run_cli(arguments))
+}
+
+async fn run_cli(arguments: Arguments) -> ExitCode {
     let cancellation = CancellationToken::new();
     let operation = execute(arguments, cancellation.clone());
     tokio::pin!(operation);

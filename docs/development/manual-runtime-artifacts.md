@@ -29,4 +29,6 @@ Use a new disposable download directory. Record the commit and tree from that ex
 
 Artifact retention runs no CLI command, Host, model, helper or walkthrough. It adds no automated runtime verification. No upload or runtime result is established merely by this workflow change.
 
+The independent default-false `inspect_cli_startup` input can run public help/version directly on the just-built default Linux executable, with disposable HOME/TMPDIR. It neither enables nor requires artifact retention. See [CLI startup](cli-startup.md) for the explicit manual dispatch and the exact source/command evidence to record. Its optional step follows artifact upload and precedes the all-feature build; retaining an executable alone still runs no CLI command.
+
 Any execution remains a separate, explicitly scoped manual action under the [validation policy](validation.md): use disposable state, bounded resources and the actual downloaded binary's identity, and record commands, outcomes, cleanup and unavailable platform or provider behavior. A successful compilation or upload does not establish Settings integration, OS credential storage, Apple UI behavior, inference, security review or the walkthrough acceptance in [#118](https://github.com/izyuumi/everything/issues/118). Deferred automated coverage remains tracked in [#32](https://github.com/izyuumi/everything/issues/32).
