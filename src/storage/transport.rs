@@ -413,7 +413,7 @@ impl Store {
         validate_time(now)?;
         validate_limit(limit)?;
         let connection = self.connection()?;
-        let mut statement = connection.prepare("SELECT o.id, o.device_id, o.envelope, o.created_at, o.not_before, o.attempts, o.delivered_at FROM outbox o JOIN transport_outbox t ON t.message_id = o.id JOIN devices d ON d.id = o.device_id WHERE o.delivered_at IS NULL AND o.not_before <= ?1 AND t.expires_at > ?1 AND d.revoked_at IS NULL ORDER BY o.not_before, o.created_at, o.id LIMIT ?2")?;
+        let mut statement = connection.prepare("SELECT o.id, o.device_id, o.envelope, o.created_at, o.not_before, o.attempts, o.delivered_at FROM outbox o JOIN transport_outbox t ON t.message_id = o.id JOIN devices d ON d.id = o.device_id WHERE o.delivered_at IS NULL AND o.not_before <= ?1 AND t.expires_at > ?1 AND d.revoked_at IS NULL AND NOT EXISTS (SELECT 1 FROM settings_transport_private_outbox AS p WHERE p.message_id=o.id) ORDER BY o.not_before, o.created_at, o.id LIMIT ?2")?;
         collect_rows(statement.query_map(params![now, limit as i64], outbox_row)?)
     }
 
@@ -431,6 +431,7 @@ impl Store {
         }
         let mut connection = self.connection()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Deferred)?;
+        super::settings_transport::require_ordinary_outbox(&transaction, message_id)?;
         let row: Option<(String,Vec<u8>)> = transaction.query_row("SELECT o.device_id,o.envelope FROM outbox o JOIN transport_outbox t ON t.message_id=o.id JOIN transport_endpoint e ON e.singleton=1 WHERE o.id=?1 AND o.delivered_at IS NULL AND t.expires_at>?2 AND e.revoked_at IS NULL",params![message_id,now],|row|Ok((row.get(0)?,row.get(1)?))).optional()?;
         let Some((recipient, bytes)) = row else {
             return Ok(false);
@@ -910,19 +911,11 @@ fn enqueue_transport(connection: &Connection, item: &TransportOutboxInsert) -> S
             "local endpoint is revoked or unconfigured".into(),
         ));
     }
-    let (global_count, global_bytes): (i64, i64) = connection.query_row(
-        "SELECT count(*),coalesce(sum(length(envelope)),0) FROM outbox WHERE delivered_at IS NULL",
-        [],
-        |row| Ok((row.get(0)?, row.get(1)?)),
+    super::settings_transport::check_outbox_capacity(
+        connection,
+        &item.message.device_id,
+        item.message.envelope.len(),
     )?;
-    let (peer_count,peer_bytes):(i64,i64)=connection.query_row("SELECT count(*),coalesce(sum(length(envelope)),0) FROM outbox WHERE device_id=?1 AND delivered_at IS NULL",[&item.message.device_id],|row|Ok((row.get(0)?,row.get(1)?)))?;
-    if global_count >= 1_024
-        || global_bytes + item.message.envelope.len() as i64 > 128 * 1_048_576
-        || peer_count >= 64
-        || peer_bytes + item.message.envelope.len() as i64 > 16 * 1_048_576
-    {
-        return Err(StorageError::TransportCapacity("encrypted sender outbox"));
-    }
     connection.execute(
         "INSERT INTO outbox(id,device_id,envelope,created_at,not_before) VALUES (?1,?2,?3,?4,?5)",
         params![
