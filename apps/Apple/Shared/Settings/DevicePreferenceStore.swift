@@ -10,6 +10,7 @@ private enum PreferenceSQLValue {
 private final class PreferenceDatabase: @unchecked Sendable {
     let handle: OpaquePointer
     private let transient = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
+    private var usable = true
 
     init(url: URL) throws {
         var opened: OpaquePointer?
@@ -26,6 +27,7 @@ private final class PreferenceDatabase: @unchecked Sendable {
 
     @discardableResult
     func rows<T>(_ sql: String, _ values: [PreferenceSQLValue] = [], map: (OpaquePointer) throws -> T) throws -> [T] {
+        guard usable else { throw DevicePreferenceError.uncertain }
         var prepared: OpaquePointer?
         try check(sqlite3_prepare_v2(handle, sql, -1, &prepared, nil))
         guard let prepared else { throw DevicePreferenceError.storage }
@@ -62,7 +64,10 @@ private final class PreferenceDatabase: @unchecked Sendable {
         } catch {
             let original = error
             do { try execute("ROLLBACK") }
-            catch { throw DevicePreferenceError.uncertain }
+            catch {
+                usable = false
+                throw DevicePreferenceError.uncertain
+            }
             throw original
         }
     }
@@ -194,6 +199,9 @@ actor DevicePreferenceStore {
             let completion = sqlite3_column_int64(row, 2)
             let attention = sqlite3_column_int64(row, 3)
             guard try PreferenceDatabase.text(row, 0) == deviceID.uuidString.lowercased(), revision > 0,
+                  sqlite3_column_type(row, 1) == SQLITE_INTEGER,
+                  sqlite3_column_type(row, 2) == SQLITE_INTEGER,
+                  sqlite3_column_type(row, 3) == SQLITE_INTEGER,
                   [0, 1].contains(completion), [0, 1].contains(attention) else { throw DevicePreferenceError.storage }
             return DevicePreferenceSnapshot(deviceID: deviceID, revision: UInt64(revision), completion: completion == 1, attention: attention == 1)
         }
@@ -204,7 +212,7 @@ actor DevicePreferenceStore {
     private func storedRequest(_ requestID: UUID) throws -> (original: Data, result: DevicePreferenceResult)? {
         try database.rows("SELECT original,outcome,revision FROM requests WHERE id=?", [.text(requestID.uuidString.lowercased())]) { row in
             let revision = sqlite3_column_int64(row, 2)
-            guard revision > 0 else { throw DevicePreferenceError.storage }
+            guard sqlite3_column_type(row, 2) == SQLITE_INTEGER, revision > 0 else { throw DevicePreferenceError.storage }
             let outcome: DevicePreferenceResult.Outcome
             switch try PreferenceDatabase.text(row, 1) {
             case "applied": outcome = .applied(revision: UInt64(revision))

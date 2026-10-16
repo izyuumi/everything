@@ -4,6 +4,88 @@
     };
     "objectVersion" = "56";
     "objects" = {
+        "8295E3895BA1FB6AE639DC68" = {
+            "isa" = "PBXFileReference";
+            "lastKnownFileType" = "sourcecode.swift";
+            "path" = "DevicePreferences.swift";
+            "sourceTree" = "<group>";
+        };
+        "4B10A4363F9D50A7E62728EF" = {
+            "isa" = "PBXBuildFile";
+            "fileRef" = "8295E3895BA1FB6AE639DC68";
+        };
+        "0D816A739677EEEBF8A2AC3B" = {
+            "isa" = "PBXBuildFile";
+            "fileRef" = "8295E3895BA1FB6AE639DC68";
+        };
+        "9B8F906935FE8E0619E40206" = {
+            "isa" = "PBXFileReference";
+            "lastKnownFileType" = "sourcecode.swift";
+            "path" = "DevicePreferenceStore.swift";
+            "sourceTree" = "<group>";
+        };
+        "6BCCF2088CA88E811E673E9A" = {
+            "isa" = "PBXBuildFile";
+            "fileRef" = "9B8F906935FE8E0619E40206";
+        };
+        "BF86DDE04FF9CD4298BF9C3F" = {
+            "isa" = "PBXBuildFile";
+            "fileRef" = "9B8F906935FE8E0619E40206";
+        };
+        "452443D1E59DD273C5A2A0E9" = {
+            "isa" = "PBXFileReference";
+            "lastKnownFileType" = "sourcecode.swift";
+            "path" = "NotificationAuthorization.swift";
+            "sourceTree" = "<group>";
+        };
+        "CBC431BA93DCE5CACC66E10B" = {
+            "isa" = "PBXBuildFile";
+            "fileRef" = "452443D1E59DD273C5A2A0E9";
+        };
+        "2F3AB4CB8B06E5D28B4F2F33" = {
+            "isa" = "PBXBuildFile";
+            "fileRef" = "452443D1E59DD273C5A2A0E9";
+        };
+        "C9D6D47BC3E2F66D3C0F8322" = {
+            "isa" = "PBXFileReference";
+            "lastKnownFileType" = "sourcecode.swift";
+            "path" = "DeviceNotificationActions.swift";
+            "sourceTree" = "<group>";
+        };
+        "7E7D8D78E755D9A44588FF03" = {
+            "isa" = "PBXBuildFile";
+            "fileRef" = "C9D6D47BC3E2F66D3C0F8322";
+        };
+        "C89ED0CC74EE3AF87D4A7D7F" = {
+            "isa" = "PBXBuildFile";
+            "fileRef" = "C9D6D47BC3E2F66D3C0F8322";
+        };
+        "2CBC28A687F581018E52F2FE" = {
+            "isa" = "PBXFileReference";
+            "lastKnownFileType" = "sourcecode.swift";
+            "path" = "SecureCredentialField.swift";
+            "sourceTree" = "<group>";
+        };
+        "F268C94F1107E41A24BC4E7C" = {
+            "isa" = "PBXBuildFile";
+            "fileRef" = "2CBC28A687F581018E52F2FE";
+        };
+        "99A19055582DE7DB5A06C02F" = {
+            "isa" = "PBXBuildFile";
+            "fileRef" = "2CBC28A687F581018E52F2FE";
+        };
+        "C1A2AE12E15AD7A6C9A05F56" = {
+            "isa" = "PBXGroup";
+            "children" = (
+                "8295E3895BA1FB6AE639DC68",
+                "9B8F906935FE8E0619E40206",
+                "452443D1E59DD273C5A2A0E9",
+                "C9D6D47BC3E2F66D3C0F8322",
+                "2CBC28A687F581018E52F2FE",
+            );
+            "path" = "Shared/Settings";
+            "sourceTree" = "<group>";
+        };
         "AD5EAE1DA3A8E6119F90EB1B" = {
             "isa" = "PBXFileReference";
             "lastKnownFileType" = "sourcecode.swift";
@@ -165,6 +247,7 @@
                 "4C553FB1BE251C19F491FFB4",
                 "5F967CF61D4A00DB208E1593",
                 "99B2612622859F92D7197CBF",
+                "C1A2AE12E15AD7A6C9A05F56",
             );
             "sourceTree" = "<group>";
         };
@@ -183,6 +266,11 @@
                 "41E89F0FF41AC64FCC039931",
                 "7DF0769529FE9CB53513AC4F",
                 "2AB3C33482D817B6FB63119E",
+                "4B10A4363F9D50A7E62728EF",
+                "6BCCF2088CA88E811E673E9A",
+                "CBC431BA93DCE5CACC66E10B",
+                "7E7D8D78E755D9A44588FF03",
+                "F268C94F1107E41A24BC4E7C",
             );
             "runOnlyForDeploymentPostprocessing" = "0";
         };
@@ -535,6 +623,11 @@
                 "6EA9EDFFE07E0A188A4CFB0A",
                 "87A53524FEB5A5438A17F270",
                 "7B2EEFDCE98202E283958730",
+                "0D816A739677EEEBF8A2AC3B",
+                "BF86DDE04FF9CD4298BF9C3F",
+                "2F3AB4CB8B06E5D28B4F2F33",
+                "C89ED0CC74EE3AF87D4A7D7F",
+                "99A19055582DE7DB5A06C02F",
             );
             "runOnlyForDeploymentPostprocessing" = "0";
         };
