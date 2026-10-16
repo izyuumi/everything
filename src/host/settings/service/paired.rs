@@ -1,3 +1,7 @@
+mod access;
+
+pub(crate) use access::{QualifiedSettingsAccess, SettingsAccessQualificationError};
+
 mod replies;
 
 pub(crate) use replies::{QualifiedBindReply, SettingsReplyProjectionError};
