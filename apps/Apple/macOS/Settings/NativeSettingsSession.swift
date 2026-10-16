@@ -49,6 +49,27 @@ actor NativeSettingsSession {
             }
         }
 
+        fileprivate func actionBounds(_ details: Details, operationID: UUID) throws -> (expiresAt: UInt64, deadline: ContinuousClock.Instant) {
+            try validateLifetime()
+            guard details.operation.binding.requestID == operationID, details.target.requestID == operationID,
+                  details.operation.binding.clientSessionID == parentID,
+                  details.operation.binding.scope == .host(hostID: hostID),
+                  details.operation.origin == .settingsAgent(sessionID: opened.chatID, nativeSessionID: parentID),
+                  case .awaitingAction(let reference) = details.operation.phase else {
+                throw NativeSettingsSessionError.invalidRequest
+            }
+            return (min(opened.expiresAt, min(reference.expiresAt, details.operation.binding.expiresAt)), deadline)
+        }
+
+        @MainActor
+        fileprivate func captureAction(_ details: Details, operationID: UUID, gate: NativeSettingsGate) throws -> NativeSettingsGate.Capture {
+            try validatePresentation(gate)
+            let bounds = try actionBounds(details, operationID: operationID)
+            let captured = try gate.capture(expiresAt: bounds.expiresAt)
+            return NativeSettingsGate.Capture(generation: captured.generation, expiresAt: captured.expiresAt,
+                                              deadline: min(captured.deadline, bounds.deadline))
+        }
+
         fileprivate func validate(issuer: UUID, gate: NativeSettingsGate, parentID: UUID, hostID: UUID) throws {
             try validateOwner(gate)
             guard self.issuer == issuer, self.parentID == parentID, self.hostID == hostID else {
@@ -88,10 +109,32 @@ actor NativeSettingsSession {
     struct AssistantDetailsReceipt: Sendable {
         let original: AssistantOperationHandle
         let details: Details
+        private let retainedBounds: (expiresAt: UInt64, deadline: ContinuousClock.Instant)?
 
-        fileprivate init(original: AssistantOperationHandle, details: Details) {
+        fileprivate init(original: AssistantOperationHandle, details: Details,
+                         bounds: (expiresAt: UInt64, deadline: ContinuousClock.Instant)?) {
             self.original = original
             self.details = details
+            retainedBounds = bounds
+        }
+
+        func presentationBounds() throws -> (expiresAt: UInt64, deadline: ContinuousClock.Instant) {
+            guard let retainedBounds else { throw NativeSettingsSessionError.invalidRequest }
+            let child = try original.chat.actionBounds(details, operationID: original.operationID)
+            let expiresAt = min(retainedBounds.expiresAt, child.expiresAt)
+            let deadline = min(retainedBounds.deadline, child.deadline)
+            guard try NativeSettingsGate.wallTime() < expiresAt, ContinuousClock.now < deadline else {
+                throw NativeSettingsSessionError.expired
+            }
+            return (expiresAt, deadline)
+        }
+
+        @MainActor
+        func capturePresentation(for gate: NativeSettingsGate) throws -> NativeSettingsGate.Capture {
+            let bounds = try presentationBounds()
+            let captured = try original.chat.captureAction(details, operationID: original.operationID, gate: gate)
+            return NativeSettingsGate.Capture(generation: captured.generation, expiresAt: min(captured.expiresAt, bounds.expiresAt),
+                                              deadline: min(captured.deadline, bounds.deadline))
         }
     }
 
@@ -227,14 +270,17 @@ actor NativeSettingsSession {
         let unresolvedOperationIDs: [UUID]
         let pairingLifecycles: [UUID: NativeSettingsWire.PairingLifecycle]
         let unresolvedAssistantOpenRequestIDs: [UUID]
+        let assistantOpenStates: [UUID: NativeSettingsAssistantWire.OpenState]
 
         init(failures: [NativeSettingsSessionError], unresolvedOperationIDs: [UUID],
              pairingLifecycles: [UUID: NativeSettingsWire.PairingLifecycle] = [:],
-             unresolvedAssistantOpenRequestIDs: [UUID] = []) {
+             unresolvedAssistantOpenRequestIDs: [UUID] = [],
+             assistantOpenStates: [UUID: NativeSettingsAssistantWire.OpenState] = [:]) {
             self.failures = failures
             self.unresolvedOperationIDs = unresolvedOperationIDs
             self.pairingLifecycles = pairingLifecycles
             self.unresolvedAssistantOpenRequestIDs = unresolvedAssistantOpenRequestIDs
+            self.assistantOpenStates = assistantOpenStates
         }
     }
 
@@ -255,6 +301,8 @@ actor NativeSettingsSession {
         var presentationUncertain = false
         var invitationRetired = false
         var invitationIdentity: InvitationIdentity?
+        var assistantDeadline: ContinuousClock.Instant?
+        var assistantExpiresAt: UInt64?
     }
 
     private struct InvitationIdentity: Sendable {
@@ -480,7 +528,48 @@ actor NativeSettingsSession {
             assistantSends[original.turnID]?.materialized.insert(id)
         }
         try accept(operation, id: id)
-        return AssistantDetailsReceipt(original: original, details: Details(operation: operation, target: target))
+        let details = Details(operation: operation, target: target)
+        let bounds: (expiresAt: UInt64, deadline: ContinuousClock.Instant)?
+        switch target {
+        case .device: bounds = try retainAssistantActionBounds(original, details: details, reference: reference)
+        case .native(let request):
+            guard case .openSection = request.action else { throw NativeSettingsSessionError.invalidResponse }
+            bounds = try retainAssistantActionBounds(original, details: details, reference: reference)
+        default: bounds = nil
+        }
+        return AssistantDetailsReceipt(original: original, details: details, bounds: bounds)
+    }
+
+    private func retainAssistantActionBounds(_ original: AssistantOperationHandle, details: Details,
+                                             reference: NativeActionReference) throws -> (expiresAt: UInt64, deadline: ContinuousClock.Instant) {
+        guard let turn = assistantSends[original.turnID], turn.admission.chat === original.chat,
+              reference.expiresAt > details.operation.binding.issuedAt,
+              reference.expiresAt - details.operation.binding.issuedAt <= 300_000 else {
+            throw NativeSettingsSessionError.invalidResponse
+        }
+        let child = try original.chat.actionBounds(details, operationID: original.operationID)
+        let now = try NativeSettingsGate.wallTime()
+        guard child.expiresAt > now else { throw NativeSettingsSessionError.expired }
+        let id = original.operationID
+        if let retainedDeadline = records[id]?.assistantDeadline, let retainedExpiry = records[id]?.assistantExpiresAt {
+            let deadline = min(retainedDeadline, child.deadline)
+            let expiresAt = min(retainedExpiry, child.expiresAt)
+            guard now < expiresAt, ContinuousClock.now < deadline else { throw NativeSettingsSessionError.expired }
+            return (expiresAt, deadline)
+        }
+        guard records[id]?.assistantDeadline == nil, records[id]?.assistantExpiresAt == nil else {
+            throw NativeSettingsSessionError.invalidResponse
+        }
+        let interval = reference.expiresAt - details.operation.binding.issuedAt
+        let originalDeadline = turn.admission.started.advanced(by: .milliseconds(Int64(interval)))
+        let observedDeadline = ContinuousClock.now.advanced(by: .milliseconds(Int64(min(child.expiresAt - now, 300_000))))
+        let candidate = min(child.deadline, min(turn.admission.capture.deadline, min(originalDeadline, observedDeadline)))
+        let deadline = candidate
+        let expiresAt = child.expiresAt
+        records[id]?.assistantDeadline = deadline
+        records[id]?.assistantExpiresAt = expiresAt
+        guard ContinuousClock.now < deadline else { throw NativeSettingsSessionError.expired }
+        return (expiresAt, deadline)
     }
 
     private func retainAssistantOpen(_ admission: NativeSettingsAssistantOpenAdmission) throws {
@@ -1354,7 +1443,8 @@ actor NativeSettingsSession {
                 guard let sessionDeadline = deadline else { throw NativeSettingsSessionError.closed }
                 let remaining = invitation.expiresAt > now ? min(invitation.expiresAt - now, 300_000) : 0
                 records[id]?.invitationIdentity = InvitationIdentity(pairingID: invitation.pairingID, expiresAt: invitation.expiresAt,
-                    fingerprint: invitation.fingerprint, deadline: min(sessionDeadline, ContinuousClock.now.advanced(by: .milliseconds(Int64(remaining)))))
+                    fingerprint: invitation.fingerprint, deadline: min(records[id]?.assistantDeadline ?? sessionDeadline,
+                        min(sessionDeadline, ContinuousClock.now.advanced(by: .milliseconds(Int64(remaining))))))
             }
             guard let original = records[id]?.invitationIdentity else { throw NativeSettingsSessionError.invalidResponse }
             if now < original.expiresAt, ContinuousClock.now < original.deadline {
@@ -1519,7 +1609,8 @@ actor NativeSettingsSession {
         let unresolvedIDs = Set(unresolved + approvalUnresolved).union(pairingUnresolved)
         return DrainReport(failures: failures, unresolvedOperationIDs: unresolvedIDs.sorted { $0.uuidString < $1.uuidString },
                            pairingLifecycles: pairingLifecycles,
-                           unresolvedAssistantOpenRequestIDs: unresolvedAssistantOpens.sorted { $0.uuidString < $1.uuidString })
+                           unresolvedAssistantOpenRequestIDs: unresolvedAssistantOpens.sorted { $0.uuidString < $1.uuidString },
+                           assistantOpenStates: assistantOpens.compactMapValues(\.state))
     }
 
     private func sanitize(_ error: any Error) -> NativeSettingsSessionError {
@@ -1595,12 +1686,37 @@ final class NativePairingApprovalAdmission: @unchecked Sendable, CustomStringCon
     @MainActor
     static func capture(session: NativeSettingsSession, creationOperationID: UUID, candidate: NativePairingCandidate,
                         label: String, expectedFingerprint: String, access: NativeSettingsWire.PairingAccess) throws -> NativePairingApprovalAdmission {
+        try captureOriginal(session: session, creationOperationID: creationOperationID, candidate: candidate,
+                            label: label, expectedFingerprint: expectedFingerprint, access: access, assistant: nil)
+    }
+
+    @MainActor
+    static func captureAssistant(session: NativeSettingsSession, receipt: NativeSettingsSession.AssistantDetailsReceipt,
+                                 candidate: NativePairingCandidate, label: String, expectedFingerprint: String,
+                                 access: NativeSettingsWire.PairingAccess) throws -> NativePairingApprovalAdmission {
+        guard case .device(let request) = receipt.details.target, request.action == .pair else {
+            throw NativeSettingsSessionError.invalidRequest
+        }
+        return try captureOriginal(session: session, creationOperationID: receipt.original.operationID, candidate: candidate,
+                                   label: label, expectedFingerprint: expectedFingerprint, access: access, assistant: receipt)
+    }
+
+    @MainActor
+    private static func captureOriginal(session: NativeSettingsSession, creationOperationID: UUID, candidate: NativePairingCandidate,
+                                        label: String, expectedFingerprint: String, access: NativeSettingsWire.PairingAccess,
+                                        assistant: NativeSettingsSession.AssistantDetailsReceipt?) throws -> NativePairingApprovalAdmission {
         guard NSApplication.shared.isActive else { throw NativeSettingsSessionError.inactive }
         try SettingsWire.identifier(creationOperationID)
         try SettingsWire.text(label, maximum: 256)
         try access.validate()
         guard expectedFingerprint == candidate.review.responder.fingerprint else { throw NativeSettingsSessionError.invalidRequest }
-        let (gate, activity) = try session.capturePairingActivity(expiresAt: candidate.review.expiresAt)
+        let (gate, nativeActivity) = try session.capturePairingActivity(expiresAt: candidate.review.expiresAt)
+        let activity: NativeSettingsGate.Capture
+        if let assistant {
+            let original = try assistant.capturePresentation(for: gate)
+            activity = NativeSettingsGate.Capture(generation: original.generation,
+                expiresAt: min(original.expiresAt, nativeActivity.expiresAt), deadline: min(original.deadline, nativeActivity.deadline))
+        } else { activity = nativeActivity }
         let input = NativeSettingsWire.PairingApprovalInput(operationID: UUID(), nativeRequestID: UUID(), creationOperationID: creationOperationID,
                                                           request: try candidate.take(), label: label, expectedFingerprint: expectedFingerprint, access: access)
         try input.validate()

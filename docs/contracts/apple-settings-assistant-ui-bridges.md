@@ -1,0 +1,31 @@
+# Native Settings assistant UI bridges
+
+This contract covers owning-layer source bridges for the macOS Settings assistant. The pane, actual destination navigation and covering-presentation composition are separate work. Source inspection and syntax parsing do not establish Apple UI behaviour or successful provider execution.
+
+## Original owner and cleanup
+
+An `AssistantOpenAction` is created only by the original Store and binds its exact Owner. `isCurrentAssistantOwner` checks that sealed object against the same Store and current Owner incarnation; a matching connection UUID alone is insufficient. This is a presentation ownership check, not service authority or a foreground grant.
+
+`assistantCleanup` returns only the original action’s observed Open state, parent-retired marker and actual parent drain report. A retired Owner can release its Store registry entry without losing those observations while its original sealed action is retained by the UI. Missing state/report remains unknown. A clean generic report is never converted into a fabricated per-child Closed. Actual drain Open states come from the same original `closeAssistantOriginal` replies; existing errors and unresolved IDs remain preserved. No question, answer, proof or invitation is included.
+
+## Sealed device handoff
+
+`presentAssistantDevice` accepts only a sealed `AssistantDetailsReceipt` already materialized through the SAME original child/turn and Store. It requires the exact current inspection, saved scope, unchanged native foreground owner, no competing unresolved mutation and an actual uncovered parent window. It never allocates another creation request. Repeated presentation of the same live context returns its original handle; a retired context is not reopened.
+
+The Agent path is separate from the existing NativeUI-only preparation predicate. On the first genuine Device/OpenSection Details materialization, Session retains an immutable per-operation wall/monotonic floor in the existing Record and sealed receipt. It is the minimum child bound, original Send capture bound, original synchronous Send-start plus the validated reference-expiry minus binding-issued-at interval, and first-observed remaining-wall deadline. Later Details/captures only preserve or reduce this bound; they cannot renew it after wall-clock rollback. This is conservative: an action created late in a turn can expire earlier locally than at the Host. It does not claim a cross-process clock equivalence or secure server-expiry proof. The existing NativeUI started-plus-lifetime path is unchanged. Pair inserts its context only after reserving ONE additional approval identity under the same64 aggregate bound, eight Pair contexts and single live ceremony. The existing creation slot is already prepaid; no reservation is refunded by dismissal. Both fresh confirmation and final approval recheck the same live original Store child and sealed membership before capture. Actual final approval captures the same sealed receipt bounds again without renewing its original deadline. Invitation retention and final delivery use the original bounded deadline. Existing full identity/access selection, held invitation callback, real acceptance verification and UI retirement remain unchanged.
+
+Rust permits this same-parent handoff: `SettingsAuthority::session` returns the original native parent for a SettingsAgent; `operation_identity` records it; `check_principal`, `admit_native_action` and `confirm_device_action` require that exact authenticated native caller/session. Scoped `agent_action_details` validates original parent/chat/turn membership and origin. `validate_current` still checks the real Agent origin is live. These source predicates are not a runtime observation.
+
+Covering the private assistant with its OWN authenticated device ceremony must only pause reads/private publication and retire the pending review. It must not automatically CloseOpen: closing that child cancels its unadmitted Awaiting operation. Actual collapse/hide/application/window/Owner retirement retains genuine close semantics. Root owns that composition; this bridge does not implement the pane or covering gate.
+
+## OpenSection-only presentation
+
+`presentAssistantSection` takes only a sealed, already materialized `AssistantDetailsReceipt`. It accepts Native OpenSection and rejects every other native action. In the same synchronous gesture it validates the exact original current Owner/child/turn/inspection/reference, rejects other unresolved effects and captures the original bounded lifetime before registering work in the SAME four-slot Owner registry.
+
+The navigation callback receives only the closed `SettingsSection` enum, never a Session, generic action presenter, invocation, proof, arbitrary URL or credential/OS payload. Root must return `.opened(section)` only after the genuine matching destination is acknowledged; `.dismissed` means no successful navigation. An incorrect destination or thrown/ambiguous callback becomes presentation uncertainty. Merely changing a tab is not an acknowledgement. No caller currently composes this bridge, so navigation is not claimed to work.
+
+The existing Session performs real Admit → checked native presentation → original Finalize and retains execution/finalization identity and ambiguity. Completion publishes only the real inspection; already admitted work remains owned through original callback/parent drain. No new client, process supervisor, paid Send, operation slot or service serialization is introduced. The required future callback must settle on actual destination acknowledgement or genuine presentation retirement; shutdown cannot pretend a pending callback joined.
+
+## Validation and remaining composition
+
+This source slice does not add a pane, authorize a provider call, navigate an actual window or widen the Agent Details whitelist. Root still owns actual synchronous covering/close/connection/quit integration and exact destination navigation. Private pane coverage must pause publication without CloseOpen for its OWN authenticated native ceremony; genuine user retirement retains close semantics. Source parsing is not SDK type checking, UI execution, device approval, OS-vault verification or security acceptance. Deferred automated assertions remain [#32](https://github.com/izyuumi/everything/issues/32).
