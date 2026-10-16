@@ -272,6 +272,54 @@ impl CredentialVault {
         self.native.clone()
     }
 
+    pub(in crate::host) fn store_settings_credential(
+        &self,
+        binding: &super::settings::contract::SettingsCredentialBinding,
+        secret: SecretTransfer,
+    ) -> Result<(), CredentialError> {
+        match binding {
+            super::settings::contract::SettingsCredentialBinding::Model { binding } => {
+                let binding = binding.as_native();
+                binding
+                    .validate()
+                    .map_err(|_| CredentialError::InvalidKey)?;
+                match binding.storage {
+                    CredentialStorage::Session => {
+                        self.store_session(format!("model:{}", binding.scope_key()), secret.0, true)
+                    }
+                    CredentialStorage::Native => self.native.store_blocking(
+                        binding.credential_key()?,
+                        CredentialSecret::new(secret.0.expose().to_vec())?,
+                    ),
+                }
+            }
+            super::settings::contract::SettingsCredentialBinding::SystemOne {
+                endpoint,
+                reference,
+            } => {
+                if reference.is_nil() {
+                    return Err(CredentialError::InvalidKey);
+                }
+                let configuration = crate::selector::system_one::SelectionConfig::system_one(
+                    endpoint,
+                    "credential-binding",
+                    Some(*reference),
+                )
+                .map_err(|_| CredentialError::InvalidKey)?;
+                let crate::selector::system_one::SelectionConfig::SystemOne(configuration) =
+                    configuration
+                else {
+                    return Err(CredentialError::InvalidKey);
+                };
+                let key = configuration
+                    .credential_key()?
+                    .ok_or(CredentialError::InvalidKey)?;
+                self.native
+                    .store_blocking(key, CredentialSecret::new(secret.0.expose().to_vec())?)
+            }
+        }
+    }
+
     fn store_session(
         &self,
         key: String,

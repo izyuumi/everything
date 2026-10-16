@@ -99,6 +99,9 @@ pub enum LocalRequestPayload {
     OwnerOperation {
         operation: crate::ipc::OwnerOperation,
     },
+    NativeSettings {
+        operation: crate::host::settings::native::NativeSettingsOperation,
+    },
     Wait {
         request: crate::ipc::ConversationWait,
     },
@@ -134,6 +137,9 @@ impl LocalRequest {
                 query.validate().map_err(LocalError::Protocol)?;
             }
             LocalRequestPayload::OwnerOperation { operation } => {
+                operation.validate().map_err(LocalError::Protocol)?;
+            }
+            LocalRequestPayload::NativeSettings { operation } => {
                 operation.validate().map_err(LocalError::Protocol)?;
             }
             LocalRequestPayload::Wait { request } => {
@@ -223,6 +229,9 @@ pub enum LocalResponsePayload {
     OwnerOperationResult {
         result: crate::ipc::OwnerOperationResult,
     },
+    NativeSettingsResult {
+        result: crate::host::settings::native::NativeSettingsResult,
+    },
     ConversationChanged {
         conversation_id: crate::protocol::ConversationId,
         through_sequence: u64,
@@ -280,6 +289,12 @@ impl LocalResponse {
                 LocalResponsePayload::OwnerOperationResult { result },
             ) => result
                 .validate_for_request(operation, request.request_id)
+                .map_err(LocalError::Protocol)?,
+            (
+                LocalRequestPayload::NativeSettings { operation },
+                LocalResponsePayload::NativeSettingsResult { result },
+            ) => result
+                .validate_for(operation)
                 .map_err(LocalError::Protocol)?,
             (
                 LocalRequestPayload::WaitCommand { command_id, .. },

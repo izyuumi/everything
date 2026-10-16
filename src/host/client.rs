@@ -90,6 +90,21 @@ impl HostClient {
         }
     }
 
+    pub async fn native_settings(
+        &self,
+        input: super::settings::native::NativeSettingsInput,
+        cancellation: CancellationToken,
+    ) -> Result<super::settings::native::NativeSettingsResult, HostClientError> {
+        let mut request = LocalRequest::new(LocalRequestPayload::NativeSettings {
+            operation: input.operation,
+        })?;
+        request.request_id = input.request_id;
+        match self.exact_request(request, cancellation).await? {
+            LocalResponsePayload::NativeSettingsResult { result } => Ok(result),
+            _ => Err(HostClientError::Protocol),
+        }
+    }
+
     pub async fn submit(
         &self,
         command: OwnerCommand,

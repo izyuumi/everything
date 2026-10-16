@@ -103,6 +103,15 @@ impl Default for MemorySettings {
 }
 
 impl MemorySettings {
+    pub(in crate::host) fn requires_restart(
+        &self,
+        desired: &Self,
+    ) -> Result<bool, serde_json::Error> {
+        let mut retained = self.clone();
+        retained.embeddings = desired.embeddings.clone();
+        Ok(serde_json::to_value(retained)? != serde_json::to_value(desired)?)
+    }
+
     pub fn validate(&self) -> Result<(), MemoryError> {
         if !(1..=16).contains(&self.max_results)
             || !(64..=16_384).contains(&self.max_excerpt_bytes)
