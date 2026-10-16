@@ -216,15 +216,17 @@ impl VectorIndex {
         validate_digest(source)?;
         let status = self.status()?;
         if !force {
-            if let Some(active) = &status.active {
-                if active.spec == *spec && active.source_fingerprint == source {
-                    return Ok(active.clone());
-                }
+            if let Some(active) = &status.active
+                && active.spec == *spec
+                && active.source_fingerprint == source
+            {
+                return Ok(active.clone());
             }
-            if let Some(building) = &status.building {
-                if building.spec == *spec && building.source_fingerprint == source {
-                    return Ok(building.clone());
-                }
+            if let Some(building) = &status.building
+                && building.spec == *spec
+                && building.source_fingerprint == source
+            {
+                return Ok(building.clone());
             }
         }
         let transaction = self.connection.transaction()?;
@@ -471,8 +473,10 @@ fn decode_vector(profile: &EmbeddingProfile, bytes: &[u8]) -> Result<EmbeddingVe
         return Err(VectorError::Incompatible);
     }
     let values = bytes
-        .chunks_exact(4)
-        .map(|value| f32::from_ne_bytes([value[0], value[1], value[2], value[3]]))
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|value| f32::from_ne_bytes(*value))
         .collect();
     Ok(EmbeddingVector::new(profile, values)?)
 }
