@@ -2,6 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::io::{self, Write};
 use std::net::IpAddr;
+use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -15,6 +16,7 @@ use sha2::{Digest, Sha256};
 use tokio_util::sync::CancellationToken;
 use zeroize::Zeroizing;
 
+use super::accounting::{ProviderAccounting, ProviderWork};
 use super::{
     ContentBlock, MAX_CONTENT_BLOCKS, MAX_CONTINUATION_BYTES, MAX_JSON_BYTES, MAX_REQUEST_BYTES,
     MAX_TEXT_BYTES, Message, MessageRole, ModelError, ModelEvent, ModelProvider, ModelRequest,
@@ -38,6 +40,7 @@ pub struct AnthropicConfig {
     idle_timeout: Duration,
     default_max_output_tokens: u32,
     thinking_budget_tokens: Option<u32>,
+    accounting: Option<Arc<ProviderAccounting>>,
 }
 
 impl AnthropicConfig {
@@ -64,7 +67,13 @@ impl AnthropicConfig {
             idle_timeout: Duration::from_secs(90),
             default_max_output_tokens: 4_096,
             thinking_budget_tokens: None,
+            accounting: None,
         })
+    }
+
+    pub(crate) fn with_accounting(mut self, accounting: Arc<ProviderAccounting>) -> Self {
+        self.accounting = Some(accounting);
+        self
     }
 
     pub fn with_loopback_endpoint(mut self, endpoint: &str) -> Result<Self, ModelError> {
@@ -202,23 +211,32 @@ impl ModelProvider for AnthropicProvider {
         };
         let runtime = tokio::runtime::Handle::try_current()
             .map_err(|_| transport("Anthropic requests require a Tokio runtime"))?;
+        let mut request = ProviderWork::new(request, self.config.accounting.as_ref())?;
+        request.fork_preparation()?;
         let preparation = runtime.spawn_blocking(move || {
-            request.validate()?;
-            let (body, names, continuation, index) = prepare_request(request, config)?;
-            let mut encoded = BoundedRequestBody(Vec::new());
-            serde_json::to_writer(&mut encoded, &body).map_err(|_| {
-                invalid(
-                    "request",
-                    "native Anthropic request exceeds 32 MiB or cannot be encoded",
-                )
-            })?;
-            Ok::<_, ModelError>((encoded.0, names, continuation, index))
+            request.prepare(|request| {
+                request.validate()?;
+                let (body, names, continuation, index) = prepare_request(request, config)?;
+                let mut encoded = BoundedRequestBody(Vec::new());
+                serde_json::to_writer(&mut encoded, &body).map_err(|_| {
+                    invalid(
+                        "request",
+                        "native Anthropic request exceeds 32 MiB or cannot be encoded",
+                    )
+                })?;
+                Ok::<_, ModelError>((encoded.0, names, continuation, index))
+            })
         });
-        let (body, tool_names, continuation, assistant_index) = tokio::select! {
+        let ProviderWork {
+            value,
+            root,
+            preparation,
+        } = tokio::select! {
             biased;
             _ = cancellation.cancelled() => return Err(ModelError::Cancelled),
-            prepared = preparation => prepared.map_err(|_| transport("Anthropic request preparation failed"))??,
+            prepared = preparation => prepared.map_err(|_| transport("Anthropic request preparation failed"))?,
         };
+        let (body, tool_names, continuation, assistant_index) = value?;
         if cancellation.is_cancelled() {
             return Err(ModelError::Cancelled);
         }
@@ -251,6 +269,7 @@ impl ModelProvider for AnthropicProvider {
             ));
         }
         let idle_timeout = self.config.idle_timeout;
+        let accounting = self.config.accounting.clone();
         let body_cancellation = cancellation.clone();
         let bytes = async_stream::try_stream! {
             let mut response = response;
@@ -266,6 +285,7 @@ impl ModelProvider for AnthropicProvider {
             let mut events = Box::pin(bytes.eventsource());
             let mut state = ResponseState::new(tool_names, continuation, assistant_index);
             let mut event_count = 0;
+            let mut observed = RestrictedUsage::default();
             loop {
                 let event = tokio::select! {
                     biased;
@@ -281,9 +301,17 @@ impl ModelProvider for AnthropicProvider {
                 if event_count > MAX_STREAM_EVENTS || event.data.len() > MAX_EVENT_BYTES {
                     Err(protocol("Anthropic event stream exceeded its event limits"))?;
                 }
+                if let Some(accounting) = &accounting {
+                    observed.record(&event.data, accounting)?;
+                }
                 let event: ApiEvent = serde_json::from_str(&event.data)
                     .map_err(|_| protocol("Anthropic sent malformed event JSON"))?;
                 let emitted = state.accept(event)?;
+                if state.completed
+                    && let Some(accounting) = &accounting
+                {
+                    accounting.observe(&state.usage, true, true)?;
+                }
                 for event in emitted {
                     yield event;
                 }
@@ -295,7 +323,12 @@ impl ModelProvider for AnthropicProvider {
                 Err(protocol("Anthropic event stream ended without message_stop"))?;
             }
         };
-        Ok(Box::pin(stream))
+        Ok(ProviderWork {
+            value: Box::pin(stream) as ProviderStream,
+            root,
+            preparation,
+        }
+        .into_stream())
     }
 }
 
@@ -809,6 +842,162 @@ struct ApiUsage {
 struct ApiError {
     #[serde(rename = "type")]
     kind: String,
+}
+
+#[derive(Deserialize)]
+struct AccountingEventKind {
+    #[serde(rename = "type")]
+    kind: String,
+}
+
+#[derive(Deserialize)]
+struct AccountingMessageStart {
+    message: Option<AccountingMessage>,
+}
+
+#[derive(Deserialize)]
+struct AccountingMessageDelta {
+    usage: Option<AccountingUsage>,
+}
+
+#[derive(Deserialize)]
+struct AccountingMessage {
+    usage: Option<AccountingUsage>,
+}
+
+#[derive(Deserialize)]
+struct AccountingUsage {
+    input_tokens: Option<Value>,
+    output_tokens: Option<Value>,
+    cache_creation_input_tokens: Option<Value>,
+    cache_read_input_tokens: Option<Value>,
+}
+
+#[derive(Default)]
+struct RestrictedUsage {
+    raw_input_tokens: u64,
+    cache_creation_tokens: u64,
+    cache_read_tokens: Option<u64>,
+    output_tokens: u64,
+    input_observed: bool,
+    output_observed: bool,
+}
+
+impl RestrictedUsage {
+    fn record(&mut self, data: &str, accounting: &ProviderAccounting) -> Result<(), ModelError> {
+        let kind: AccountingEventKind = serde_json::from_str(data)
+            .map_err(|_| protocol("invalid Anthropic accounting event"))?;
+        if kind.kind == "message_stop" {
+            if !self.input_observed || !self.output_observed {
+                accounting.invalidate(true)?;
+                return Err(protocol("Anthropic terminal token usage is incomplete"));
+            }
+            return accounting.observe(&self.usage()?, true, false);
+        }
+        if !matches!(kind.kind.as_str(), "message_start" | "message_delta") {
+            return Ok(());
+        }
+        let usage = if kind.kind == "message_start" {
+            serde_json::from_str::<AccountingMessageStart>(data)
+                .map(|envelope| envelope.message.and_then(|message| message.usage))
+        } else {
+            serde_json::from_str::<AccountingMessageDelta>(data).map(|envelope| envelope.usage)
+        };
+        let usage = match usage {
+            Ok(usage) => usage,
+            Err(_) => {
+                accounting.invalidate(false)?;
+                return Err(protocol("invalid Anthropic accounting envelope"));
+            }
+        };
+        let Some(usage) = usage else {
+            accounting.invalidate(false)?;
+            return Err(protocol("Anthropic accounting usage is malformed"));
+        };
+        let mut malformed = false;
+        let mut count = |value: Option<Value>| match value {
+            None | Some(Value::Null) => None,
+            Some(value) => match value.as_u64() {
+                Some(tokens) => Some(tokens),
+                None => {
+                    malformed = true;
+                    None
+                }
+            },
+        };
+        let usage = ApiUsage {
+            input_tokens: count(usage.input_tokens),
+            output_tokens: count(usage.output_tokens),
+            cache_creation_input_tokens: count(usage.cache_creation_input_tokens),
+            cache_read_input_tokens: count(usage.cache_read_input_tokens),
+        };
+        let invalid = usage
+            .input_tokens
+            .is_some_and(|input| input < self.raw_input_tokens)
+            || usage
+                .cache_creation_input_tokens
+                .is_some_and(|cache| cache < self.cache_creation_tokens)
+            || usage.cache_read_input_tokens.is_some_and(|cache| {
+                self.cache_read_tokens
+                    .is_some_and(|previous| cache < previous)
+            })
+            || usage
+                .output_tokens
+                .is_some_and(|output| output < self.output_tokens);
+        if let Some(input) = usage.input_tokens {
+            self.raw_input_tokens = input;
+            self.input_observed = true;
+        }
+        if let Some(cache) = usage.cache_creation_input_tokens {
+            self.cache_creation_tokens = cache;
+        }
+        if let Some(cache) = usage.cache_read_input_tokens {
+            self.cache_read_tokens = Some(cache);
+        }
+        if let Some(output) = usage.output_tokens {
+            self.output_tokens = output;
+            self.output_observed = true;
+        }
+        let observed = match self.usage() {
+            Ok(usage) => usage,
+            Err(error) => {
+                let lower_bound = TokenUsage {
+                    input_tokens: self
+                        .raw_input_tokens
+                        .max(self.cache_creation_tokens)
+                        .max(self.cache_read_tokens.unwrap_or(0)),
+                    output_tokens: self.output_tokens,
+                    cached_input_tokens: self.cache_read_tokens,
+                    reasoning_tokens: None,
+                };
+                accounting.observe(&lower_bound, false, false)?;
+                accounting.invalidate(false)?;
+                return Err(error);
+            }
+        };
+        accounting.observe(&observed, false, false)?;
+        if invalid || malformed {
+            accounting.invalidate(false)?;
+            return Err(protocol(
+                "Anthropic cumulative token usage is malformed or decreased",
+            ));
+        }
+        Ok(())
+    }
+
+    fn usage(&self) -> Result<TokenUsage, ModelError> {
+        let input_tokens = self
+            .raw_input_tokens
+            .checked_add(self.cache_creation_tokens)
+            .and_then(|tokens| tokens.checked_add(self.cache_read_tokens.unwrap_or(0)))
+            .ok_or_else(|| protocol("Anthropic token usage overflowed"))?;
+        Ok(TokenUsage {
+            input_tokens,
+            output_tokens: self.output_tokens,
+            cached_input_tokens: self.cache_read_tokens,
+            reasoning_tokens: None,
+        })
+    }
 }
 
 struct BlockState {

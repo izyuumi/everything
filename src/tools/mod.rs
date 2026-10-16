@@ -51,6 +51,7 @@ pub struct ToolExecutionContext {
     workspace_root: PathBuf,
     cancellation: CancellationToken,
     _retained_owner: Option<RetainedToolOwner>,
+    settings_capability: Option<crate::agent::settings::SettingsToolCapability>,
 }
 
 #[derive(Clone)]
@@ -99,12 +100,27 @@ impl ToolExecutionContext {
             workspace_root,
             cancellation,
             _retained_owner: None,
+            settings_capability: None,
         })
     }
 
     pub(super) fn with_retained_owner(mut self, owner: Option<RetainedToolOwner>) -> Self {
         self._retained_owner = owner;
         self
+    }
+
+    pub(crate) fn with_settings_capability(
+        mut self,
+        capability: crate::agent::settings::SettingsToolCapability,
+    ) -> Self {
+        self.settings_capability = Some(capability);
+        self
+    }
+
+    pub(crate) fn settings_capability(
+        &self,
+    ) -> Option<&crate::agent::settings::SettingsToolCapability> {
+        self.settings_capability.as_ref()
     }
 
     pub fn request_id(&self) -> &str {

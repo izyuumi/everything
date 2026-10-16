@@ -297,6 +297,11 @@ pub struct ScheduledTarget {
 
 impl ScheduledTarget {
     pub fn validate(&self) -> ScheduleResult<()> {
+        if self.permissions.mode == ExecutionMode::SettingsRestricted {
+            return Err(ScheduleError::Invalid(
+                "restricted Settings authority cannot be scheduled",
+            ));
+        }
         self.configuration.validate()?;
         if self.instruction.trim().is_empty()
             || self.instruction.len() > 32_768

@@ -84,6 +84,11 @@ pub struct ExecutionPolicy {
 
 impl ExecutionPolicy {
     pub fn validate(&self) -> Result<(), SchedulerError> {
+        if self.mode == ExecutionMode::SettingsRestricted {
+            return Err(SchedulerError::Invalid(
+                "restricted Settings authority cannot enter the scheduler",
+            ));
+        }
         self.limits.validate()?;
         ContextBuilder::new(self.budget.clone())?;
         if !self.workspace_root.is_absolute()

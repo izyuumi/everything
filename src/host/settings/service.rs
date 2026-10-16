@@ -6,6 +6,7 @@ mod pairing;
 mod persistence;
 mod projection;
 mod updates;
+mod work;
 mod writes;
 
 pub use changes::{SettingsChangeHint, SettingsChangePage, SettingsChangeState};
@@ -16,6 +17,7 @@ pub use pairing::{
     NativePairingRequest,
 };
 pub use persistence::OwnerSettingsWriteResult;
+pub(crate) use work::{SettingsInvocationCompletion, SettingsInvocationDisposition};
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
@@ -41,8 +43,8 @@ use super::actions::{
     PendingPairingState, SettingsActionTarget,
 };
 use super::authority::{
-    Authority, CallerSource, NativeSessionOpened, NativeSessionProof, SettingsAgentSession,
-    SettingsCaller, SettingsOperationOrigin,
+    Authority, CallerSource, NativeSessionOpened, NativeSessionProof, SettingsAgentBinding,
+    SettingsAgentSession, SettingsCaller, SettingsOperationOrigin,
 };
 use super::contract::{
     SETTINGS_CONTRACT_VERSION, SettingsActionReference, SettingsActionRequest,
@@ -120,6 +122,7 @@ pub enum SettingsServiceError {
 #[derive(Clone)]
 pub struct SettingsService {
     core: Arc<ServiceCore>,
+    invocation: Option<Arc<work::InvocationWork>>,
 }
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -159,6 +162,7 @@ impl SettingsStartupContext {
 struct ActiveSettingsWrite {
     request_id: CommandId,
     client_session_id: Uuid,
+    origin: SettingsOperationOrigin,
     cancellation: CancellationToken,
 }
 
@@ -209,6 +213,7 @@ impl SettingsService {
                 application_stop: CancellationToken::new(),
                 agent,
             }),
+            invocation: None,
         };
         service
             .blocking(move |core| {
@@ -347,6 +352,57 @@ impl SettingsService {
         self.core.authority.native(call, proof, true)
     }
 
+    pub(crate) fn settings_cleanup_principal(
+        &self,
+        caller: &SettingsCaller,
+    ) -> Result<Uuid, SettingsServiceError> {
+        self.core.authority.validate_owner_cleanup(caller)?;
+        Ok(self.core.authority.principal())
+    }
+
+    pub(crate) async fn inspect_settings_cleanup(
+        &self,
+        caller: SettingsCaller,
+        command_id: CommandId,
+        expected_fence_sha256: String,
+    ) -> Result<(), SettingsServiceError> {
+        self.core.authority.validate_owner_cleanup(&caller)?;
+        self.blocking(move |core| {
+            core.authority.validate_owner_cleanup(&caller)?;
+            let store = core.agent.store();
+            let fence = store
+                .settings_turn(command_id)?
+                .ok_or(SettingsServiceError::NotFound)?;
+            let session = store
+                .settings_session(fence.session_id)?
+                .ok_or(SettingsServiceError::NotFound)?;
+            if fence.sha256()? != expected_fence_sha256
+                || session.principal_id != core.authority.principal()
+            {
+                return Err(SettingsServiceError::OutsideScope);
+            }
+            for id in fence.mutation_ids {
+                match core.repository.get(id) {
+                    Ok(record)
+                        if record.identity.origin
+                            == (SettingsOperationOrigin::SettingsAgent {
+                                session_id: session.session_id,
+                                native_session_id: session.native_session_id,
+                            })
+                            && record.identity.binding.principal_id == session.principal_id =>
+                    {
+                        record.inspection().validate()?;
+                    }
+                    Err(SettingsServiceError::NotFound) => {}
+                    Ok(_) => return Err(SettingsServiceError::OutsideScope),
+                    Err(error) => return Err(error),
+                }
+            }
+            Ok(())
+        })
+        .await
+    }
+
     pub fn begin_settings_session(
         &self,
         caller: SettingsCaller,
@@ -360,6 +416,98 @@ impl SettingsService {
         tool: SettingsToolName,
     ) -> Result<SettingsCaller, SettingsServiceError> {
         self.core.authority.agent(session, tool)
+    }
+
+    pub(crate) fn settings_agent_binding(
+        &self,
+        session: &SettingsAgentSession,
+    ) -> Result<SettingsAgentBinding, SettingsServiceError> {
+        self.core.authority.agent_binding(session)
+    }
+
+    pub(crate) fn settings_invocation(
+        &self,
+        session: &SettingsAgentSession,
+        tool: SettingsToolName,
+        operation_id: CommandId,
+    ) -> Result<
+        (
+            SettingsService,
+            SettingsCaller,
+            SettingsInvocationCompletion,
+        ),
+        SettingsServiceError,
+    > {
+        if self.invocation.is_some() || operation_id.as_uuid().is_nil() {
+            return Err(SettingsServiceError::OutsideScope);
+        }
+        let binding = self.core.authority.agent_binding(session)?;
+        let caller = self.core.authority.agent(session, tool)?;
+        let (work, completion) = work::InvocationWork::new(binding, tool, operation_id);
+        Ok((
+            Self {
+                core: Arc::clone(&self.core),
+                invocation: Some(work),
+            },
+            caller,
+            completion,
+        ))
+    }
+
+    pub(crate) async fn close_settings_agent(
+        &self,
+        session: &SettingsAgentSession,
+    ) -> Result<(), SettingsServiceError> {
+        let (session_id, native_session_id) = self.core.authority.close_agent(session)?;
+        let origin = SettingsOperationOrigin::SettingsAgent {
+            session_id,
+            native_session_id,
+        };
+        let active = self
+            .core
+            .active_write
+            .lock()
+            .map_err(|_| SettingsServiceError::Poisoned)?
+            .clone();
+        if let Some(active) = active
+            && active.origin == origin
+        {
+            active.cancellation.cancel();
+        }
+        let mutation = Arc::clone(&self.core.mutation).lock_owned().await;
+        let service = Self {
+            core: Arc::clone(&self.core),
+            invocation: None,
+        };
+        service
+            .blocking(move |core| {
+                let _mutation = mutation;
+                for record in core.repository.pending()? {
+                    if record.identity.origin != origin {
+                        continue;
+                    }
+                    if record.write().is_some() {
+                        core.cancel_write(record.identity.binding.request_id)?;
+                        continue;
+                    }
+                    if matches!(
+                        record.phase(),
+                        SettingsOperationPhase::AwaitingAction { .. }
+                            | SettingsOperationPhase::AwaitingConfirmation { .. }
+                    ) {
+                        core.repository.finish_unadmitted(
+                            &record.identity,
+                            core.result(&record.identity, SettingsOperationState::Cancelled),
+                        )?;
+                        core.pending
+                            .lock()
+                            .map_err(|_| SettingsServiceError::Poisoned)?
+                            .remove(&record.identity.binding.request_id);
+                    }
+                }
+                Ok(())
+            })
+            .await
     }
 
     pub async fn operation(
@@ -387,6 +535,11 @@ impl SettingsService {
         request: SettingsActionRequest,
         cancellation: CancellationToken,
     ) -> Result<SettingsOperationResult, SettingsServiceError> {
+        let _work = self.invocation_guard(
+            &caller,
+            SettingsToolName::RequestAction,
+            Some(request.request_id),
+        )?;
         self.core
             .authority
             .require_tool(&caller, SettingsToolName::RequestAction)?;
@@ -436,10 +589,17 @@ impl SettingsService {
         target: SettingsActionTarget,
         cancellation: CancellationToken,
     ) -> Result<SettingsOperationResult, SettingsServiceError> {
-        target.validate()?;
-        self.core.check_scope(target.scope())?;
+        if let Err(error) = target.validate() {
+            self.reject_invocation()?;
+            return Err(error);
+        }
+        if let Err(error) = self.core.check_scope(target.scope()) {
+            self.reject_invocation()?;
+            return Err(error);
+        }
         let session_id = self.core.operation_session(&caller, &target)?;
         let mutation = self.enter(&caller, &cancellation).await?;
+        let work = self.invocation.clone();
         self.blocking(move |core| {
             let _mutation = mutation;
             core.authority.validate(&caller, false)?;
@@ -455,6 +615,9 @@ impl SettingsService {
                         || record.identity.binding.client_session_id != session_id
                     {
                         return Err(SettingsServiceError::Conflict);
+                    }
+                    if let Some(work) = &work {
+                        work.recorded(record.identity.binding.request_id)?;
                     }
                     return core.project(&record.inspection());
                 }
@@ -492,9 +655,15 @@ impl SettingsService {
             } else {
                 core.pending_phase(&identity)
             };
+            if let Some(work) = &work {
+                work.attempting()?;
+            }
             let record = core
                 .repository
                 .prepare(identity, phase, || core.authority.validate(&caller, false))?;
+            if let Some(work) = &work {
+                work.recorded(record.identity.binding.request_id)?;
+            }
             if matches!(
                 record.phase(),
                 SettingsOperationPhase::AwaitingAction { .. }
@@ -845,9 +1014,17 @@ impl SettingsService {
         cancellation: &CancellationToken,
     ) -> Result<OwnedMutexGuard<()>, SettingsServiceError> {
         self.core.authority.validate(caller, false)?;
+        let child = self.core.authority.agent_cancellation(caller)?;
+        let child_cancelled = async move {
+            match child {
+                Some(child) => child.cancelled().await,
+                None => std::future::pending::<()>().await,
+            }
+        };
         let mutation = tokio::select! {
             biased;
             _=cancellation.cancelled()=>return Err(SettingsServiceError::Cancelled),
+            _=child_cancelled=>return Err(SettingsServiceError::Cancelled),
             mutation=Arc::clone(&self.core.mutation).lock_owned()=>mutation,
         };
         self.core.authority.validate(caller, false)?;
@@ -859,9 +1036,19 @@ impl SettingsService {
         operation: impl FnOnce(&ServiceCore) -> Result<T, SettingsServiceError> + Send + 'static,
     ) -> Result<T, SettingsServiceError> {
         let core = Arc::clone(&self.core);
-        tokio::task::spawn_blocking(move || operation(&core))
-            .await
-            .map_err(|_| SettingsServiceError::Worker)?
+        let work = self
+            .invocation
+            .as_ref()
+            .map(work::InvocationWork::fork)
+            .transpose()?;
+        tokio::task::spawn_blocking(move || {
+            let _work = work;
+            let result = operation(&core);
+            drop(core);
+            result
+        })
+        .await
+        .map_err(|_| SettingsServiceError::Worker)?
     }
 }
 

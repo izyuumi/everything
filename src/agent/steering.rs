@@ -402,6 +402,9 @@ impl Agent {
         &self,
         command: TaskInputCommand,
     ) -> Result<TaskInputReceipt, AgentError> {
+        if self.settings_profile.is_some() {
+            return Err(AgentError::ToolsUnsupported);
+        }
         let write = self.write_gate(command.conversation_id)?.lock_owned().await;
         let owner = self.clone();
         blocking(move || {

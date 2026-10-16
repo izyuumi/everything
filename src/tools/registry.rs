@@ -15,6 +15,7 @@ struct RegisteredTool {
     tool: Arc<dyn Tool>,
     descriptor: ToolDescriptor,
     validator: Validator,
+    settings_only: bool,
 }
 
 #[derive(Clone, Default)]
@@ -28,6 +29,18 @@ impl ToolRegistry {
     }
 
     pub fn register(&mut self, tool: Arc<dyn Tool>) -> Result<(), ToolError> {
+        self.register_profile(tool, false)
+    }
+
+    pub(crate) fn register_settings(&mut self, tool: Arc<dyn Tool>) -> Result<(), ToolError> {
+        self.register_profile(tool, true)
+    }
+
+    fn register_profile(
+        &mut self,
+        tool: Arc<dyn Tool>,
+        settings_only: bool,
+    ) -> Result<(), ToolError> {
         let descriptor = tool.descriptor().clone();
         validate_descriptor(&descriptor)?;
         if self.tools.contains_key(&descriptor.name) {
@@ -60,6 +73,7 @@ impl ToolRegistry {
                 tool,
                 descriptor,
                 validator,
+                settings_only,
             }),
         );
         Ok(())
@@ -68,20 +82,25 @@ impl ToolRegistry {
     pub fn discover(&self) -> Vec<ToolDescriptor> {
         self.tools
             .values()
+            .filter(|entry| !entry.settings_only)
             .map(|entry| entry.descriptor.clone())
             .collect()
     }
 
     pub fn descriptor(&self, name: &str) -> Result<&ToolDescriptor, ToolError> {
-        Ok(&self.get(name)?.descriptor)
+        let entry = self.general(name)?;
+        Ok(&entry.descriptor)
     }
 
     pub fn descriptors(&self) -> impl Iterator<Item = &ToolDescriptor> {
-        self.tools.values().map(|entry| &entry.descriptor)
+        self.tools
+            .values()
+            .filter(|entry| !entry.settings_only)
+            .map(|entry| &entry.descriptor)
     }
 
     pub fn validate(&self, name: &str, arguments: &Value) -> Result<(), ToolError> {
-        validate_arguments(self.get(name)?, arguments)
+        validate_arguments(self.general(name)?, arguments)
     }
 
     pub async fn execute(
@@ -92,6 +111,15 @@ impl ToolRegistry {
     ) -> Result<ToolOutput, ToolError> {
         let entry = Arc::clone(self.get(name)?);
         context.check_cancelled()?;
+        match (entry.settings_only, context.settings_capability()) {
+            (true, Some(capability)) => capability
+                .check(context.request_id(), context.task_id(), name)
+                .map_err(|_| ToolError::InvalidContext {
+                    message: "restricted tool capability does not match".into(),
+                })?,
+            (false, None) => {}
+            _ => return Err(ToolError::UnknownTool { name: name.into() }),
+        }
         let validation_entry = Arc::clone(&entry);
         let retained_context = context.clone();
         let runtime =
@@ -110,6 +138,27 @@ impl ToolRegistry {
             })??;
         context.check_cancelled()?;
         entry.tool.execute(context, arguments).await
+    }
+
+    pub(crate) fn settings_descriptor(&self, name: &str) -> Result<&ToolDescriptor, ToolError> {
+        let entry = self.get(name)?;
+        if !entry.settings_only {
+            return Err(ToolError::UnknownTool { name: name.into() });
+        }
+        Ok(&entry.descriptor)
+    }
+
+    pub(crate) fn validate_settings(&self, name: &str, arguments: &Value) -> Result<(), ToolError> {
+        self.settings_descriptor(name)?;
+        validate_arguments(self.get(name)?, arguments)
+    }
+
+    fn general(&self, name: &str) -> Result<&Arc<RegisteredTool>, ToolError> {
+        let entry = self.get(name)?;
+        if entry.settings_only {
+            return Err(ToolError::UnknownTool { name: name.into() });
+        }
+        Ok(entry)
     }
 
     fn get(&self, name: &str) -> Result<&Arc<RegisteredTool>, ToolError> {

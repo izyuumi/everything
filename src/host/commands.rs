@@ -639,6 +639,7 @@ impl HostInner {
         command_id: CommandId,
         options: &RequestedRunOptions,
     ) -> Result<EffectiveCommand, HostError> {
+        options.validate().map_err(HostError::Invalid)?;
         let legacy_active = self.blocking(move |host| {
             host.agent.store().connection()?.query_row(
                 "SELECT EXISTS(SELECT 1 FROM tasks WHERE conversation_id=?1 AND state IN ('queued','running','waiting') AND coalesce(json_extract(input,'$.scheduler_version'),0)!=1)",

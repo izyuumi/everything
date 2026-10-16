@@ -38,6 +38,7 @@ struct FileWrite {
     deadline: Instant,
     cancellation: CancellationToken,
     request_cancellation: CancellationToken,
+    invocation: Option<Arc<super::work::InvocationWork>>,
 }
 
 enum WriteGuard {
@@ -52,10 +53,17 @@ impl SettingsService {
         patch: SettingsPatch,
         cancellation: CancellationToken,
     ) -> Result<SettingsOperationInspection, SettingsServiceError> {
+        let work =
+            self.invocation_guard(&caller, SettingsToolName::Update, Some(patch.request_id))?;
         let service = self.clone();
-        tokio::spawn(async move { service.update_owned(caller, patch, cancellation).await })
-            .await
-            .map_err(|_| SettingsServiceError::Worker)?
+        tokio::spawn(async move {
+            let _work = work;
+            let result = service.update_owned(caller, patch, cancellation).await;
+            drop(service);
+            result
+        })
+        .await
+        .map_err(|_| SettingsServiceError::Worker)?
     }
 
     async fn update_owned(
@@ -68,17 +76,28 @@ impl SettingsService {
             .authority
             .require_tool(&caller, SettingsToolName::Update)?;
         let target = SettingsActionTarget::Patch(patch.clone());
-        target.validate()?;
-        self.core.check_scope(&patch.scope)?;
+        if let Err(error) = target.validate() {
+            self.reject_invocation()?;
+            return Err(error);
+        }
+        if let Err(error) = self.core.check_scope(&patch.scope) {
+            self.reject_invocation()?;
+            return Err(error);
+        }
         if !matches!(patch.scope, SettingsScope::Host { .. }) {
+            self.reject_invocation()?;
             return Err(SettingsServiceError::OutsideScope);
         }
         let mutation = self.enter(&caller, &cancellation).await?;
+        let work = self.invocation.clone();
         self.blocking(move |core| {
             let retained_guard = WriteGuard::Ordinary(mutation);
             core.authority
                 .require_tool(&caller, SettingsToolName::Update)?;
             if let Some(record) = core.replay_target(&caller, &target)? {
+                if let Some(work) = &work {
+                    work.recorded(record.identity.binding.request_id)?;
+                }
                 return Ok(record.inspection());
             }
             core.require_resolved_file()?;
@@ -86,6 +105,12 @@ impl SettingsService {
             let composition = core.composition()?;
             let current = core.settings.observed_snapshot()?;
             let metadata = composition.memory.embedding_metadata()?;
+            if let Some(work) = &work
+                && current.revision != patch.expected_revision
+            {
+                work.reject()?;
+                return Err(SettingsServiceError::Conflict);
+            }
             let candidate = updates::patch_candidate(&current, &patch, metadata.profile.as_ref())?;
             let protected = patch.changes.iter().any(|change| {
                 change.key.agent_mutability() == AgentMutability::RequiresNativeConfirmation
@@ -99,9 +124,15 @@ impl SettingsService {
                 } else {
                     core.pending_phase(&identity)
                 };
+                if let Some(work) = &work {
+                    work.attempting()?;
+                }
                 let record = core
                     .repository
                     .prepare(identity, phase, || core.authority.validate(&caller, false))?;
+                if let Some(work) = &work {
+                    work.recorded(record.identity.binding.request_id)?;
+                }
                 if matches!(
                     record.phase(),
                     SettingsOperationPhase::AwaitingConfirmation { .. }
@@ -140,6 +171,7 @@ impl SettingsService {
                 deadline,
                 cancellation: cancellation.child_token(),
                 request_cancellation: cancellation,
+                invocation: work,
             };
             core.write_file(write, retained_guard)
         })
@@ -243,6 +275,7 @@ impl SettingsService {
                     deadline,
                     cancellation: cancellation.child_token(),
                     request_cancellation: cancellation,
+                    invocation: None,
                 },
                 retained_guard,
             )?;
@@ -361,6 +394,7 @@ impl SettingsService {
                     deadline: effect.claim.deadline,
                     cancellation: effect.cancellation(),
                     request_cancellation: cancellation,
+                    invocation: None,
                 };
                 Ok((write, effect))
             })();
@@ -441,6 +475,7 @@ impl ServiceCore {
         let active = Arc::new(ActiveSettingsWrite {
             request_id: write.identity.binding.request_id,
             client_session_id: write.identity.binding.client_session_id,
+            origin: write.identity.origin,
             cancellation: write.cancellation.clone(),
         });
         {
@@ -461,9 +496,13 @@ impl ServiceCore {
                 &write.request_cancellation,
             )
         };
-        let admitted =
+        let admitted = (|| {
+            if let Some(work) = &write.invocation {
+                work.attempting()?;
+            }
             self.repository
-                .begin_write(write.identity.clone(), write.intent.clone(), check);
+                .begin_write(write.identity.clone(), write.intent.clone(), check)
+        })();
         if let Err(cause) = admitted {
             let mut current = self
                 .active_write
@@ -476,6 +515,9 @@ impl ServiceCore {
                 current.take();
             }
             return Err(cause);
+        }
+        if let Some(work) = &write.invocation {
+            work.recorded(write.identity.binding.request_id)?;
         }
         let mut capture = ApplicationCapture {
             semantic: None,

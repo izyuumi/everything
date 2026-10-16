@@ -292,6 +292,9 @@ impl HostInner {
             self.ensure_accepting()?;
         }
         match operation {
+            OwnerOperation::AcknowledgeSettingsUncertainty { .. } => Err(HostError::Invalid(
+                "Settings uncertainty cleanup requires the authenticated owner channel",
+            )),
             OwnerOperation::WorkerCoordinator { operation } => {
                 self.worker_operation(*operation, request_id, cancellation)
                     .await
