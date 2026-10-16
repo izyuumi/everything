@@ -286,21 +286,16 @@ impl Scheduler {
             return Ok(report);
         }
         let (reply, result) = oneshot::channel();
-        if self
-            .inner
-            .sender
-            .send(Control::Shutdown(reply))
-            .await
-            .is_err()
-        {
-            return self
-                .inner
-                .drained
-                .borrow()
-                .clone()
-                .ok_or(SchedulerError::Stopped);
-        }
-        match tokio::time::timeout(self.inner.shutdown_grace, result).await {
+        let deadline = tokio::time::Instant::now() + self.inner.shutdown_grace;
+        let shutdown = async {
+            self.inner
+                .sender
+                .send(Control::Shutdown(reply))
+                .await
+                .map_err(|_| SchedulerError::Stopped)?;
+            result.await.map_err(|_| SchedulerError::Stopped)
+        };
+        match tokio::time::timeout_at(deadline, shutdown).await {
             Ok(Ok(report)) => Ok(report),
             Ok(Err(_)) => self
                 .inner
@@ -1466,16 +1461,15 @@ impl Actor {
                 .retry_once
                 .remove(&id)
                 .filter(|target| target.matches(&conversation, &task));
-            if let Some(reason) = native_waiting(&conversation, &task) {
-                if !pending_input_can_run(&conversation, &task)
-                    && resume.is_none()
-                    && !matches!(reason, WaitingReason::Approval | WaitingReason::InFlight)
-                {
-                    progress = true;
-                    task.checkpoint.waiting = Some(reason);
-                    save_waiting(&self.store(), &mut task)?;
-                    continue;
-                }
+            if let Some(reason) = native_waiting(&conversation, &task)
+                && !pending_input_can_run(&conversation, &task)
+                && resume.is_none()
+                && !matches!(reason, WaitingReason::Approval | WaitingReason::InFlight)
+            {
+                progress = true;
+                task.checkpoint.waiting = Some(reason);
+                save_waiting(&self.store(), &mut task)?;
+                continue;
             }
             progress = true;
             task.checkpoint.waiting = None;

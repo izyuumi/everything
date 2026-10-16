@@ -11,8 +11,9 @@ impl Agent {
         let admission = self.admit(conversation_id)?;
         let owner = self.clone();
         blocking(move || {
+            let retained_agent = owner;
             let _admission = admission;
-            let conversation = load_conversation(&owner.store, conversation_id)?;
+            let conversation = load_conversation(&retained_agent.store, conversation_id)?;
             let pending = conversation
                 .checkpoint
                 .pending
@@ -36,7 +37,7 @@ impl Agent {
             initial.id = TaskId::try_from(*command_id.as_uuid())?;
             let input = serde_json::to_value(&initial)
                 .map_err(|_| AgentError::InvalidData("task serialization failed"))?;
-            let row = match owner.store.task(&initial.id.to_string())? {
+            let row = match retained_agent.store.task(&initial.id.to_string())? {
                 Some(row) => row,
                 None => {
                     let row = TaskRow {
@@ -51,7 +52,7 @@ impl Agent {
                         updated_at: i64::try_from(initial.updated_at.get())
                             .map_err(|_| AgentError::InvalidData("task time overflow"))?,
                     };
-                    owner.store.create_task(&row)?;
+                    retained_agent.store.create_task(&row)?;
                     row
                 }
             };
@@ -81,7 +82,7 @@ impl Agent {
             record.transition(TaskStatus::Running, now, None)?;
             let checkpoint = serde_json::to_value(&record)
                 .map_err(|_| AgentError::InvalidData("task serialization failed"))?;
-            owner.store.transition_task(
+            retained_agent.store.transition_task(
                 &row.id,
                 row.state,
                 TaskState::Running,
@@ -101,7 +102,8 @@ impl Agent {
     ) -> Result<Option<TaskRecord>, AgentError> {
         let owner = self.clone();
         let exists = blocking(move || {
-            Ok(owner
+            let retained_agent = owner;
+            Ok(retained_agent
                 .store
                 .task(&TaskId::try_from(*command_id.as_uuid())?.to_string())?
                 .is_some())
@@ -124,10 +126,11 @@ impl Agent {
         let admission = self.admit(conversation_id)?;
         let owner = self.clone();
         blocking(move || {
+            let retained_agent = owner;
             let _admission = admission;
-            let conversation = load_conversation(&owner.store, conversation_id)?;
+            let conversation = load_conversation(&retained_agent.store, conversation_id)?;
             let id = TaskId::try_from(*command_id.as_uuid())?;
-            let mut row = owner
+            let mut row = retained_agent
                 .store
                 .task(&id.to_string())?
                 .ok_or(AgentError::InvalidData("foreground task is missing"))?;
@@ -185,7 +188,7 @@ impl Agent {
             if completed && matches!(row.state, TaskState::Queued | TaskState::Waiting) {
                 let now = UnixMillis::now()?;
                 record.transition(TaskStatus::Running, now, None)?;
-                owner.store.transition_task(
+                retained_agent.store.transition_task(
                     &row.id,
                     row.state,
                     TaskState::Running,
@@ -214,7 +217,7 @@ impl Agent {
             };
             let now = UnixMillis::now()?;
             record.transition(status, now, None)?;
-            owner.store.transition_task(
+            retained_agent.store.transition_task(
                 &row.id,
                 row.state,
                 state,
