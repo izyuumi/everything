@@ -1,3 +1,4 @@
+pub(crate) mod accounting;
 pub mod anthropic;
 pub mod openai;
 pub mod types;

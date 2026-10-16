@@ -1,4 +1,5 @@
 mod external;
+pub(crate) mod settings_agent;
 mod transport;
 pub(crate) use external::ExternalTaskStateUpdate;
 pub use transport::*;
