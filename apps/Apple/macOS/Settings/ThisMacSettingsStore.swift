@@ -80,6 +80,8 @@ final class ThisMacSettingsStore {
     @ObservationIgnored private var inspectionTask: Task<Void, Never>?
     @ObservationIgnored private var authorizationTask: Task<Void, Never>?
     @ObservationIgnored private var authorizationObservationTask: Task<Void, Never>?
+    @ObservationIgnored private var authorizationObservationID: UUID?
+    @ObservationIgnored private var authorizationObservationRefreshNeeded = false
     @ObservationIgnored private var observerTask: Task<Void, Never>?
     @ObservationIgnored private var observerID: UUID?
     private static let maximumRecords = 64
@@ -170,7 +172,6 @@ final class ThisMacSettingsStore {
             case .success(let store):
                 preferences = store
                 await readSnapshot(from: store)
-                updateForegroundSession()
             case .failure(let error):
                 preferenceError = error
                 snapshotReadFailed = true
@@ -185,18 +186,20 @@ final class ThisMacSettingsStore {
         guard !isClosed else { return }
         let changed = surfaceVisible != visible
         surfaceVisible = visible
+        if !isForeground { invalidateAuthorizationObservation() }
         updateForegroundSession()
         updateObserver()
-        if visible && changed { open(); refresh(); observeAuthorization() }
+        if visible && changed { refresh() }
     }
 
     func setApplicationActive(_ active: Bool) {
         guard !isClosed else { return }
         let changed = applicationActive != active
         applicationActive = active
+        if !isForeground { invalidateAuthorizationObservation() }
         updateForegroundSession()
         updateObserver()
-        if active && changed && surfaceVisible { open(); refresh(); observeAuthorization() }
+        if active && changed && surfaceVisible { refresh() }
     }
 
     func setCompletion(_ value: Bool) {
@@ -211,8 +214,8 @@ final class ThisMacSettingsStore {
 
     func refresh() {
         guard !isClosed else { return }
-        guard let preferences else { open(); return }
-        startRefresh(preferences, discardDraft: false)
+        if let preferences { startRefresh(preferences, discardDraft: false) }
+        else { open() }
         if isForeground { observeAuthorization() }
     }
 
@@ -282,6 +285,7 @@ final class ThisMacSettingsStore {
         isAuthorizing = true
         authorizationTask = Task { [self, admission, preferences] in
             let result = await notificationActions.authorize(admission)
+            invalidateAuthorizationObservation()
             notificationRecords[requestID]?.result = result
             lastNotificationResult = result
             switch result.outcome {
@@ -293,6 +297,7 @@ final class ThisMacSettingsStore {
             case .unavailable(let observation): receive(observation)
             default: break
             }
+            if isForeground { observeAuthorization() }
             await readSnapshot(from: preferences)
             isAuthorizing = false
             authorizationTask = nil
@@ -306,6 +311,7 @@ final class ThisMacSettingsStore {
         applicationActive = false
         foregroundSession?.close()
         foregroundSession = nil
+        invalidateAuthorizationObservation()
         observerTask?.cancel()
         for (requestID, record) in notificationRecords where record.result == nil { notificationActions.cancel(requestID: requestID) }
     }
@@ -359,6 +365,7 @@ final class ThisMacSettingsStore {
         }
         if pendingPatch == nil && (discardDraft || draft == nil || draft?.isModified == false) { draft = Draft(snapshot: incoming) }
         if pendingPatch == nil { preferenceError = nil }
+        updateForegroundSession()
     }
 
     private func receive(_ result: DevicePreferenceResult, for patch: DevicePreferencePatch) {
@@ -402,19 +409,35 @@ final class ThisMacSettingsStore {
     }
 
     private func observeAuthorization() {
-        guard isForeground, authorizationObservationTask == nil else { return }
+        guard isForeground else { return }
+        guard authorizationObservationTask == nil else {
+            authorizationObservationID = nil
+            authorizationObservationRefreshNeeded = true
+            return
+        }
+        let id = UUID()
+        authorizationObservationID = id
+        authorizationObservationRefreshNeeded = false
         isObservingAuthorization = true
         authorizationObservationTask = Task { [self] in
             let observation = await authorization.observe()
-            if isForeground { receive(observation) }
+            if isForeground && authorizationObservationID == id { receive(observation) }
             isObservingAuthorization = false
             authorizationObservationTask = nil
+            authorizationObservationID = nil
+            let refreshNeeded = authorizationObservationRefreshNeeded
+            authorizationObservationRefreshNeeded = false
+            if refreshNeeded { observeAuthorization() }
         }
     }
 
     private func receive(_ observation: DeviceNotificationObservation) {
-        if let previous = notificationObservation, previous.observedAt > observation.observedAt { return }
         notificationObservation = observation
+    }
+
+    private func invalidateAuthorizationObservation() {
+        authorizationObservationID = nil
+        authorizationObservationRefreshNeeded = false
     }
 
     private func updateObserver() {
