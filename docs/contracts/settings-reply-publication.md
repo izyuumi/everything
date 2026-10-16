@@ -46,7 +46,7 @@ The caller must still prove the original Main Immediate, call this final gate im
 
 ## Subsequent one-Main publication producer
 
-The separate Unix-only `storage/settings_publication.rs` source now defines `Store::publish_settings_reply` for the existing three-variant Bind/Fresh/Historical input and actual borrowed `SettingsReplySealContext`. Module/export registration, a started Work consumer and compilation remain separate integration steps. This is a synchronous transaction producer, not a registered job, accepted remote route, queued/send owner or memory-settlement API.
+The separate Unix-only `storage/settings_publication.rs` source now defines `Store::publish_settings_reply` for the existing three-variant Bind/Fresh/Historical input and actual borrowed `SettingsReplySealContext`. Its Unix module and two internal result/error exports are now registered. A started Work consumer and compilation remain separate integration steps. This is a synchronous transaction producer, not a registered job, accepted remote route, queued/send owner or memory-settlement API.
 
 The method first requires its Store to share the context's actual connection, acquires the existing health-checked Main guard and begins one `TransactionBehavior::Immediate`. Its guard and transaction stay inside that invocation; no transaction, callback, arbitrary byte input or second connection is accepted. Existing shared Store quarantine checks fence new and waiting Main borrowers. No Agent, profile, session, Broker, Caller, parent or capability is allocated here.
 

@@ -2,10 +2,14 @@ mod external;
 pub(crate) mod settings_agent;
 mod settings_grants;
 pub(crate) mod settings_originals;
+#[cfg(unix)]
+mod settings_publication;
 mod settings_transport;
 mod transport;
 pub(crate) use external::ExternalTaskStateUpdate;
 pub(crate) use settings_grants::settings_grant_head_on;
+#[cfg(unix)]
+pub(crate) use settings_publication::{CommittedSettingsReply, SettingsReplyPublishFailure};
 #[cfg(unix)]
 pub(crate) use settings_transport::{
     ConsumedSettingsReply, SettingsAccessAdmissionError, SettingsAccessReceiptCommit,
