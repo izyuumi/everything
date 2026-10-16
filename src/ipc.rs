@@ -104,6 +104,9 @@ pub enum OwnerQuery {
         lookup: ApprovalLookup,
     },
     Settings,
+    SettingsOperation {
+        request_id: CommandId,
+    },
     Composition,
     Publication,
     ScheduleEngine,
@@ -367,6 +370,9 @@ impl ConversationWait {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum OwnerQueryResult {
+    SettingsOperation {
+        operation: crate::host::settings::SettingsOperationInspection,
+    },
     WorkerCoordinator {
         result: Box<crate::host::worker::WorkerCoordinatorQueryResult>,
     },
@@ -477,6 +483,12 @@ impl From<crate::agent::ConversationInfo> for ConversationSummary {
 impl OwnerQueryResult {
     pub fn validate_for(&self, query: &OwnerQuery) -> Result<(), &'static str> {
         let valid = match (query, self) {
+            (
+                OwnerQuery::SettingsOperation { request_id },
+                Self::SettingsOperation { operation },
+            ) => {
+                operation.binding.request_id == *request_id && operation.binding.validate().is_ok()
+            }
             (OwnerQuery::WorkerCoordinator { query }, Self::WorkerCoordinator { result }) => {
                 result.validate_for(query).is_ok()
             }

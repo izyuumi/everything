@@ -35,6 +35,7 @@ use super::inbox::{
     CommandOrigin, CommandPhase, HostCommandRecord, HostInbox, InboxError, InboxInput,
 };
 use super::providers::HostProviderFactory;
+use super::settings::service::{SettingsService, SettingsServiceError};
 use super::settings::{SettingsError, SettingsRepository};
 
 #[derive(Debug, Error)]
@@ -47,6 +48,8 @@ pub enum HostError {
     Storage(#[from] StorageError),
     #[error(transparent)]
     Settings(#[from] SettingsError),
+    #[error(transparent)]
+    SettingsService(#[from] SettingsServiceError),
     #[error(transparent)]
     Inbox(#[from] InboxError),
     #[error(transparent)]
@@ -132,6 +135,7 @@ pub(super) struct HostInner {
     pub(super) agent: Agent,
     pub(super) inbox: HostInbox,
     pub(super) settings: SettingsRepository,
+    pub(super) settings_service: SettingsService,
     pub(super) credentials: CredentialVault,
     pub(super) devices: DeviceEndpoint,
     pub(super) registry: Arc<ToolRegistry>,
@@ -236,6 +240,10 @@ impl HostService {
         })
         .await
         .map_err(|_| HostError::Worker)??;
+        let mutation = Arc::new(Mutex::new(()));
+        let settings_service =
+            SettingsService::open(agent.clone(), settings.clone(), &devices, mutation.clone())
+                .await?;
         let credentials = CredentialVault::from_environment();
         if let Some(path) = binding_file {
             credentials
@@ -388,6 +396,7 @@ impl HostService {
             inbox: HostInbox::new(agent.store()),
             agent,
             settings,
+            settings_service,
             credentials,
             devices,
             registry,
@@ -398,7 +407,7 @@ impl HostService {
             broker,
             composition,
             changed: Notify::new(),
-            mutation: Arc::new(Mutex::new(())),
+            mutation,
             relay_origin,
             relay_status,
             relay_updates,
@@ -565,6 +574,11 @@ impl HostService {
         {
             let _mutation = inner.mutation.lock().await;
             inner.draining.store(true, Ordering::Release);
+            if let Err(error) = inner.settings_service.stop_intake()
+                && result.is_ok()
+            {
+                result = Err(error.into());
+            }
             inner.composition.close();
             inner.schedule_controls.close();
             if let Some(coordinator) = inner.worker.get() {
@@ -575,6 +589,15 @@ impl HostService {
         work_stop.cancel();
         let service_owner = inner.clone();
         let mut service_work = Some(tokio::spawn(async move {
+            loop {
+                match service_owner.settings_service.close().await {
+                    Ok(()) => break,
+                    Err(_) => tracing::error!(
+                        "settings cleanup remains unconfirmed; state ownership retained"
+                    ),
+                }
+                tokio::time::sleep(Duration::from_secs(1)).await;
+            }
             loop {
                 match service_owner.composition.stop_work().await {
                     Ok(()) => return,
@@ -860,6 +883,16 @@ impl HostInner {
                 )
                 .await
             }
+            LocalRequestPayload::Query {
+                query: crate::ipc::OwnerQuery::SettingsOperation { request_id },
+            } => {
+                let caller = self.settings_service.local_owner_caller(call)?;
+                Ok(LocalResponsePayload::QueryResult {
+                    result: crate::ipc::OwnerQueryResult::SettingsOperation {
+                        operation: self.settings_service.operation(caller, *request_id).await?,
+                    },
+                })
+            }
             LocalRequestPayload::Query { query } => Ok(LocalResponsePayload::QueryResult {
                 result: self.query(query.clone(), call.cancellation.clone()).await?,
             }),
@@ -872,6 +905,11 @@ impl HostInner {
                             call.cancellation.clone(),
                         )
                         .await?,
+                })
+            }
+            LocalRequestPayload::NativeSettings { operation } => {
+                Ok(LocalResponsePayload::NativeSettingsResult {
+                    result: self.native_settings(call, operation.clone()).await?,
                 })
             }
             LocalRequestPayload::Synchronize { request } => {
@@ -1029,11 +1067,13 @@ pub(super) fn public_failure(error: &HostError) -> LocalFailure {
             "legacy foreground task requires stopping the host and explicitly resuming or settling it through the foreground CLI",
         ),
         HostError::Inbox(InboxError::OriginDenied)
+        | HostError::SettingsService(SettingsServiceError::OutsideScope)
         | HostError::Device(DeviceError::AccessDenied | DeviceError::EndpointRevoked) => (
             LocalFailureCode::PermissionDenied,
             "command origin is no longer authorized",
         ),
         HostError::Inbox(InboxError::Capacity)
+        | HostError::SettingsService(SettingsServiceError::Capacity)
         | HostError::Scheduler(SchedulerError::Capacity(_)) => (
             LocalFailureCode::Busy,
             "host command or task capacity is exhausted",
@@ -1042,6 +1082,7 @@ pub(super) fn public_failure(error: &HostError) -> LocalFailure {
             (LocalFailureCode::InvalidRequest, *message)
         }
         HostError::Inbox(InboxError::Conflict(_))
+        | HostError::SettingsService(SettingsServiceError::Conflict)
         | HostError::Settings(SettingsError::Conflict) => (
             LocalFailureCode::InvalidRequest,
             "identity or revision conflicts with existing durable state",
@@ -1049,6 +1090,27 @@ pub(super) fn public_failure(error: &HostError) -> LocalFailure {
         HostError::Credential(_) => (
             LocalFailureCode::Unavailable,
             "credential operation failed; inspect native store availability and exact reference",
+        ),
+        HostError::SettingsService(
+            SettingsServiceError::Invalid(_) | SettingsServiceError::Contract(_),
+        ) => (LocalFailureCode::InvalidRequest, "invalid settings request"),
+        HostError::SettingsService(SettingsServiceError::NotFound) => (
+            LocalFailureCode::InvalidRequest,
+            "settings operation was not found in this scope",
+        ),
+        HostError::SettingsService(
+            SettingsServiceError::Expired
+            | SettingsServiceError::Cancelled
+            | SettingsServiceError::Stopped,
+        ) => (
+            LocalFailureCode::Unavailable,
+            "settings admission is closed, expired or cancelled",
+        ),
+        HostError::SettingsService(
+            SettingsServiceError::OutcomeUnknown { .. } | SettingsServiceError::Worker,
+        ) => (
+            LocalFailureCode::Unavailable,
+            "settings outcome is uncertain; inspect the original operation",
         ),
         HostError::Scheduler(_) => (
             LocalFailureCode::Unavailable,

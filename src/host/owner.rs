@@ -188,6 +188,9 @@ impl HostInner {
                 })
                 .await
             }
+            OwnerQuery::SettingsOperation { .. } => Err(HostError::Invalid(
+                "settings operation inspection requires authenticated owner ingress",
+            )),
             OwnerQuery::Identity => {
                 let keys = self.devices.public_keys();
                 Ok(OwnerQueryResult::Identity {
