@@ -431,3 +431,169 @@ fn outbox_usage(row: &Row<'_>) -> rusqlite::Result<OutboxUsage> {
         reserved_bytes: row.get(3)?,
     })
 }
+
+#[cfg(unix)]
+pub(crate) struct ConsumedSettingsReply<'sealed, 'transaction, 'connection, 'source> {
+    sealed: &'sealed crate::devices::SealedSettingsReply<'transaction, 'connection, 'source>,
+}
+
+#[cfg(unix)]
+pub(crate) fn consume_settings_reply_in<'sealed, 'transaction, 'connection, 'source>(
+    transaction: &'transaction rusqlite::Transaction<'connection>,
+    sealed: &'sealed crate::devices::SealedSettingsReply<'transaction, 'connection, 'source>,
+) -> Result<
+    ConsumedSettingsReply<'sealed, 'transaction, 'connection, 'source>,
+    crate::devices::SettingsReplyPublicationError,
+> {
+    sealed.check_before_transfer(transaction)?;
+    check_reply_reservation_on(transaction, sealed)?;
+    let reply = sealed.reservation();
+    let reserved_bytes = i64::try_from(reply.family.reserved_bytes())
+        .map_err(|_| crate::devices::SettingsReplyPublicationError::Conflict)?;
+    let created_at = i64::try_from(reply.created_at.get())
+        .map_err(|_| crate::devices::SettingsReplyPublicationError::Conflict)?;
+    let expires_at = i64::try_from(reply.expires_at.get())
+        .map_err(|_| crate::devices::SettingsReplyPublicationError::Conflict)?;
+    let deleted = transaction.execute(
+        "DELETE FROM settings_transport_reply_reservations WHERE reservation_id=?1 AND local_device_id=?2 AND peer_device_id=?3 AND provenance=?4 AND family=?5 AND reserved_bytes=?6 AND created_at=?7 AND expires_at=?8",
+        rusqlite::params![reply.reservation_id.to_string(), reply.local_device_id.to_string(), reply.peer_device_id.to_string(), reply.provenance, reply.family.name(), reserved_bytes, created_at, expires_at],
+    )?;
+    if deleted != 1 {
+        return Err(crate::devices::SettingsReplyPublicationError::Conflict);
+    }
+    super::transport::enqueue_transport(transaction, sealed.item())?;
+    let item = sealed.item();
+    let envelope_bytes = i64::try_from(item.message.envelope.len())
+        .map_err(|_| crate::devices::SettingsReplyPublicationError::Conflict)?;
+    transaction.execute(
+        "INSERT INTO settings_transport_private_outbox(message_id,reservation_id,local_device_id,peer_device_id,provenance,family,envelope_bytes,created_at,expires_at) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9)",
+        rusqlite::params![item.message.id,reply.reservation_id.to_string(),reply.local_device_id.to_string(),reply.peer_device_id.to_string(),reply.provenance,reply.family.name(),envelope_bytes,item.message.created_at,item.expires_at],
+    )?;
+    check_consumed_reply_on(transaction, sealed)?;
+    sealed.check_local_on(transaction)?;
+    Ok(ConsumedSettingsReply { sealed })
+}
+
+#[cfg(unix)]
+impl<'sealed, 'transaction, 'connection, 'source>
+    ConsumedSettingsReply<'sealed, 'transaction, 'connection, 'source>
+{
+    pub(crate) fn check_on(
+        &self,
+        transaction: &rusqlite::Transaction<'_>,
+    ) -> Result<(), crate::devices::SettingsReplyPublicationError> {
+        self.sealed.check_local_on(transaction)?;
+        check_consumed_reply_on(transaction, self.sealed)
+    }
+
+    pub(crate) fn sealed(
+        &self,
+    ) -> &'sealed crate::devices::SealedSettingsReply<'transaction, 'connection, 'source> {
+        self.sealed
+    }
+}
+
+#[cfg(unix)]
+impl std::fmt::Debug for ConsumedSettingsReply<'_, '_, '_, '_> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("ConsumedSettingsReply([transaction-local transition])")
+    }
+}
+
+#[cfg(unix)]
+fn check_reply_reservation_on(
+    connection: &Connection,
+    sealed: &crate::devices::SealedSettingsReply<'_, '_, '_>,
+) -> Result<(), crate::devices::SettingsReplyPublicationError> {
+    let reply = sealed.reservation();
+    if reply.provenance.len() > 2048 {
+        return Err(crate::devices::SettingsReplyPublicationError::Conflict);
+    }
+    let mut statement = connection.prepare("SELECT reservation_id,local_device_id,peer_device_id,provenance,family,reserved_bytes,created_at,expires_at FROM settings_transport_reply_reservations WHERE reservation_id=?1")?;
+    let mut rows = statement.query([reply.reservation_id.to_string()])?;
+    let row = rows
+        .next()?
+        .ok_or(crate::devices::SettingsReplyPublicationError::Conflict)?;
+    if reply_text(row, 0, 36)? != reply.reservation_id.to_string()
+        || reply_text(row, 1, 36)? != reply.local_device_id.to_string()
+        || reply_text(row, 2, 36)? != reply.peer_device_id.to_string()
+        || reply_text(row, 3, 2048)? != reply.provenance
+        || reply_text(row, 4, 10)? != reply.family.name()
+        || row.get::<_, i64>(5)?
+            != i64::try_from(reply.family.reserved_bytes())
+                .map_err(|_| crate::devices::SettingsReplyPublicationError::Conflict)?
+        || row.get::<_, i64>(6)?
+            != i64::try_from(reply.created_at.get())
+                .map_err(|_| crate::devices::SettingsReplyPublicationError::Conflict)?
+        || row.get::<_, i64>(7)?
+            != i64::try_from(reply.expires_at.get())
+                .map_err(|_| crate::devices::SettingsReplyPublicationError::Conflict)?
+    {
+        return Err(crate::devices::SettingsReplyPublicationError::Conflict);
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn check_consumed_reply_on(
+    connection: &Connection,
+    sealed: &crate::devices::SealedSettingsReply<'_, '_, '_>,
+) -> Result<(), crate::devices::SettingsReplyPublicationError> {
+    let reply = sealed.reservation();
+    let item = sealed.item();
+    let reservation_exists: bool = connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM settings_transport_reply_reservations WHERE reservation_id=?1)",
+        [reply.reservation_id.to_string()], |row|row.get(0),
+    )?;
+    if reservation_exists {
+        return Err(crate::devices::SettingsReplyPublicationError::Conflict);
+    }
+    let mut statement = connection.prepare("SELECT o.id,o.device_id,o.envelope,o.created_at,o.not_before,o.attempts,o.delivered_at,t.message_id,t.expires_at,p.message_id,p.reservation_id,p.local_device_id,p.peer_device_id,p.provenance,p.family,p.envelope_bytes,p.created_at,p.expires_at FROM outbox AS o JOIN transport_outbox AS t ON t.message_id=o.id JOIN settings_transport_private_outbox AS p ON p.message_id=o.id WHERE o.id=?1")?;
+    let mut rows = statement.query([&item.message.id])?;
+    let row = rows
+        .next()?
+        .ok_or(crate::devices::SettingsReplyPublicationError::Conflict)?;
+    let rusqlite::types::ValueRef::Blob(actual_bytes) = row.get_ref(2)? else {
+        return Err(crate::devices::SettingsReplyPublicationError::Conflict);
+    };
+    if actual_bytes.len() > reply.family.reserved_bytes()
+        || actual_bytes != item.message.envelope.as_slice()
+        || reply_text(row, 0, 36)? != item.message.id
+        || reply_text(row, 1, 36)? != item.message.device_id
+        || row.get::<_, i64>(3)? != item.message.created_at
+        || row.get::<_, i64>(4)? != item.message.not_before
+        || row.get::<_, i64>(5)? != 0
+        || row.get::<_, Option<i64>>(6)?.is_some()
+        || reply_text(row, 7, 36)? != item.message.id
+        || row.get::<_, i64>(8)? != item.expires_at
+        || reply_text(row, 9, 36)? != item.message.id
+        || reply_text(row, 10, 36)? != reply.reservation_id.to_string()
+        || reply_text(row, 11, 36)? != reply.local_device_id.to_string()
+        || reply_text(row, 12, 36)? != reply.peer_device_id.to_string()
+        || reply_text(row, 13, 2048)? != reply.provenance
+        || reply_text(row, 14, 10)? != reply.family.name()
+        || row.get::<_, i64>(15)?
+            != i64::try_from(item.message.envelope.len())
+                .map_err(|_| crate::devices::SettingsReplyPublicationError::Conflict)?
+        || row.get::<_, i64>(16)? != item.message.created_at
+        || row.get::<_, i64>(17)? != item.expires_at
+    {
+        return Err(crate::devices::SettingsReplyPublicationError::Conflict);
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn reply_text<'row>(
+    row: &'row Row<'_>,
+    column: usize,
+    maximum: usize,
+) -> Result<&'row str, crate::devices::SettingsReplyPublicationError> {
+    let rusqlite::types::ValueRef::Text(bytes) = row.get_ref(column)? else {
+        return Err(crate::devices::SettingsReplyPublicationError::Conflict);
+    };
+    if bytes.len() > maximum {
+        return Err(crate::devices::SettingsReplyPublicationError::Conflict);
+    }
+    std::str::from_utf8(bytes).map_err(|_| crate::devices::SettingsReplyPublicationError::Conflict)
+}

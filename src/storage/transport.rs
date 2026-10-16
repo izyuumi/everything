@@ -1145,7 +1145,10 @@ fn validate_outbound(item: &TransportOutboxInsert) -> StorageResult<()> {
     Ok(())
 }
 
-fn enqueue_transport(connection: &Connection, item: &TransportOutboxInsert) -> StorageResult<()> {
+pub(super) fn enqueue_transport(
+    connection: &Connection,
+    item: &TransportOutboxInsert,
+) -> StorageResult<()> {
     active_peer(connection, &item.message.device_id, None)?;
     let local_active: bool = connection.query_row(
         "SELECT EXISTS(SELECT 1 FROM transport_endpoint WHERE singleton=1 AND revoked_at IS NULL)",
