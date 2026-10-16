@@ -14,6 +14,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::context::{ContextBudget, ContextBuilder, ContextInput, MemoryExcerpt, TaskContext};
 use crate::model::{ContentBlock, ModelEvent, ModelProvider, StopReason, ToolChoice};
+use crate::protocol::CommandId;
 
 use super::wiki::{content_hash, validate_page_path};
 use super::{Wiki, WikiError};
@@ -68,6 +69,10 @@ pub enum ConsolidationError {
     PageConflict(String),
     #[error("wiki maintenance background worker is already running")]
     AlreadyRunning,
+    #[error("semantic generation does not match its original service or operation")]
+    SemanticBinding,
+    #[error("semantic admission is permanently closed or exhausted")]
+    SemanticClosed,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -206,6 +211,51 @@ pub struct ConsolidationConfig {
 }
 
 #[derive(Clone)]
+pub struct SemanticGeneration {
+    capture: SemanticCapture,
+    operation_id: CommandId,
+}
+
+#[derive(Clone)]
+pub(crate) struct SemanticCapture {
+    gate: Arc<Mutex<SemanticGate>>,
+    generation: u64,
+    queries: bool,
+    cancellation: CancellationToken,
+}
+
+struct SemanticGate {
+    generation: u64,
+    operation_id: Option<CommandId>,
+    queries: bool,
+    closed: bool,
+    cancellation: CancellationToken,
+}
+
+impl SemanticCapture {
+    pub(crate) fn admitted(&self) -> bool {
+        self.queries && self.current()
+    }
+
+    pub(crate) fn current(&self) -> bool {
+        self.gate.lock().is_ok_and(|gate| {
+            !gate.closed && gate.generation == self.generation && !self.cancellation.is_cancelled()
+        })
+    }
+}
+
+impl SemanticGeneration {
+    pub fn generation(&self) -> u64 {
+        self.capture.generation
+    }
+
+    #[cfg(feature = "local-embeddings")]
+    pub(crate) fn cancellation(&self) -> CancellationToken {
+        self.capture.cancellation.clone()
+    }
+}
+
+#[derive(Clone)]
 pub struct Consolidator {
     inner: Arc<ConsolidationInner>,
 }
@@ -218,12 +268,14 @@ struct ConsolidationInner {
     wakeup: Notify,
     running: AtomicBool,
     active_cancellation: Mutex<Option<(String, CancellationToken)>>,
+    semantics: Arc<Mutex<SemanticGate>>,
 }
 
 struct MaintenanceState {
     wiki: Wiki,
     connection: Connection,
     active: Option<(String, CancellationToken)>,
+    semantic_captures: BTreeMap<String, SemanticCapture>,
     #[cfg(feature = "local-embeddings")]
     hybrid: Option<super::search::HybridSearch>,
     #[cfg(feature = "local-embeddings")]
@@ -245,6 +297,7 @@ struct ClaimedJob {
     request: Option<MaintenanceRequest>,
     prepared: bool,
     cancellation: CancellationToken,
+    semantic: Option<SemanticCapture>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -272,6 +325,133 @@ struct IngestContext {
 }
 
 impl Consolidator {
+    fn capture_semantics(&self) -> Result<SemanticCapture, ConsolidationError> {
+        let gate = self
+            .inner
+            .semantics
+            .lock()
+            .map_err(|_| ConsolidationError::SemanticClosed)?;
+        Ok(SemanticCapture {
+            gate: Arc::clone(&self.inner.semantics),
+            generation: gate.generation,
+            queries: gate.queries && !gate.closed,
+            cancellation: gate.cancellation.clone(),
+        })
+    }
+
+    pub(crate) fn suspend_semantics(
+        &self,
+        operation_id: CommandId,
+    ) -> Result<SemanticGeneration, ConsolidationError> {
+        let mut gate = self
+            .inner
+            .semantics
+            .lock()
+            .map_err(|_| ConsolidationError::SemanticClosed)?;
+        if gate.closed {
+            return Err(ConsolidationError::SemanticClosed);
+        }
+        if gate.operation_id != Some(operation_id) {
+            gate.queries = false;
+            gate.cancellation.cancel();
+            let Some(next) = gate.generation.checked_add(1) else {
+                gate.closed = true;
+                return Err(ConsolidationError::SemanticClosed);
+            };
+            gate.generation = next;
+            gate.operation_id = Some(operation_id);
+            gate.cancellation = CancellationToken::new();
+        }
+        Ok(SemanticGeneration {
+            capture: SemanticCapture {
+                gate: Arc::clone(&self.inner.semantics),
+                generation: gate.generation,
+                queries: true,
+                cancellation: gate.cancellation.clone(),
+            },
+            operation_id,
+        })
+    }
+
+    pub(crate) fn validate_semantics(
+        &self,
+        generation: &SemanticGeneration,
+        operation_id: CommandId,
+    ) -> Result<(), ConsolidationError> {
+        if !Arc::ptr_eq(&self.inner.semantics, &generation.capture.gate)
+            || generation.operation_id != operation_id
+            || !generation.capture.current()
+        {
+            return Err(ConsolidationError::SemanticBinding);
+        }
+        Ok(())
+    }
+
+    pub(crate) fn semantic_admission(&self) -> Result<(u64, bool), ConsolidationError> {
+        let capture = self.capture_semantics()?;
+        Ok((capture.generation, capture.admitted()))
+    }
+
+    pub(crate) fn close_semantics(&self) -> Result<(), ConsolidationError> {
+        let mut gate = self
+            .inner
+            .semantics
+            .lock()
+            .map_err(|_| ConsolidationError::SemanticClosed)?;
+        gate.closed = true;
+        gate.queries = false;
+        gate.cancellation.cancel();
+        Ok(())
+    }
+
+    #[cfg(feature = "local-embeddings")]
+    pub(crate) fn activate_semantics(
+        &self,
+        generation: &SemanticGeneration,
+    ) -> Result<(), ConsolidationError> {
+        self.validate_semantics(generation, generation.operation_id)?;
+        let mut gate = self
+            .inner
+            .semantics
+            .lock()
+            .map_err(|_| ConsolidationError::SemanticClosed)?;
+        if gate.closed
+            || gate.generation != generation.capture.generation
+            || gate.cancellation.is_cancelled()
+        {
+            return Err(ConsolidationError::SemanticBinding);
+        }
+        gate.queries = true;
+        Ok(())
+    }
+
+    #[cfg(feature = "local-embeddings")]
+    fn replace_semantics(&self, queries: bool) -> Result<SemanticCapture, ConsolidationError> {
+        let mut gate = self
+            .inner
+            .semantics
+            .lock()
+            .map_err(|_| ConsolidationError::SemanticClosed)?;
+        if gate.closed {
+            return Err(ConsolidationError::SemanticClosed);
+        }
+        gate.queries = false;
+        gate.cancellation.cancel();
+        let Some(next) = gate.generation.checked_add(1) else {
+            gate.closed = true;
+            return Err(ConsolidationError::SemanticClosed);
+        };
+        gate.generation = next;
+        gate.operation_id = None;
+        gate.cancellation = CancellationToken::new();
+        Ok(SemanticCapture {
+            gate: Arc::clone(&self.inner.semantics),
+            generation: next,
+            queries,
+            cancellation: gate.cancellation.clone(),
+        })
+    }
+
     pub async fn open_offline(
         wiki: Wiki,
         journal_path: impl AsRef<Path>,
@@ -304,8 +484,9 @@ impl Consolidator {
                 "retrieval results require one to one hundred".into(),
             ));
         }
+        let semantic = self.capture_semantics()?;
         self.blocking_cancellable(cancellation, move |state, cancellation| {
-            state.query_retrieval(&question, max_results, cancellation)
+            state.query_retrieval(&question, max_results, cancellation, Some(&semantic))
         })
         .await
     }
@@ -359,6 +540,13 @@ impl Consolidator {
                 wakeup: Notify::new(),
                 running: AtomicBool::new(false),
                 active_cancellation: Mutex::new(None),
+                semantics: Arc::new(Mutex::new(SemanticGate {
+                    generation: 0,
+                    operation_id: None,
+                    queries: false,
+                    closed: false,
+                    cancellation: CancellationToken::new(),
+                })),
             }),
         })
     }
@@ -370,9 +558,16 @@ impl Consolidator {
     ) -> Result<MaintenanceJob, ConsolidationError> {
         validate_identifier(&id)?;
         validate_request(&request)?;
+        let semantic = self.capture_semantics()?;
         let inner = Arc::clone(&self.inner);
         self.blocking(move |state| {
             let job = state.enqueue(&id, &request)?;
+            if !job.replayed && matches!(request, MaintenanceRequest::Query { .. }) {
+                if state.semantic_captures.len() >= MAX_JOBS {
+                    return Err(limit("retained semantic captures", MAX_JOBS));
+                }
+                state.semantic_captures.insert(job.id.clone(), semantic);
+            }
             inner.wakeup.notify_one();
             Ok(job)
         })
@@ -873,6 +1068,7 @@ impl MaintenanceState {
             wiki,
             connection,
             active: None,
+            semantic_captures: BTreeMap::new(),
             #[cfg(feature = "local-embeddings")]
             hybrid: None,
             #[cfg(feature = "local-embeddings")]
@@ -983,12 +1179,14 @@ impl MaintenanceState {
             )?;
         }
         self.active = Some((id.clone(), cancellation.clone()));
+        let semantic = self.semantic_captures.get(&id).cloned();
         Ok(Some(ClaimedJob {
             id,
             digest: job.request_digest,
             request,
             prepared,
             cancellation,
+            semantic,
         }))
     }
 
@@ -1509,9 +1707,11 @@ impl Consolidator {
     ) -> Result<(), ConsolidationError> {
         let query = question.to_owned();
         let cancellation = claim.cancellation.clone();
+        let semantic = claim.semantic.clone();
         let (excerpts, candidates, retrieval) = self
             .blocking(move |state| {
-                let response = state.query_retrieval(&query, 16, &cancellation)?;
+                let response =
+                    state.query_retrieval(&query, 16, &cancellation, semantic.as_ref())?;
                 let hits = response.hits;
                 let mut citations = Vec::new();
                 let mut excerpts = Vec::new();
@@ -2049,10 +2249,19 @@ impl MaintenanceState {
         query: &str,
         limit: usize,
         cancellation: &CancellationToken,
+        _semantic: Option<&SemanticCapture>,
     ) -> Result<super::search::SearchResponse, ConsolidationError> {
         #[cfg(feature = "local-embeddings")]
-        if let Some(hybrid) = &self.hybrid {
-            return Ok(hybrid.search(&mut self.wiki, query, limit, cancellation)?);
+        if let Some(semantic) = _semantic.filter(|capture| capture.admitted())
+            && let Some(hybrid) = &self.hybrid
+        {
+            return Ok(hybrid.search_guarded(
+                &mut self.wiki,
+                query,
+                limit,
+                cancellation,
+                semantic,
+            )?);
         }
         self.wiki.synchronize()?;
         let response =
@@ -2076,46 +2285,95 @@ impl Consolidator {
         &self,
         hybrid: Option<super::search::HybridSearch>,
     ) -> Result<(), ConsolidationError> {
-        self.blocking(move |state| {
-            state.hybrid = hybrid;
-            state.semantic_unavailable = None;
-            Ok(())
-        })
-        .await
+        self.set_hybrid_search_result_inner(Ok(hybrid)).await
     }
 
     pub async fn set_hybrid_search_result(
         &self,
         result: Result<super::search::HybridSearch, super::vector::VectorError>,
     ) -> Result<(), ConsolidationError> {
-        use super::embedding::EmbeddingError;
-        use super::vector::VectorError;
+        self.set_hybrid_search_result_inner(result.map(Some)).await
+    }
+
+    async fn set_hybrid_search_result_inner(
+        &self,
+        result: Result<Option<super::search::HybridSearch>, super::vector::VectorError>,
+    ) -> Result<(), ConsolidationError> {
+        let capture = self.replace_semantics(result.as_ref().is_ok_and(Option::is_some))?;
         let (hybrid, diagnostic) = match result {
-            Ok(hybrid) => (Some(hybrid), None),
-            Err(VectorError::Cancelled | VectorError::Embedding(EmbeddingError::Cancelled)) => {
-                return Err(ConsolidationError::Cancelled);
-            }
-            Err(error) => {
-                let diagnostic = match error {
-                    VectorError::Invalid(_) => "semantic retrieval configuration is invalid",
-                    VectorError::Limit(_) => "semantic index exceeds its configured resource bound",
-                    VectorError::Incompatible => "semantic index is incompatible or malformed",
-                    VectorError::Database(_) => "semantic index database is unavailable",
-                    VectorError::Serialization(_) => "semantic index metadata is invalid",
-                    VectorError::Embedding(_) => "local embedding backend is unavailable",
-                    VectorError::Wiki(_) => "semantic wiki source is unavailable",
-                    VectorError::SourceChanged => "semantic source changed during configuration",
-                    VectorError::Cancelled => "semantic configuration cancelled",
-                };
-                (None, Some(diagnostic.to_owned()))
-            }
+            Ok(hybrid) => (hybrid, None),
+            Err(
+                super::vector::VectorError::Cancelled
+                | super::vector::VectorError::Embedding(super::embedding::EmbeddingError::Cancelled),
+            ) => return Err(ConsolidationError::Cancelled),
+            Err(_) => (
+                None,
+                Some("local embedding backend is unavailable".to_owned()),
+            ),
         };
         self.blocking(move |state| {
-            state.hybrid = hybrid;
+            if !capture.current() {
+                return Err(ConsolidationError::SemanticBinding);
+            }
+            let displaced = std::mem::replace(&mut state.hybrid, hybrid);
             state.semantic_unavailable = diagnostic;
+            {
+                let mut gate = capture
+                    .gate
+                    .lock()
+                    .map_err(|_| ConsolidationError::SemanticClosed)?;
+                if !gate.closed && gate.generation == capture.generation {
+                    gate.queries = capture.queries;
+                }
+            }
+            drop(displaced);
             Ok(())
         })
+        .await?;
+        Ok(())
+    }
+
+    pub(crate) async fn detach_semantics(
+        &self,
+        generation: &SemanticGeneration,
+    ) -> Result<Option<super::search::HybridSearch>, ConsolidationError> {
+        self.validate_semantics(generation, generation.operation_id)?;
+        let generation = generation.clone();
+        self.blocking(move |state| {
+            if !generation.capture.current() {
+                return Err(ConsolidationError::SemanticBinding);
+            }
+            state.semantic_unavailable = None;
+            Ok(state.hybrid.take())
+        })
         .await
+    }
+
+    pub(crate) async fn install_semantics(
+        &self,
+        generation: &SemanticGeneration,
+        hybrid: super::search::HybridSearch,
+    ) -> Result<Result<(), super::search::HybridSearch>, ConsolidationError> {
+        let original_gate = Arc::clone(&self.inner.semantics);
+        let generation = generation.clone();
+        self.blocking(move |state| {
+            if !Arc::ptr_eq(&original_gate, &generation.capture.gate)
+                || !generation.capture.current()
+                || state.hybrid.is_some()
+            {
+                return Ok(Err(hybrid));
+            }
+            state.semantic_unavailable = None;
+            state.hybrid = Some(hybrid);
+            Ok(Ok(()))
+        })
+        .await
+    }
+
+    pub(crate) async fn detach_all_semantics(
+        &self,
+    ) -> Result<Option<super::search::HybridSearch>, ConsolidationError> {
+        self.blocking(|state| Ok(state.hybrid.take())).await
     }
 
     pub async fn semantic_status(
@@ -2137,11 +2395,41 @@ impl Consolidator {
         fresh: bool,
         cancellation: CancellationToken,
     ) -> Result<super::search::BuildReport, ConsolidationError> {
+        let semantic = self.capture_semantics()?;
+        self.rebuild_semantic_capture(budget, fresh, cancellation, semantic)
+            .await
+    }
+
+    pub(crate) async fn rebuild_semantics_generation(
+        &self,
+        generation: &SemanticGeneration,
+        budget: super::search::BuildBudget,
+    ) -> Result<super::search::BuildReport, ConsolidationError> {
+        self.validate_semantics(generation, generation.operation_id)?;
+        self.rebuild_semantic_capture(
+            budget,
+            false,
+            generation.cancellation(),
+            generation.capture.clone(),
+        )
+        .await
+    }
+
+    async fn rebuild_semantic_capture(
+        &self,
+        budget: super::search::BuildBudget,
+        fresh: bool,
+        cancellation: CancellationToken,
+        semantic: SemanticCapture,
+    ) -> Result<super::search::BuildReport, ConsolidationError> {
         self.blocking_cancellable(cancellation, move |state, cancellation| {
+            if !semantic.admitted() {
+                return Err(ConsolidationError::Cancelled);
+            }
             let hybrid = state.hybrid.as_mut().ok_or_else(|| {
                 ConsolidationError::Invalid("semantic retrieval is disabled".into())
             })?;
-            Ok(hybrid.rebuild(&mut state.wiki, budget, fresh, cancellation)?)
+            Ok(hybrid.rebuild_guarded(&mut state.wiki, budget, fresh, cancellation, &semantic)?)
         })
         .await
     }

@@ -1,19 +1,22 @@
 use std::path::PathBuf;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use rustix::fs::{FileType, Mode, OFlags};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
-use tokio::sync::watch;
+use tokio::sync::{Notify, watch};
 use tokio_util::sync::CancellationToken;
 
 use crate::agent::{Agent, ConversationConfig, ProviderEndpoint, ProviderKind};
 use crate::context::{ContextBudget, ContextBuilder, MemoryExcerpt};
+pub use crate::memory::consolidate::SemanticGeneration;
 use crate::memory::consolidate::{ConsolidationConfig, ConsolidationError, Consolidator};
+use crate::memory::embedding::EmbeddingProfile;
 use crate::memory::search::{FallbackReason, RetrievalMode, RetrievalSummary};
 use crate::memory::{Wiki, WikiError};
+use crate::protocol::CommandId;
 use crate::scheduler::TaskProviderFactory;
 use crate::service::ServiceError;
 use crate::service::state::StateDirectory;
@@ -26,6 +29,8 @@ pub enum MemoryError {
     UnleasedAgent,
     #[error("host memory is shutting down")]
     Draining,
+    #[error("embedding application binding changed")]
+    BindingChanged,
     #[error("host memory operation cancelled")]
     Cancelled,
     #[error("host memory worker failed")]
@@ -138,7 +143,7 @@ impl MaintenanceModelSettings {
     }
 }
 
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "mode", rename_all = "snake_case", deny_unknown_fields)]
 pub enum EmbeddingSettings {
     #[default]
@@ -146,7 +151,25 @@ pub enum EmbeddingSettings {
     EmbeddingGemma2(EmbeddingGemma2Settings),
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+impl EmbeddingSettings {
+    pub fn backend_default_dimensions(&self) -> Option<usize> {
+        match self {
+            Self::Disabled => None,
+            Self::EmbeddingGemma2(_) => {
+                #[cfg(feature = "local-embeddings")]
+                {
+                    Some(crate::memory::embedding::embeddinggemma2::DEFAULT_DIMENSIONS)
+                }
+                #[cfg(not(feature = "local-embeddings"))]
+                {
+                    None
+                }
+            }
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct EmbeddingGemma2Settings {
     pub runtime_library: PathBuf,
@@ -183,7 +206,7 @@ impl EmbeddingGemma2Settings {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct EmbeddingExecutionSettings {
     pub threads: usize,
@@ -227,6 +250,8 @@ pub enum MemoryDiagnostic {
     EmbeddingInitializationFailed,
     MaintenanceWorkerFailed,
     QuiescenceFailed,
+    EmbeddingApplyFailed,
+    EmbeddingConfigurationUnavailable,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -269,6 +294,156 @@ pub struct RetrievedMemory {
     pub omitted_hits: usize,
 }
 
+#[derive(Clone, Copy, Debug, Serialize)]
+pub enum EmbeddingDimensionChoice {
+    Inherit,
+    BackendDefault,
+    Selected { dimensions: u32 },
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct EmbeddingPreferences {
+    pub configured: EmbeddingSettings,
+    pub enabled: bool,
+    pub dimensions: EmbeddingDimensionChoice,
+}
+
+impl EmbeddingPreferences {
+    pub fn inherited(configured: EmbeddingSettings) -> Self {
+        let enabled = !matches!(configured, EmbeddingSettings::Disabled);
+        Self {
+            configured,
+            enabled,
+            dimensions: EmbeddingDimensionChoice::Inherit,
+        }
+    }
+
+    fn resolved(&self) -> Result<EmbeddingSettings, MemoryError> {
+        if let EmbeddingDimensionChoice::Selected { dimensions } = self.dimensions
+            && !(1..=65_536).contains(&dimensions)
+        {
+            return Err(MemoryError::Invalid("embedding dimensions"));
+        }
+        let mut settings = self.configured.clone();
+        if let EmbeddingSettings::EmbeddingGemma2(configuration) = &mut settings {
+            configuration.validate()?;
+            match self.dimensions {
+                EmbeddingDimensionChoice::Inherit => {}
+                EmbeddingDimensionChoice::BackendDefault => {
+                    if let Some(dimensions) = self.configured.backend_default_dimensions() {
+                        configuration.dimensions = dimensions;
+                    }
+                }
+                EmbeddingDimensionChoice::Selected { dimensions } => {
+                    configuration.dimensions = dimensions as usize;
+                }
+            }
+            configuration.validate()?;
+        }
+        if !self.enabled {
+            return Ok(EmbeddingSettings::Disabled);
+        }
+        Ok(settings)
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct EmbeddingApplyRequest {
+    pub operation_id: CommandId,
+    pub settings_revision: u64,
+    pub request_sha256: String,
+    pub preferences: EmbeddingPreferences,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EmbeddingApplyStage {
+    Capacity,
+    Detaching,
+    Loading,
+    Rebuilding,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EmbeddingBuildStop {
+    ChunkBudget,
+    TimeBudget,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct EmbeddingBuildProgress {
+    pub vector_generation: i64,
+    pub vectors: usize,
+    pub embedded: usize,
+    pub reused: usize,
+    pub skipped_blank: usize,
+    pub stop: EmbeddingBuildStop,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum EmbeddingApplyPhase {
+    Pending {
+        stage: EmbeddingApplyStage,
+    },
+    Disabled,
+    Ready {
+        dimensions: usize,
+        vector_generation: i64,
+        reused: bool,
+    },
+    Unavailable {
+        diagnostic: MemoryDiagnostic,
+    },
+    Failed {
+        diagnostic: MemoryDiagnostic,
+    },
+    Superseded,
+    Stopped,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct EmbeddingApplySnapshot {
+    pub operation_id: CommandId,
+    pub settings_revision: u64,
+    pub generation: u64,
+    pub phase: EmbeddingApplyPhase,
+    pub progress: Option<EmbeddingBuildProgress>,
+}
+
+#[derive(Clone, Debug)]
+pub struct EmbeddingMetadata {
+    pub generation: u64,
+    pub accepting_semantics: bool,
+    pub application_active: bool,
+    pub status: EmbeddingStatus,
+    pub profile: Option<EmbeddingProfile>,
+    pub application: Option<EmbeddingApplySnapshot>,
+}
+
+#[derive(Clone, Debug)]
+pub enum EmbeddingApplyAdmission {
+    Started(EmbeddingApplySnapshot),
+    Observed(EmbeddingApplySnapshot),
+    Deferred(EmbeddingApplySnapshot),
+}
+
+struct EmbeddingApplication {
+    binding: Vec<u8>,
+    snapshot: EmbeddingApplySnapshot,
+    installed: bool,
+}
+
+struct EmbeddingControl {
+    status: EmbeddingStatus,
+    profile: Option<EmbeddingProfile>,
+    application: Option<EmbeddingApplication>,
+    active: Option<u64>,
+    #[cfg(feature = "local-embeddings")]
+    process: Option<Arc<crate::memory::embedding::isolated::IsolatedEmbeddingGemma2>>,
+}
+
 #[derive(Clone)]
 pub struct MemoryService {
     owner: Arc<MemoryOwner>,
@@ -282,9 +457,11 @@ struct MemoryCore {
     settings: MemorySettings,
     consolidator: Consolidator,
     maintenance: MaintenanceStatus,
-    embeddings: EmbeddingStatus,
+    embeddings: Mutex<EmbeddingControl>,
+    embedding_changes: Arc<Notify>,
     #[cfg(feature = "local-embeddings")]
-    embedding_process: Option<Arc<crate::memory::embedding::isolated::IsolatedEmbeddingGemma2>>,
+    directory: PathBuf,
+    quiescence_failed: AtomicBool,
     worker: watch::Receiver<MemoryWorkerStatus>,
     stop: CancellationToken,
     closing: AtomicBool,
@@ -294,7 +471,11 @@ struct MemoryCore {
 impl Drop for MemoryOwner {
     fn drop(&mut self) {
         self.core.closing.store(true, Ordering::Release);
+        if self.core.consolidator.close_semantics().is_err() {
+            self.core.quiescence_failed.store(true, Ordering::Release);
+        }
         self.core.stop.cancel();
+        self.core.embedding_changes.notify_waiters();
     }
 }
 
@@ -305,11 +486,34 @@ impl MemoryService {
         providers: Option<Arc<dyn TaskProviderFactory>>,
         cancellation: CancellationToken,
     ) -> Result<Self, MemoryError> {
+        let preferences = EmbeddingPreferences::inherited(settings.embeddings.clone());
+        Self::open_with_embedding_preferences(agent, settings, providers, cancellation, preferences)
+            .await
+    }
+
+    pub async fn open_with_embedding_preferences(
+        agent: Agent,
+        settings: MemorySettings,
+        providers: Option<Arc<dyn TaskProviderFactory>>,
+        cancellation: CancellationToken,
+        preferences: EmbeddingPreferences,
+    ) -> Result<Self, MemoryError> {
+        if serde_json::to_vec(&settings.embeddings)? != serde_json::to_vec(&preferences.configured)?
+        {
+            return Err(MemoryError::BindingChanged);
+        }
+        let effective = preferences.resolved()?;
         let initialization = cancellation.child_token();
         let guard = initialization.clone().drop_guard();
-        let result = tokio::spawn(Self::open_owned(agent, settings, providers, initialization))
-            .await
-            .map_err(|_| MemoryError::Worker)?;
+        let result = tokio::spawn(Self::open_owned(
+            agent,
+            settings,
+            effective,
+            providers,
+            initialization,
+        ))
+        .await
+        .map_err(|_| MemoryError::Worker)?;
         if result.is_ok() {
             guard.disarm();
         }
@@ -319,6 +523,7 @@ impl MemoryService {
     async fn open_owned(
         agent: Agent,
         settings: MemorySettings,
+        effective: EmbeddingSettings,
         providers: Option<Arc<dyn TaskProviderFactory>>,
         cancellation: CancellationToken,
     ) -> Result<Self, MemoryError> {
@@ -394,8 +599,8 @@ impl MemoryService {
         let embeddings = configure_embeddings(
             &agent,
             &consolidator,
-            &settings.embeddings,
-            paths.directory,
+            &effective,
+            paths.directory.clone(),
             cancellation.clone(),
         )
         .await?;
@@ -411,9 +616,18 @@ impl MemoryService {
             settings,
             consolidator,
             maintenance,
-            embeddings: embeddings.status,
+            embeddings: Mutex::new(EmbeddingControl {
+                status: embeddings.status,
+                profile: embeddings.profile,
+                application: None,
+                active: None,
+                #[cfg(feature = "local-embeddings")]
+                process: embeddings.process,
+            }),
+            embedding_changes: Arc::new(Notify::new()),
             #[cfg(feature = "local-embeddings")]
-            embedding_process: embeddings.process,
+            directory: paths.directory,
+            quiescence_failed: AtomicBool::new(false),
             worker,
             stop: cancellation.child_token(),
             closing: AtomicBool::new(false),
@@ -423,16 +637,44 @@ impl MemoryService {
         tokio::spawn(async move {
             let result = supervisor.consolidator.run(supervisor.stop.clone()).await;
             supervisor.closing.store(true, Ordering::Release);
+            let gate_failed = supervisor.consolidator.close_semantics().is_err();
+            supervisor.stop.cancel();
+            loop {
+                let changed = supervisor.embedding_changes.notified();
+                tokio::pin!(changed);
+                changed.as_mut().enable();
+                let active = match supervisor.embeddings.lock() {
+                    Ok(state) => state.active.is_some(),
+                    Err(poisoned) => {
+                        supervisor.quiescence_failed.store(true, Ordering::Release);
+                        poisoned.into_inner().active.is_some()
+                    }
+                };
+                if !active {
+                    break;
+                }
+                changed.await;
+            }
             let idle_failed = supervisor.consolidator.wait_idle().await.is_err();
             #[cfg(feature = "local-embeddings")]
-            let isolation_failed = stop_embeddings(
-                supervisor.embedding_process.clone(),
-                supervisor._agent.clone(),
-            )
-            .await
-            .is_err();
+            let isolation_failed = shutdown_backend(&supervisor).await.is_err();
             #[cfg(not(feature = "local-embeddings"))]
             let isolation_failed = false;
+            let isolation_failed = isolation_failed
+                || gate_failed
+                || supervisor.quiescence_failed.load(Ordering::Acquire);
+            if let Ok(mut state) = supervisor.embeddings.lock() {
+                state.status = EmbeddingStatus::Disabled;
+                if let Some(application) = &mut state.application
+                    && matches!(
+                        application.snapshot.phase,
+                        EmbeddingApplyPhase::Pending { .. }
+                    )
+                {
+                    application.snapshot.phase = EmbeddingApplyPhase::Stopped;
+                }
+            }
+            supervisor.embedding_changes.notify_waiters();
             let diagnostic = if idle_failed || isolation_failed {
                 Some(MemoryDiagnostic::QuiescenceFailed)
             } else if result.is_err() {
@@ -458,21 +700,12 @@ impl MemoryService {
 
     pub fn status(&self) -> MemoryStatus {
         let core = &self.owner.core;
-        #[cfg(feature = "local-embeddings")]
-        let embeddings = if matches!(core.embeddings, EmbeddingStatus::Enabled { .. })
-            && core
-                .embedding_process
-                .as_ref()
-                .is_some_and(|process| !process.is_available())
-        {
-            EmbeddingStatus::Unavailable {
-                diagnostic: MemoryDiagnostic::EmbeddingProcessUnavailable,
-            }
-        } else {
-            core.embeddings.clone()
-        };
-        #[cfg(not(feature = "local-embeddings"))]
-        let embeddings = core.embeddings.clone();
+        let embeddings = self
+            .embedding_metadata()
+            .map(|metadata| metadata.status)
+            .unwrap_or(EmbeddingStatus::Unavailable {
+                diagnostic: MemoryDiagnostic::QuiescenceFailed,
+            });
         MemoryStatus {
             retrieval_enabled: core.settings.retrieval_enabled,
             maintenance: core.maintenance.clone(),
@@ -507,7 +740,11 @@ impl MemoryService {
             .retrieve(question, core.settings.max_results, cancellation)
             .await?;
         let mut retrieval = response.summary;
-        if matches!(core.embeddings, EmbeddingStatus::Unavailable { .. }) {
+        if matches!(
+            self.status().embeddings,
+            EmbeddingStatus::Unavailable { .. }
+        ) && retrieval.mode == RetrievalMode::Lexical
+        {
             retrieval.fallback = Some(FallbackReason::SemanticFailure);
             retrieval
                 .diagnostic
@@ -575,10 +812,177 @@ impl MemoryService {
             .await?)
     }
 
+    pub fn suspend_semantics(
+        &self,
+        operation_id: CommandId,
+    ) -> Result<SemanticGeneration, MemoryError> {
+        self.ensure_accepting()?;
+        let generation = self.consolidator().suspend_semantics(operation_id)?;
+        self.owner.core.embedding_changes.notify_waiters();
+        Ok(generation)
+    }
+
+    pub fn embedding_metadata(&self) -> Result<EmbeddingMetadata, MemoryError> {
+        let core = &self.owner.core;
+        let control = core.embeddings.lock().map_err(|_| MemoryError::Worker)?;
+        let (generation, accepting_semantics) = core.consolidator.semantic_admission()?;
+        let status = control.status.clone();
+        #[cfg(feature = "local-embeddings")]
+        let status = if matches!(status, EmbeddingStatus::Enabled { .. })
+            && control
+                .process
+                .as_ref()
+                .is_some_and(|process| !process.is_available())
+        {
+            EmbeddingStatus::Unavailable {
+                diagnostic: MemoryDiagnostic::EmbeddingProcessUnavailable,
+            }
+        } else {
+            status
+        };
+        let application = control.application.as_ref().map(|application| {
+            let mut snapshot = application.snapshot.clone();
+            if snapshot.generation != generation {
+                snapshot.phase = EmbeddingApplyPhase::Superseded;
+            }
+            snapshot
+        });
+        Ok(EmbeddingMetadata {
+            generation,
+            accepting_semantics,
+            application_active: control.active.is_some(),
+            status,
+            profile: control.profile.clone(),
+            application,
+        })
+    }
+
+    pub fn embedding_changes(&self) -> Arc<Notify> {
+        Arc::clone(&self.owner.core.embedding_changes)
+    }
+
+    pub async fn apply_embeddings(
+        &self,
+        generation: SemanticGeneration,
+        request: EmbeddingApplyRequest,
+    ) -> Result<EmbeddingApplyAdmission, MemoryError> {
+        self.ensure_accepting()?;
+        if request.settings_revision == 0
+            || request.request_sha256.len() != 64
+            || !request
+                .request_sha256
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        {
+            return Err(MemoryError::Invalid("embedding application identity"));
+        }
+        request.preferences.resolved()?;
+        let binding = serde_json::to_vec(&(
+            request.operation_id,
+            request.settings_revision,
+            &request.request_sha256,
+            &request.preferences,
+        ))?;
+        if binding.len() > 32 * 1024 {
+            return Err(MemoryError::Invalid("embedding application capture"));
+        }
+        let core = Arc::clone(&self.owner.core);
+        core.consolidator
+            .validate_semantics(&generation, request.operation_id)?;
+        let mut control = core.embeddings.lock().map_err(|_| MemoryError::Worker)?;
+        core.consolidator
+            .validate_semantics(&generation, request.operation_id)?;
+        if core.closing.load(Ordering::Acquire) {
+            return Err(MemoryError::Draining);
+        }
+        if let Some(application) = &control.application
+            && application.snapshot.generation == generation.generation()
+        {
+            if application.binding != binding {
+                return Err(MemoryError::BindingChanged);
+            }
+            if !matches!(
+                application.snapshot.phase,
+                EmbeddingApplyPhase::Pending { .. }
+            ) || control.active == Some(generation.generation())
+            {
+                return Ok(EmbeddingApplyAdmission::Observed(
+                    application.snapshot.clone(),
+                ));
+            }
+        } else {
+            control.application = Some(EmbeddingApplication {
+                binding,
+                snapshot: EmbeddingApplySnapshot {
+                    operation_id: request.operation_id,
+                    settings_revision: request.settings_revision,
+                    generation: generation.generation(),
+                    phase: EmbeddingApplyPhase::Pending {
+                        stage: EmbeddingApplyStage::Capacity,
+                    },
+                    progress: None,
+                },
+                installed: false,
+            });
+        }
+        if control.active.is_some() {
+            let application = control.application.as_ref().ok_or(MemoryError::Worker)?;
+            return Ok(EmbeddingApplyAdmission::Deferred(
+                application.snapshot.clone(),
+            ));
+        }
+        let application = control.application.as_mut().ok_or(MemoryError::Worker)?;
+        application.snapshot.phase = EmbeddingApplyPhase::Pending {
+            stage: if application.installed {
+                EmbeddingApplyStage::Rebuilding
+            } else {
+                EmbeddingApplyStage::Detaching
+            },
+        };
+        let snapshot = application.snapshot.clone();
+        control.active = Some(generation.generation());
+        drop(control);
+        let worker = EmbeddingApplyOwner {
+            core: Arc::clone(&core),
+            generation: generation.generation(),
+            settled: false,
+        };
+        tokio::spawn(async move {
+            let mut worker = worker;
+            let result = apply_embedding_step(&core, &generation, &request).await;
+            if let Err(error) = result {
+                let phase = if core.closing.load(Ordering::Acquire) {
+                    EmbeddingApplyPhase::Stopped
+                } else if core
+                    .consolidator
+                    .validate_semantics(&generation, request.operation_id)
+                    .is_err()
+                {
+                    EmbeddingApplyPhase::Superseded
+                } else {
+                    EmbeddingApplyPhase::Failed {
+                        diagnostic: MemoryDiagnostic::EmbeddingApplyFailed,
+                    }
+                };
+                if set_application_phase(&core, &generation, phase, None).is_err() {
+                    core.quiescence_failed.store(true, Ordering::Release);
+                    core.closing.store(true, Ordering::Release);
+                    core.stop.cancel();
+                }
+                drop(error);
+            }
+            worker.settled = true;
+        });
+        Ok(EmbeddingApplyAdmission::Started(snapshot))
+    }
+
     pub async fn shutdown(&self) -> Result<(), MemoryError> {
         let core = &self.owner.core;
         core.closing.store(true, Ordering::Release);
+        let gate = core.consolidator.close_semantics();
         core.stop.cancel();
+        core.embedding_changes.notify_waiters();
+        gate?;
         let mut worker = core.worker.clone();
         loop {
             match worker.borrow().clone() {
@@ -596,6 +1000,349 @@ impl MemoryService {
         }
         Ok(())
     }
+}
+
+struct EmbeddingApplyOwner {
+    core: Arc<MemoryCore>,
+    generation: u64,
+    settled: bool,
+}
+
+impl Drop for EmbeddingApplyOwner {
+    fn drop(&mut self) {
+        match self.core.embeddings.lock() {
+            Ok(mut state) => {
+                if state.active == Some(self.generation) {
+                    state.active = None;
+                }
+                if !self.settled
+                    && let Some(application) = &mut state.application
+                    && application.snapshot.generation == self.generation
+                {
+                    application.snapshot.phase = EmbeddingApplyPhase::Failed {
+                        diagnostic: MemoryDiagnostic::EmbeddingApplyFailed,
+                    };
+                }
+            }
+            Err(poisoned) => {
+                let mut state = poisoned.into_inner();
+                if state.active == Some(self.generation) {
+                    state.active = None;
+                }
+                self.core.quiescence_failed.store(true, Ordering::Release);
+                self.core.closing.store(true, Ordering::Release);
+                self.core.stop.cancel();
+            }
+        }
+        self.core.embedding_changes.notify_waiters();
+    }
+}
+
+fn set_application_phase(
+    core: &MemoryCore,
+    generation: &SemanticGeneration,
+    phase: EmbeddingApplyPhase,
+    progress: Option<EmbeddingBuildProgress>,
+) -> Result<(), MemoryError> {
+    let mut state = core.embeddings.lock().map_err(|_| MemoryError::Worker)?;
+    if let Some(application) = &mut state.application
+        && application.snapshot.generation == generation.generation()
+    {
+        application.snapshot.phase = phase;
+        application.snapshot.progress = progress;
+    }
+    drop(state);
+    core.embedding_changes.notify_waiters();
+    Ok(())
+}
+
+fn ensure_application(
+    core: &MemoryCore,
+    generation: &SemanticGeneration,
+    request: &EmbeddingApplyRequest,
+) -> Result<(), MemoryError> {
+    if core.closing.load(Ordering::Acquire) || core.stop.is_cancelled() {
+        return Err(MemoryError::Draining);
+    }
+    core.consolidator
+        .validate_semantics(generation, request.operation_id)
+        .map_err(MemoryError::from)
+}
+
+async fn apply_embedding_step(
+    core: &Arc<MemoryCore>,
+    generation: &SemanticGeneration,
+    request: &EmbeddingApplyRequest,
+) -> Result<(), MemoryError> {
+    ensure_application(core, generation, request)?;
+    let installed = core
+        .embeddings
+        .lock()
+        .map_err(|_| MemoryError::Worker)?
+        .application
+        .as_ref()
+        .filter(|application| application.snapshot.generation == generation.generation())
+        .is_some_and(|application| application.installed);
+    if !installed {
+        set_application_phase(
+            core,
+            generation,
+            EmbeddingApplyPhase::Pending {
+                stage: EmbeddingApplyStage::Detaching,
+            },
+            None,
+        )?;
+        #[cfg(feature = "local-embeddings")]
+        {
+            let hybrid = core.consolidator.detach_semantics(generation).await?;
+            let process = core
+                .embeddings
+                .lock()
+                .map_err(|_| MemoryError::Worker)?
+                .process
+                .take();
+            stop_backend(hybrid, process, core._agent.clone()).await?;
+        }
+        ensure_application(core, generation, request)?;
+        let settings = request.preferences.resolved()?;
+        if !request.preferences.enabled {
+            core.embeddings
+                .lock()
+                .map_err(|_| MemoryError::Worker)?
+                .status = EmbeddingStatus::Disabled;
+            return set_application_phase(core, generation, EmbeddingApplyPhase::Disabled, None);
+        }
+        if matches!(settings, EmbeddingSettings::Disabled) {
+            return unavailable_application(
+                core,
+                generation,
+                MemoryDiagnostic::EmbeddingConfigurationUnavailable,
+            );
+        }
+        #[cfg(not(feature = "local-embeddings"))]
+        {
+            return unavailable_application(
+                core,
+                generation,
+                MemoryDiagnostic::EmbeddingFeatureUnavailable,
+            );
+        }
+        #[cfg(feature = "local-embeddings")]
+        {
+            let EmbeddingSettings::EmbeddingGemma2(configuration) = settings else {
+                return Err(MemoryError::Invalid("embedding application backend"));
+            };
+            set_application_phase(
+                core,
+                generation,
+                EmbeddingApplyPhase::Pending {
+                    stage: EmbeddingApplyStage::Loading,
+                },
+                None,
+            )?;
+            ensure_application(core, generation, request)?;
+            let owned = (
+                configuration,
+                core.directory.clone(),
+                generation.cancellation(),
+                Arc::clone(core),
+            );
+            let construction = tokio::task::spawn_blocking(move || {
+                let (configuration, directory, cancellation, core) = owned;
+                build_embeddings(configuration, directory, cancellation, core._agent.clone())
+            })
+            .await
+            .map_err(|_| MemoryError::Worker)?;
+            let mut built = match construction {
+                Ok(built) => built,
+                Err(error) => {
+                    ensure_application(core, generation, request)?;
+                    let diagnostic = match &error {
+                        crate::memory::vector::VectorError::Embedding(error)
+                            if crate::memory::embedding::isolated::is_unavailable(error) =>
+                        {
+                            MemoryDiagnostic::EmbeddingIsolationUnavailable
+                        }
+                        _ => MemoryDiagnostic::EmbeddingInitializationFailed,
+                    };
+                    return unavailable_application(core, generation, diagnostic);
+                }
+            };
+            if let Err(error) = ensure_application(core, generation, request) {
+                dispose_built(built).await?;
+                return Err(error);
+            }
+            let hybrid = built.hybrid.take().ok_or(MemoryError::Worker)?;
+            let profile = hybrid.specification().profile().clone();
+            let installation = core
+                .consolidator
+                .install_semantics(generation, hybrid)
+                .await;
+            match installation {
+                Ok(Ok(())) => {}
+                Ok(Err(hybrid)) => {
+                    built.hybrid = Some(hybrid);
+                    dispose_built(built).await?;
+                    return Err(MemoryError::BindingChanged);
+                }
+                Err(error) => {
+                    dispose_built(built).await?;
+                    return Err(error.into());
+                }
+            }
+            {
+                let mut state = core.embeddings.lock().map_err(|_| MemoryError::Worker)?;
+                state.profile = Some(profile.clone());
+                state.status = EmbeddingStatus::Enabled {
+                    dimensions: profile.dimensions(),
+                };
+                state.process = Some(Arc::clone(&built.process));
+                if let Some(application) = &mut state.application
+                    && application.snapshot.generation == generation.generation()
+                {
+                    application.installed = true;
+                }
+            }
+        }
+    }
+    #[cfg(feature = "local-embeddings")]
+    {
+        ensure_application(core, generation, request)?;
+        set_application_phase(
+            core,
+            generation,
+            EmbeddingApplyPhase::Pending {
+                stage: EmbeddingApplyStage::Rebuilding,
+            },
+            None,
+        )?;
+        let previous = core.consolidator.semantic_status().await?;
+        let report = core
+            .consolidator
+            .rebuild_semantics_generation(generation, crate::memory::search::BuildBudget::default())
+            .await?;
+        ensure_application(core, generation, request)?;
+        match report.stop {
+            crate::memory::search::BuildStop::Complete => {
+                let status = core.consolidator.semantic_status().await?;
+                let active = status
+                    .and_then(|status| status.active)
+                    .filter(|active| {
+                        active.ready
+                            && active.id == report.generation.id
+                            && active.spec == report.generation.spec
+                    })
+                    .ok_or(MemoryError::Worker)?;
+                core.consolidator.activate_semantics(generation)?;
+                set_application_phase(
+                    core,
+                    generation,
+                    EmbeddingApplyPhase::Ready {
+                        dimensions: active.spec.profile().dimensions(),
+                        vector_generation: active.id,
+                        reused: previous
+                            .and_then(|status| status.active)
+                            .is_some_and(|previous| previous.ready && previous.id == active.id),
+                    },
+                    None,
+                )
+            }
+            stop => {
+                let stop = match stop {
+                    crate::memory::search::BuildStop::ChunkBudget => {
+                        EmbeddingBuildStop::ChunkBudget
+                    }
+                    crate::memory::search::BuildStop::TimeBudget => EmbeddingBuildStop::TimeBudget,
+                    crate::memory::search::BuildStop::Complete => return Err(MemoryError::Worker),
+                };
+                set_application_phase(
+                    core,
+                    generation,
+                    EmbeddingApplyPhase::Pending {
+                        stage: EmbeddingApplyStage::Rebuilding,
+                    },
+                    Some(EmbeddingBuildProgress {
+                        vector_generation: report.generation.id,
+                        vectors: report.generation.vectors,
+                        embedded: report.generation.embedded,
+                        reused: report.generation.reused,
+                        skipped_blank: report.generation.skipped_blank,
+                        stop,
+                    }),
+                )
+            }
+        }
+    }
+    #[cfg(not(feature = "local-embeddings"))]
+    {
+        unavailable_application(
+            core,
+            generation,
+            MemoryDiagnostic::EmbeddingFeatureUnavailable,
+        )
+    }
+}
+
+fn unavailable_application(
+    core: &MemoryCore,
+    generation: &SemanticGeneration,
+    diagnostic: MemoryDiagnostic,
+) -> Result<(), MemoryError> {
+    core.embeddings
+        .lock()
+        .map_err(|_| MemoryError::Worker)?
+        .status = EmbeddingStatus::Unavailable { diagnostic };
+    set_application_phase(
+        core,
+        generation,
+        EmbeddingApplyPhase::Unavailable { diagnostic },
+        None,
+    )
+}
+
+#[cfg(feature = "local-embeddings")]
+async fn stop_backend(
+    hybrid: Option<crate::memory::search::HybridSearch>,
+    process: Option<Arc<crate::memory::embedding::isolated::IsolatedEmbeddingGemma2>>,
+    agent: Agent,
+) -> Result<(), MemoryError> {
+    let owned = (hybrid, process, agent);
+    tokio::task::spawn_blocking(move || {
+        let owned = owned;
+        let result = match &owned.1 {
+            Some(process) => process.shutdown().map_err(|_| MemoryError::Worker),
+            None => Ok(()),
+        };
+        drop(owned);
+        result
+    })
+    .await
+    .map_err(|_| MemoryError::Worker)?
+}
+
+#[cfg(feature = "local-embeddings")]
+async fn dispose_built(built: BuiltEmbeddings) -> Result<(), MemoryError> {
+    tokio::task::spawn_blocking(move || {
+        let owned = built;
+        let result = owned.process.shutdown().map_err(|_| MemoryError::Worker);
+        drop(owned);
+        result
+    })
+    .await
+    .map_err(|_| MemoryError::Worker)?
+}
+
+#[cfg(feature = "local-embeddings")]
+async fn shutdown_backend(core: &MemoryCore) -> Result<(), MemoryError> {
+    let hybrid = core.consolidator.detach_all_semantics().await?;
+    let process = match core.embeddings.lock() {
+        Ok(mut state) => state.process.take(),
+        Err(poisoned) => {
+            core.quiescence_failed.store(true, Ordering::Release);
+            poisoned.into_inner().process.take()
+        }
+    };
+    stop_backend(hybrid, process, core._agent.clone()).await
 }
 
 struct PreparedMemory {
@@ -650,6 +1397,7 @@ async fn configure_embeddings(
     let EmbeddingSettings::EmbeddingGemma2(configuration) = settings else {
         return Ok(ConfiguredEmbeddings {
             status: EmbeddingStatus::Disabled,
+            profile: None,
             #[cfg(feature = "local-embeddings")]
             process: None,
         });
@@ -661,25 +1409,31 @@ async fn configure_embeddings(
             status: EmbeddingStatus::Unavailable {
                 diagnostic: MemoryDiagnostic::EmbeddingFeatureUnavailable,
             },
+            profile: None,
         })
     }
     #[cfg(feature = "local-embeddings")]
     {
         let configuration = configuration.clone();
         let dimensions = configuration.dimensions;
-        let retained_agent = agent.clone();
+        let owned = (configuration, directory, cancellation, agent.clone());
         let construction = tokio::task::spawn_blocking(move || {
-            let _retained_agent = retained_agent;
-            build_embeddings(configuration, directory, cancellation)
+            let (configuration, directory, cancellation, agent) = owned;
+            build_embeddings(configuration, directory, cancellation, agent)
         })
         .await
         .map_err(|_| MemoryError::Worker)?;
-        let (hybrid, process, status) = match construction {
-            Ok(BuiltEmbeddings { hybrid, process }) => (
-                Ok(hybrid),
-                Some(process),
-                EmbeddingStatus::Enabled { dimensions },
-            ),
+        let (hybrid, process, status, profile) = match construction {
+            Ok(mut built) => {
+                let hybrid = built.hybrid.take().ok_or(MemoryError::Worker)?;
+                let profile = hybrid.specification().profile().clone();
+                (
+                    Ok(hybrid),
+                    Some(Arc::clone(&built.process)),
+                    EmbeddingStatus::Enabled { dimensions },
+                    Some(profile),
+                )
+            }
             Err(error) => {
                 let diagnostic = match &error {
                     crate::memory::vector::VectorError::Embedding(error)
@@ -693,6 +1447,7 @@ async fn configure_embeddings(
                     Err(error),
                     None,
                     EmbeddingStatus::Unavailable { diagnostic },
+                    None,
                 )
             }
         };
@@ -700,20 +1455,26 @@ async fn configure_embeddings(
             stop_embeddings(process, agent.clone()).await?;
             return Err(error.into());
         }
-        Ok(ConfiguredEmbeddings { status, process })
+        Ok(ConfiguredEmbeddings {
+            status,
+            process,
+            profile,
+        })
     }
 }
 
 struct ConfiguredEmbeddings {
     status: EmbeddingStatus,
+    profile: Option<EmbeddingProfile>,
     #[cfg(feature = "local-embeddings")]
     process: Option<Arc<crate::memory::embedding::isolated::IsolatedEmbeddingGemma2>>,
 }
 
 #[cfg(feature = "local-embeddings")]
 struct BuiltEmbeddings {
-    hybrid: crate::memory::search::HybridSearch,
+    hybrid: Option<crate::memory::search::HybridSearch>,
     process: Arc<crate::memory::embedding::isolated::IsolatedEmbeddingGemma2>,
+    _agent: Agent,
 }
 
 #[cfg(feature = "local-embeddings")]
@@ -721,15 +1482,7 @@ async fn stop_embeddings(
     process: Option<Arc<crate::memory::embedding::isolated::IsolatedEmbeddingGemma2>>,
     agent: Agent,
 ) -> Result<(), MemoryError> {
-    tokio::task::spawn_blocking(move || {
-        let _retained_agent = agent;
-        match process {
-            Some(process) => process.shutdown().map_err(|_| MemoryError::Worker),
-            None => Ok(()),
-        }
-    })
-    .await
-    .map_err(|_| MemoryError::Worker)?
+    stop_backend(None, process, agent).await
 }
 
 #[cfg(feature = "local-embeddings")]
@@ -737,6 +1490,7 @@ fn build_embeddings(
     configuration: EmbeddingGemma2Settings,
     directory: PathBuf,
     cancellation: CancellationToken,
+    agent: Agent,
 ) -> Result<BuiltEmbeddings, crate::memory::vector::VectorError> {
     use crate::memory::embedding::EmbeddingError;
     use crate::memory::embedding::isolated::{IsolatedEmbeddingGemma2, IsolationConfiguration};
@@ -744,6 +1498,7 @@ fn build_embeddings(
     use crate::memory::search::HybridSearch;
     use crate::memory::vector::{VectorError, VectorIndex, VectorLimits};
 
+    let retained_agent = agent;
     if cancellation.is_cancelled() {
         return Err(VectorError::Cancelled);
     }
@@ -778,8 +1533,9 @@ fn build_embeddings(
         Arc::clone(&model) as Arc<dyn crate::memory::embedding::Embedder>,
     )?;
     Ok(BuiltEmbeddings {
-        hybrid,
+        hybrid: Some(hybrid),
         process: model,
+        _agent: retained_agent,
     })
 }
 
