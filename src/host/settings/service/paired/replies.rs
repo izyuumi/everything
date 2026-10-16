@@ -15,7 +15,7 @@ use crate::devices::{
     OwnedCommittedSettingsBind, RemoteOperationPhase, RemoteOperationState, RemoteServiceReceipt,
     ReplyBuildPermit, ServiceLookup, SettingsBindReplyContractError, SettingsBindReplyPacket,
     SettingsOriginalReplyPacket, SettingsParentReference, SettingsReceiveError,
-    SettingsReplyContractError,
+    SettingsReplyContractError, SettingsReplyPublicationError, SettingsReplyQualification,
 };
 use crate::host::settings::SettingsGrantReference;
 use crate::host::settings::contract::SettingsOperationState;
@@ -23,11 +23,12 @@ use crate::protocol::{DeviceId, MessageId, UnixMillis};
 use crate::storage::settings_originals::{
     RemoteOriginalIdentity, RemoteOriginalLink, RemotePublicCommand,
 };
-use crate::storage::{Store, settings_grant_head_on};
+use crate::storage::{ConsumedSettingsReply, Store, settings_grant_head_on};
 
 use super::{
-    OriginalReplySource, PairedSettingsParent, QualifiedOriginalReply, SettingsGrantState,
-    SettingsOperationPhase, SettingsReceiptAuthority, SettingsServiceError, original_reply_text,
+    OriginalReplySource, PairedSettingsParent, QualifiedOriginalReply, SettingsGrantOwner,
+    SettingsGrantState, SettingsOperationPhase, SettingsReceiptAuthority, SettingsServiceError,
+    original_reply_text,
 };
 
 #[derive(Error)]
@@ -71,6 +72,14 @@ pub(crate) struct QualifiedBindReply<'scope> {
     observed_monotonic: Instant,
 }
 
+struct BindReplyRead {
+    owner: SettingsGrantOwner,
+    reply_deadline: Instant,
+    grant_expires_at: UnixMillis,
+    wall: UnixMillis,
+    monotonic: Instant,
+}
+
 struct BindReplyObservation {
     reply_deadline: Instant,
     wall: UnixMillis,
@@ -84,6 +93,25 @@ impl fmt::Debug for QualifiedBindReply<'_> {
 }
 
 impl SettingsReceiptAuthority {
+    pub(crate) fn recheck_consumed_reply_on(
+        &self,
+        store: &Store,
+        transaction: &Transaction<'_>,
+        consumed: &ConsumedSettingsReply<'_, '_, '_, '_>,
+    ) -> Result<(), SettingsReplyPublicationError> {
+        consumed.check_on(transaction)?;
+        match consumed.sealed().qualification() {
+            SettingsReplyQualification::Original(qualified) => {
+                self.recheck_consumed_original_reply_on(store, transaction, qualified)
+                    .map_err(SettingsReplyProjectionError::from)?;
+            }
+            SettingsReplyQualification::Bind(qualified) => {
+                self.recheck_consumed_bind_reply_on(store, transaction, qualified)?;
+            }
+        }
+        Ok(())
+    }
+
     pub(crate) fn project_original_reply_on(
         &self,
         store: &Store,
@@ -178,14 +206,7 @@ impl SettingsReceiptAuthority {
         transaction: &Transaction<'_>,
         qualified: &QualifiedBindReply<'_>,
     ) -> Result<(), SettingsReplyProjectionError> {
-        if !std::ptr::eq(self, qualified.authority)
-            || !Arc::ptr_eq(
-                &qualified.creation,
-                qualified.request.committed_source().creation_identity(),
-            )
-        {
-            return Err(SettingsServiceError::OutsideScope.into());
-        }
+        self.check_bind_reply_association(qualified)?;
         let observed = self.observe_bind_reply_on(
             store,
             transaction,
@@ -193,9 +214,38 @@ impl SettingsReceiptAuthority {
             qualified.request,
             qualified.parent,
         )?;
-        if observed.reply_deadline != qualified.reply_deadline
-            || observed.wall < qualified.observed_wall
-            || observed.monotonic < qualified.observed_monotonic
+        check_bind_reply_observation(qualified, observed)
+    }
+
+    fn recheck_consumed_bind_reply_on(
+        &self,
+        store: &Store,
+        transaction: &Transaction<'_>,
+        qualified: &QualifiedBindReply<'_>,
+    ) -> Result<(), SettingsReplyProjectionError> {
+        self.check_bind_reply_association(qualified)?;
+        let read = self.read_bind_reply_on(
+            store,
+            transaction,
+            qualified.mutation,
+            qualified.request,
+            qualified.parent,
+        )?;
+        check_bind_reservation_identity(qualified.request, read.wall)?;
+        let observed =
+            self.finish_bind_reply_observation(qualified.request, qualified.parent, read)?;
+        check_bind_reply_observation(qualified, observed)
+    }
+
+    fn check_bind_reply_association(
+        &self,
+        qualified: &QualifiedBindReply<'_>,
+    ) -> Result<(), SettingsReplyProjectionError> {
+        if !std::ptr::eq(self, qualified.authority)
+            || !Arc::ptr_eq(
+                &qualified.creation,
+                qualified.request.committed_source().creation_identity(),
+            )
         {
             return Err(SettingsServiceError::OutsideScope.into());
         }
@@ -242,6 +292,19 @@ impl SettingsReceiptAuthority {
         request: &OwnedCommittedSettingsBind,
         parent: &PairedSettingsParent,
     ) -> Result<BindReplyObservation, SettingsReplyProjectionError> {
+        let read = self.read_bind_reply_on(store, connection, mutation, request, parent)?;
+        check_bind_reservation(connection, request, read.wall)?;
+        self.finish_bind_reply_observation(request, parent, read)
+    }
+
+    fn read_bind_reply_on(
+        &self,
+        store: &Store,
+        connection: &Connection,
+        mutation: &OwnedMutexGuard<()>,
+        request: &OwnedCommittedSettingsBind,
+        parent: &PairedSettingsParent,
+    ) -> Result<BindReplyRead, SettingsReplyProjectionError> {
         if self.core.application_stop.is_cancelled() {
             return Err(SettingsServiceError::Stopped.into());
         }
@@ -307,19 +370,36 @@ impl SettingsReceiptAuthority {
                     .ok_or(SettingsServiceError::Expired)?,
             ))
             .ok_or(SettingsServiceError::Expired)?;
-        check_bind_reservation(connection, request, first_wall)?;
+        Ok(BindReplyRead {
+            owner,
+            reply_deadline,
+            grant_expires_at: head.grant.change.target.expires_at,
+            wall: first_wall,
+            monotonic: first_monotonic,
+        })
+    }
+
+    fn finish_bind_reply_observation(
+        &self,
+        request: &OwnedCommittedSettingsBind,
+        parent: &PairedSettingsParent,
+        read: BindReplyRead,
+    ) -> Result<BindReplyObservation, SettingsReplyProjectionError> {
+        let source = request.authority_source();
+        let committed = request.committed_source();
+        let reply = committed.reply_reservation();
         let (checked_owner, wall, monotonic) = self.core.authority.observe_paired_bind_reply(
             &self.host,
             request,
             parent,
             &self.core.application_stop,
         )?;
-        if checked_owner != owner
-            || wall < first_wall
-            || monotonic < first_monotonic
-            || wall >= head.grant.change.target.expires_at
+        if checked_owner != read.owner
+            || wall < read.wall
+            || monotonic < read.monotonic
+            || wall >= read.grant_expires_at
             || wall >= reply.expires_at
-            || monotonic >= reply_deadline
+            || monotonic >= read.reply_deadline
             || self.core.application_stop.is_cancelled()
             || !source.connection().is_live()
             || !source.matches_context(&self.core.agent, &self.core.endpoint, &self.core.mutation)
@@ -327,11 +407,24 @@ impl SettingsReceiptAuthority {
             return Err(SettingsServiceError::OutsideScope.into());
         }
         Ok(BindReplyObservation {
-            reply_deadline,
+            reply_deadline: read.reply_deadline,
             wall,
             monotonic,
         })
     }
+}
+
+fn check_bind_reply_observation(
+    qualified: &QualifiedBindReply<'_>,
+    observed: BindReplyObservation,
+) -> Result<(), SettingsReplyProjectionError> {
+    if observed.reply_deadline != qualified.reply_deadline
+        || observed.wall < qualified.observed_wall
+        || observed.monotonic < qualified.observed_monotonic
+    {
+        return Err(SettingsServiceError::OutsideScope.into());
+    }
+    Ok(())
 }
 
 fn remote_phase(
@@ -393,8 +486,7 @@ struct BindReplyProvenance<'keys> {
     parent_id: Option<Uuid>,
 }
 
-fn check_bind_reservation(
-    connection: &Connection,
+fn check_bind_reservation_identity(
     request: &OwnedCommittedSettingsBind,
     now: UnixMillis,
 ) -> Result<(), SettingsReplyProjectionError> {
@@ -442,6 +534,17 @@ fn check_bind_reservation(
     if reply.provenance != expected_provenance {
         return Err(SettingsServiceError::CorruptJournal.into());
     }
+    Ok(())
+}
+
+fn check_bind_reservation(
+    connection: &Connection,
+    request: &OwnedCommittedSettingsBind,
+    now: UnixMillis,
+) -> Result<(), SettingsReplyProjectionError> {
+    check_bind_reservation_identity(request, now)?;
+    let committed = request.committed_source();
+    let reply = committed.reply_reservation();
     let mut statement = connection.prepare("SELECT reservation_id,local_device_id,peer_device_id,provenance,family,reserved_bytes,created_at,expires_at FROM settings_transport_reply_reservations WHERE reservation_id=?1")
         .map_err(SettingsServiceError::from)?;
     let mut rows = statement
