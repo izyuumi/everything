@@ -97,6 +97,10 @@ impl OwnedCommittedSettingsAccess {
     pub(super) fn reply_build_witness(&self) -> &PrivateWitness {
         &self.verified._witness
     }
+
+    pub(super) fn reply_build_witness_mut(&mut self) -> &mut PrivateWitness {
+        &mut self.verified._witness
+    }
 }
 
 impl fmt::Debug for OwnedCommittedSettingsAccess {

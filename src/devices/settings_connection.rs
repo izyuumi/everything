@@ -9,10 +9,11 @@ use uuid::Uuid;
 
 #[cfg(unix)]
 use super::settings_ingress::{
-    ReceiveContext,
+    OwnedCommittedSettingsAccess, ReceiveContext,
     work::{
         OwnedQueuedSettingsReply, PairedResultAdmissionFailure, PendingSettingsReplyBuild,
-        SettingsReceiveWork, SettingsReceiveWorkEvent,
+        ReplyBuildAdmissionFailure, SettingsReceiveWork, SettingsReceiveWorkEvent,
+        SettingsReplyBuildRequest,
     },
 };
 use super::{DeviceEndpoint, DeviceError, EndpointRole};
@@ -242,6 +243,17 @@ impl SettingsConnectionOwner<'_> {
         self.owner
             .receive
             .try_adopt_paired_result(&self.identity, handoff)
+    }
+
+    #[cfg(unix)]
+    pub(super) fn try_register_access_reply_build(
+        &mut self,
+        request: OwnedCommittedSettingsAccess,
+    ) -> Result<PendingSettingsReplyBuild, ReplyBuildAdmissionFailure> {
+        self.owner.receive.try_register_reply_build(
+            &self.identity,
+            SettingsReplyBuildRequest::Access(Box::new(request)),
+        )
     }
 
     #[cfg(unix)]

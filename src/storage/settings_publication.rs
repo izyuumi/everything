@@ -188,6 +188,17 @@ fn publish_on(
             let sealed = SealedSettingsReply::bind(context, transaction, &qualified, request)?;
             commit_sealed_on(store, transaction, authority, &sealed)
         }
+        SettingsReplyBuildRequest::Access(request) => {
+            let authority = request.verified_request().receipt_authority();
+            if !std::ptr::eq(context.authority, authority) {
+                return Err(SettingsReplyPublicationError::Conflict.into());
+            }
+            let qualified = authority
+                .qualify_access_reply_on(store, transaction, context.mutation, request)
+                .map_err(SettingsReplyProjectionError::from)?;
+            let sealed = SealedSettingsReply::access(context, transaction, &qualified, request)?;
+            commit_sealed_on(store, transaction, authority, &sealed)
+        }
     }
 }
 
