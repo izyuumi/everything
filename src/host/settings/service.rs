@@ -3,6 +3,7 @@ mod application;
 mod changes;
 mod credentials;
 mod devices;
+mod grant_owner;
 mod pairing;
 mod persistence;
 mod projection;

@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::agent::{ConversationConfig, ProviderEndpoint, ProviderKind};
@@ -20,14 +21,14 @@ pub(crate) struct SettingsGrantOwner {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct SettingsGrantReference {
+pub struct SettingsGrantReference {
     pub grant_id: Uuid,
     pub revision: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
-pub(crate) enum SettingsGrantConsent {
+pub enum SettingsGrantConsent {
     None,
     ConfiguredProvider {
         provider: ProviderKind,
@@ -38,7 +39,7 @@ pub(crate) enum SettingsGrantConsent {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
-pub(crate) enum SettingsGrantState {
+pub enum SettingsGrantState {
     Revoked,
     Active {
         readable_keys: Vec<SettingKey>,
@@ -49,7 +50,7 @@ pub(crate) enum SettingsGrantState {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct SettingsGrantTarget {
+pub struct SettingsGrantTarget {
     pub grant_id: Uuid,
     pub issued_at: UnixMillis,
     pub expires_at: UnixMillis,
@@ -58,7 +59,7 @@ pub(crate) struct SettingsGrantTarget {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct SettingsGrantChange {
+pub struct SettingsGrantChange {
     pub version: u16,
     pub request_id: CommandId,
     pub peer_keys: DevicePublicKeys,
@@ -70,7 +71,7 @@ pub(crate) struct SettingsGrantChange {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct SettingsGrantVersion {
+pub struct SettingsGrantVersion {
     pub version: u16,
     pub host_id: DeviceId,
     pub owner_principal_id: Uuid,
@@ -80,7 +81,7 @@ pub(crate) struct SettingsGrantVersion {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct SettingsGrantReceipt {
+pub struct SettingsGrantReceipt {
     pub version: u16,
     pub host_id: DeviceId,
     pub device_id: DeviceId,
@@ -97,8 +98,9 @@ pub(crate) struct SettingsGrantCommit {
     pub replayed: bool,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct SettingsGrantHead {
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SettingsGrantHead {
     pub grant: SettingsGrantVersion,
     pub peer_revoked: bool,
     pub host_revoked: bool,
@@ -227,6 +229,55 @@ impl SettingsGrantVersion {
     }
 }
 
+impl SettingsGrantReceipt {
+    pub(crate) fn validate(&self) -> Result<(), SettingsContractError> {
+        if self.version != 1
+            || self.host_id == self.device_id
+            || self.grant_id.is_nil()
+            || self.revision == 0
+            || self.revision > i64::MAX as u64
+            || self.committed_at.get() == 0
+            || self.request_sha256.len() != 64
+            || !self
+                .request_sha256
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+            || serde_json::to_vec(self)
+                .map_err(|_| SettingsContractError::Invalid("Settings grant receipt encoding"))?
+                .len()
+                > MAX_SETTINGS_GRANT_RECEIPT_BYTES
+        {
+            return Err(SettingsContractError::Invalid("Settings grant receipt"));
+        }
+        Ok(())
+    }
+
+    pub(crate) fn matches_change(&self, change: &SettingsGrantChange) -> bool {
+        if self.validate().is_err() || change.validate().is_err() {
+            return false;
+        }
+        let revision = change
+            .expected
+            .map_or(Some(1), |expected| expected.revision.checked_add(1));
+        let Ok(canonical) = serde_json::to_string(change) else {
+            return false;
+        };
+        self.owner_request_id == change.request_id
+            && self.device_id == change.peer_keys.device_id
+            && self.grant_id == change.target.grant_id
+            && Some(self.revision) == revision
+            && self.request_sha256 == change_digest(&canonical)
+            && self.committed_at >= change.target.issued_at
+            && self.committed_at < change.target.expires_at
+    }
+}
+
+impl SettingsGrantHead {
+    pub(crate) fn validate(&self) -> Result<(), SettingsContractError> {
+        self.grant.validate()
+    }
+}
+
 impl SettingsGrantConsent {
     fn validate(&self) -> Result<(), SettingsContractError> {
         let Self::ConfiguredProvider {
@@ -285,4 +336,11 @@ fn readable_key(key: SettingKey) -> bool {
             | SettingKey::EmbeddingsDimensions
             | SettingKey::EmbeddingsModel
     )
+}
+
+pub(crate) fn change_digest(canonical: &str) -> String {
+    let mut digest = Sha256::new();
+    digest.update(b"everything.settings-grant.owner-change.v1\0");
+    digest.update(canonical.as_bytes());
+    format!("{:x}", digest.finalize())
 }

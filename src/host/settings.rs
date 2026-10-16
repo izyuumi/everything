@@ -14,6 +14,10 @@ pub use authority::{
     NativeSessionOpened, NativeSessionProof, SettingsAgentSession, SettingsCaller,
     SettingsOperationOrigin,
 };
+pub use grants::{
+    SettingsGrantChange, SettingsGrantConsent, SettingsGrantHead, SettingsGrantReceipt,
+    SettingsGrantReference, SettingsGrantState, SettingsGrantTarget, SettingsGrantVersion,
+};
 pub use operations::{
     SettingsApplicationState, SettingsOperationInspection, SettingsOperationPhase,
     SettingsWriteInspection, SettingsWriteResolution,

@@ -565,7 +565,17 @@ async fn owner_cli(
             ) {
                 return Err(CliError::SensitiveOwnerInput);
             }
-            let request_id = request_id.unwrap_or_default();
+            let request_id = match (&*operation, request_id) {
+                (everything::ipc::OwnerOperation::SetSettingsGrant { change }, Some(original))
+                    if original == change.request_id =>
+                {
+                    original
+                }
+                (everything::ipc::OwnerOperation::SetSettingsGrant { .. }, _) => {
+                    return Err(CliError::OwnerInput);
+                }
+                (_, original) => original.unwrap_or_default(),
+            };
             eprintln!("owner request {request_id}; reuse this ID for an explicit retry");
             write_json(client.operate(*operation, request_id, cancellation).await?).await
         }

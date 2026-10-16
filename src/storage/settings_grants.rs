@@ -1,6 +1,5 @@
 use rusqlite::{Connection, OptionalExtension, Row, TransactionBehavior, params, types::ValueRef};
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 
 use crate::crypto::DevicePublicKeys;
 use crate::devices::DeviceAccess;
@@ -8,7 +7,7 @@ use crate::host::settings::grants::{
     MAX_SETTINGS_GRANT_BYTES, MAX_SETTINGS_GRANT_RECEIPT_BYTES,
     SETTINGS_GRANT_REVOKE_RESERVE_BYTES, SettingsGrantChange, SettingsGrantCommit,
     SettingsGrantHead, SettingsGrantOwner, SettingsGrantReceipt, SettingsGrantReference,
-    SettingsGrantState, SettingsGrantVersion,
+    SettingsGrantState, SettingsGrantVersion, change_digest,
 };
 use crate::protocol::{CommandId, DeviceId, UnixMillis};
 
@@ -404,13 +403,6 @@ fn encode(value: &impl Serialize, maximum: usize) -> StorageResult<String> {
         return invalid("Settings grant encoded record exceeds its bound");
     }
     Ok(encoded)
-}
-
-fn change_digest(canonical: &str) -> String {
-    let mut digest = Sha256::new();
-    digest.update(b"everything.settings-grant.owner-change.v1\0");
-    digest.update(canonical.as_bytes());
-    format!("{:x}", digest.finalize())
 }
 
 fn validate_owner(owner: SettingsGrantOwner) -> StorageResult<()> {
