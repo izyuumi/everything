@@ -218,9 +218,21 @@ impl OwnedCommittedSettingsCommand {
     pub(crate) fn committed_source(&self) -> CommittedSettingsCommandSource<'_> {
         CommittedSettingsCommandSource { request: self }
     }
+
+    pub(super) fn reply_build_witness(&self) -> &PrivateWitness {
+        &self.verified._witness
+    }
+
+    pub(super) fn reply_build_witness_mut(&mut self) -> &mut PrivateWitness {
+        &mut self.verified._witness
+    }
 }
 
 impl CommittedSettingsCommandSource<'_> {
+    pub(super) fn reply_build_witness(&self) -> &PrivateWitness {
+        &self.request.verified._witness
+    }
+
     pub(crate) fn authority_source(&self) -> &AuthenticatedSettingsCommandSource {
         self.request.verified.authority_source()
     }
@@ -283,6 +295,14 @@ impl OwnedHistoricalSettingsCommand {
     pub(crate) fn receipt_floor(&self) -> (UnixMillis, Instant) {
         let clock = self.verified.source.envelope.clock;
         (clock.wall, clock.monotonic)
+    }
+
+    pub(super) fn reply_build_witness(&self) -> &PrivateWitness {
+        &self.verified._witness
+    }
+
+    pub(super) fn reply_build_witness_mut(&mut self) -> &mut PrivateWitness {
+        &mut self.verified._witness
     }
 }
 
