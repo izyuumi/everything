@@ -125,6 +125,9 @@ actor NativeSettingsSession {
         var operations: [UUID: AssistantOperationHandle] = [:]
         var materialized: Set<UUID> = []
         var references: [UUID: NativeActionReference] = [:]
+        var modelAttempts: UInt32 = 0
+        var chargedTokens: UInt64 = 0
+        var reservedOutputTokens: UInt64 = 0
         var pending = true
     }
 
@@ -664,14 +667,12 @@ actor NativeSettingsSession {
                       status.provisional?.state.rawValue == previous.provisional?.state.rawValue,
                       status.provisional?.text == previous.provisional?.text else { throw NativeSettingsSessionError.invalidResponse }
             }
-            if status.turnID == previous.turnID {
-                guard status.modelAttempts >= previous.modelAttempts, status.chargedTokens >= previous.chargedTokens,
-                      status.reservedOutputTokens >= previous.reservedOutputTokens else { throw NativeSettingsSessionError.invalidResponse }
-            }
         }
         var handles: [AssistantOperationHandle] = []
         if let turnID = status.turnID {
             guard let turn = assistantSends[turnID], turn.admission.chat === chat else { throw NativeSettingsSessionError.invalidResponse }
+            guard status.modelAttempts >= turn.modelAttempts, status.chargedTokens >= turn.chargedTokens,
+                  status.reservedOutputTokens >= turn.reservedOutputTokens else { throw NativeSettingsSessionError.invalidResponse }
             let members = Set(turn.operations.keys).union(status.operationIDs)
             guard members.count <= 8 else { throw NativeSettingsSessionError.capacity }
             for id in status.operationIDs {
@@ -693,6 +694,11 @@ actor NativeSettingsSession {
             guard status.operationIDs.isEmpty, status.assistantText.isEmpty else { throw NativeSettingsSessionError.invalidResponse }
         }
         if let state = assistantOpens[chat.openRequestID]?.state, assistantOriginalClosed(state) { throw NativeSettingsSessionError.closed }
+        if let turnID = status.turnID {
+            assistantSends[turnID]?.modelAttempts = status.modelAttempts
+            assistantSends[turnID]?.chargedTokens = status.chargedTokens
+            assistantSends[turnID]?.reservedOutputTokens = status.reservedOutputTokens
+        }
         assistantOpens[chat.openRequestID]?.status = status
         return AssistantObservation(status: status, operations: handles)
     }
