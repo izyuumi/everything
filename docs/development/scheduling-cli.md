@@ -16,6 +16,8 @@ everything --state-dir STATE schedule disable 3e154b91-094f-4c70-93a3-a70164a20f
 
 Use the current response's revision before each new mutation. A concurrent edit or manual/automatic claim can change it. Create, update, disable and delete use ordinary uniqueness/CAS rules. Reusing their IPC request ID does not convert them into replayable commands. After an ambiguous error, inspect the stored job before deciding on another mutation; the CLI never refreshes revisions or retries automatically.
 
+Disabling or deleting affects future automatic admission. It does not cancel an already claimed occurrence, change its captured definition or remove its history. Inspect occurrence status for its native attempt/task identity, then use the separate explicit [owner task cancellation](host.md#owner-inspection-and-configuration) when needed. Cancellation still cannot prove that an uncertain external effect stopped. Pending delivery and blocked-job diagnostics remain visible through `schedule status`.
+
 List accepts `--after-id UUID`, `--enabled true|false`, `--include-deleted`, and `--limit 1..100`. Its JSON contains the actual `next_after` cursor. Request the next page explicitly; pages are current views rather than a frozen snapshot. Individual records are never silently truncated. Delete requires `schedule delete JOB_ID --expected-revision REVISION` and does not remove run records.
 
 ## Manual execution and inspection
