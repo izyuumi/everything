@@ -1,8 +1,13 @@
+mod changes;
 mod credentials;
 mod devices;
 mod persistence;
+mod projection;
+mod updates;
 
+pub use changes::{SettingsChangeHint, SettingsChangePage, SettingsChangeState};
 pub use devices::NativeDeviceActionResult;
+pub use persistence::OwnerSettingsWriteResult;
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
@@ -80,6 +85,8 @@ pub enum SettingsServiceError {
     Worker,
     #[error("settings file reconciliation is required for original operation {request_id}")]
     WriteBlocked { request_id: CommandId },
+    #[error("embedding profile metadata is unavailable")]
+    EmbeddingMetadataUnavailable,
     #[error(transparent)]
     Contract(#[from] SettingsContractError),
     #[error(transparent)]
@@ -92,6 +99,10 @@ pub enum SettingsServiceError {
     Settings(#[from] super::SettingsError),
     #[error(transparent)]
     Device(#[from] DeviceError),
+    #[error(transparent)]
+    Memory(#[from] crate::host::memory::MemoryError),
+    #[error(transparent)]
+    Selection(#[from] crate::host::selection::SelectionPreflightError),
     #[error(transparent)]
     Credential(#[from] crate::credentials::CredentialError),
 }
@@ -106,6 +117,33 @@ pub struct SettingsService {
 pub enum SettingsStartupPolicy {
     Ready,
     OptionalFeaturesSuspended { operation_id: CommandId },
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct SettingsStartupContext {
+    pub settings: super::HostSettings,
+    pub policy: SettingsStartupPolicy,
+    pub pending_application: Option<SettingsOperationInspection>,
+}
+
+impl SettingsStartupContext {
+    pub(crate) fn embedding_preferences(&self) -> crate::host::memory::EmbeddingPreferences {
+        let mut preferences = updates::embedding_preferences(&self.settings);
+        if !matches!(self.policy, SettingsStartupPolicy::Ready) {
+            preferences.enabled = false;
+        }
+        preferences
+    }
+
+    pub(crate) fn selection_configuration(
+        &self,
+    ) -> (crate::host::selection::SelectionSettings, bool) {
+        (
+            self.settings.selection.clone(),
+            matches!(self.policy, SettingsStartupPolicy::Ready)
+                && updates::selection_enabled(&self.settings),
+        )
+    }
 }
 
 struct ActiveSettingsWrite {
@@ -124,6 +162,7 @@ struct ServiceCore {
     pairings: Mutex<BTreeMap<CommandId, Arc<PendingPairingLease>>>,
     endpoint: DeviceEndpoint,
     active_write: Mutex<Option<Arc<ActiveSettingsWrite>>>,
+    composition: Mutex<Option<Arc<crate::host::composition::Composition>>>,
     agent: Agent,
 }
 
@@ -153,6 +192,7 @@ impl SettingsService {
                 pairings: Mutex::new(BTreeMap::new()),
                 endpoint: endpoint.clone(),
                 active_write: Mutex::new(None),
+                composition: Mutex::new(None),
                 agent,
             }),
         };
@@ -191,6 +231,28 @@ impl SettingsService {
         Ok(service)
     }
 
+    pub(in crate::host) fn bind_composition(
+        &self,
+        composition: Arc<crate::host::composition::Composition>,
+    ) -> Result<(), SettingsServiceError> {
+        if !composition.shares_agent(&self.core.agent) {
+            return Err(SettingsServiceError::LeaseRequired);
+        }
+        let mut current = self
+            .core
+            .composition
+            .lock()
+            .map_err(|_| SettingsServiceError::Poisoned)?;
+        if let Some(existing) = &*current {
+            if !Arc::ptr_eq(existing, &composition) {
+                return Err(SettingsServiceError::Conflict);
+            }
+            return Ok(());
+        }
+        *current = Some(composition);
+        Ok(())
+    }
+
     pub(crate) fn local_owner_caller(
         &self,
         call: &LocalCall,
@@ -198,18 +260,50 @@ impl SettingsService {
         self.core.authority.owner(call)
     }
 
-    pub(crate) async fn startup_policy(
+    pub(crate) async fn startup_context(
         &self,
-    ) -> Result<SettingsStartupPolicy, SettingsServiceError> {
+    ) -> Result<SettingsStartupContext, SettingsServiceError> {
         self.blocking(|core| {
-            Ok(match core.repository.unresolved_write()? {
-                Some(operation) => SettingsStartupPolicy::OptionalFeaturesSuspended {
-                    operation_id: operation.identity.binding.request_id,
+            let settings = core.settings.observed_snapshot()?;
+            let fingerprint = persistence::file_fingerprint(&settings)?;
+            let unresolved = core.repository.unresolved_write()?;
+            let mut pending_application = None;
+            for operation in core.repository.pending_applications()? {
+                if operation
+                    .write()
+                    .is_some_and(|write| write.intent.after == fingerprint)
+                {
+                    if pending_application.is_some() {
+                        return Err(SettingsServiceError::CorruptJournal);
+                    }
+                    pending_application = Some(operation.inspection());
+                }
+            }
+            let operation_id = unresolved
+                .map(|record| record.identity.binding.request_id)
+                .or_else(|| {
+                    pending_application
+                        .as_ref()
+                        .map(|record| record.binding.request_id)
+                });
+            Ok(SettingsStartupContext {
+                settings,
+                policy: match operation_id {
+                    Some(operation_id) => {
+                        SettingsStartupPolicy::OptionalFeaturesSuspended { operation_id }
+                    }
+                    None => SettingsStartupPolicy::Ready,
                 },
-                None => SettingsStartupPolicy::Ready,
+                pending_application,
             })
         })
         .await
+    }
+
+    pub(crate) async fn startup_policy(
+        &self,
+    ) -> Result<SettingsStartupPolicy, SettingsServiceError> {
+        Ok(self.startup_context().await?.policy)
     }
 
     pub(crate) fn open_native_session(
@@ -343,7 +437,7 @@ impl SettingsService {
     ) -> Result<SettingsOperationResult, SettingsServiceError> {
         target.validate()?;
         self.core.check_scope(target.scope())?;
-        let session_id = self.core.authority.session(&caller)?;
+        let session_id = self.core.operation_session(&caller, &target)?;
         let mutation = self.enter(&caller, &cancellation).await?;
         self.blocking(move |core| {
             let _mutation = mutation;
@@ -366,24 +460,12 @@ impl SettingsService {
                 Err(SettingsServiceError::NotFound) => {}
                 Err(error) => return Err(error),
             }
-            let issued_at = UnixMillis::now()?;
-            let (expires_at, deadline) = core.authority.lifetime(&caller)?;
-            let identity = OperationIdentity {
-                version: 1,
-                binding: SettingsRequestBinding {
-                    request_id: target.request_id(),
-                    principal_id: core.authority.principal(),
-                    client_session_id: session_id,
-                    scope: target.scope().clone(),
-                    expected_revision: target.expected_revision(),
-                    exact_request_sha256: request_digest(&target)?,
-                    issued_at,
-                    expires_at,
-                },
-                target,
-                origin: core.authority.origin(&caller),
-            };
-            let phase = if let Some(expected) = identity.binding.expected_revision {
+            let (identity, deadline) = core.operation_identity(&caller, target)?;
+            let phase = if matches!(caller.source, CallerSource::LocalOwner { .. }) {
+                SettingsOperationPhase::Finished {
+                    result: core.result(&identity, SettingsOperationState::HostActionRequired),
+                }
+            } else if let Some(expected) = identity.binding.expected_revision {
                 let actual = core.settings.snapshot()?.revision;
                 if !matches!(identity.binding.scope, SettingsScope::Host { .. }) {
                     SettingsOperationPhase::Finished {
@@ -906,6 +988,89 @@ impl SettingsService {
 }
 
 impl ServiceCore {
+    fn operation_session(
+        &self,
+        caller: &SettingsCaller,
+        target: &SettingsActionTarget,
+    ) -> Result<Uuid, SettingsServiceError> {
+        self.authority.validate(caller, false)?;
+        match caller.source {
+            CallerSource::LocalOwner { request_id }
+                if request_id == target.request_id()
+                    && matches!(
+                        target,
+                        SettingsActionTarget::Patch(_) | SettingsActionTarget::OwnerReplacement(_)
+                    ) =>
+            {
+                Ok(*request_id.as_uuid())
+            }
+            CallerSource::LocalOwner { .. } => Err(SettingsServiceError::OutsideScope),
+            _ => self.authority.session(caller),
+        }
+    }
+
+    fn operation_identity(
+        &self,
+        caller: &SettingsCaller,
+        target: SettingsActionTarget,
+    ) -> Result<(OperationIdentity, Instant), SettingsServiceError> {
+        target.validate()?;
+        self.check_scope(target.scope())?;
+        let client_session_id = self.operation_session(caller, &target)?;
+        let issued_at = UnixMillis::now()?;
+        let (expires_at, deadline) = match caller.source {
+            CallerSource::LocalOwner { .. } => {
+                let lifetime = super::contract::MAX_SETTINGS_ACTION_LIFETIME_MS;
+                let expiry = issued_at
+                    .get()
+                    .checked_add(lifetime)
+                    .ok_or(SettingsServiceError::Expired)?;
+                let deadline = Instant::now()
+                    .checked_add(std::time::Duration::from_millis(lifetime))
+                    .ok_or(SettingsServiceError::Expired)?;
+                (UnixMillis::try_from(expiry)?, deadline)
+            }
+            _ => self.authority.lifetime(caller)?,
+        };
+        let identity = OperationIdentity {
+            version: 1,
+            binding: SettingsRequestBinding {
+                request_id: target.request_id(),
+                principal_id: self.authority.principal(),
+                client_session_id,
+                scope: target.scope().clone(),
+                expected_revision: target.expected_revision(),
+                exact_request_sha256: request_digest(&target)?,
+                issued_at,
+                expires_at,
+            },
+            target,
+            origin: self.authority.origin(caller),
+        };
+        identity.validate()?;
+        Ok((identity, deadline))
+    }
+
+    fn check_write_origin(
+        &self,
+        identity: &OperationIdentity,
+        deadline: Instant,
+        cancellation: &CancellationToken,
+        request_cancellation: &CancellationToken,
+    ) -> Result<(), SettingsServiceError> {
+        self.authority.check_origin(&identity.origin)?;
+        self.check_scope(&identity.binding.scope)?;
+        if cancellation.is_cancelled() || request_cancellation.is_cancelled() {
+            return Err(SettingsServiceError::Cancelled);
+        }
+        if UnixMillis::now()?.get() >= identity.binding.expires_at.get()
+            || Instant::now() >= deadline
+        {
+            return Err(SettingsServiceError::Expired);
+        }
+        Ok(())
+    }
+
     fn require_resolved_file(&self) -> Result<(), SettingsServiceError> {
         if let Some(operation) = self.repository.unresolved_write()? {
             return Err(SettingsServiceError::WriteBlocked {

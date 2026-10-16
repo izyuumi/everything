@@ -9,7 +9,10 @@ pub use authority::{
     NativeSessionOpened, NativeSessionProof, SettingsAgentSession, SettingsCaller,
     SettingsOperationOrigin,
 };
-pub use operations::{SettingsOperationInspection, SettingsOperationPhase};
+pub use operations::{
+    SettingsApplicationState, SettingsOperationInspection, SettingsOperationPhase,
+    SettingsWriteInspection, SettingsWriteResolution,
+};
 
 use std::fs::File;
 use std::io::{self, Read, Write};
@@ -296,12 +299,24 @@ impl SettingsRepository {
 
     pub fn replace(
         &self,
-        mut settings: HostSettings,
+        settings: HostSettings,
         expected_revision: u64,
     ) -> Result<HostSettings, SettingsError> {
+        self.replace_checked(settings, expected_revision, || Ok(()))
+    }
+
+    fn replace_checked<E>(
+        &self,
+        mut settings: HostSettings,
+        expected_revision: u64,
+        check_before_effect: impl Fn() -> Result<(), E>,
+    ) -> Result<HostSettings, E>
+    where
+        E: From<SettingsError>,
+    {
         let mut current = self.current.lock().map_err(|_| SettingsError::Poisoned)?;
         if current.revision != expected_revision || settings.revision != expected_revision {
-            return Err(SettingsError::Conflict);
+            return Err(SettingsError::Conflict.into());
         }
         let disk = read_settings(&self.lease)?.ok_or(SettingsError::Conflict)?;
         if serde_json::to_value(&disk)
@@ -309,13 +324,13 @@ impl SettingsRepository {
             != serde_json::to_value(&*current)
                 .map_err(|_| SettingsError::Invalid("settings encoding failed"))?
         {
-            return Err(SettingsError::Conflict);
+            return Err(SettingsError::Conflict.into());
         }
         settings.revision = expected_revision
             .checked_add(1)
             .ok_or(SettingsError::Invalid("settings revision overflow"))?;
         settings.validate()?;
-        write_settings(&self.lease, &settings)?;
+        write_settings_checked(&self.lease, &settings, check_before_effect)?;
         *current = settings.clone();
         Ok(settings)
     }
@@ -363,6 +378,17 @@ fn validate_file(
 }
 
 fn write_settings(lease: &Arc<StateLease>, settings: &HostSettings) -> Result<(), SettingsError> {
+    write_settings_checked(lease, settings, || Ok(()))
+}
+
+fn write_settings_checked<E>(
+    lease: &Arc<StateLease>,
+    settings: &HostSettings,
+    check_before_effect: impl Fn() -> Result<(), E>,
+) -> Result<(), E>
+where
+    E: From<SettingsError>,
+{
     if let Some(existing) = match rustix::fs::openat(
         &lease.directory.file,
         SETTINGS_FILE,
@@ -371,36 +397,44 @@ fn write_settings(lease: &Arc<StateLease>, settings: &HostSettings) -> Result<()
     ) {
         Ok(file) => Some(file),
         Err(rustix::io::Errno::NOENT) => None,
-        Err(error) => return Err(error.into()),
+        Err(error) => return Err(SettingsError::from(error).into()),
     } {
         validate_file(lease, &existing)?;
     }
+    let bytes = serde_json::to_vec(settings)
+        .map_err(|_| SettingsError::Invalid("settings encoding failed"))?;
+    if bytes.len() > MAX_SETTINGS_BYTES {
+        return Err(SettingsError::Invalid("settings exceed 64 KiB").into());
+    }
     let temporary = format!(".host-settings-{}.tmp", Uuid::new_v4());
+    check_before_effect()?;
     let file = rustix::fs::openat(
         &lease.directory.file,
         &temporary,
         OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC,
         Mode::from_raw_mode(0o600),
-    )?;
+    )
+    .map_err(SettingsError::from)?;
     let _cleanup = TemporarySettings {
         lease: Arc::clone(lease),
         name: temporary.clone(),
     };
     let mut file = File::from(file);
-    let bytes = serde_json::to_vec(settings)
-        .map_err(|_| SettingsError::Invalid("settings encoding failed"))?;
-    if bytes.len() > MAX_SETTINGS_BYTES {
-        return Err(SettingsError::Invalid("settings exceed 64 KiB"));
-    }
-    file.write_all(&bytes)?;
-    file.sync_all()?;
+    file.write_all(&bytes).map_err(SettingsError::from)?;
+    file.sync_all().map_err(SettingsError::from)?;
+    check_before_effect()?;
     rustix::fs::renameat(
         &lease.directory.file,
         &temporary,
         &lease.directory.file,
         SETTINGS_FILE,
-    )?;
-    lease.directory.file.sync_all()?;
+    )
+    .map_err(SettingsError::from)?;
+    lease
+        .directory
+        .file
+        .sync_all()
+        .map_err(SettingsError::from)?;
     Ok(())
 }
 
