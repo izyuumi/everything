@@ -69,6 +69,13 @@ impl AccessWorkState {
     pub(super) fn witness(&self) -> Option<&PrivateWitness> {
         self.verified().map(|verified| &verified._witness)
     }
+
+    pub(super) fn witness_mut(&mut self) -> Option<&mut PrivateWitness> {
+        match self {
+            Self::Rejected(_) => None,
+            Self::Verified { verified, .. } => Some(&mut verified._witness),
+        }
+    }
 }
 
 impl OwnedCommittedSettingsAccess {
@@ -85,6 +92,10 @@ impl OwnedCommittedSettingsAccess {
 
     pub(crate) fn reply_reservation(&self) -> &StoredSettingsAccessReply {
         &self.reply
+    }
+
+    pub(super) fn reply_build_witness(&self) -> &PrivateWitness {
+        &self.verified._witness
     }
 }
 

@@ -27,9 +27,13 @@ use crate::host::settings::agent::{
     PairedControlSendError, PairedHandoffReadError, PairedResultCorrelation, PairedResultHandoff,
     SettingsAgentRuntime,
 };
-use crate::host::settings::service::{PairedSettingsParent, SettingsReceiptAuthority};
+use crate::host::settings::service::{
+    PairedSettingsParent, SettingsAccessReplyFamily, SettingsReceiptAuthority,
+};
 use crate::protocol::{DeviceId, UnixMillis};
-use crate::storage::{StoredSettingsBindReply, StoredSettingsCommandReply};
+use crate::storage::{
+    StoredSettingsAccessReply, StoredSettingsBindReply, StoredSettingsCommandReply,
+};
 
 #[derive(Default)]
 struct Counts {
@@ -179,6 +183,8 @@ pub(super) struct PrivateWitness {
 enum ReplyBuildFamily {
     BindDefault49152,
     CommandInspection90112,
+    AccessDefault49152,
+    AccessDenial4096,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -285,7 +291,26 @@ type TerminalQuarantine = (
     Option<JoinedRegisteredJob>,
 );
 
+impl ReplyBuildFamily {
+    fn access(reply: &StoredSettingsAccessReply) -> Self {
+        match reply.family {
+            SettingsAccessReplyFamily::Default => Self::AccessDefault49152,
+            SettingsAccessReplyFamily::Denial => Self::AccessDenial4096,
+        }
+    }
+}
+
 impl ReplyBuildStamp {
+    fn access(reply: &StoredSettingsAccessReply) -> Self {
+        Self {
+            reservation_id: reply.reservation_id,
+            local_device_id: reply.local_device_id,
+            peer_device_id: reply.peer_device_id,
+            created_at: reply.created_at,
+            expires_at: reply.expires_at,
+        }
+    }
+
     fn bind(reply: &StoredSettingsBindReply) -> Self {
         Self {
             reservation_id: reply.reservation_id,
@@ -319,6 +344,20 @@ impl ReplyBuildAssociation {
 }
 
 impl ReplyBuildPermit {
+    pub(crate) fn check_access(
+        &self,
+        request: &OwnedCommittedSettingsAccess,
+    ) -> Result<(), SettingsReceiveError> {
+        let source = request.verified_request().authority_source();
+        let reply = request.reply_reservation();
+        self.check(
+            request.reply_build_witness(),
+            ReplyBuildFamily::access(reply),
+            source.invocation_identity(),
+            ReplyBuildStamp::access(reply),
+        )
+    }
+
     pub(crate) fn check_bind(
         &self,
         source: &CommittedBindSource<'_>,
@@ -677,6 +716,52 @@ impl SettingsReceiveWork {
         {
             return Err(self.ledger.fail());
         }
+        Ok(())
+    }
+
+    fn seal_access_join(&mut self) -> Result<(), SettingsReceiveError> {
+        let Some(Ok((_, output))) = self.retained_join.as_ref() else {
+            return Err(self.ledger.fail());
+        };
+        let Some(
+            access @ AccessWorkState::Verified {
+                issue: None,
+                reply: Some(reply),
+                verified,
+            },
+        ) = output.access.as_ref()
+        else {
+            return Err(self.ledger.fail());
+        };
+        let source = verified.authority_source();
+        let context = self.context.as_ref().ok_or_else(|| self.ledger.fail())?;
+        if !source.matches_context(&context.agent, &context.endpoint, &context.mutation) {
+            return Err(self.ledger.fail());
+        }
+        self.check_unjoined_build(
+            access.witness().ok_or_else(|| self.ledger.fail())?,
+            source.connection(),
+            source.verified_peer_keys().device_id,
+        )?;
+        let association = Arc::new(ReplyBuildAssociation {
+            family: ReplyBuildFamily::access(reply),
+            original: Arc::clone(source.invocation_identity()),
+            reply: ReplyBuildStamp::access(reply),
+        });
+        let witness = self
+            .retained_join
+            .as_mut()
+            .and_then(|joined| joined.as_mut().ok())
+            .and_then(|(_, output)| output.access.as_mut())
+            .and_then(AccessWorkState::witness_mut)
+            .ok_or_else(|| self.ledger.fail())?;
+        if witness.build.is_some() {
+            return Err(self.ledger.fail());
+        }
+        witness.build = Some(JoinedReplyBuild {
+            association,
+            claim: ReplyBuildClaim::Unclaimed,
+        });
         Ok(())
     }
 
@@ -1489,7 +1574,13 @@ impl SettingsReceiveWork {
         &mut self,
         receipt: oneshot::Sender<Result<SettingsTransportReceipt, SettingsReceiveError>>,
     ) -> Result<Option<SettingsReceiveEvent>, SettingsReceiveError> {
-        let disposition = match self.access_join_disposition() {
+        let disposition = self.access_join_disposition().and_then(|disposition| {
+            if matches!(&disposition, AccessJoinedDisposition::Fresh) {
+                self.seal_access_join()?;
+            }
+            Ok(disposition)
+        });
+        let disposition = match disposition {
             Ok(disposition) => disposition,
             Err(error) => {
                 self.ledger.fail();
