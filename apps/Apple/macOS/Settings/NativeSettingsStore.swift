@@ -34,6 +34,53 @@ final class NativeSettingsStore {
         }
     }
 
+    @MainActor
+    final class DeviceHandle: Identifiable {
+        let id: UUID
+        fileprivate let ownerID: UUID
+
+        fileprivate init(id: UUID, ownerID: UUID) {
+            self.id = id
+            self.ownerID = ownerID
+        }
+    }
+
+    struct DeviceOperation: Identifiable {
+        let id: UUID
+        let handle: DeviceHandle
+        let request: SettingsDeviceRequest
+        let operation: NativeSettingsOperation
+        let retired: Bool
+        let approvalID: UUID?
+        let approval: NativeSettingsSession.PairingApprovalStatus?
+        let approvalWorking: Bool
+        let issue: NativeSettingsSessionError?
+    }
+
+    @MainActor
+    private final class DeviceContext {
+        let handle: DeviceHandle
+        let request: SettingsDeviceRequest
+        let capture: CredentialCapture
+        let ceremony: NativeDeviceCeremony
+        var details: NativeSettingsSession.Details?
+        var confirmation: NativeSettingsAdmission?
+        var approval: NativePairingApprovalAdmission?
+        var approvalStatus: NativeSettingsSession.PairingApprovalStatus?
+        var approvalIssue: NativeSettingsSessionError?
+        var approvalWorking = false
+        var invitationPresented = false
+        var retired = false
+        var issue: NativeSettingsSessionError?
+
+        init(handle: DeviceHandle, request: SettingsDeviceRequest, capture: CredentialCapture, ceremony: NativeDeviceCeremony) {
+            self.handle = handle
+            self.request = request
+            self.capture = capture
+            self.ceremony = ceremony
+        }
+    }
+
     private struct CredentialCapture {
         let generation: UUID
         let started: ContinuousClock.Instant
@@ -125,6 +172,9 @@ final class NativeSettingsStore {
         var submittedDrafts: [UUID: NativeSettingsDraft] = [:]
         var effects: [UUID: Task<Void, Never>] = [:]
         var credentials: [UUID: CredentialContext] = [:]
+        var devices: [UUID: DeviceContext] = [:]
+        var devicePage: SettingsDevicePage?
+        var devicesReadID: UUID?
         var reloadAfterRead = false
         var refreshRequested = false
         var retirement: Task<Cleanup, Never>?
@@ -149,6 +199,10 @@ final class NativeSettingsStore {
     private(set) var draftConflict = false
     private(set) var draftMessage: String?
     private(set) var operations: [NativeSettingsOperation] = []
+    private(set) var devicePage: SettingsDevicePage?
+    private(set) var devicesLoading = false
+    private(set) var deviceIssue: NativeSettingsSessionError?
+    private(set) var deviceOperations: [DeviceOperation] = []
     private(set) var credentialPresentation: CredentialPresentation?
     private(set) var credentialOperations: [NativeCredentialOperation] = []
     private(set) var credentialIssue: NativeCredentialIssue?
@@ -171,6 +225,9 @@ final class NativeSettingsStore {
     @ObservationIgnored private var owners: [UUID: Owner] = [:]
     @ObservationIgnored private var observationGeneration = UUID()
     @ObservationIgnored private var credentialGeneration = UUID()
+    @ObservationIgnored private var deviceGeneration = UUID()
+    @ObservationIgnored private var devicePageOwnerID: UUID?
+    @ObservationIgnored private var devicePageGeneration: UUID?
     @ObservationIgnored private var drainTask: Task<[Cleanup], Never>?
     private static let maximumOwners = 8
 
@@ -201,7 +258,7 @@ final class NativeSettingsStore {
 
     var canEdit: Bool {
         !isClosed && !isOpening && !isRefreshing && draft != nil && !operations.contains(where: \.blocksNewChanges)
-            && current.map({ !credentialLinksNeedRecovery($0) }) == true
+            && current.map({ !credentialLinksNeedRecovery($0) && !deviceApprovalsNeedRecovery($0) }) == true
     }
 
     var canSave: Bool {
@@ -211,12 +268,15 @@ final class NativeSettingsStore {
             && snapshot?.revision != UInt64(Int64.max) && current.map({ identityCount($0) < 64 }) == true
     }
 
-    var canAct: Bool { canRefresh && !snapshotIsStale && current?.effects.isEmpty == true }
+    var canAct: Bool {
+        canRefresh && !snapshotIsStale && current?.effects.isEmpty == true && !hasDeviceCeremony
+            && current.map { !deviceApprovalsNeedRecovery($0) } == true
+    }
 
     var canEnterCredential: Bool {
         canAct && !actionCapacityReached && draft?.isDirty == false && metadata != nil
             && metadata?.revision == snapshot?.revision && credentialPresentation == nil
-            && !operations.contains(where: \.blocksNewChanges) && current.map({ !credentialLinksNeedRecovery($0) }) == true
+            && !operations.contains(where: \.blocksNewChanges) && current.map({ !credentialLinksNeedRecovery($0) && !deviceApprovalsNeedRecovery($0) }) == true
     }
 
     var status: String {
@@ -231,7 +291,7 @@ final class NativeSettingsStore {
     func setSurfaceVisible(_ visible: Bool) {
         guard !isClosed else { return }
         if surfaceVisible != visible { invalidateObservation() }
-        if surfaceVisible != visible { retireCredentialPresentations() }
+        if surfaceVisible != visible { retireCredentialPresentations(); retireDeviceCeremonies() }
         surfaceVisible = visible
         current?.lifecycle.setSurfaceVisible(visible)
         if isForeground && observationIsStale { requestRefresh() }
@@ -241,7 +301,7 @@ final class NativeSettingsStore {
     func setApplicationActive(_ active: Bool) {
         guard !isClosed else { return }
         if applicationActive != active { invalidateObservation() }
-        if applicationActive != active { retireCredentialPresentations() }
+        if applicationActive != active { retireCredentialPresentations(); retireDeviceCeremonies() }
         applicationActive = active
         current?.lifecycle.setApplicationActive(active)
         if isForeground && observationIsStale { requestRefresh() }
@@ -318,7 +378,7 @@ final class NativeSettingsStore {
         guard canAct, let owner = current, let information = owner.information,
               let snapshot, let registry else { throw NativeSettingsSessionError.inactive }
         guard identityCount(owner) < 64 else { throw NativeSettingsSessionError.capacity }
-        guard !owner.operations.values.contains(where: \.blocksNewChanges), !credentialLinksNeedRecovery(owner) else {
+        guard !owner.operations.values.contains(where: \.blocksNewChanges), !credentialLinksNeedRecovery(owner), !deviceApprovalsNeedRecovery(owner) else {
             throw NativeSettingsSessionError.operationUncertain
         }
         let target: SettingsActionTarget
@@ -340,7 +400,10 @@ final class NativeSettingsStore {
         try target.validate()
         guard target.scope == snapshot.scope,
               target.expectedRevision == nil || target.expectedRevision == snapshot.revision,
-              owner.actions[target.requestID] == nil else { throw NativeSettingsSessionError.invalidRequest }
+              owner.actions[target.requestID] == nil,
+              !owner.devices.values.contains(where: { $0.approval?.review.operationID == target.requestID }) else {
+            throw NativeSettingsSessionError.invalidRequest
+        }
         var submittedDraft: NativeSettingsDraft?
         if case .update(let patch) = intent, let draft, draft.isDirty, draft.validationMessage == nil,
            try draft.patch(requestID: patch.requestID) == patch { submittedDraft = draft }
@@ -536,7 +599,7 @@ final class NativeSettingsStore {
         guard !isClosed else { return }
         invalidateObservation()
         stopObserver()
-        if !available { retireCredentialPresentations() }
+        if !available { retireCredentialPresentations(); retireDeviceCeremonies() }
         if available { requestRefresh() }
     }
 
@@ -570,6 +633,335 @@ final class NativeSettingsStore {
         }
         drainTask = task
         return await task.value
+    }
+
+    var devicesAreStale: Bool {
+        snapshotIsStale || deviceIssue != nil || devicesLoading || devicePageOwnerID != currentID || devicePageGeneration != observationGeneration
+    }
+
+    var canRefreshDevices: Bool {
+        canRefresh && current.map { $0.effects.count < 4 && $0.devicesReadID == nil } == true
+    }
+
+    var canBeginDevicePairing: Bool {
+        canBeginDeviceAction && current.map { identityCount($0) + 2 <= 64 && $0.devices.values.filter { $0.request.action == .pair }.count < 8 } == true
+    }
+
+    func refreshDevices(first: Bool = true) {
+        guard canRefreshDevices, let owner = current else { return }
+        let after: UUID?
+        if first { after = nil }
+        else {
+            guard !devicesAreStale, let next = owner.devicePage?.nextAfter else { return }
+            after = next
+        }
+        let id = UUID()
+        guard owner.effects[id] == nil, owner.operations[id] == nil,
+              !owner.devices.values.contains(where: { $0.approval?.review.operationID == id }),
+              !owner.credentials.values.contains(where: { $0.link?.plan.ownerRequest.id.value == id }) else {
+            deviceIssue = .requestReused
+            return
+        }
+        let generation = observationGeneration
+        owner.devicesReadID = id
+        devicesLoading = true
+        deviceIssue = nil
+        owner.effects[id] = Task { [self, owner] in
+            do {
+                let page = try await owner.lifecycle.session.devices(after: after, limit: 25)
+                guard page.hostID == owner.information?.hostID, page.devices.count <= 25 else { throw NativeSettingsSessionError.invalidResponse }
+                if isCurrent(owner), generation == observationGeneration, isForeground {
+                    owner.devicePage = page
+                    devicePage = page
+                    devicePageOwnerID = owner.id
+                    devicePageGeneration = generation
+                }
+            } catch { if isCurrent(owner) { deviceIssue = sanitize(error) } }
+            owner.effects[id] = nil
+            if owner.devicesReadID == id { owner.devicesReadID = nil }
+            if isCurrent(owner) { devicesLoading = false }
+        }
+    }
+
+    func beginDevicePairing(parent: NSWindow?) {
+        guard canBeginDevicePairing else { return }
+        beginDeviceAction(.pair, parent: parent)
+    }
+
+    func canRevokeDevice(_ row: SettingsDeviceSummary) -> Bool {
+        canBeginDeviceAction && !devicesAreStale && devicePage?.devices.contains(row) == true
+            && current.map { identityCount($0) < 64 } == true
+    }
+
+    func requestDeviceRevocation(_ row: SettingsDeviceSummary, parent: NSWindow?) {
+        guard canRevokeDevice(row) else { return }
+        beginDeviceAction(.revoke(deviceID: row.deviceID, publicKeys: row.publicKeys), parent: parent)
+    }
+
+    func confirmDeviceAction(_ handle: DeviceHandle, ceremony: NativeDeviceCeremony) {
+        guard let (owner, context) = device(handle), context.ceremony === ceremony,
+              canContinueDevice(owner, context: context), context.confirmation == nil,
+              owner.effects[handle.id] == nil, let details = context.details,
+              case .awaitingAction(let reference) = details.operation.phase,
+              owner.operations[handle.id]?.inspection?.phase == details.operation.phase,
+              context.request.action == .pair || ceremony.compared else { return }
+        do {
+            try validateDevice(context.capture, owner: owner)
+            try ceremony.validate()
+            let invocation = NativeActionInvocation(operationID: handle.id, nativeRequestID: UUID(), reference: .action(reference: reference))
+            let admission = try owner.lifecycle.prepare(.confirmDevice(invocation), expiresAt: reference.expiresAt)
+            context.confirmation = admission
+            ceremony.confirming()
+            owner.operations[handle.id]?.executionPrepared = true
+            owner.operations[handle.id]?.isWorking = true
+            context.issue = nil
+            publishDevices()
+            owner.effects[handle.id] = Task { [self, owner, context, admission] in
+                do {
+                    let result = try await owner.lifecycle.session.perform(admission)
+                    switch result {
+                    case .prepared: throw NativeSettingsSessionError.invalidResponse
+                    case .inspected(let inspection): try owner.operations[handle.id]?.adopt(inspection)
+                    case .pairing(let status):
+                        try owner.operations[handle.id]?.adopt(status.operation)
+                        guard context.request.action == .pair, status.invitationAvailable else { throw NativeSettingsSessionError.expired }
+                        context.invitationPresented = true
+                        publishOperations(owner)
+                        let final = try await owner.lifecycle.session.showInvitation(admission) { [context] presentation in
+                            try await context.ceremony.showInvitation(presentation)
+                        }
+                        try owner.operations[handle.id]?.adopt(final.operation)
+                    }
+                    if !context.invitationPresented {
+                        guard case .finished = owner.operations[handle.id]?.inspection?.phase else { throw NativeSettingsSessionError.operationUncertain }
+                        context.ceremony.completed()
+                    }
+                } catch {
+                    context.issue = sanitize(error)
+                    owner.operations[handle.id]?.issue = sanitize(error)
+                    context.ceremony.failure(sanitize(error))
+                }
+                owner.operations[handle.id]?.isWorking = false
+                owner.effects[handle.id] = nil
+                publishOperations(owner)
+                if isCurrent(owner) { invalidateObservation(); requestRefresh() }
+            }
+        } catch { context.issue = sanitize(error); context.ceremony.failure(sanitize(error)); publishDevices() }
+    }
+
+    func approveDevicePairing(_ handle: DeviceHandle, ceremony: NativeDeviceCeremony) {
+        guard let (owner, context) = device(handle), context.ceremony === ceremony,
+              context.request.action == .pair, context.invitationPresented,
+              context.approval == nil, canContinueDevice(owner, context: context),
+              owner.effects[handle.id] != nil else { return }
+        do {
+            try validateDevice(context.capture, owner: owner)
+            let choice = try ceremony.takeChoice()
+            let admission: NativePairingApprovalAdmission
+            do {
+                admission = try NativePairingApprovalAdmission.capture(session: owner.lifecycle.session,
+                    creationOperationID: handle.id, candidate: choice.candidate, label: choice.label,
+                    expectedFingerprint: choice.fingerprint, access: choice.access)
+            } catch { choice.candidate.discard(); throw error }
+            let id = admission.review.operationID
+            guard owner.operations[id] == nil, owner.effects[id] == nil,
+                  !owner.devices.values.contains(where: { $0.approval?.review.operationID == id }),
+                  !owner.credentials.values.contains(where: { $0.link?.plan.ownerRequest.id.value == id }) else {
+                admission.cancel()
+                throw NativeSettingsSessionError.requestReused
+            }
+            context.approval = admission
+            context.approvalIssue = nil
+            runPairingApproval(owner, context: context, inspecting: false)
+        } catch { context.approvalIssue = sanitize(error); ceremony.failure(sanitize(error)); publishDevices() }
+    }
+
+    func inspectPairingApproval(_ handle: DeviceHandle) {
+        guard let (owner, context) = device(handle), isCurrent(owner), owner.retirement == nil,
+              let admission = context.approval, owner.effects[admission.review.operationID] == nil,
+              owner.effects.count < 4 else { return }
+        runPairingApproval(owner, context: context, inspecting: true)
+    }
+
+    func inspectDeviceOperation(_ handle: DeviceHandle) {
+        guard let (owner, _) = device(handle), isCurrent(owner), owner.retirement == nil else { return }
+        recover(handle.id, reconciliation: false, cancellation: false)
+    }
+
+    func canInspectDeviceOperation(_ handle: DeviceHandle) -> Bool {
+        guard let (owner, _) = device(handle), isCurrent(owner), owner.retirement == nil else { return false }
+        return owner.effects.count < 4 && owner.effects[handle.id] == nil
+    }
+
+    func canInspectPairingApproval(_ handle: DeviceHandle) -> Bool {
+        guard let (owner, context) = device(handle), isCurrent(owner), owner.retirement == nil,
+              let admission = context.approval else { return false }
+        return owner.effects.count < 4 && owner.effects[admission.review.operationID] == nil
+    }
+
+    func devicesSurfaceHidden() { retireDeviceCeremonies() }
+
+    func dismissDeviceCeremony(_ handle: DeviceHandle) {
+        guard let (owner, context) = device(handle) else { return }
+        guard !context.retired else { context.ceremony.retire(); return }
+        context.retired = true
+        context.ceremony.retire()
+        context.approval?.cancel()
+        if !context.invitationPresented { context.confirmation?.cancel() }
+        if context.confirmation == nil, owner.effects[handle.id] == nil, isCurrent(owner) {
+            recover(handle.id, reconciliation: false, cancellation: true)
+        }
+        publishDevices()
+    }
+
+    private var hasDeviceCeremony: Bool {
+        owners.values.contains { $0.devices.values.contains { !$0.ceremony.uiRetired } }
+    }
+
+    private var canBeginDeviceAction: Bool {
+        canAct && draft?.isDirty == false && credentialPresentation == nil
+            && !operations.contains(where: \.blocksNewChanges)
+            && current.map { !credentialLinksNeedRecovery($0) && !deviceApprovalsNeedRecovery($0) } == true
+    }
+
+    private func beginDeviceAction(_ action: SettingsDeviceAction, parent: NSWindow?) {
+        guard canBeginDeviceAction, let owner = current, let snapshot else { return }
+        do {
+            let parent = try NativeDeviceCeremony.requireParent(parent)
+            let capture = try captureDevice(owner)
+            let request = SettingsDeviceRequest(contractVersion: 1, requestID: UUID(), scope: snapshot.scope, action: action)
+            let prepared = try prepareAction(action == .pair ? .pairDevice(request) : .revokeDevice(request))
+            let handle = DeviceHandle(id: request.requestID, ownerID: owner.id)
+            let ceremony = NativeDeviceCeremony(store: self, handle: handle, request: request, parent: parent,
+                                                expiresAt: capture.expiresAt, deadline: capture.deadline)
+            let context = DeviceContext(handle: handle, request: request, capture: capture, ceremony: ceremony)
+            owner.devices[handle.id] = context
+            do { try ceremony.present() }
+            catch {
+                prepared.admission.cancel()
+                owner.operations[handle.id]?.cancelledBeforeSubmission = true
+                context.retired = true
+                ceremony.retire()
+                throw error
+            }
+            deviceIssue = nil
+            perform(prepared)
+            publishDevices()
+        } catch { deviceIssue = sanitize(error); publishDevices() }
+    }
+
+    private func device(_ handle: DeviceHandle) -> (Owner, DeviceContext)? {
+        guard let owner = owners[handle.ownerID], let context = owner.devices[handle.id], context.handle === handle else { return nil }
+        return (owner, context)
+    }
+
+    private func captureDevice(_ owner: Owner) throws -> CredentialCapture {
+        guard isCurrent(owner), isForeground, let information = owner.information else { throw NativeSettingsSessionError.inactive }
+        let now = try NativeSettingsGate.wallTime()
+        guard information.expiresAt > now else { throw NativeSettingsSessionError.expired }
+        let started = ContinuousClock.now
+        return CredentialCapture(generation: deviceGeneration, started: started, expiresAt: information.expiresAt,
+            deadline: started.advanced(by: .milliseconds(Int64(min(information.expiresAt - now, 300_000)))))
+    }
+
+    private func validateDevice(_ capture: CredentialCapture, owner: Owner) throws {
+        guard isCurrent(owner), isForeground, capture.generation == deviceGeneration else { throw NativeSettingsSessionError.inactive }
+        guard try NativeSettingsGate.wallTime() < capture.expiresAt, ContinuousClock.now < capture.deadline else {
+            throw NativeSettingsSessionError.expired
+        }
+    }
+
+    private func canContinueDevice(_ owner: Owner, context: DeviceContext) -> Bool {
+        isCurrent(owner) && isForeground && !context.retired && owner.effects.count < 4
+            && !credentialLinksNeedRecovery(owner)
+            && !owner.devices.values.contains(where: { $0 !== context && deviceApprovalNeedsRecovery($0) })
+            && !owner.operations.contains { $0.key != context.handle.id && $0.value.blocksNewChanges }
+            && owner.effects.keys.allSatisfy { $0 == context.handle.id }
+    }
+
+    private func prepareDeviceConfirmation(_ owner: Owner, context: DeviceContext) async throws {
+        guard let inspection = owner.operations[context.handle.id]?.inspection,
+              case .awaitingAction(let reference) = inspection.phase else { return }
+        let details = try await owner.lifecycle.session.details(operationID: context.handle.id, reference: .action(reference: reference))
+        guard details.target == .device(request: context.request), details.operation.binding == inspection.binding,
+              details.operation.origin == inspection.origin, details.operation.phase == .awaitingAction(reference: reference),
+              case .nativeUI(let sessionID) = details.operation.origin,
+              sessionID == details.operation.binding.clientSessionID else { throw NativeSettingsSessionError.invalidResponse }
+        context.details = details
+        do {
+            try validateDevice(context.capture, owner: owner)
+            guard !context.retired else { throw NativeSettingsSessionError.inactive }
+            let lifetime = reference.expiresAt - details.operation.binding.issuedAt
+            let deadline = min(context.capture.deadline, context.capture.started.advanced(by: .milliseconds(Int64(min(lifetime, 300_000)))))
+            try context.ceremony.confirmation(expiresAt: reference.expiresAt, deadline: deadline)
+        } catch {
+            context.retired = true
+            context.issue = sanitize(error)
+            context.ceremony.retire()
+            let cancelled = try await owner.lifecycle.session.cancel(operationID: context.handle.id)
+            try owner.operations[context.handle.id]?.adopt(cancelled)
+            throw error
+        }
+    }
+
+    private func runPairingApproval(_ owner: Owner, context: DeviceContext, inspecting: Bool) {
+        guard let admission = context.approval else { return }
+        let id = admission.review.operationID
+        guard isCurrent(owner), owner.retirement == nil, owner.effects[id] == nil, owner.effects.count < 4 else { return }
+        context.approvalWorking = true
+        publishDevices()
+        owner.effects[id] = Task { [self, owner, context, admission] in
+            do {
+                let status: NativeSettingsSession.PairingApprovalStatus
+                if inspecting { status = try await owner.lifecycle.session.pairingApproval(admission) }
+                else { status = try await owner.lifecycle.session.approvePairing(admission) }
+                context.approvalStatus = status
+                context.approvalIssue = nil
+                publishDevices()
+                if status.acceptanceAvailable, !context.retired {
+                    _ = try await owner.lifecycle.session.showPairingAcceptance(admission) { [context, admission] presentation in
+                        guard presentation.operationID == admission.review.operationID else { throw NativeSettingsSessionError.invalidResponse }
+                        try await context.ceremony.showAcceptance(presentation)
+                    }
+                } else if !context.retired { context.ceremony.failure(.operationUncertain) }
+            } catch {
+                context.approvalIssue = sanitize(error)
+                context.ceremony.failure(sanitize(error))
+            }
+            context.approvalWorking = false
+            owner.effects[id] = nil
+            publishDevices()
+        }
+    }
+
+    private func deviceApprovalsNeedRecovery(_ owner: Owner) -> Bool {
+        owner.devices.values.contains { deviceApprovalNeedsRecovery($0) }
+    }
+
+    private func deviceApprovalNeedsRecovery(_ context: DeviceContext) -> Bool {
+        guard context.approval != nil else { return false }
+        guard !context.approvalWorking, context.approvalIssue == nil, let status = context.approvalStatus,
+              case .finished(let result) = status.operation.phase else { return true }
+        return result.state == .unknown
+    }
+
+    private func retireDeviceCeremonies() {
+        deviceGeneration = UUID()
+        for owner in owners.values {
+            for context in owner.devices.values { dismissDeviceCeremony(context.handle) }
+        }
+    }
+
+    private func publishDevices() {
+        deviceOperations = owners.values.flatMap { owner in
+            owner.devices.values.compactMap { context in
+                guard let operation = owner.operations[context.handle.id] else { return nil }
+                return DeviceOperation(id: context.handle.id, handle: context.handle, request: context.request,
+                    operation: operation, retired: context.retired, approvalID: context.approval?.review.operationID,
+                    approval: context.approvalStatus, approvalWorking: context.approvalWorking,
+                    issue: context.approvalIssue ?? context.issue)
+            }
+        }.sorted { $0.id.uuidString < $1.id.uuidString }
     }
 
     private var current: Owner? { currentID.flatMap { owners[$0] } }
@@ -619,6 +1011,7 @@ final class NativeSettingsStore {
                 issue = sanitize(error)
                 observationIsStale = true
                 retireCredentialPresentations()
+                retireDeviceCeremonies()
             }
         }
         owner.work = nil
@@ -639,6 +1032,7 @@ final class NativeSettingsStore {
     private func retireCurrent() {
         guard let owner = current else { return }
         retireCredentialPresentations()
+        retireDeviceCeremonies()
         owner.lifecycle.invalidate()
         owner.observer?.cancel()
         currentID = nil
@@ -650,11 +1044,13 @@ final class NativeSettingsStore {
         let work = owner.work
         let observer = owner.observer
         let effects = Array(owner.effects.values)
+        let ceremonies = owner.devices.values.map(\.ceremony)
         let retirementID = UUID()
         owner.retirementID = retirementID
-        owner.retirement = Task { [self, owner, work, observer, effects] in
+        owner.retirement = Task { [self, owner, work, observer, effects, ceremonies] in
             if let work { await work.value }
             if let observer { await observer.value }
+            for ceremony in ceremonies { await ceremony.waitForRetirement() }
             for effect in effects { await effect.value }
             let native = await owner.lifecycle.drain()
             owner.nativeReport = native
@@ -667,6 +1063,7 @@ final class NativeSettingsStore {
             }
             refreshCleanup()
             publishCredentials()
+            publishDevices()
             return result
         }
         refreshCleanup()
@@ -695,6 +1092,11 @@ final class NativeSettingsStore {
         credentialIssue = nil
         credentialPresentationIssue = nil
         issue = nil
+        devicePage = nil
+        devicePageOwnerID = nil
+        devicePageGeneration = nil
+        devicesLoading = false
+        deviceIssue = nil
         invalidateObservation()
     }
 
@@ -737,7 +1139,17 @@ final class NativeSettingsStore {
                         try owner.operations[id]?.adopt(cancelled)
                     } else if !context.retired { try await prepareCredentialPresentation(owner, context: context) }
                 }
-            } catch { owner.operations[id]?.issue = sanitize(error) }
+                if let context = owner.devices[id], context.details == nil {
+                    if context.retired, case .awaitingAction = owner.operations[id]?.inspection?.phase {
+                        let cancelled = try await owner.lifecycle.session.cancel(operationID: id)
+                        try owner.operations[id]?.adopt(cancelled)
+                    } else if !context.retired { try await prepareDeviceConfirmation(owner, context: context) }
+                }
+                owner.devices[id]?.issue = nil
+            } catch {
+                owner.operations[id]?.issue = sanitize(error)
+                if let context = owner.devices[id] { context.issue = sanitize(error); context.ceremony.failure(sanitize(error)) }
+            }
             owner.operations[id]?.isWorking = false
             owner.effects[id] = nil
             if isCurrent(owner) {
@@ -792,10 +1204,12 @@ final class NativeSettingsStore {
     private func publishOperations(_ owner: Owner) {
         if isCurrent(owner) { operations = owner.operations.values.sorted { $0.id.uuidString < $1.id.uuidString } }
         publishCredentials()
+        publishDevices()
     }
 
     private func identityCount(_ owner: Owner) -> Int {
         owner.operations.count + owner.credentials.values.filter { $0.initial || $0.link != nil }.count
+            + owner.devices.values.filter { $0.request.action == .pair }.count
     }
 
     private func credential(_ handle: CredentialHandle) -> (Owner, CredentialContext)? {
@@ -974,6 +1388,7 @@ final class NativeSettingsStore {
                 }
                 refreshCleanup()
                 publishCredentials()
+                publishDevices()
                 return result
             }
         }
@@ -1052,7 +1467,7 @@ final class NativeSettingsStore {
                 }
             } catch is CancellationError {
             } catch {
-                if isCurrent(owner) { issue = sanitize(error); invalidateObservation(); retireCredentialPresentations() }
+                if isCurrent(owner) { issue = sanitize(error); invalidateObservation(); retireCredentialPresentations(); retireDeviceCeremonies() }
             }
             if owner.observerID == observerID {
                 owner.observer = nil
