@@ -82,7 +82,7 @@ impl fmt::Debug for SettingsCaller {
     }
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct NativeSessionProof {
     session_id: Uuid,
@@ -101,7 +101,8 @@ impl NativeSessionProof {
     }
 }
 
-struct SessionSecret(Zeroizing<String>);
+#[derive(Clone)]
+struct SessionSecret(Arc<Zeroizing<String>>);
 
 impl Serialize for SessionSecret {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
@@ -120,14 +121,15 @@ impl<'de> Deserialize<'de> for SessionSecret {
                 .decode(encoded.as_bytes())
                 .map_err(|_| serde::de::Error::custom("invalid native session proof"))?,
         );
-        if decoded.len() != 32 || STANDARD.encode(&*decoded) != encoded.as_str() {
+        let canonical = Zeroizing::new(STANDARD.encode(&*decoded));
+        if decoded.len() != 32 || canonical.as_str() != encoded.as_str() {
             return Err(serde::de::Error::custom("invalid native session proof"));
         }
-        Ok(Self(encoded))
+        Ok(Self(Arc::new(encoded)))
     }
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct NativeSessionOpened {
     pub host_id: DeviceId,
@@ -264,7 +266,7 @@ impl Authority {
             expires_at,
             proof: NativeSessionProof {
                 session_id,
-                secret: SessionSecret(encoded),
+                secret: SessionSecret(Arc::new(encoded)),
             },
         })
     }

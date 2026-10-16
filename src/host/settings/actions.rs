@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
 
 use crate::agent::Agent;
-use crate::protocol::CommandId;
+use crate::protocol::{CommandId, UnixMillis};
 
 use super::authority::SessionAdmission;
 use super::contract::{
@@ -153,6 +153,7 @@ impl NativeActionAdmission {
         if state.closed
             || self.claim.cancellation.is_cancelled()
             || Instant::now() >= self.claim.deadline
+            || UnixMillis::now()?.get() >= self.claim.identity.binding.expires_at.get()
         {
             return Err(SettingsServiceError::Expired);
         }
