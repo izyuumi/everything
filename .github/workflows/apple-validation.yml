@@ -21,6 +21,8 @@ jobs:
         include:
           - scheme: EverythingMac
             destination: 'generic/platform=macOS'
+          - scheme: EverythingIOS
+            destination: 'generic/platform=iOS Simulator'
     steps:
       - uses: actions/checkout@v4
         with:
