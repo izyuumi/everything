@@ -37,7 +37,7 @@ struct SettingsView: View {
             Section("This iPhone") {
                 NavigationLink("Appearance and notifications", value: ClientSettingsDestination.thisDevice)
                 if let issue = model.localSettingsIssue { Text(issue).foregroundStyle(.red) }
-                Text("Local preferences use this iPhone's existing identity and remain independent of the Host connection. Completion and attention delivery is unavailable; no generic cursor-activity notifications are scheduled.").font(.footnote)
+                Text("Local preferences remain available while the Host is offline. Completion and attention notification delivery is currently unavailable.").font(.footnote)
             }
             Section("Local privacy") {
                 Text("Identity secrets use unlocked-only, non-synchronizing ThisDeviceOnly Keychain storage. Local history uses complete file protection. These Curve25519 keys are not Secure Enclave keys.").font(.footnote)
