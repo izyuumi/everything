@@ -235,7 +235,10 @@ pub struct SelectionPreflightStatus {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct SelectionGeneration(u64);
+pub struct SelectionGeneration {
+    preflight: Uuid,
+    epoch: u64,
+}
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -360,7 +363,10 @@ impl SelectionPreflight {
                 shutdown: CancellationToken::new(),
                 state: Mutex::new(PreflightState {
                     closed: false,
-                    generation: SelectionGeneration(1),
+                    generation: SelectionGeneration {
+                        preflight: Uuid::new_v4(),
+                        epoch: 1,
+                    },
                     suspended: false,
                     configuration: Arc::new(ConfiguredSelection {
                         selector,
@@ -384,12 +390,12 @@ impl SelectionPreflight {
         }
         state.suspended = true;
         state.remove_all();
-        let Some(generation) = state.generation.0.checked_add(1) else {
+        let Some(generation) = state.generation.epoch.checked_add(1) else {
             state.closed = true;
             self.inner.shutdown.cancel();
             return Err(SelectionPreflightError::Capacity);
         };
-        state.generation = SelectionGeneration(generation);
+        state.generation.epoch = generation;
         Ok(state.generation)
     }
 
@@ -516,15 +522,21 @@ impl SelectionPreflight {
         };
         let worker = tokio::spawn(async move {
             let _request = request_guard;
-            let local = this.inner.local.clone();
-            let agent = this.inner.agent.clone();
+            let resources = (
+                configuration,
+                this.inner.local.clone(),
+                this.inner.agent.clone(),
+            );
             let current = authority.clone();
             let prepared = tokio::task::spawn_blocking(move || {
-                let _agent = agent;
+                let retained_resources = resources;
                 if remote {
-                    configuration.selector.prepare(&current, &query, limit)
+                    retained_resources
+                        .0
+                        .selector
+                        .prepare(&current, &query, limit)
                 } else {
-                    local.prepare(&current, &query, limit)
+                    retained_resources.1.prepare(&current, &query, limit)
                 }
             })
             .await
@@ -754,7 +766,7 @@ impl SelectionPreflight {
 impl PreflightState {
     fn configuration_status(&self) -> SelectionConfigurationStatus {
         SelectionConfigurationStatus {
-            generation: self.generation.0,
+            generation: self.generation.epoch,
             suspended: self.suspended,
             remote_enabled: !self.closed && !self.suspended && self.configuration.remote_enabled,
             settings: self.configuration.settings.clone(),
@@ -768,7 +780,9 @@ impl PreflightState {
         if self.closed {
             return Err(SelectionPreflightError::Draining);
         }
-        if self.generation != generation {
+        if self.generation.preflight != generation.preflight
+            || self.generation.epoch != generation.epoch
+        {
             return Err(SelectionPreflightError::BindingChanged);
         }
         Ok(())
