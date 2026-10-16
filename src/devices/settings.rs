@@ -33,6 +33,18 @@ pub enum PairingCancellation {
     NotPending,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub enum DeviceSettingsRevocation {
+    Revoked {
+        device_id: DeviceId,
+        revoked_at: UnixMillis,
+    },
+    AlreadyRevoked {
+        device_id: DeviceId,
+        revoked_at: UnixMillis,
+    },
+}
+
 impl DeviceEndpoint {
     pub fn settings_devices(
         &self,
@@ -96,6 +108,66 @@ impl DeviceEndpoint {
             return Err(DeviceError::Invalid("settings device page exceeds bound"));
         }
         Ok(page)
+    }
+
+    pub fn revoke_device_exact(
+        &self,
+        expected: &DevicePublicKeys,
+        now: UnixMillis,
+    ) -> Result<DeviceSettingsRevocation, DeviceError> {
+        self.ensure_active()?;
+        if self.inner.role != EndpointRole::Host {
+            return Err(DeviceError::AccessDenied);
+        }
+        super::time(now)?;
+        expected.validate()?;
+        let before = self.settings_device(expected.device_id)?;
+        if before.0.public_keys != *expected {
+            return Err(DeviceError::AccessDenied);
+        }
+        self.revoke_device(expected.device_id, now)?;
+        let (after, revoked_at) = self.settings_device(expected.device_id)?;
+        if after.public_keys != *expected || !after.revoked {
+            return Err(DeviceError::MalformedRegistration);
+        }
+        let revoked_at = UnixMillis::try_from(
+            u64::try_from(revoked_at.ok_or(DeviceError::MalformedRegistration)?)
+                .map_err(|_| DeviceError::MalformedRegistration)?,
+        )?;
+        Ok(if before.0.revoked {
+            DeviceSettingsRevocation::AlreadyRevoked {
+                device_id: expected.device_id,
+                revoked_at,
+            }
+        } else {
+            DeviceSettingsRevocation::Revoked {
+                device_id: expected.device_id,
+                revoked_at,
+            }
+        })
+    }
+
+    fn settings_device(
+        &self,
+        device_id: DeviceId,
+    ) -> Result<(DeviceSettingsSummary, Option<i64>), DeviceError> {
+        let connection = self.inner.store.connection()?;
+        let mut statement = connection
+            .prepare(
+                "SELECT id,label,public_identity,created_at,revoked_at FROM devices WHERE id=?1",
+            )
+            .map_err(StorageError::from)?;
+        let mut rows = statement
+            .query([device_id.to_string()])
+            .map_err(StorageError::from)?;
+        let row = rows
+            .next()
+            .map_err(StorageError::from)?
+            .ok_or(DeviceError::AccessDenied)?;
+        Ok((
+            summary(row, self.public_keys().device_id)?,
+            row.get(4).map_err(StorageError::from)?,
+        ))
     }
 
     pub fn cancel_pairing(

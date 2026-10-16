@@ -125,6 +125,15 @@ impl NativeCredentialStore {
         .map_err(|_| CredentialError::Worker)?
     }
 
+    pub(crate) fn store_blocking(
+        &self,
+        key: CredentialKey,
+        secret: CredentialSecret,
+    ) -> Result<(), CredentialError> {
+        let _permit = self.permit()?;
+        write_native(&key, secret)
+    }
+
     pub async fn delete(&self, key: CredentialKey) -> Result<(), CredentialError> {
         let permit = self.permit()?;
         tokio::task::spawn_blocking(move || {

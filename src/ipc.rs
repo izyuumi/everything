@@ -104,6 +104,9 @@ pub enum OwnerQuery {
         lookup: ApprovalLookup,
     },
     Settings,
+    SettingsOperation {
+        request_id: CommandId,
+    },
     Composition,
     Publication,
     ScheduleEngine,
@@ -245,6 +248,9 @@ pub enum OwnerOperation {
         expected_revision: u64,
         settings: Box<crate::host::settings::HostSettings>,
     },
+    ReconcileSettings {
+        operation_id: CommandId,
+    },
     Credential {
         operation: crate::host::credentials::CredentialOperation,
     },
@@ -367,6 +373,9 @@ impl ConversationWait {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum OwnerQueryResult {
+    SettingsOperation {
+        operation: crate::host::settings::SettingsOperationInspection,
+    },
     WorkerCoordinator {
         result: Box<crate::host::worker::WorkerCoordinatorQueryResult>,
     },
@@ -477,6 +486,10 @@ impl From<crate::agent::ConversationInfo> for ConversationSummary {
 impl OwnerQueryResult {
     pub fn validate_for(&self, query: &OwnerQuery) -> Result<(), &'static str> {
         let valid = match (query, self) {
+            (
+                OwnerQuery::SettingsOperation { request_id },
+                Self::SettingsOperation { operation },
+            ) => operation.binding.request_id == *request_id && operation.validate().is_ok(),
             (OwnerQuery::WorkerCoordinator { query }, Self::WorkerCoordinator { result }) => {
                 result.validate_for(query).is_ok()
             }
@@ -669,6 +682,14 @@ pub enum OwnerOperationResult {
         receipt: CommandReceipt,
     },
     Applied,
+    SettingsReceipt {
+        operation: Box<crate::host::settings::SettingsOperationInspection>,
+        settings: Option<Box<crate::host::settings::HostSettings>>,
+        restart_required: bool,
+    },
+    SettingsReconciled {
+        operation: Box<crate::host::settings::SettingsOperationInspection>,
+    },
     Settings {
         settings: Box<crate::host::settings::HostSettings>,
         restart_required: bool,
@@ -693,6 +714,16 @@ impl OwnerOperationResult {
         operation: &OwnerOperation,
         request_id: CommandId,
     ) -> Result<(), &'static str> {
+        if let Self::SettingsReceipt { operation, .. } = self
+            && (operation.binding.request_id != request_id
+                || !matches!(
+                    operation.origin,
+                    crate::host::settings::SettingsOperationOrigin::LocalOwner { request_id: original }
+                        if original == request_id
+                ))
+        {
+            return Err("settings receipt does not match its original owner request");
+        }
         if let (
             OwnerOperation::WorkerCoordinator { operation },
             Self::WorkerCoordinator { result },
@@ -706,6 +737,69 @@ impl OwnerOperationResult {
     }
     pub fn validate_for(&self, operation: &OwnerOperation) -> Result<(), &'static str> {
         let valid = match (operation, self) {
+            (
+                OwnerOperation::ReconcileSettings { operation_id },
+                Self::SettingsReconciled { operation },
+            ) => {
+                operation
+                    .validate()
+                    .map_err(|_| "invalid reconciled settings inspection")?;
+                operation.binding.request_id == *operation_id && operation.write.is_some()
+            }
+            (
+                OwnerOperation::ReplaceSettings {
+                    expected_revision,
+                    settings: submitted,
+                },
+                Self::SettingsReceipt {
+                    operation,
+                    settings,
+                    restart_required,
+                },
+            ) => {
+                operation
+                    .validate()
+                    .map_err(|_| "invalid settings receipt inspection")?;
+                let applied = operation.write.as_ref().is_some_and(|write| {
+                    write.resolution
+                        == Some(crate::host::settings::SettingsWriteResolution::Applied)
+                });
+                let expected_restart = applied
+                    && operation
+                        .write
+                        .as_ref()
+                        .is_some_and(|write| write.restart_required);
+                let snapshot_matches = if let Some(settings) = settings {
+                    let mut expected = submitted.as_ref().clone();
+                    expected.revision = expected_revision
+                        .checked_add(1)
+                        .ok_or("settings revision overflow")?;
+                    applied
+                        && serde_json::to_value(settings)
+                            .map_err(|_| "invalid settings receipt snapshot")?
+                            == serde_json::to_value(expected)
+                                .map_err(|_| "invalid original settings snapshot")?
+                } else {
+                    true
+                };
+                operation.binding.expected_revision == Some(*expected_revision)
+                    && submitted.revision == *expected_revision
+                    && matches!(
+                        operation.binding.scope,
+                        crate::host::settings::contract::SettingsScope::Host { .. }
+                    )
+                    && matches!(
+                        operation.origin,
+                        crate::host::settings::SettingsOperationOrigin::LocalOwner { .. }
+                    )
+                    && matches!(
+                        operation.phase,
+                        crate::host::settings::SettingsOperationPhase::Applying { .. }
+                            | crate::host::settings::SettingsOperationPhase::Finished { .. }
+                    )
+                    && *restart_required == expected_restart
+                    && snapshot_matches
+            }
             (OwnerOperation::Schedule { mutation }, Self::Schedule { result }) => {
                 schedule_mutation_matches(mutation, result)
             }

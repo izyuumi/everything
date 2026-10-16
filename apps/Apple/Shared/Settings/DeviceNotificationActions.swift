@@ -81,6 +81,22 @@ struct DeviceNotificationActionResult: Equatable, Sendable {
 
 @MainActor
 final class DeviceNotificationActions {
+    @MainActor
+    final class Admission {
+        fileprivate let requestID: UUID
+        fileprivate let deviceID: UUID
+
+        fileprivate init(requestID: UUID, deviceID: UUID) {
+            self.requestID = requestID
+            self.deviceID = deviceID
+        }
+    }
+
+    enum PreparationError: Error, Equatable, Sendable {
+        case capacity
+        case requestReused
+    }
+
     private struct Identity: Equatable {
         let deviceID: UUID
         let sessionID: UUID
@@ -90,8 +106,12 @@ final class DeviceNotificationActions {
 
     private struct Invocation {
         let identity: Identity
+        let admission: Admission
+        let initialAdmission: InitialAdmission
+        let session: DeviceForegroundSession
+        let preferences: DevicePreferenceStore
         let cancellation: InvocationCancellation
-        let task: Task<DeviceNotificationActionResult, Never>
+        var task: Task<DeviceNotificationActionResult, Never>?
     }
 
     private final class InvocationCancellation {
@@ -112,13 +132,15 @@ final class DeviceNotificationActions {
         self.authorization = authorization
     }
 
-    func authorize(requestID: UUID, expectedRevision: UInt64, expiresAt: Date, session: DeviceForegroundSession, preferences: DevicePreferenceStore) async -> DeviceNotificationActionResult {
+    func prepare(requestID: UUID, expectedRevision: UInt64, expiresAt: Date, session: DeviceForegroundSession, preferences: DevicePreferenceStore) throws -> Admission {
         let identity = Identity(deviceID: session.deviceID, sessionID: session.id, expectedRevision: expectedRevision, expiresAt: expiresAt)
         if let previous = invocations[requestID] {
-            guard previous.identity == identity else { return result(requestID, session.deviceID, .requestReused) }
-            return await wait(for: previous.task, requestID: requestID)
+            guard previous.identity == identity, previous.session === session, previous.preferences === preferences else {
+                throw PreparationError.requestReused
+            }
+            return previous.admission
         }
-        guard invocations.count < Self.maximumInvocations else { return result(requestID, session.deviceID, .capacity) }
+        guard invocations.count < Self.maximumInvocations else { throw PreparationError.capacity }
         let admission: InitialAdmission
         let lifetime = identity.expiresAt.timeIntervalSinceNow
         if requestID == UUID(uuid: (0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0))
@@ -132,10 +154,22 @@ final class DeviceNotificationActions {
         }
         let cancellation = InvocationCancellation()
         cancellation.requested = Task.isCancelled
-        let task = Task { @MainActor in
-            await self.perform(requestID: requestID, identity: identity, admission: admission, cancellation: cancellation, session: session, preferences: preferences)
+        let ticket = Admission(requestID: requestID, deviceID: session.deviceID)
+        invocations[requestID] = Invocation(identity: identity, admission: ticket, initialAdmission: admission, session: session, preferences: preferences, cancellation: cancellation, task: nil)
+        return ticket
+    }
+
+    func authorize(_ admission: Admission) async -> DeviceNotificationActionResult {
+        let requestID = admission.requestID
+        guard let invocation = invocations[requestID], invocation.admission === admission else {
+            return result(requestID, admission.deviceID, .requestReused)
         }
-        invocations[requestID] = Invocation(identity: identity, cancellation: cancellation, task: task)
+        if Task.isCancelled { invocation.cancellation.requested = true }
+        if let task = invocation.task { return await wait(for: task, requestID: requestID) }
+        let task = Task { @MainActor in
+            await self.perform(requestID: requestID, identity: invocation.identity, admission: invocation.initialAdmission, cancellation: invocation.cancellation, session: invocation.session, preferences: invocation.preferences)
+        }
+        invocations[requestID]?.task = task
         return await wait(for: task, requestID: requestID)
     }
 
@@ -164,6 +198,7 @@ final class DeviceNotificationActions {
             case .rejected(.expired): return result(requestID, identity.deviceID, .expired)
             case .rejected(.inactive): return result(requestID, identity.deviceID, .cancelled)
             }
+            try session.validate(generation: generation, expiresAt: identity.expiresAt, deadline: deadline)
             let current = try await preferences.snapshot()
             guard current.deviceID == identity.deviceID else { return result(requestID, identity.deviceID, .failed(observation: nil)) }
             guard current.revision == identity.expectedRevision else { return result(requestID, identity.deviceID, .conflict(observedRevision: current.revision)) }

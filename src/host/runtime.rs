@@ -35,6 +35,7 @@ use super::inbox::{
     CommandOrigin, CommandPhase, HostCommandRecord, HostInbox, InboxError, InboxInput,
 };
 use super::providers::HostProviderFactory;
+use super::settings::service::{SettingsService, SettingsServiceError};
 use super::settings::{SettingsError, SettingsRepository};
 
 #[derive(Debug, Error)]
@@ -47,6 +48,8 @@ pub enum HostError {
     Storage(#[from] StorageError),
     #[error(transparent)]
     Settings(#[from] SettingsError),
+    #[error(transparent)]
+    SettingsService(#[from] SettingsServiceError),
     #[error(transparent)]
     Inbox(#[from] InboxError),
     #[error(transparent)]
@@ -132,6 +135,7 @@ pub(super) struct HostInner {
     pub(super) agent: Agent,
     pub(super) inbox: HostInbox,
     pub(super) settings: SettingsRepository,
+    pub(super) settings_service: SettingsService,
     pub(super) credentials: CredentialVault,
     pub(super) devices: DeviceEndpoint,
     pub(super) registry: Arc<ToolRegistry>,
@@ -160,6 +164,7 @@ enum HostWorker {
     Local(Result<(), HostError>),
     Dispatcher(Result<(), HostError>),
     Publication(Result<(), HostError>),
+    Settings(Result<(), HostError>),
     Relay(Result<(), DeviceError>),
     Coordinator(Result<(), crate::worker::WorkerError>),
 }
@@ -186,8 +191,6 @@ impl HostService {
             mut scopes,
             task_tools,
             schedule_tools,
-            effective,
-            worker_endpoint,
             _preparation_lease,
         ) = tokio::task::spawn_blocking(move || {
             let preparation_lease = Arc::clone(&prepared_lease);
@@ -199,21 +202,7 @@ impl HostService {
             let identity = crate::devices::load_or_create_identity_in(&directory)?;
             let devices = DeviceEndpoint::new(store.clone(), identity, EndpointRole::Host)?;
             let settings = SettingsRepository::open(Arc::clone(&prepared_lease))?;
-            let effective = settings.snapshot()?;
             let agent = Agent::from_leased_store(store, prepared_lease);
-            let worker_endpoint = effective
-                .worker
-                .as_ref()
-                .map(|configuration| {
-                    let identity = crate::worker::load_or_create_worker_identity(&agent)?;
-                    crate::worker::WorkerEndpoint::open(
-                        agent.clone(),
-                        identity,
-                        crate::worker::WorkerRole::Coordinator,
-                        configuration.relay_origin.clone(),
-                    )
-                })
-                .transpose()?;
             let mut registry = ToolRegistry::new();
             let mut scopes =
                 BuiltinTools::new(BuiltinConfig::default())?.register_into(&mut registry)?;
@@ -229,13 +218,46 @@ impl HostService {
                 scopes,
                 task_tools,
                 schedule_tools,
-                effective,
-                worker_endpoint,
                 preparation_lease,
             ))
         })
         .await
         .map_err(|_| HostError::Worker)??;
+        let mutation = Arc::new(Mutex::new(()));
+        let settings_service =
+            SettingsService::open(agent.clone(), settings.clone(), &devices, mutation.clone())
+                .await?;
+        let startup = settings_service.startup_context().await?;
+        let effective = startup.settings.clone();
+        if let super::settings::service::SettingsStartupPolicy::OptionalFeaturesSuspended {
+            operation_id,
+        } = &startup.policy
+        {
+            tracing::warn!(
+                %operation_id,
+                pending_application = startup.pending_application.is_some(),
+                "optional settings execution remains suspended for original-operation recovery"
+            );
+        }
+        let worker_endpoint = if let Some(configuration) = effective.worker.clone() {
+            let owned = (configuration, agent.clone());
+            let (endpoint, _worker_owner) = tokio::task::spawn_blocking(move || {
+                let owned = owned;
+                let identity = crate::worker::load_or_create_worker_identity(&owned.1)?;
+                let endpoint = crate::worker::WorkerEndpoint::open(
+                    owned.1.clone(),
+                    identity,
+                    crate::worker::WorkerRole::Coordinator,
+                    owned.0.relay_origin,
+                )?;
+                Ok::<_, HostError>((endpoint, owned.1))
+            })
+            .await
+            .map_err(|_| HostError::Worker)??;
+            Some(endpoint)
+        } else {
+            None
+        };
         let credentials = CredentialVault::from_environment();
         if let Some(path) = binding_file {
             credentials
@@ -286,22 +308,28 @@ impl HostService {
             settings.clone(),
             credentials.clone(),
         ));
-        let memory = super::memory::MemoryService::open(
+        let memory = super::memory::MemoryService::open_with_embedding_preferences(
             agent.clone(),
             effective.memory.clone(),
             Some(providers.clone()),
             CancellationToken::new(),
+            startup.embedding_preferences(),
         )
         .await?;
         let catalog = super::selection::SelectionCatalog::from_registry(&registry)?;
+        let (selection_settings, remote_enabled) = startup.selection_configuration();
         let selection = super::selection::SelectionPreflight::new(
             agent.clone(),
             discovery.selector.clone(),
-            &effective.selection,
+            &selection_settings,
             credentials.native_store(),
             catalog.clone(),
             Duration::from_secs(300),
         )?;
+        if !remote_enabled {
+            let generation = selection.suspend_remote()?;
+            selection.configure_remote(generation, selection_settings, false)?;
+        }
         let relay_origin = effective.relay_origin.clone();
         let worker_settings = effective.worker.clone();
         let composition = Arc::new(super::composition::Composition::new(
@@ -313,6 +341,7 @@ impl HostService {
             HostInbox::new(agent.store()),
             agent.clone(),
         ));
+        settings_service.bind_composition(composition.clone())?;
         let broker = ToolBroker::start_with_owner(
             agent.store(),
             registry.clone(),
@@ -388,6 +417,7 @@ impl HostService {
             inbox: HostInbox::new(agent.store()),
             agent,
             settings,
+            settings_service,
             credentials,
             devices,
             registry,
@@ -398,7 +428,7 @@ impl HostService {
             broker,
             composition,
             changed: Notify::new(),
-            mutation: Arc::new(Mutex::new(())),
+            mutation,
             relay_origin,
             relay_status,
             relay_updates,
@@ -457,6 +487,11 @@ impl HostService {
         workers.spawn(
             async move { HostWorker::Dispatcher(dispatcher.dispatch(dispatcher_stop).await) },
         );
+        let settings_owner = inner.clone();
+        let settings_stop = work_stop.clone();
+        workers.spawn(async move {
+            HostWorker::Settings(settings_owner.apply_settings(settings_stop).await)
+        });
         if let Some(origin) = inner.relay_origin.clone() {
             let host = inner.clone();
             let relay_stop = work_stop.clone();
@@ -518,7 +553,7 @@ impl HostService {
                             tracing::warn!("optional relay stopped during initial metadata reconciliation");
                         }
                     }
-                    Some(Ok(HostWorker::Local(outcome) | HostWorker::Dispatcher(outcome) | HostWorker::Publication(outcome))) => break outcome.and(Err(HostError::Worker)),
+                    Some(Ok(HostWorker::Local(outcome) | HostWorker::Dispatcher(outcome) | HostWorker::Publication(outcome) | HostWorker::Settings(outcome))) => break outcome.and(Err(HostError::Worker)),
                     _ => break Err(HostError::Worker),
                 },
                 joined = handlers.join_next(), if !handlers.is_empty() => {
@@ -548,7 +583,7 @@ impl HostService {
                                 tracing::warn!("optional relay stopped; local host remains available");
                             }
                         }
-                        Some(Ok(HostWorker::Local(outcome) | HostWorker::Dispatcher(outcome) | HostWorker::Publication(outcome))) => break outcome.and(Err(HostError::Worker)),
+                        Some(Ok(HostWorker::Local(outcome) | HostWorker::Dispatcher(outcome) | HostWorker::Publication(outcome) | HostWorker::Settings(outcome))) => break outcome.and(Err(HostError::Worker)),
                         _ => break Err(HostError::Worker),
                     },
                     joined = handlers.join_next(), if !handlers.is_empty() => {
@@ -565,6 +600,11 @@ impl HostService {
         {
             let _mutation = inner.mutation.lock().await;
             inner.draining.store(true, Ordering::Release);
+            if let Err(error) = inner.settings_service.stop_intake()
+                && result.is_ok()
+            {
+                result = Err(error.into());
+            }
             inner.composition.close();
             inner.schedule_controls.close();
             if let Some(coordinator) = inner.worker.get() {
@@ -575,6 +615,15 @@ impl HostService {
         work_stop.cancel();
         let service_owner = inner.clone();
         let mut service_work = Some(tokio::spawn(async move {
+            loop {
+                match service_owner.settings_service.close().await {
+                    Ok(()) => break,
+                    Err(_) => tracing::error!(
+                        "settings cleanup remains unconfirmed; state ownership retained"
+                    ),
+                }
+                tokio::time::sleep(Duration::from_secs(1)).await;
+            }
             loop {
                 match service_owner.composition.stop_work().await {
                     Ok(()) => return,
@@ -727,7 +776,7 @@ impl HostService {
                 }
                 joined = workers.join_next(), if !workers.is_empty() => {
                     let failure = match joined {
-                        Some(Ok(HostWorker::Local(outcome) | HostWorker::Dispatcher(outcome) | HostWorker::Publication(outcome))) => outcome.err(),
+                        Some(Ok(HostWorker::Local(outcome) | HostWorker::Dispatcher(outcome) | HostWorker::Publication(outcome) | HostWorker::Settings(outcome))) => outcome.err(),
                         Some(Ok(HostWorker::Coordinator(outcome))) => { if outcome.is_err() { tracing::warn!("optional worker coordinator ended during host drain"); } None },
                         Some(Ok(HostWorker::Relay(outcome))) => { if outcome.is_err() { tracing::warn!("optional relay stopped during host drain"); } None },
                         _ => Some(HostError::Worker),
@@ -771,7 +820,8 @@ impl HostService {
                 Ok(
                     HostWorker::Local(outcome)
                     | HostWorker::Dispatcher(outcome)
-                    | HostWorker::Publication(outcome),
+                    | HostWorker::Publication(outcome)
+                    | HostWorker::Settings(outcome),
                 ) => {
                     if result.is_ok() {
                         result = outcome;
@@ -860,9 +910,64 @@ impl HostInner {
                 )
                 .await
             }
+            LocalRequestPayload::Query {
+                query: crate::ipc::OwnerQuery::SettingsOperation { request_id },
+            } => {
+                let caller = self.settings_service.local_owner_cleanup_caller(call)?;
+                Ok(LocalResponsePayload::QueryResult {
+                    result: crate::ipc::OwnerQueryResult::SettingsOperation {
+                        operation: self.settings_service.operation(caller, *request_id).await?,
+                    },
+                })
+            }
             LocalRequestPayload::Query { query } => Ok(LocalResponsePayload::QueryResult {
                 result: self.query(query.clone(), call.cancellation.clone()).await?,
             }),
+            LocalRequestPayload::OwnerOperation {
+                operation: crate::ipc::OwnerOperation::ReconcileSettings { operation_id },
+            } => {
+                let caller = self.settings_service.local_owner_cleanup_caller(call)?;
+                let operation = self
+                    .settings_service
+                    .reconcile_write(caller, *operation_id, call.cancellation.clone())
+                    .await?;
+                Ok(LocalResponsePayload::OwnerOperationResult {
+                    result: crate::ipc::OwnerOperationResult::SettingsReconciled {
+                        operation: Box::new(operation),
+                    },
+                })
+            }
+            LocalRequestPayload::OwnerOperation {
+                operation:
+                    crate::ipc::OwnerOperation::ReplaceSettings {
+                        expected_revision,
+                        settings,
+                    },
+            } => {
+                self.ensure_accepting()?;
+                let caller = self.settings_service.local_owner_caller(call)?;
+                let receipt = self
+                    .settings_service
+                    .replace_as_owner(
+                        caller,
+                        *expected_revision,
+                        settings.as_ref().clone(),
+                        call.cancellation.clone(),
+                    )
+                    .await?;
+                if let (Some(coordinator), Some(settings)) =
+                    (self.worker.get(), receipt.settings.as_ref())
+                {
+                    coordinator.settings_changed(settings.worker.as_ref());
+                }
+                Ok(LocalResponsePayload::OwnerOperationResult {
+                    result: crate::ipc::OwnerOperationResult::SettingsReceipt {
+                        operation: Box::new(receipt.operation),
+                        settings: receipt.settings,
+                        restart_required: receipt.restart_required,
+                    },
+                })
+            }
             LocalRequestPayload::OwnerOperation { operation } => {
                 Ok(LocalResponsePayload::OwnerOperationResult {
                     result: self
@@ -872,6 +977,11 @@ impl HostInner {
                             call.cancellation.clone(),
                         )
                         .await?,
+                })
+            }
+            LocalRequestPayload::NativeSettings { operation } => {
+                Ok(LocalResponsePayload::NativeSettingsResult {
+                    result: self.native_settings(call, operation.clone()).await?,
                 })
             }
             LocalRequestPayload::Synchronize { request } => {
@@ -1029,11 +1139,13 @@ pub(super) fn public_failure(error: &HostError) -> LocalFailure {
             "legacy foreground task requires stopping the host and explicitly resuming or settling it through the foreground CLI",
         ),
         HostError::Inbox(InboxError::OriginDenied)
+        | HostError::SettingsService(SettingsServiceError::OutsideScope)
         | HostError::Device(DeviceError::AccessDenied | DeviceError::EndpointRevoked) => (
             LocalFailureCode::PermissionDenied,
             "command origin is no longer authorized",
         ),
         HostError::Inbox(InboxError::Capacity)
+        | HostError::SettingsService(SettingsServiceError::Capacity)
         | HostError::Scheduler(SchedulerError::Capacity(_)) => (
             LocalFailureCode::Busy,
             "host command or task capacity is exhausted",
@@ -1042,6 +1154,7 @@ pub(super) fn public_failure(error: &HostError) -> LocalFailure {
             (LocalFailureCode::InvalidRequest, *message)
         }
         HostError::Inbox(InboxError::Conflict(_))
+        | HostError::SettingsService(SettingsServiceError::Conflict)
         | HostError::Settings(SettingsError::Conflict) => (
             LocalFailureCode::InvalidRequest,
             "identity or revision conflicts with existing durable state",
@@ -1049,6 +1162,29 @@ pub(super) fn public_failure(error: &HostError) -> LocalFailure {
         HostError::Credential(_) => (
             LocalFailureCode::Unavailable,
             "credential operation failed; inspect native store availability and exact reference",
+        ),
+        HostError::SettingsService(
+            SettingsServiceError::Invalid(_) | SettingsServiceError::Contract(_),
+        ) => (LocalFailureCode::InvalidRequest, "invalid settings request"),
+        HostError::SettingsService(SettingsServiceError::NotFound) => (
+            LocalFailureCode::InvalidRequest,
+            "settings operation was not found in this scope",
+        ),
+        HostError::SettingsService(
+            SettingsServiceError::Expired
+            | SettingsServiceError::Cancelled
+            | SettingsServiceError::Stopped,
+        ) => (
+            LocalFailureCode::Unavailable,
+            "settings admission is closed, expired or cancelled",
+        ),
+        HostError::SettingsService(
+            SettingsServiceError::OutcomeUnknown { .. }
+            | SettingsServiceError::Worker
+            | SettingsServiceError::WriteBlocked { .. },
+        ) => (
+            LocalFailureCode::Unavailable,
+            "settings outcome is uncertain; inspect the original operation",
         ),
         HostError::Scheduler(_) => (
             LocalFailureCode::Unavailable,

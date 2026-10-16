@@ -5,7 +5,7 @@ use thiserror::Error;
 use uuid::Uuid;
 
 use crate::agent::{ConversationConfig, ProviderEndpoint, ProviderKind};
-use crate::memory::embedding::Embedder;
+use crate::memory::embedding::{Embedder, EmbeddingProfile};
 use crate::protocol::{CommandId, DeviceId, UnixMillis};
 use crate::selector::system_one::SelectionConfig;
 
@@ -296,7 +296,8 @@ pub struct SettingDescriptor {
     pub apply_behavior: SettingApplyBehavior,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SettingRegistry {
     pub contract_version: u16,
     pub descriptors: Vec<SettingDescriptor>,
@@ -304,9 +305,12 @@ pub struct SettingRegistry {
 
 impl SettingRegistry {
     pub fn from_active_embedder(embedder: Option<&dyn Embedder>) -> Self {
-        let choices = embedder.map(|embedder| {
-            embedder
-                .profile()
+        Self::from_profile(embedder.map(|embedder| embedder.profile()))
+    }
+
+    pub fn from_profile(profile: Option<&EmbeddingProfile>) -> Self {
+        let choices = profile.map(|profile| {
+            profile
                 .spec()
                 .supported_dimensions()
                 .iter()
