@@ -19,6 +19,37 @@ pub struct TransportInboxRow {
     pub expires_at: i64,
 }
 
+pub(crate) struct TransportInboxMetadata<'a> {
+    pub message_id: &'a str,
+    pub sender: &'a str,
+    pub recipient: &'a str,
+    pub envelope_digest: &'a str,
+    pub received_at: i64,
+    pub expires_at: i64,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) enum TransportInboxRejection {
+    SettingsUnavailable,
+    InvalidPacket,
+    UnsupportedVersion,
+}
+
+impl TransportInboxRejection {
+    fn detail(self) -> &'static str {
+        match self {
+            Self::SettingsUnavailable => "settings_unavailable",
+            Self::InvalidPacket => "invalid_packet",
+            Self::UnsupportedVersion => "unsupported_version",
+        }
+    }
+}
+
+enum TransportInboxDisposition<'a> {
+    Pending(&'a [u8]),
+    Rejected(TransportInboxRejection),
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TransportInboxCursor {
     pub received_at: i64,
@@ -204,12 +235,45 @@ impl Store {
         receipt: &TransportInboxRow,
         pinned_identity: &Value,
     ) -> StorageResult<bool> {
-        validate_inbox(receipt)?;
+        self.record_transport_inbox(
+            &TransportInboxMetadata {
+                message_id: &receipt.message_id,
+                sender: &receipt.sender,
+                recipient: &receipt.recipient,
+                envelope_digest: &receipt.envelope_digest,
+                received_at: receipt.received_at,
+                expires_at: receipt.expires_at,
+            },
+            pinned_identity,
+            TransportInboxDisposition::Pending(&receipt.payload),
+        )
+    }
+
+    pub(crate) fn reject_transport_inbox(
+        &self,
+        receipt: &TransportInboxMetadata<'_>,
+        pinned_identity: &Value,
+        rejection: TransportInboxRejection,
+    ) -> StorageResult<bool> {
+        self.record_transport_inbox(
+            receipt,
+            pinned_identity,
+            TransportInboxDisposition::Rejected(rejection),
+        )
+    }
+
+    fn record_transport_inbox(
+        &self,
+        receipt: &TransportInboxMetadata<'_>,
+        pinned_identity: &Value,
+        disposition: TransportInboxDisposition<'_>,
+    ) -> StorageResult<bool> {
+        validate_inbox(receipt, &disposition)?;
         let mut connection = self.connection()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        active_peer(&transaction, &receipt.sender, Some(pinned_identity))?;
+        active_peer(&transaction, receipt.sender, Some(pinned_identity))?;
         let local: Option<String> = transaction.query_row("SELECT device_id FROM transport_endpoint WHERE singleton = 1 AND revoked_at IS NULL", [], |row| row.get(0)).optional()?;
-        if local.as_deref() != Some(receipt.recipient.as_str()) {
+        if local.as_deref() != Some(receipt.recipient) {
             return Err(StorageError::TransportConflict(
                 "local recipient identity".into(),
             ));
@@ -218,27 +282,40 @@ impl Store {
             "DELETE FROM transport_inbox WHERE expires_at <= ?1 AND state != 'pending'",
             [receipt.received_at],
         )?;
-        let existing: Option<(String, String, String)> = transaction.query_row("SELECT sender, recipient, envelope_digest FROM transport_inbox WHERE message_id = ?1", [&receipt.message_id], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?))).optional()?;
+        let existing: Option<(String, String, String)> = transaction.query_row("SELECT sender, recipient, envelope_digest FROM transport_inbox WHERE message_id = ?1", [receipt.message_id], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?))).optional()?;
         if let Some((sender, recipient, digest)) = existing {
             if sender != receipt.sender
                 || recipient != receipt.recipient
                 || digest != receipt.envelope_digest
             {
-                return Err(StorageError::TransportConflict(receipt.message_id.clone()));
+                return Err(StorageError::TransportConflict(receipt.message_id.into()));
             }
             return Ok(false);
         }
         let (markers, pending, pending_bytes): (i64, i64, i64) = transaction.query_row("SELECT count(*), coalesce(sum(state = 'pending'), 0), coalesce(sum(CASE WHEN state = 'pending' THEN length(payload) ELSE 0 END), 0) FROM transport_inbox", [], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?;
-        let (peer_count, peer_bytes): (i64, i64) = transaction.query_row("SELECT count(*), coalesce(sum(length(payload)), 0) FROM transport_inbox WHERE sender = ?1 AND state = 'pending'", [&receipt.sender], |row| Ok((row.get(0)?, row.get(1)?)))?;
-        if markers >= 100_000
-            || pending >= MAX_PENDING_INBOX
-            || pending_bytes + receipt.payload.len() as i64 > MAX_PENDING_INBOX_BYTES
-            || peer_count >= MAX_PEER_INBOX
-            || peer_bytes + receipt.payload.len() as i64 > MAX_PEER_INBOX_BYTES
-        {
+        let marker_full = markers >= 100_000;
+        let pending_full = match &disposition {
+            TransportInboxDisposition::Pending(payload) => {
+                let (peer_count, peer_bytes): (i64, i64) = transaction.query_row("SELECT count(*), coalesce(sum(length(payload)), 0) FROM transport_inbox WHERE sender = ?1 AND state = 'pending'", [receipt.sender], |row| Ok((row.get(0)?, row.get(1)?)))?;
+                !marker_full
+                    && (pending >= MAX_PENDING_INBOX
+                        || pending_bytes + payload.len() as i64 > MAX_PENDING_INBOX_BYTES
+                        || peer_count >= MAX_PEER_INBOX
+                        || peer_bytes + payload.len() as i64 > MAX_PEER_INBOX_BYTES)
+            }
+            TransportInboxDisposition::Rejected(_) => false,
+        };
+        if marker_full || pending_full {
             return Err(StorageError::TransportCapacity("durable receiver inbox"));
         }
-        transaction.execute("INSERT INTO transport_inbox(message_id, sender, recipient, envelope_digest, payload, received_at, expires_at, state) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'pending')", params![receipt.message_id, receipt.sender, receipt.recipient, receipt.envelope_digest, receipt.payload, receipt.received_at, receipt.expires_at])?;
+        match disposition {
+            TransportInboxDisposition::Pending(payload) => {
+                transaction.execute("INSERT INTO transport_inbox(message_id, sender, recipient, envelope_digest, payload, received_at, expires_at, state) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'pending')", params![receipt.message_id, receipt.sender, receipt.recipient, receipt.envelope_digest, payload, receipt.received_at, receipt.expires_at])?;
+            }
+            TransportInboxDisposition::Rejected(rejection) => {
+                transaction.execute("INSERT INTO transport_inbox(message_id, sender, recipient, envelope_digest, payload, received_at, expires_at, state, command_id, detail) VALUES (?1, ?2, ?3, ?4, NULL, ?5, ?6, 'rejected', NULL, ?7)", params![receipt.message_id, receipt.sender, receipt.recipient, receipt.envelope_digest, receipt.received_at, receipt.expires_at, rejection.detail()])?;
+            }
+        }
         transaction.commit()?;
         Ok(true)
     }
@@ -783,15 +860,17 @@ fn active_peer(
     Ok(row)
 }
 
-fn validate_inbox(row: &TransportInboxRow) -> StorageResult<()> {
-    validate_id(&row.message_id)?;
-    validate_id(&row.sender)?;
-    validate_id(&row.recipient)?;
+fn validate_inbox(
+    row: &TransportInboxMetadata<'_>,
+    disposition: &TransportInboxDisposition<'_>,
+) -> StorageResult<()> {
+    validate_id(row.message_id)?;
+    validate_id(row.sender)?;
+    validate_id(row.recipient)?;
     validate_time(row.received_at)?;
     validate_time(row.expires_at)?;
     if row.expires_at <= row.received_at
-        || row.payload.is_empty()
-        || row.payload.len() > MAX_JSON_BYTES
+        || matches!(disposition, TransportInboxDisposition::Pending(payload) if payload.is_empty() || payload.len() > MAX_JSON_BYTES)
         || row.envelope_digest.len() != 64
         || !row
             .envelope_digest

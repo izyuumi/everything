@@ -4,6 +4,7 @@ mod settings_grants;
 mod transport;
 pub(crate) use external::ExternalTaskStateUpdate;
 pub use transport::*;
+pub(crate) use transport::{TransportInboxMetadata, TransportInboxRejection};
 
 use rusqlite::{Connection, OptionalExtension, Row, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
