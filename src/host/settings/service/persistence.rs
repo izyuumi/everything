@@ -138,6 +138,9 @@ impl super::SettingsService {
             core.check_principal(&caller, &record.identity)?;
             let write = record.write().ok_or(SettingsServiceError::Conflict)?;
             if write.resolution.is_some() {
+                if write.resolution == Some(SettingsWriteResolution::NotApplied) {
+                    core.restore_file_admission(operation_id)?;
+                }
                 core.release_file_resources(&record.identity, &write.intent)?;
                 core.authority.validate(&caller, cleanup)?;
                 return Ok(record.inspection());
@@ -208,6 +211,9 @@ impl super::ServiceCore {
                 cause: Box::new(cause),
                 repair_error: None,
             })?;
+        if resolution == Some(SettingsWriteResolution::NotApplied) {
+            self.restore_file_admission(identity.binding.request_id)?;
+        }
         if resolution.is_some() {
             self.release_file_resources(identity, intent)?;
         }

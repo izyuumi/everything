@@ -4,6 +4,7 @@ mod devices;
 mod persistence;
 mod projection;
 mod updates;
+mod writes;
 
 pub use changes::{SettingsChangeHint, SettingsChangePage, SettingsChangeState};
 pub use devices::NativeDeviceActionResult;
@@ -99,6 +100,8 @@ pub enum SettingsServiceError {
     Settings(#[from] super::SettingsError),
     #[error(transparent)]
     Device(#[from] DeviceError),
+    #[error("optional settings application failed: {0}")]
+    Application(#[source] Box<crate::host::runtime::HostError>),
     #[error(transparent)]
     Memory(#[from] crate::host::memory::MemoryError),
     #[error(transparent)]
@@ -163,6 +166,7 @@ struct ServiceCore {
     endpoint: DeviceEndpoint,
     active_write: Mutex<Option<Arc<ActiveSettingsWrite>>>,
     composition: Mutex<Option<Arc<crate::host::composition::Composition>>>,
+    applications: Mutex<BTreeMap<CommandId, writes::ApplicationCapture>>,
     agent: Agent,
 }
 
@@ -193,6 +197,7 @@ impl SettingsService {
                 endpoint: endpoint.clone(),
                 active_write: Mutex::new(None),
                 composition: Mutex::new(None),
+                applications: Mutex::new(BTreeMap::new()),
                 agent,
             }),
         };
