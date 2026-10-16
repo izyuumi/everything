@@ -1,17 +1,76 @@
 name: Apple validation
 on:
   push:
-    paths:
-      - 'apps/Apple/**'
-      - '.github/workflows/apple-validation.yml'
+    branches: [main]
   pull_request:
-    paths:
-      - 'apps/Apple/**'
-      - '.github/workflows/apple-validation.yml'
+  workflow_dispatch:
 permissions:
   contents: read
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 jobs:
+  changes:
+    name: Detect Apple changes
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      apple: ${{ steps.paths.outputs.apple }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - id: paths
+        name: Identify shared client contract changes
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+          import re
+          import subprocess
+
+          event_name = os.environ['GITHUB_EVENT_NAME']
+          event = json.loads(Path(os.environ['GITHUB_EVENT_PATH']).read_text())
+          if event_name == 'workflow_dispatch':
+              apple = True
+          else:
+              if event_name == 'pull_request':
+                  base = event['pull_request']['base']['sha']
+                  head = event['pull_request']['head']['sha']
+              elif event_name == 'push':
+                  base = event['before']
+                  head = event['after']
+              else:
+                  raise SystemExit('Unsupported validation event')
+              if not all(isinstance(value, str) and re.fullmatch(r'[0-9a-f]{40}', value) for value in (base, head)):
+                  raise SystemExit('Invalid validation commit identity')
+              if head == '0' * 40:
+                  raise SystemExit('Missing validation head')
+              if base == '0' * 40:
+                  apple = True
+              else:
+                  revisions = [f'{base}...{head}'] if event_name == 'pull_request' else [base, head]
+                  changed = subprocess.check_output([
+                      'git', 'diff', '--no-ext-diff', '--no-textconv', '--no-renames',
+                      '--name-only', '-z', *revisions, '--',
+                  ]).split(b'\0')
+                  files = {
+                      b'.github/workflows/apple-validation.yml', b'Cargo.toml', b'Cargo.lock',
+                      b'src/protocol.rs', b'src/ipc.rs', b'src/crypto.rs', b'src/credentials.rs',
+                      b'src/devices.rs', b'src/relay_protocol.rs', b'src/host/settings.rs',
+                      b'src/host/credentials.rs', b'src/host/client.rs', b'src/main.rs',
+                  }
+                  prefixes = (b'apps/Apple/', b'src/protocol/', b'src/devices/', b'src/transport/', b'src/host/settings/')
+                  apple = any(path in files or path.startswith(prefixes) for path in changed)
+          with Path(os.environ['GITHUB_OUTPUT']).open('a') as output:
+              output.write(f'apple={str(apple).lower()}\n')
+          print(f'Apple SDK validation required: {str(apple).lower()}')
+          PY
   xcode:
+    needs: changes
+    if: ${{ needs.changes.outputs.apple == 'true' }}
     name: ${{ matrix.scheme }} build and analyze
     runs-on: macos-latest
     timeout-minutes: 30
@@ -40,3 +99,25 @@ jobs:
             -derivedDataPath "$RUNNER_TEMP/everything-apple-$APPLE_SCHEME" \
             CODE_SIGNING_ALLOWED=NO \
             build analyze
+  compatibility:
+    name: Apple compatibility
+    needs: [changes, xcode]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Require relevant SDK validation
+        env:
+          DETECTION_RESULT: ${{ needs.changes.result }}
+          APPLE_CHANGED: ${{ needs.changes.outputs.apple }}
+          SDK_RESULT: ${{ needs.xcode.result }}
+        run: |
+          if [ "$DETECTION_RESULT" != "success" ]; then
+            printf '%s\n' 'Apple change detection failed.' >&2
+            exit 1
+          fi
+          case "$APPLE_CHANGED:$SDK_RESULT" in
+            true:success) printf '%s\n' 'Both relevant Apple SDK build/analyze jobs passed.' ;;
+            false:skipped) printf '%s\n' 'Apple SDK validation is not required for these paths.' ;;
+            *) printf '%s\n' 'Required Apple SDK validation did not succeed.' >&2; exit 1 ;;
+          esac

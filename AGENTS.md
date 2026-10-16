@@ -13,7 +13,7 @@ For hybrid Settings work, start at the [typed scopes and authority contract](doc
 - Never commit credentials or user data. Validate inputs, bound resources, propagate cancellation, and report errors. Do not represent incomplete features as working.
 - Use isolated worktrees and focused issue branches. One owner per file; merge prerequisites and inspect stable contracts before dependent work. The coordinator owns Cargo.toml, src/lib.rs, integration, and shared status.
 - Update architecture, contracts, status, and consequential ADRs when behavior changes. Docs describe implemented reality.
-- Validate with `cargo fmt --all --check`, `cargo check --workspace --all-targets --locked`, `cargo clippy --workspace --all-targets --locked -- -D warnings`, and `cargo build --workspace --release --locked`. Run focused manual checks on disposable data. Apple targets require supported Xcode validation.
+- Normal Rust validation is `cargo fmt --all --check` and strict `cargo clippy --workspace --all-targets --locked -- -D warnings`, also with `--all-features`. Relevant Apple/shared-protocol changes require supported Xcode build/analyze. Use [POC CI](docs/development/poc-ci.md) for the blocking contexts and separate manual macOS Rust, MSRV, optimized builds, CLI artifacts and embedding measurements. Run focused manual checks on disposable data; compile/static checks do not prove production or security readiness.
 - Open and review focused PRs. Respect required checks; close issues only when implementation criteria are met. Report unavailable validation explicitly.
 
 See [setup](docs/development/setup.md), [conventions](docs/development/conventions.md), [workflows](docs/development/workflows.md), and [contracts](docs/INDEX.md#contracts).
