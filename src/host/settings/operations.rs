@@ -187,6 +187,10 @@ impl OperationRecord {
         self.update.write.as_ref()
     }
 
+    pub fn application(&self) -> Option<&SettingsApplicationState> {
+        self.update.application.as_ref()
+    }
+
     pub fn admitted(&self) -> bool {
         matches!(
             self.phase(),
@@ -233,11 +237,19 @@ impl OperationIdentity {
 #[derive(Clone)]
 pub(super) struct OperationRepository {
     store: Store,
+    changes: tokio::sync::watch::Sender<u64>,
 }
 
 impl OperationRepository {
     pub fn new(store: Store) -> Self {
-        Self { store }
+        Self {
+            store,
+            changes: tokio::sync::watch::channel(0).0,
+        }
+    }
+
+    pub fn changes(&self) -> tokio::sync::watch::Receiver<u64> {
+        self.changes.subscribe()
     }
 
     pub fn get(&self, request_id: CommandId) -> Result<OperationRecord, SettingsServiceError> {
@@ -299,9 +311,11 @@ impl OperationRepository {
             updated_at: now,
         };
         validate_update(&identity, &update)?;
-        append(&transaction, identity.binding.request_id, &update)?;
+        let sequence = append(&transaction, identity.binding.request_id, &update)?;
         check_current()?;
         transaction.commit()?;
+        drop(connection);
+        self.changes.send_replace(sequence);
         Ok(OperationRecord { identity, update })
     }
 
@@ -378,12 +392,14 @@ impl OperationRepository {
             updated_at: now,
         };
         validate_update(expected, &update)?;
-        append(&transaction, native.operation_id, &update)?;
+        let sequence = append(&transaction, native.operation_id, &update)?;
         check_current()?;
         if UnixMillis::now()?.get() >= expected.binding.expires_at.get() {
             return Err(SettingsServiceError::Expired);
         }
         transaction.commit()?;
+        drop(connection);
+        self.changes.send_replace(sequence);
         Ok((
             OperationRecord {
                 identity: record.identity,
@@ -425,8 +441,10 @@ impl OperationRepository {
             updated_at: UnixMillis::now()?,
         };
         validate_update(expected, &update)?;
-        append(&transaction, expected.binding.request_id, &update)?;
+        let sequence = append(&transaction, expected.binding.request_id, &update)?;
         transaction.commit()?;
+        drop(connection);
+        self.changes.send_replace(sequence);
         Ok(OperationRecord {
             identity: record.identity,
             update,
@@ -482,8 +500,10 @@ impl OperationRepository {
             },
         };
         validate_update(expected, &update)?;
-        append(&transaction, expected.binding.request_id, &update)?;
+        let sequence = append(&transaction, expected.binding.request_id, &update)?;
         transaction.commit()?;
+        drop(connection);
+        self.changes.send_replace(sequence);
         Ok(OperationRecord {
             identity: record.identity,
             update,
@@ -520,8 +540,10 @@ impl OperationRepository {
             updated_at: UnixMillis::now()?,
         };
         validate_update(expected, &update)?;
-        append(&transaction, expected.binding.request_id, &update)?;
+        let sequence = append(&transaction, expected.binding.request_id, &update)?;
         transaction.commit()?;
+        drop(connection);
+        self.changes.send_replace(sequence);
         Ok(OperationRecord {
             identity: record.identity,
             update,
@@ -656,12 +678,14 @@ impl OperationRepository {
             updated_at: now,
         };
         validate_update(&identity, &update)?;
-        append(&transaction, identity.binding.request_id, &update)?;
+        let sequence = append(&transaction, identity.binding.request_id, &update)?;
         check_current()?;
         if UnixMillis::now()?.get() >= identity.binding.expires_at.get() {
             return Err(SettingsServiceError::Expired);
         }
         transaction.commit()?;
+        drop(connection);
+        self.changes.send_replace(sequence);
         Ok((OperationRecord { identity, update }, true))
     }
 
@@ -703,8 +727,10 @@ impl OperationRepository {
             updated_at: UnixMillis::now()?,
         };
         validate_update(expected, &update)?;
-        append(&transaction, expected.binding.request_id, &update)?;
+        let sequence = append(&transaction, expected.binding.request_id, &update)?;
         transaction.commit()?;
+        drop(connection);
+        self.changes.send_replace(sequence);
         Ok(OperationRecord {
             identity: record.identity,
             update,
@@ -754,13 +780,59 @@ impl OperationRepository {
             updated_at: UnixMillis::now()?,
         };
         validate_update(expected, &update)?;
-        append(&transaction, expected.binding.request_id, &update)?;
+        let sequence = append(&transaction, expected.binding.request_id, &update)?;
         transaction.commit()?;
+        drop(connection);
+        self.changes.send_replace(sequence);
         Ok(OperationRecord {
             identity: record.identity,
             update,
         }
         .inspection())
+    }
+
+    pub fn change_records(
+        &self,
+        after: u64,
+        limit: usize,
+    ) -> Result<Vec<(u64, OperationRecord)>, SettingsServiceError> {
+        if after > i64::MAX as u64 || !(1..=128).contains(&limit) {
+            return Err(SettingsServiceError::Invalid("change cursor or count"));
+        }
+        let connection = self.store.connection()?;
+        let mut statement = connection.prepare("SELECT sequence,request_id,record,occurred_at FROM settings_operation_updates WHERE sequence>?1 ORDER BY sequence LIMIT ?2")?;
+        let mut rows = statement.query(params![after as i64, limit as i64])?;
+        let mut changes = Vec::with_capacity(limit);
+        while let Some(row) = rows.next()? {
+            let sequence = u64::try_from(row.get::<_, i64>(0)?)
+                .map_err(|_| SettingsServiceError::CorruptJournal)?;
+            if sequence <= after {
+                return Err(SettingsServiceError::CorruptJournal);
+            }
+            let id = bounded_text(row, 1, 36)?.parse()?;
+            let current = read(&connection, id)?.ok_or(SettingsServiceError::CorruptJournal)?;
+            let update: UpdateRecord =
+                decode(bounded_text(row, 2, MAX_UPDATE_BYTES)?, MAX_UPDATE_BYTES)?;
+            validate_update(&current.identity, &update)?;
+            if update.updated_at.get() as i64 != row.get::<_, i64>(3)?
+                || update.write.as_ref().is_some_and(|write| {
+                    current
+                        .write()
+                        .is_none_or(|latest| latest.intent != write.intent)
+                })
+            {
+                return Err(SettingsServiceError::CorruptJournal);
+            }
+            validate_native_link(&connection, &current.identity, &update)?;
+            changes.push((
+                sequence,
+                OperationRecord {
+                    identity: current.identity,
+                    update,
+                },
+            ));
+        }
+        Ok(changes)
     }
 
     pub fn unresolved_write(&self) -> Result<Option<OperationRecord>, SettingsServiceError> {
@@ -801,28 +873,7 @@ fn read(
     if record.updated_at.get() as i64 != row.get::<_, i64>(1)? {
         return Err(SettingsServiceError::CorruptJournal);
     }
-    if let SettingsOperationPhase::InFlight { native_request_id } = record.phase {
-        let native = native_request(connection, native_request_id, request_id)?
-            .ok_or(SettingsServiceError::CorruptJournal)?;
-        if native.operation_id != request_id
-            || native.native_request_id != native_request_id
-            || native.session_id != identity.binding.client_session_id
-        {
-            return Err(SettingsServiceError::CorruptJournal);
-        }
-    }
-    if let Some(write) = &record.write
-        && let Some(native_request_id) = write.intent.native_request_id
-    {
-        let native = native_request(connection, native_request_id, request_id)?
-            .ok_or(SettingsServiceError::CorruptJournal)?;
-        if native.operation_id != request_id
-            || native.native_request_id != native_request_id
-            || native.session_id != identity.binding.client_session_id
-        {
-            return Err(SettingsServiceError::CorruptJournal);
-        }
-    }
+    validate_native_link(connection, &identity, &record)?;
     let original: Option<String> = {
         let mut statement = connection.prepare("SELECT record FROM settings_operation_updates WHERE request_id=?1 AND json_type(record,'$.write')='object' ORDER BY sequence LIMIT 1")?;
         let mut rows = statement.query([request_id.to_string()])?;
@@ -871,6 +922,31 @@ fn read(
         identity,
         update: record,
     }))
+}
+
+fn validate_native_link(
+    connection: &rusqlite::Connection,
+    identity: &OperationIdentity,
+    record: &UpdateRecord,
+) -> Result<(), SettingsServiceError> {
+    let native_request_id = match record.phase {
+        SettingsOperationPhase::InFlight { native_request_id } => Some(native_request_id),
+        _ => record
+            .write
+            .as_ref()
+            .and_then(|write| write.intent.native_request_id),
+    };
+    if let Some(native_request_id) = native_request_id {
+        let native = native_request(connection, native_request_id, identity.binding.request_id)?
+            .ok_or(SettingsServiceError::CorruptJournal)?;
+        if native.operation_id != identity.binding.request_id
+            || native.native_request_id != native_request_id
+            || native.session_id != identity.binding.client_session_id
+        {
+            return Err(SettingsServiceError::CorruptJournal);
+        }
+    }
+    Ok(())
 }
 
 fn native_request(
@@ -982,7 +1058,7 @@ fn append(
     transaction: &Transaction<'_>,
     request_id: CommandId,
     record: &UpdateRecord,
-) -> Result<(), SettingsServiceError> {
+) -> Result<u64, SettingsServiceError> {
     let count: i64 = transaction.query_row(
         "SELECT count(*) FROM settings_operation_updates",
         [],
@@ -991,15 +1067,16 @@ fn append(
     if count >= MAX_UPDATES {
         return Err(SettingsServiceError::Capacity);
     }
-    transaction.execute(
-        "INSERT INTO settings_operation_updates(request_id,record,occurred_at) VALUES(?1,?2,?3)",
+    let sequence: i64 = transaction.query_row(
+        "INSERT INTO settings_operation_updates(request_id,record,occurred_at) VALUES(?1,?2,?3) RETURNING sequence",
         params![
             request_id.to_string(),
             encode(record, MAX_UPDATE_BYTES)?,
             record.updated_at.get() as i64
         ],
+        |row| row.get(0),
     )?;
-    Ok(())
+    u64::try_from(sequence).map_err(|_| SettingsServiceError::CorruptJournal)
 }
 
 fn validate_update(
