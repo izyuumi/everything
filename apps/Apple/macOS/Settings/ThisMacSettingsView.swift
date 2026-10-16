@@ -4,9 +4,56 @@ import SwiftUI
 struct ThisMacSettingsView: View {
     let store: ThisMacSettingsStore
     @State private var confirmingReload = false
+    @State private var confirmingAppearanceReload = false
 
     var body: some View {
         Form {
+            Section("Appearance on this Mac") {
+                if let draft = store.appearanceDraft {
+                    Picker("Appearance", selection: Binding(get: { store.appearanceDraft?.appearance ?? draft.appearance }, set: { value in store.setAppearance(value) })) {
+                        ForEach(DeviceAppearance.allCases, id: \.self) { value in
+                            Text(appearanceLabel(value)).tag(value)
+                        }
+                    }
+                    .disabled(!store.canEditAppearance)
+                } else {
+                    Text(store.isOpening ? "Reading saved appearance…" : "Saved appearance is unavailable.")
+                }
+                if let saved = store.appearanceSnapshot {
+                    LabeledContent("Saved appearance", value: appearanceLabel(saved.appearance))
+                }
+                HStack {
+                    Button("Save appearance") { store.saveAppearance() }
+                        .disabled(!store.canSaveAppearance)
+                    Button("Reload appearance") {
+                        if store.hasAppearanceDraftChanges { confirmingAppearanceReload = true }
+                        else { store.reloadAppearance() }
+                    }
+                    .disabled(!store.canReloadAppearance)
+                    if store.pendingAppearancePatch != nil {
+                        Button("Inspect original appearance save") { store.inspectAppearanceSave() }
+                            .disabled(!store.canInspectAppearance)
+                    }
+                }
+                if let message = store.appearanceStatus { Text(message) }
+                if let error = store.appearanceError { Text(error.errorDescription ?? "Local appearance is unavailable.").foregroundStyle(.red) }
+                if let patch = store.pendingAppearancePatch {
+                    Text("Appearance save reference: \(patch.requestID.uuidString.lowercased())")
+                        .font(.caption)
+                        .textSelection(.enabled)
+                }
+                if store.isAppearanceSnapshotStale && store.appearanceSnapshot != nil {
+                    Text("Showing the last observed saved appearance.").foregroundStyle(.secondary)
+                }
+                Text("Appearance and notification preferences share a saved revision. Save them separately; reload a draft if another save changes its revision.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                if store.capacityReached {
+                    Text("This app session has reached its retained request limit. Existing requests remain available for inspection.").foregroundStyle(.secondary)
+                }
+            }
+            .disabled(store.isClosed)
+
             Section("Preferences on this Mac") {
                 if store.isOpening { ProgressView("Opening local preferences…") }
                 Toggle("Completion notifications", isOn: Binding(get: { store.draft?.completion ?? false }, set: { value in store.setCompletion(value) }))
@@ -79,6 +126,19 @@ struct ThisMacSettingsView: View {
             Button("Reload saved preferences", role: .destructive) { store.reload() }
         } message: {
             Text("The latest saved values will replace this draft. An unresolved save must be inspected first.")
+        }
+        .confirmationDialog("Discard unsaved appearance edits?", isPresented: $confirmingAppearanceReload, titleVisibility: .visible) {
+            Button("Reload saved appearance", role: .destructive) { store.reloadAppearance() }
+        } message: {
+            Text("The latest saved appearance will replace this draft. Notification edits are kept. An unresolved save must be inspected first.")
+        }
+    }
+
+    private func appearanceLabel(_ value: DeviceAppearance) -> String {
+        switch value {
+        case .system: "Follow system"
+        case .light: "Light"
+        case .dark: "Dark"
         }
     }
 

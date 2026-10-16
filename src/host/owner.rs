@@ -1,3 +1,5 @@
+mod grants;
+
 use super::credentials::SecretTransfer;
 use super::runtime::{HostError, HostInner, timestamp};
 use crate::devices::PairingApproval;
@@ -34,6 +36,11 @@ impl HostInner {
         cancellation: tokio_util::sync::CancellationToken,
     ) -> Result<OwnerQueryResult, HostError> {
         match query {
+            OwnerQuery::SettingsGrantCurrent { .. }
+            | OwnerQuery::SettingsGrantVersion { .. }
+            | OwnerQuery::SettingsGrantReceipt { .. } => Err(HostError::Invalid(
+                "Settings grant inspection requires authenticated owner ingress",
+            )),
             OwnerQuery::WorkerCoordinator { query } => Ok(OwnerQueryResult::WorkerCoordinator {
                 result: Box::new(self.worker_query(query).await?),
             }),
@@ -292,6 +299,9 @@ impl HostInner {
             self.ensure_accepting()?;
         }
         match operation {
+            OwnerOperation::SetSettingsGrant { .. } => Err(HostError::Invalid(
+                "Settings grant changes require authenticated owner ingress",
+            )),
             OwnerOperation::AcknowledgeSettingsUncertainty { .. } => Err(HostError::Invalid(
                 "Settings uncertainty cleanup requires the authenticated owner channel",
             )),

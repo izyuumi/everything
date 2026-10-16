@@ -4,7 +4,7 @@
 
 ## Initialization and migrations
 
-`Store::open(path)` opens or creates a database at an existing parent directory. Startup enables foreign keys, WAL, full synchronous durability, and a five-second busy timeout before applying pending versioned migrations in one immediate transaction. Fresh databases apply migrations `0001_initial.sql` through `0012_remote_delegation_lookup.sql` in order; existing databases apply only their pending migrations. The current schema version is SQLite `user_version = 12`; newer databases are rejected. The ordered additions are:
+`Store::open(path)` opens or creates a database at an existing parent directory. Startup enables foreign keys, WAL, full synchronous durability, and a five-second busy timeout before applying pending versioned migrations in one immediate transaction. Fresh databases apply migrations `0001_initial.sql` through `0015_settings_grants.sql` in order; existing databases apply only their pending migrations. The current schema version is SQLite `user_version = 15`; newer databases are rejected. The ordered additions are:
 
 | Migration | Addition |
 | --- | --- |
@@ -20,6 +20,9 @@
 | 10 | Worker-purpose endpoint, peers, profile, delegations, messages and native admissions |
 | 11 | Immutable original worker terminal-packet sources |
 | 12 | Indexed, ambiguity-preserving native remote-delegation lookup |
+| 13 | Revisioned Settings operations, native requests and immutable operation updates |
+| 14 | Restricted Settings namespace, original sessions/turn fences and cleanup attestations |
+| 15 | Immutable scoped Settings grant decisions, current heads and reserved revocation capacity |
 
 See [scheduled storage](scheduling-storage.md), [host inbox](host-inbox.md), [schedule admission](scheduling-engine.md), [scheduled execution](scheduled-execution.md), [worker terminal sources](worker-terminal-sources.md) and [remote binding lookup](remote-binding-lookup.md) for component invariants. `open_in_memory` uses the same migrations and constraints, with SQLite's in-memory journal mode because WAL is unavailable for memory databases. There is no backup or restore API.
 
@@ -120,3 +123,7 @@ The validated Store/Agent descriptor ownership from [PR #84](https://github.com/
 ## Remote delegation lookup
 
 Schema 12 adds the nonunique `tasks_remote_delegation` expression index after schema11. The locator restricts native scheduler version1 and object remote definitions, returns at most two bounded task IDs, and preserves ambiguity errors and complete stored-task/binding validation. SQLite maintains it for writes from every actual Store handle; it is no approval or cached authority. See [the lookup contract](remote-binding-lookup.md) for migration and validation scope.
+
+## Scoped Settings grant decisions
+
+Schema 15 adds immutable canonical public grant versions and receipts with exact current heads on the same Store connection. One existing-connection Immediate transaction validates the actual Host/full peer pin, exact original replay, expected head and bounded history; the insertion installs its head atomically. Every Active head reserves logical room for a future Revoked version/receipt. No original is evicted and no new grant record grants remote authority by itself. Authenticated local-owner consumers retain the real Host/Agent/lease and mutation guard through the actual blocking worker. See [grant storage and owner routes](settings-grants.md) for the closed DTOs, replay/rotation rules, logical resource limits and outstanding schema/runtime validation. Native Settings schema 13–14 records and ordinary data remain unchanged.

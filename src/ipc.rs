@@ -116,6 +116,16 @@ pub enum OwnerQuery {
     SettingsOperation {
         request_id: CommandId,
     },
+    SettingsGrantCurrent {
+        device_id: DeviceId,
+    },
+    SettingsGrantVersion {
+        device_id: DeviceId,
+        revision: u64,
+    },
+    SettingsGrantReceipt {
+        request_id: CommandId,
+    },
     Composition,
     Publication,
     ScheduleEngine,
@@ -145,6 +155,11 @@ pub enum OwnerQuery {
 
 impl OwnerQuery {
     pub fn validate(&self) -> Result<(), &'static str> {
+        if let Self::SettingsGrantVersion { revision, .. } = self
+            && (*revision == 0 || *revision > i64::MAX as u64)
+        {
+            return Err("invalid Settings grant revision");
+        }
         if let Self::WorkerCoordinator { query } = self {
             query
                 .validate()
@@ -205,6 +220,9 @@ pub enum ApprovalLookup {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum OwnerOperation {
+    SetSettingsGrant {
+        change: Box<crate::host::settings::SettingsGrantChange>,
+    },
     WorkerCoordinator {
         operation: Box<crate::host::worker::WorkerCoordinatorOperation>,
     },
@@ -305,6 +323,9 @@ pub enum OwnerOperation {
 impl OwnerOperation {
     pub fn validate(&self) -> Result<(), &'static str> {
         match self {
+            Self::SetSettingsGrant { change } => change
+                .validate()
+                .map_err(|_| "invalid Settings grant change"),
             Self::AcknowledgeSettingsUncertainty {
                 exact_fence_sha256,
                 lost_ram_uncertainty_accepted,
@@ -404,6 +425,15 @@ impl ConversationWait {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum OwnerQueryResult {
+    SettingsGrantCurrent {
+        head: Option<Box<crate::host::settings::SettingsGrantHead>>,
+    },
+    SettingsGrantVersion {
+        grant: Option<Box<crate::host::settings::SettingsGrantVersion>>,
+    },
+    SettingsGrantReceipt {
+        receipt: Option<crate::host::settings::SettingsGrantReceipt>,
+    },
     SettingsOperation {
         operation: crate::host::settings::SettingsOperationInspection,
     },
@@ -517,6 +547,29 @@ impl From<crate::agent::ConversationInfo> for ConversationSummary {
 impl OwnerQueryResult {
     pub fn validate_for(&self, query: &OwnerQuery) -> Result<(), &'static str> {
         let valid = match (query, self) {
+            (
+                OwnerQuery::SettingsGrantCurrent { device_id },
+                Self::SettingsGrantCurrent { head },
+            ) => head.as_ref().is_none_or(|head| {
+                head.validate().is_ok() && head.grant.change.peer_keys.device_id == *device_id
+            }),
+            (
+                OwnerQuery::SettingsGrantVersion {
+                    device_id,
+                    revision,
+                },
+                Self::SettingsGrantVersion { grant },
+            ) => grant.as_ref().is_none_or(|grant| {
+                grant.validate().is_ok()
+                    && grant.change.peer_keys.device_id == *device_id
+                    && grant.revision == *revision
+            }),
+            (
+                OwnerQuery::SettingsGrantReceipt { request_id },
+                Self::SettingsGrantReceipt { receipt },
+            ) => receipt.as_ref().is_none_or(|receipt| {
+                receipt.validate().is_ok() && receipt.owner_request_id == *request_id
+            }),
             (
                 OwnerQuery::SettingsOperation { request_id },
                 Self::SettingsOperation { operation },
@@ -686,6 +739,10 @@ pub struct TaskExecutionMetadata {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum OwnerOperationResult {
+    SettingsGrantCommitted {
+        receipt: crate::host::settings::SettingsGrantReceipt,
+        replayed: bool,
+    },
     SettingsUncertaintyAcknowledged {
         acknowledgement: crate::host::settings::agent::SettingsUncertaintyAcknowledgement,
     },
@@ -748,6 +805,11 @@ impl OwnerOperationResult {
         operation: &OwnerOperation,
         request_id: CommandId,
     ) -> Result<(), &'static str> {
+        if let OwnerOperation::SetSettingsGrant { change } = operation
+            && change.request_id != request_id
+        {
+            return Err("Settings grant requires its original owner request ID");
+        }
         if let Self::SettingsReceipt { operation, .. } = self
             && (operation.binding.request_id != request_id
                 || !matches!(
@@ -771,6 +833,10 @@ impl OwnerOperationResult {
     }
     pub fn validate_for(&self, operation: &OwnerOperation) -> Result<(), &'static str> {
         let valid = match (operation, self) {
+            (
+                OwnerOperation::SetSettingsGrant { change },
+                Self::SettingsGrantCommitted { receipt, .. },
+            ) => receipt.matches_change(change),
             (
                 OwnerOperation::ReconcileSettings { operation_id },
                 Self::SettingsReconciled { operation },

@@ -336,9 +336,22 @@ enum CliError {
     ToolOptions(&'static str),
 }
 
-#[tokio::main]
-async fn main() -> ExitCode {
+fn main() -> ExitCode {
     let arguments = Arguments::parse();
+    let runtime = match tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(runtime) => runtime,
+        Err(error) => {
+            eprintln!("everything: could not start async runtime: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
+    runtime.block_on(run_cli(arguments))
+}
+
+async fn run_cli(arguments: Arguments) -> ExitCode {
     let cancellation = CancellationToken::new();
     let operation = execute(arguments, cancellation.clone());
     tokio::pin!(operation);
@@ -565,7 +578,17 @@ async fn owner_cli(
             ) {
                 return Err(CliError::SensitiveOwnerInput);
             }
-            let request_id = request_id.unwrap_or_default();
+            let request_id = match (&*operation, request_id) {
+                (everything::ipc::OwnerOperation::SetSettingsGrant { change }, Some(original))
+                    if original == change.request_id =>
+                {
+                    original
+                }
+                (everything::ipc::OwnerOperation::SetSettingsGrant { .. }, _) => {
+                    return Err(CliError::OwnerInput);
+                }
+                (_, original) => original.unwrap_or_default(),
+            };
             eprintln!("owner request {request_id}; reuse this ID for an explicit retry");
             write_json(client.operate(*operation, request_id, cancellation).await?).await
         }
