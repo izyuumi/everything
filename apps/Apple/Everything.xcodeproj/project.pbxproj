@@ -74,6 +74,16 @@
             "isa" = "PBXBuildFile";
             "fileRef" = "0C033674B3E2048D89A933D7";
         };
+        "BC02965820324DAB9751A7EE" = {
+            "isa" = "PBXFileReference";
+            "lastKnownFileType" = "sourcecode.swift";
+            "path" = "SchedulesView.swift";
+            "sourceTree" = "<group>";
+        };
+        "42D1465C9A4544B4BB5A3E90" = {
+            "isa" = "PBXBuildFile";
+            "fileRef" = "BC02965820324DAB9751A7EE";
+        };
         "0112514560F5BC5CF1ECEF39" = {
             "isa" = "PBXGroup";
             "children" = (
@@ -84,6 +94,7 @@
                 "D7C84BABB04E783E04F7D6EB",
                 "E4DEA7C2A88FA1DC5F002B17",
                 "0C033674B3E2048D89A933D7",
+                "BC02965820324DAB9751A7EE",
             );
             "path" = "macOS";
             "sourceTree" = "<group>";
@@ -168,6 +179,7 @@
                 "7CA5E98DE69F2186DEA9BCC0",
                 "68B248F9B1B6FC26D9DD796C",
                 "F3589FE64633CD71BA5F075A",
+                "42D1465C9A4544B4BB5A3E90",
                 "41E89F0FF41AC64FCC039931",
                 "7DF0769529FE9CB53513AC4F",
                 "2AB3C33482D817B6FB63119E",

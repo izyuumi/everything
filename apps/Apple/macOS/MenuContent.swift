@@ -53,6 +53,7 @@ struct MenuContent: View {
             }
             TabView {
                 TasksView(model: model).tabItem { Label("Tasks", systemImage: "list.bullet") }
+                SchedulesView(model: model).tabItem { Label("Schedules", systemImage: "calendar") }
                 PermissionsView(model: model).tabItem { Label("Permissions", systemImage: "hand.raised") }
             }
             Divider()
