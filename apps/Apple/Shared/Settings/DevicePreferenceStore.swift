@@ -103,10 +103,130 @@ private final class PreferenceDatabase: @unchecked Sendable {
     }
 }
 
+private enum PreferenceRequestKind: String {
+    case notifications
+    case appearance
+}
+
+private enum PreferenceMutation {
+    case notifications(DevicePreferencePatch)
+    case appearance(DeviceAppearancePatch)
+
+    var kind: PreferenceRequestKind {
+        switch self {
+        case .notifications: .notifications
+        case .appearance: .appearance
+        }
+    }
+
+    var requestID: UUID {
+        switch self {
+        case .notifications(let patch): patch.requestID
+        case .appearance(let patch): patch.requestID
+        }
+    }
+
+    var deviceID: UUID {
+        switch self {
+        case .notifications(let patch): patch.deviceID
+        case .appearance(let patch): patch.deviceID
+        }
+    }
+
+    var expectedRevision: UInt64 {
+        switch self {
+        case .notifications(let patch): patch.expectedRevision
+        case .appearance(let patch): patch.expectedRevision
+        }
+    }
+
+    func encodedIdentity() throws -> Data {
+        switch self {
+        case .notifications(let patch): try patch.encodedIdentity()
+        case .appearance(let patch): try patch.encodedIdentity()
+        }
+    }
+}
+
+private struct PreferenceState {
+    let deviceID: UUID
+    let revision: UInt64
+    let completion: Bool
+    let attention: Bool
+    let appearance: DeviceAppearance
+
+    var notifications: DevicePreferenceSnapshot {
+        DevicePreferenceSnapshot(deviceID: deviceID, revision: revision, completion: completion, attention: attention)
+    }
+
+    var appearanceSnapshot: DeviceAppearanceSnapshot {
+        DeviceAppearanceSnapshot(deviceID: deviceID, revision: revision, appearance: appearance)
+    }
+}
+
+private struct PreferenceColumn: Equatable {
+    let name: String
+    let type: String
+    let required: Bool
+    let defaultValue: String?
+    let primaryKey: Bool
+}
+
+private struct StoredPreferenceRequest {
+    let kind: PreferenceRequestKind
+    let original: Data
+    let result: DevicePreferenceResult
+}
+
+private struct PreferenceRequestIdentity: Decodable {
+    struct Scope: Decodable {
+        let kind: String
+        let deviceID: UUID
+
+        enum CodingKeys: String, CodingKey {
+            case kind
+            case deviceID = "device_id"
+        }
+    }
+
+    let kind: String?
+    let contractVersion: UInt16
+    let requestID: UUID
+    let scope: Scope
+    let expectedRevision: UInt64
+    let changes: [DevicePreferenceChange]?
+    let appearance: DeviceAppearance?
+
+    enum CodingKeys: String, CodingKey {
+        case kind
+        case contractVersion = "contract_version"
+        case requestID = "request_id"
+        case scope
+        case expectedRevision = "expected_revision"
+        case changes
+        case appearance
+    }
+
+    func mutation(for kind: PreferenceRequestKind) throws -> PreferenceMutation {
+        guard contractVersion == 1, scope.kind == "device_preferences" else { throw DevicePreferenceError.storage }
+        switch kind {
+        case .notifications:
+            guard self.kind == nil, appearance == nil, let changes else { throw DevicePreferenceError.storage }
+            return .notifications(DevicePreferencePatch(requestID: requestID, deviceID: scope.deviceID,
+                expectedRevision: expectedRevision, changes: changes))
+        case .appearance:
+            guard self.kind == "appearance", changes == nil, let appearance else { throw DevicePreferenceError.storage }
+            return .appearance(DeviceAppearancePatch(requestID: requestID, deviceID: scope.deviceID,
+                expectedRevision: expectedRevision, appearance: appearance))
+        }
+    }
+}
+
 actor DevicePreferenceStore {
     private let database: PreferenceDatabase
     private let deviceID: UUID
     private static let maximumRequests = 8_192
+    private static let zeroID = UUID(uuid: (0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0))
 
     init(directory: URL, deviceID: UUID) throws {
         let opened = try Self.open(directory: directory, identity: .bound(deviceID))
@@ -125,9 +245,8 @@ actor DevicePreferenceStore {
     }
 
     private static func open(directory: URL, identity: PreferenceIdentity) throws -> (database: PreferenceDatabase, deviceID: UUID) {
-        let zero = UUID(uuid: (0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0))
         guard directory.isFileURL else { throw DevicePreferenceError.invalidRequest }
-        if case .bound(let deviceID) = identity, deviceID == zero { throw DevicePreferenceError.invalidRequest }
+        if case .bound(let deviceID) = identity, deviceID == zeroID { throw DevicePreferenceError.invalidRequest }
         let manager = FileManager.default
         var attributes: [FileAttributeKey: Any] = [.posixPermissions: 0o700]
         #if os(iOS)
@@ -141,8 +260,7 @@ actor DevicePreferenceStore {
         try excluded.setResourceValues(values)
         let url = directory.appendingPathComponent("device-preferences-v1.sqlite3")
         let database = try PreferenceDatabase(url: url)
-        let version = try database.rows("PRAGMA user_version") { sqlite3_column_int64($0, 0) }.first ?? 0
-        guard version == 0 || version == 1 else { throw DevicePreferenceError.unsupportedVersion }
+        try validateVersion(database)
         for sql in [
             "PRAGMA page_size=4096",
             "PRAGMA max_page_count=2048",
@@ -150,44 +268,43 @@ actor DevicePreferenceStore {
             "PRAGMA wal_autocheckpoint=128",
             "PRAGMA synchronous=FULL"
         ] { try database.execute(sql) }
+        guard try integer(database, "PRAGMA page_size") == 4096,
+              try integer(database, "PRAGMA max_page_count") <= 2048 else { throw DevicePreferenceError.capacity }
         let deviceID = try database.transaction {
-            let version = try database.rows("PRAGMA user_version") { sqlite3_column_int64($0, 0) }.first ?? 0
-            guard version == 0 || version == 1 else { throw DevicePreferenceError.unsupportedVersion }
-            let initializeSchema = switch identity {
-            case .bound: true
-            case .local: version == 0
-            }
-            if initializeSchema {
-                for sql in [
-                    "CREATE TABLE IF NOT EXISTS preferences(id INTEGER PRIMARY KEY CHECK(id=1),device TEXT NOT NULL,revision INTEGER NOT NULL CHECK(revision>0),completion INTEGER NOT NULL CHECK(completion IN (0,1)),attention INTEGER NOT NULL CHECK(attention IN (0,1)))",
-                    "CREATE TABLE IF NOT EXISTS requests(id TEXT PRIMARY KEY,original BLOB NOT NULL,outcome TEXT NOT NULL CHECK(outcome IN ('applied','conflict')),revision INTEGER NOT NULL CHECK(revision>0))"
-                ] { try database.execute(sql) }
-            }
-            let identities = try database.rows("SELECT device FROM preferences WHERE id=1") { try PreferenceDatabase.text($0, 0, maximumBytes: 36) }
-            let deviceID: UUID
-            switch identity {
-            case .bound(let expected):
-                if let existing = identities.first {
-                    guard existing == expected.uuidString.lowercased() else { throw DevicePreferenceError.wrongDevice }
+            try validateVersion(database)
+            let version = try integer(database, "PRAGMA user_version")
+            if version == 0 {
+                let count = try integer(database, "SELECT COUNT(*) FROM sqlite_schema WHERE name NOT GLOB 'sqlite_*'")
+                guard count == 0 else { throw DevicePreferenceError.storage }
+                try createSchema(database)
+                let deviceID: UUID
+                switch identity {
+                case .bound(let expected): deviceID = expected
+                case .local: deviceID = UUID()
                 }
-                deviceID = expected
-            case .local:
-                let preferenceCount = try database.rows("SELECT COUNT(*) FROM preferences") { sqlite3_column_int64($0, 0) }.first ?? 0
-                let requestCount = try database.rows("SELECT COUNT(*) FROM requests") { sqlite3_column_int64($0, 0) }.first ?? 0
-                if let existing = identities.first {
-                    guard version == 1, preferenceCount == 1, let parsed = UUID(uuidString: existing), parsed != zero,
-                          parsed.uuidString.lowercased() == existing else { throw DevicePreferenceError.storage }
-                    _ = try Self.readSnapshot(database: database, deviceID: parsed)
-                    deviceID = parsed
-                } else {
-                    guard version == 0, preferenceCount == 0, requestCount == 0 else { throw DevicePreferenceError.storage }
-                    deviceID = UUID()
-                }
+                guard deviceID != zeroID else { throw DevicePreferenceError.storage }
+                try database.execute("INSERT INTO preferences(id,device,revision,completion,attention,appearance) VALUES(1,?,1,0,0,'system')", [.text(deviceID.uuidString.lowercased())])
+                try database.execute("PRAGMA user_version=2")
+                try validateSchema(database, version: 2)
+                _ = try readState(database: database, deviceID: deviceID)
+                return deviceID
             }
-            if identities.isEmpty {
-                try database.execute("INSERT INTO preferences(id,device,revision,completion,attention) VALUES(1,?,1,0,0)", [.text(deviceID.uuidString.lowercased())])
+            try validateSchema(database, version: version)
+            let deviceID = try existingIdentity(database, expected: identity)
+            let currentRevision: UInt64
+            if version == 1 {
+                currentRevision = try readLegacySnapshot(database: database, deviceID: deviceID).revision
+            } else {
+                currentRevision = try readState(database: database, deviceID: deviceID).revision
             }
-            try database.execute("PRAGMA user_version=1")
+            try validateRequests(database, deviceID: deviceID, revision: currentRevision, version: version)
+            if version == 1 {
+                try database.execute("ALTER TABLE preferences ADD COLUMN appearance TEXT NOT NULL DEFAULT 'system' CHECK(appearance IN ('system','light','dark'))")
+                try database.execute("ALTER TABLE requests ADD COLUMN kind TEXT NOT NULL DEFAULT 'notifications' CHECK(kind IN ('notifications','appearance'))")
+                try database.execute("PRAGMA user_version=2")
+                try validateSchema(database, version: 2)
+                _ = try readState(database: database, deviceID: deviceID)
+            }
             return deviceID
         }
         for name in [url.lastPathComponent, url.lastPathComponent + "-wal", url.lastPathComponent + "-shm"] {
@@ -204,83 +321,246 @@ actor DevicePreferenceStore {
     }
 
     func snapshot() throws -> DevicePreferenceSnapshot {
-        try readSnapshot()
+        try Self.readState(database: database, deviceID: deviceID).notifications
+    }
+
+    func appearanceSnapshot() throws -> DeviceAppearanceSnapshot {
+        try Self.readState(database: database, deviceID: deviceID).appearanceSnapshot
     }
 
     func result(for requestID: UUID) throws -> DevicePreferenceResult? {
-        try storedRequest(requestID)?.result
+        try result(for: requestID, kind: .notifications)
+    }
+
+    func appearanceResult(for requestID: UUID) throws -> DevicePreferenceResult? {
+        try result(for: requestID, kind: .appearance)
     }
 
     func apply(_ patch: DevicePreferencePatch) throws -> DevicePreferenceResult {
-        let original = try patch.encodedIdentity()
-        guard patch.deviceID == deviceID else { throw DevicePreferenceError.wrongDevice }
+        try apply(.notifications(patch))
+    }
+
+    func applyAppearance(_ patch: DeviceAppearancePatch) throws -> DevicePreferenceResult {
+        try apply(.appearance(patch))
+    }
+
+    private func result(for requestID: UUID, kind: PreferenceRequestKind) throws -> DevicePreferenceResult? {
+        guard let previous = try storedRequest(requestID) else { return nil }
+        guard previous.kind == kind else { throw DevicePreferenceError.requestReused }
+        return previous.result
+    }
+
+    private func apply(_ mutation: PreferenceMutation) throws -> DevicePreferenceResult {
+        let original = try mutation.encodedIdentity()
+        guard mutation.deviceID == deviceID else { throw DevicePreferenceError.wrongDevice }
         return try database.transaction {
-            if let previous = try storedRequest(patch.requestID) {
-                guard previous.original == original else { throw DevicePreferenceError.requestReused }
+            if let previous = try storedRequest(mutation.requestID) {
+                guard previous.kind == mutation.kind, previous.original == original else { throw DevicePreferenceError.requestReused }
                 return previous.result
             }
-            let count = try database.rows("SELECT COUNT(*) FROM requests") { sqlite3_column_int64($0, 0) }.first ?? 0
+            let count = try Self.integer(database, "SELECT COUNT(*) FROM requests")
             guard count < Self.maximumRequests else { throw DevicePreferenceError.capacity }
-            let current = try readSnapshot()
+            let current = try Self.readState(database: database, deviceID: deviceID)
             let outcome: DevicePreferenceResult.Outcome
             let revision: UInt64
             let label: String
-            if current.revision != patch.expectedRevision {
+            if current.revision != mutation.expectedRevision {
                 revision = current.revision
                 label = "conflict"
                 outcome = .conflict(observedRevision: revision)
             } else {
                 guard current.revision < UInt64(Int64.max) else { throw DevicePreferenceError.capacity }
-                var completion = current.completion
-                var attention = current.attention
-                for change in patch.changes {
-                    switch change.key {
-                    case .completion: completion = change.value
-                    case .attention: attention = change.value
-                    }
-                }
                 revision = current.revision + 1
                 label = "applied"
                 outcome = .applied(revision: revision)
-                try database.execute("UPDATE preferences SET revision=?,completion=?,attention=? WHERE id=1 AND revision=?", [.integer(Int64(revision)), .integer(completion ? 1 : 0), .integer(attention ? 1 : 0), .integer(Int64(current.revision))])
+                switch mutation {
+                case .notifications(let patch):
+                    var completion = current.completion
+                    var attention = current.attention
+                    for change in patch.changes {
+                        switch change.key {
+                        case .completion: completion = change.value
+                        case .attention: attention = change.value
+                        }
+                    }
+                    try database.execute("UPDATE preferences SET revision=?,completion=?,attention=? WHERE id=1 AND revision=?", [.integer(Int64(revision)), .integer(completion ? 1 : 0), .integer(attention ? 1 : 0), .integer(Int64(current.revision))])
+                case .appearance(let patch):
+                    try database.execute("UPDATE preferences SET revision=?,appearance=? WHERE id=1 AND revision=?", [.integer(Int64(revision)), .text(patch.appearance.rawValue), .integer(Int64(current.revision))])
+                }
                 guard sqlite3_changes(database.handle) == 1 else { throw DevicePreferenceError.storage }
             }
-            try database.execute("INSERT INTO requests(id,original,outcome,revision) VALUES(?,?,?,?)", [.text(patch.requestID.uuidString.lowercased()), .bytes(original), .text(label), .integer(Int64(revision))])
-            return DevicePreferenceResult(requestID: patch.requestID, deviceID: deviceID, outcome: outcome)
+            try database.execute("INSERT INTO requests(id,original,outcome,revision,kind) VALUES(?,?,?,?,?)", [.text(mutation.requestID.uuidString.lowercased()), .bytes(original), .text(label), .integer(Int64(revision)), .text(mutation.kind.rawValue)])
+            return DevicePreferenceResult(requestID: mutation.requestID, deviceID: deviceID, outcome: outcome)
         }
     }
 
-    private func readSnapshot() throws -> DevicePreferenceSnapshot {
-        try Self.readSnapshot(database: database, deviceID: deviceID)
+    private func storedRequest(_ requestID: UUID) throws -> StoredPreferenceRequest? {
+        try database.rows("SELECT id,original,outcome,revision,kind FROM requests WHERE id=?", [.text(requestID.uuidString.lowercased())]) { row in
+            let stored = try Self.readRequest(row, deviceID: deviceID, version: 2)
+            guard stored.result.requestID == requestID else { throw DevicePreferenceError.storage }
+            return stored
+        }.first
     }
 
-    private static func readSnapshot(database: PreferenceDatabase, deviceID: UUID) throws -> DevicePreferenceSnapshot {
-        let snapshots = try database.rows("SELECT device,revision,completion,attention FROM preferences WHERE id=1") { row in
-            let revision = sqlite3_column_int64(row, 1)
-            let completion = sqlite3_column_int64(row, 2)
-            let attention = sqlite3_column_int64(row, 3)
-            guard try PreferenceDatabase.text(row, 0, maximumBytes: 36) == deviceID.uuidString.lowercased(), revision > 0,
-                  sqlite3_column_type(row, 1) == SQLITE_INTEGER,
-                  sqlite3_column_type(row, 2) == SQLITE_INTEGER,
-                  sqlite3_column_type(row, 3) == SQLITE_INTEGER,
-                  [0, 1].contains(completion), [0, 1].contains(attention) else { throw DevicePreferenceError.storage }
-            return DevicePreferenceSnapshot(deviceID: deviceID, revision: UInt64(revision), completion: completion == 1, attention: attention == 1)
+    private static func integer(_ database: PreferenceDatabase, _ sql: String) throws -> Int64 {
+        let values = try database.rows(sql) { row in
+            guard sqlite3_column_type(row, 0) == SQLITE_INTEGER else { throw DevicePreferenceError.storage }
+            return sqlite3_column_int64(row, 0)
         }
-        guard let snapshot = snapshots.first else { throw DevicePreferenceError.storage }
+        guard values.count == 1, let value = values.first else { throw DevicePreferenceError.storage }
+        return value
+    }
+
+    private static func validateVersion(_ database: PreferenceDatabase) throws {
+        let version = try integer(database, "PRAGMA user_version")
+        guard (0...2).contains(version) else { throw DevicePreferenceError.unsupportedVersion }
+    }
+
+    private static func createSchema(_ database: PreferenceDatabase) throws {
+        try database.execute("CREATE TABLE preferences(id INTEGER PRIMARY KEY CHECK(id=1),device TEXT NOT NULL,revision INTEGER NOT NULL CHECK(revision>0),completion INTEGER NOT NULL CHECK(completion IN (0,1)),attention INTEGER NOT NULL CHECK(attention IN (0,1)),appearance TEXT NOT NULL DEFAULT 'system' CHECK(appearance IN ('system','light','dark')))")
+        try database.execute("CREATE TABLE requests(id TEXT PRIMARY KEY,original BLOB NOT NULL,outcome TEXT NOT NULL CHECK(outcome IN ('applied','conflict')),revision INTEGER NOT NULL CHECK(revision>0),kind TEXT NOT NULL DEFAULT 'notifications' CHECK(kind IN ('notifications','appearance')))")
+    }
+
+    private static func validateSchema(_ database: PreferenceDatabase, version: Int64) throws {
+        let tables = try database.rows("SELECT name,type FROM sqlite_schema WHERE name NOT GLOB 'sqlite_*' ORDER BY name LIMIT 3") { row in
+            guard try PreferenceDatabase.text(row, 1, maximumBytes: 5) == "table" else { throw DevicePreferenceError.storage }
+            return try PreferenceDatabase.text(row, 0, maximumBytes: 11)
+        }
+        guard tables == ["preferences", "requests"] else { throw DevicePreferenceError.storage }
+        var preferences = [
+            PreferenceColumn(name: "id", type: "INTEGER", required: false, defaultValue: nil, primaryKey: true),
+            PreferenceColumn(name: "device", type: "TEXT", required: true, defaultValue: nil, primaryKey: false),
+            PreferenceColumn(name: "revision", type: "INTEGER", required: true, defaultValue: nil, primaryKey: false),
+            PreferenceColumn(name: "completion", type: "INTEGER", required: true, defaultValue: nil, primaryKey: false),
+            PreferenceColumn(name: "attention", type: "INTEGER", required: true, defaultValue: nil, primaryKey: false)
+        ]
+        var requests = [
+            PreferenceColumn(name: "id", type: "TEXT", required: false, defaultValue: nil, primaryKey: true),
+            PreferenceColumn(name: "original", type: "BLOB", required: true, defaultValue: nil, primaryKey: false),
+            PreferenceColumn(name: "outcome", type: "TEXT", required: true, defaultValue: nil, primaryKey: false),
+            PreferenceColumn(name: "revision", type: "INTEGER", required: true, defaultValue: nil, primaryKey: false)
+        ]
+        if version == 2 {
+            preferences.append(PreferenceColumn(name: "appearance", type: "TEXT", required: true, defaultValue: "'system'", primaryKey: false))
+            requests.append(PreferenceColumn(name: "kind", type: "TEXT", required: true, defaultValue: "'notifications'", primaryKey: false))
+        }
+        for (table, expected) in [("preferences", preferences), ("requests", requests)] {
+            let columns = try database.rows("PRAGMA table_xinfo(\(table))") { row in
+                guard sqlite3_column_type(row, 0) == SQLITE_INTEGER, sqlite3_column_type(row, 3) == SQLITE_INTEGER,
+                      sqlite3_column_type(row, 5) == SQLITE_INTEGER, sqlite3_column_type(row, 6) == SQLITE_INTEGER,
+                      sqlite3_column_int64(row, 6) == 0 else { throw DevicePreferenceError.storage }
+                let required = sqlite3_column_int64(row, 3)
+                let primary = sqlite3_column_int64(row, 5)
+                guard [0, 1].contains(required), [0, 1].contains(primary) else { throw DevicePreferenceError.storage }
+                let defaultValue = sqlite3_column_type(row, 4) == SQLITE_NULL ? nil : try PreferenceDatabase.text(row, 4, maximumBytes: 15)
+                return PreferenceColumn(name: try PreferenceDatabase.text(row, 1, maximumBytes: 10),
+                    type: try PreferenceDatabase.text(row, 2, maximumBytes: 7), required: required == 1,
+                    defaultValue: defaultValue, primaryKey: primary == 1)
+            }
+            guard columns == expected else { throw DevicePreferenceError.storage }
+        }
+    }
+
+    private static func existingIdentity(_ database: PreferenceDatabase, expected: PreferenceIdentity) throws -> UUID {
+        let values = try database.rows("SELECT id,device FROM preferences LIMIT 2") { row in
+            guard sqlite3_column_type(row, 0) == SQLITE_INTEGER, sqlite3_column_int64(row, 0) == 1 else {
+                throw DevicePreferenceError.storage
+            }
+            return try canonicalID(row, 1)
+        }
+        guard values.count == 1, let deviceID = values.first else { throw DevicePreferenceError.storage }
+        if case .bound(let bound) = expected, bound != deviceID { throw DevicePreferenceError.wrongDevice }
+        return deviceID
+    }
+
+    private static func readState(database: PreferenceDatabase, deviceID: UUID) throws -> PreferenceState {
+        let snapshots = try database.rows("SELECT id,device,revision,completion,attention,appearance FROM preferences LIMIT 2") { row in
+            let snapshot = try readNotificationColumns(row, deviceID: deviceID)
+            guard let appearance = DeviceAppearance(rawValue: try PreferenceDatabase.text(row, 5, maximumBytes: 6)) else {
+                throw DevicePreferenceError.storage
+            }
+            return PreferenceState(deviceID: deviceID, revision: snapshot.revision, completion: snapshot.completion,
+                                   attention: snapshot.attention, appearance: appearance)
+        }
+        guard snapshots.count == 1, let snapshot = snapshots.first else { throw DevicePreferenceError.storage }
         return snapshot
     }
 
-    private func storedRequest(_ requestID: UUID) throws -> (original: Data, result: DevicePreferenceResult)? {
-        try database.rows("SELECT original,outcome,revision FROM requests WHERE id=?", [.text(requestID.uuidString.lowercased())]) { row in
-            let revision = sqlite3_column_int64(row, 2)
-            guard sqlite3_column_type(row, 2) == SQLITE_INTEGER, revision > 0 else { throw DevicePreferenceError.storage }
-            let outcome: DevicePreferenceResult.Outcome
-            switch try PreferenceDatabase.text(row, 1, maximumBytes: 8) {
-            case "applied": outcome = .applied(revision: UInt64(revision))
-            case "conflict": outcome = .conflict(observedRevision: UInt64(revision))
-            default: throw DevicePreferenceError.storage
+    private static func readLegacySnapshot(database: PreferenceDatabase, deviceID: UUID) throws -> DevicePreferenceSnapshot {
+        let snapshots = try database.rows("SELECT id,device,revision,completion,attention FROM preferences LIMIT 2") { row in
+            try readNotificationColumns(row, deviceID: deviceID)
+        }
+        guard snapshots.count == 1, let snapshot = snapshots.first else { throw DevicePreferenceError.storage }
+        return snapshot
+    }
+
+    private static func readNotificationColumns(_ row: OpaquePointer, deviceID: UUID) throws -> DevicePreferenceSnapshot {
+        let revision = sqlite3_column_int64(row, 2)
+        let completion = sqlite3_column_int64(row, 3)
+        let attention = sqlite3_column_int64(row, 4)
+        guard sqlite3_column_type(row, 0) == SQLITE_INTEGER, sqlite3_column_int64(row, 0) == 1,
+              try canonicalID(row, 1) == deviceID, revision > 0,
+              sqlite3_column_type(row, 2) == SQLITE_INTEGER,
+              sqlite3_column_type(row, 3) == SQLITE_INTEGER,
+              sqlite3_column_type(row, 4) == SQLITE_INTEGER,
+              [0, 1].contains(completion), [0, 1].contains(attention) else { throw DevicePreferenceError.storage }
+        return DevicePreferenceSnapshot(deviceID: deviceID, revision: UInt64(revision), completion: completion == 1, attention: attention == 1)
+    }
+
+    private static func canonicalID(_ row: OpaquePointer, _ column: Int32) throws -> UUID {
+        let text = try PreferenceDatabase.text(row, column, maximumBytes: 36)
+        guard let id = UUID(uuidString: text), id != zeroID, id.uuidString.lowercased() == text else {
+            throw DevicePreferenceError.storage
+        }
+        return id
+    }
+
+    private static func validateRequests(_ database: PreferenceDatabase, deviceID: UUID, revision: UInt64, version: Int64) throws {
+        let count = try integer(database, "SELECT COUNT(*) FROM requests")
+        guard (0...Int64(maximumRequests)).contains(count) else { throw DevicePreferenceError.capacity }
+        let query = version == 1 ? "SELECT id,original,outcome,revision FROM requests" : "SELECT id,original,outcome,revision,kind FROM requests"
+        try database.rows(query) { row in
+            let request = try readRequest(row, deviceID: deviceID, version: version)
+            let observed: UInt64
+            switch request.result.outcome {
+            case .applied(let value), .conflict(let value): observed = value
             }
-            return (original: try PreferenceDatabase.data(row, 0), result: DevicePreferenceResult(requestID: requestID, deviceID: deviceID, outcome: outcome))
-        }.first
+            guard observed <= revision else { throw DevicePreferenceError.storage }
+        }
+    }
+
+    private static func readRequest(_ row: OpaquePointer, deviceID: UUID, version: Int64) throws -> StoredPreferenceRequest {
+        let requestID = try canonicalID(row, 0)
+        let original = try PreferenceDatabase.data(row, 1)
+        let revision = sqlite3_column_int64(row, 3)
+        guard sqlite3_column_type(row, 3) == SQLITE_INTEGER, revision > 0 else { throw DevicePreferenceError.storage }
+        let kind: PreferenceRequestKind
+        if version == 1 { kind = .notifications }
+        else {
+            guard let value = PreferenceRequestKind(rawValue: try PreferenceDatabase.text(row, 4, maximumBytes: 13)) else {
+                throw DevicePreferenceError.storage
+            }
+            kind = value
+        }
+        let mutation: PreferenceMutation
+        do {
+            mutation = try JSONDecoder().decode(PreferenceRequestIdentity.self, from: original).mutation(for: kind)
+            guard mutation.requestID == requestID, mutation.deviceID == deviceID,
+                  try mutation.encodedIdentity() == original else { throw DevicePreferenceError.storage }
+        } catch { throw DevicePreferenceError.storage }
+        let outcome: DevicePreferenceResult.Outcome
+        switch try PreferenceDatabase.text(row, 2, maximumBytes: 8) {
+        case "applied":
+            guard mutation.expectedRevision < UInt64(Int64.max), mutation.expectedRevision + 1 == UInt64(revision) else {
+                throw DevicePreferenceError.storage
+            }
+            outcome = .applied(revision: UInt64(revision))
+        case "conflict":
+            guard mutation.expectedRevision != UInt64(revision) else { throw DevicePreferenceError.storage }
+            outcome = .conflict(observedRevision: UInt64(revision))
+        default: throw DevicePreferenceError.storage
+        }
+        return StoredPreferenceRequest(kind: kind, original: original,
+            result: DevicePreferenceResult(requestID: requestID, deviceID: deviceID, outcome: outcome))
     }
 }
