@@ -102,6 +102,7 @@ pub enum Interruption {
 #[serde(rename_all = "snake_case")]
 pub enum UnknownReason {
     InterruptedByHostRestart,
+    AbandonedAfterDrain,
     ToolFailureAfterInvocation,
     CancellationAfterInvocation,
     CleanupDeadline,
@@ -198,6 +199,7 @@ pub struct CleanupRequirement {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct RecoveryReport {
     pub recovered_operations: usize,
+    pub running_count: usize,
     pub unresolved_count: usize,
     pub requirements: Vec<CleanupRequirement>,
     pub restart_required: bool,
@@ -226,6 +228,7 @@ struct BrokerInner {
     quarantined: AtomicBool,
     restart_required: AtomicBool,
     recovered_operations: usize,
+    _retained_owner: Option<RetainedToolOwner>,
 }
 
 #[derive(Serialize)]
@@ -309,7 +312,7 @@ impl ToolBroker {
             None,
         ))?;
         let recovery_store = store.clone();
-        let (recovered_operations, recovery_report) = blocking(owner, move || {
+        let (recovered_operations, recovery_report) = blocking(owner.clone(), move || {
             let recovered = recovery_store.mark_running_tool_calls_unknown(&recovery, now()?)?;
             Ok((recovered, inspect_cleanup(&recovery_store, recovered)?))
         })
@@ -326,6 +329,7 @@ impl ToolBroker {
                 quarantined: AtomicBool::new(recovery_report.quarantined),
                 restart_required: AtomicBool::new(false),
                 recovered_operations,
+                _retained_owner: owner,
             }),
         })
     }
@@ -356,6 +360,61 @@ impl ToolBroker {
         Ok(report)
     }
 
+    pub async fn recover_after_drain(&self) -> Result<RecoveryReport, BrokerError> {
+        let permits = u32::try_from(self.inner.limits.max_in_flight).map_err(|_| {
+            BrokerError::InvalidConfiguration(
+                "in-flight limit cannot be represented by the admission semaphore".into(),
+            )
+        })?;
+        let inner = Arc::clone(&self.inner);
+        let (admission, exclusion) = tokio::time::timeout(self.inner.limits.queue_timeout, async {
+            let admission = Arc::clone(&inner.admission)
+                .acquire_many_owned(permits)
+                .await
+                .map_err(|_| BrokerError::RecoveryBusy)?;
+            let exclusion = Arc::clone(&inner.exclusion).write_owned().await;
+            Ok::<_, BrokerError>((admission, exclusion))
+        })
+        .await
+        .map_err(|_| BrokerError::RecoveryBusy)??;
+        let recovery = encode_record(&record(
+            OperationResult::Unknown {
+                reason: UnknownReason::AbandonedAfterDrain,
+                cleanup_completed: false,
+                diagnostic: None,
+            },
+            None,
+        ))?;
+        blocking(None, move || {
+            let _admission = admission;
+            let _exclusion = exclusion;
+            let mut lease = ExecutionLease {
+                inner: Arc::clone(&inner),
+                armed: true,
+            };
+            let recovered = inner
+                .store
+                .mark_running_tool_calls_unknown(&recovery, now()?)?;
+            if recovered > 0 {
+                inner.restart_required.store(true, Ordering::Release);
+                inner.quarantined.store(true, Ordering::Release);
+            }
+            let mut report = inspect_cleanup(&inner.store, inner.recovered_operations)?;
+            if report.running_count != 0 {
+                return Err(BrokerError::RecoveryBusy);
+            }
+            report.restart_required = inner.restart_required.load(Ordering::Acquire);
+            report.quarantined |=
+                inner.quarantined.load(Ordering::Acquire) || report.restart_required;
+            if report.quarantined {
+                inner.quarantined.store(true, Ordering::Release);
+            }
+            lease.armed = false;
+            Ok(report)
+        })
+        .await
+    }
+
     pub async fn acknowledge_cleanup(
         &self,
         operation_id: &str,
@@ -377,7 +436,7 @@ impl ToolBroker {
                 "cleanup requires an exact digest and a nonempty bounded note".into(),
             ));
         }
-        let _gate = tokio::time::timeout(
+        let gate = tokio::time::timeout(
             self.inner.limits.queue_timeout,
             Arc::clone(&self.inner.exclusion).write_owned(),
         )
@@ -388,7 +447,8 @@ impl ToolBroker {
         let expected_result_digest = expected_result_digest.to_owned();
         let operator = operator.to_owned();
         let note = note.to_owned();
-        let mut report = blocking(None, move || {
+        blocking(None, move || {
+            let _gate = gate;
             let status = inner.store.tool_cleanup_status(&operation_id)?;
             if status.original_result_digest != expected_result_digest {
                 return Err(BrokerError::CleanupAttestationConflict { operation_id });
@@ -419,15 +479,15 @@ impl ToolBroker {
                 }
             };
             inner.store.attest_tool_cleanup(&attestation)?;
-            inspect_cleanup(&inner.store, inner.recovered_operations)
+            let mut report = inspect_cleanup(&inner.store, inner.recovered_operations)?;
+            report.restart_required = inner.restart_required.load(Ordering::Acquire);
+            report.quarantined |= report.restart_required;
+            inner
+                .quarantined
+                .store(report.quarantined, Ordering::Release);
+            Ok(report)
         })
-        .await?;
-        report.restart_required = self.inner.restart_required.load(Ordering::Acquire);
-        report.quarantined |= report.restart_required;
-        self.inner
-            .quarantined
-            .store(report.quarantined, Ordering::Release);
-        Ok(report)
+        .await
     }
 
     pub async fn execute(
@@ -990,6 +1050,19 @@ fn inspect_cleanup(
     }
     Ok(RecoveryReport {
         recovered_operations,
+        running_count: usize::try_from(
+            store
+                .connection()?
+                .query_row(
+                    "SELECT count(*) FROM tool_calls WHERE state='running'",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .map_err(StorageError::from)?,
+        )
+        .map_err(|_| {
+            BrokerError::Worker("running journal count exceeds supported bounds".into())
+        })?,
         unresolved_count,
         requirements,
         restart_required: false,

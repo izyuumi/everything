@@ -19,6 +19,12 @@ pub struct TransportInboxRow {
     pub expires_at: i64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TransportInboxCursor {
+    pub received_at: i64,
+    pub message_id: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct TransportOutboxInsert {
     pub message: OutboxRow,
@@ -55,6 +61,12 @@ pub struct RemoteCommandRow {
     pub result_digest: Option<String>,
     pub received_at: i64,
     pub updated_at: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemoteCommandCursor {
+    pub received_at: i64,
+    pub command_id: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -232,10 +244,29 @@ impl Store {
     }
 
     pub fn pending_transport_inbox(&self, limit: usize) -> StorageResult<Vec<TransportInboxRow>> {
+        self.pending_transport_inbox_after(None, limit)
+    }
+
+    pub fn pending_transport_inbox_after(
+        &self,
+        cursor: Option<&TransportInboxCursor>,
+        limit: usize,
+    ) -> StorageResult<Vec<TransportInboxRow>> {
         validate_limit(limit)?;
+        if let Some(cursor) = cursor {
+            validate_time(cursor.received_at)?;
+            validate_id(&cursor.message_id)?;
+        }
         let connection = self.connection()?;
-        let mut statement = connection.prepare("SELECT i.message_id, i.sender, i.recipient, i.envelope_digest, i.payload, i.received_at, i.expires_at FROM transport_inbox i JOIN devices d ON d.id = i.sender WHERE i.state = 'pending' AND d.revoked_at IS NULL ORDER BY i.received_at, i.message_id LIMIT ?1")?;
-        collect_rows(statement.query_map([limit as i64], inbox_row)?)
+        let mut statement = connection.prepare("SELECT i.message_id, i.sender, i.recipient, i.envelope_digest, i.payload, i.received_at, i.expires_at FROM transport_inbox i JOIN devices d ON d.id = i.sender WHERE i.state = 'pending' AND d.revoked_at IS NULL AND (?1 IS NULL OR (i.received_at, i.message_id) > (?1, ?2)) ORDER BY i.received_at, i.message_id LIMIT ?3")?;
+        collect_rows(statement.query_map(
+            params![
+                cursor.map(|cursor| cursor.received_at),
+                cursor.map(|cursor| cursor.message_id.as_str()),
+                limit as i64
+            ],
+            inbox_row,
+        )?)
     }
 
     pub fn finish_transport_inbox(
@@ -458,10 +489,29 @@ impl Store {
     }
 
     pub fn pending_remote_commands(&self, limit: usize) -> StorageResult<Vec<RemoteCommandRow>> {
+        self.pending_remote_commands_after(None, limit)
+    }
+
+    pub fn pending_remote_commands_after(
+        &self,
+        cursor: Option<&RemoteCommandCursor>,
+        limit: usize,
+    ) -> StorageResult<Vec<RemoteCommandRow>> {
         validate_limit(limit)?;
+        if let Some(cursor) = cursor {
+            validate_time(cursor.received_at)?;
+            validate_id(&cursor.command_id)?;
+        }
         let connection = self.connection()?;
-        let mut statement = connection.prepare("SELECT command_id, sender, conversation_id, request, request_digest, state, result, result_digest, received_at, updated_at FROM remote_commands WHERE state = 'pending' ORDER BY received_at, command_id LIMIT ?1")?;
-        collect_rows(statement.query_map([limit as i64], remote_command_row)?)
+        let mut statement = connection.prepare("SELECT command_id, sender, conversation_id, request, request_digest, state, result, result_digest, received_at, updated_at FROM remote_commands WHERE state = 'pending' AND (?1 IS NULL OR (received_at, command_id) > (?1, ?2)) ORDER BY received_at, command_id LIMIT ?3")?;
+        collect_rows(statement.query_map(
+            params![
+                cursor.map(|cursor| cursor.received_at),
+                cursor.map(|cursor| cursor.command_id.as_str()),
+                limit as i64
+            ],
+            remote_command_row,
+        )?)
     }
 
     pub fn complete_remote_command(

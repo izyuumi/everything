@@ -1,4 +1,3 @@
-use std::fs::File;
 use std::io;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -16,8 +15,8 @@ use tokio_util::sync::CancellationToken;
 use crate::protocol::{
     CommandEnvelope, CommandId, SchemaVersion, SyncBatch, SyncRequest, UnixMillis,
 };
-use crate::service::ServiceError;
 use crate::service::state::StateDirectory;
+use crate::service::{ServiceError, StateLease};
 
 pub const MAX_LOCAL_FRAME_BYTES: usize = 1_024 * 1_024;
 pub const MAX_LOCAL_COMMAND_BYTES: usize = 256 * 1_024;
@@ -254,8 +253,17 @@ impl LocalServer {
     ) -> Result<(Self, mpsc::Receiver<LocalCall>), LocalError> {
         options.validate()?;
         socket_path(state_directory.as_ref())?;
-        let state_directory = state_directory.as_ref().to_path_buf();
-        let prepared = tokio::task::spawn_blocking(move || PreparedBinding::open(state_directory))
+        let lease = StateLease::acquire(state_directory).await?;
+        Self::bind_with_lease(lease, options).await
+    }
+
+    pub async fn bind_with_lease(
+        lease: Arc<StateLease>,
+        options: LocalOptions,
+    ) -> Result<(Self, mpsc::Receiver<LocalCall>), LocalError> {
+        options.validate()?;
+        socket_path(lease.path())?;
+        let prepared = tokio::task::spawn_blocking(move || PreparedBinding::open(lease))
             .await
             .map_err(|_| LocalError::Worker)??;
         let remove_stale = if prepared.existing_socket.is_some() {
@@ -347,8 +355,8 @@ impl LocalServer {
 }
 
 struct EndpointOwnership {
-    directory: StateDirectory,
-    _lock: File,
+    directory: Arc<StateDirectory>,
+    _lease: Arc<StateLease>,
     socket_metadata: Option<rustix::fs::Stat>,
 }
 
@@ -383,15 +391,14 @@ struct PreparedBinding {
 }
 
 impl PreparedBinding {
-    fn open(path: PathBuf) -> Result<Self, LocalError> {
-        socket_path(&path)?;
-        let directory = StateDirectory::open(&path, true)?;
-        let lock = directory.lock()?;
+    fn open(lease: Arc<StateLease>) -> Result<Self, LocalError> {
+        socket_path(lease.path())?;
+        let directory = Arc::clone(&lease.directory);
         let existing_socket = directory.socket_metadata()?;
         Ok(Self {
             ownership: EndpointOwnership {
                 directory,
-                _lock: lock,
+                _lease: lease,
                 socket_metadata: None,
             },
             existing_socket,
