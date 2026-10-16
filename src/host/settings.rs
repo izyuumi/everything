@@ -1,4 +1,6 @@
 pub mod actions;
+pub mod agent;
+mod agent_tools;
 mod authority;
 pub mod contract;
 mod driver;
