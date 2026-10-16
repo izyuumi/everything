@@ -785,7 +785,7 @@ impl ServiceCore {
             ),
             (Ok(()), Ok(None)) => {
                 return Err(
-                    self.failed_claim_bookkeeping(&claim, SettingsServiceError::CorruptJournal)
+                    self.failed_claim_bookkeeping(claim, SettingsServiceError::CorruptJournal)
                 );
             }
             (Err(cause), Ok(None)) => {
@@ -821,7 +821,7 @@ impl ServiceCore {
                     self.result(&claim.identity, SettingsOperationState::Unknown),
                     None,
                 );
-                let cleanup = self.release_approval_claim(&claim);
+                let cleanup = self.release_approval_claim(claim);
                 let repair_error = match (repair, cleanup) {
                     (Err(error), Err(cleanup)) => {
                         Some(Box::new(SettingsServiceError::OutcomeUnknown {
@@ -865,7 +865,7 @@ impl ServiceCore {
             }
             cell.invitation = None;
         }
-        self.release_approval_claim(&claim).map_err(|cause| {
+        self.release_approval_claim(claim).map_err(|cause| {
             SettingsServiceError::OutcomeUnknown {
                 request_id: approval.request_id,
                 cause: Box::new(cause),
