@@ -9,8 +9,9 @@ use crate::storage::Store;
 use super::actions::{NativeActionObservation, NativeActionReference, SettingsActionTarget};
 use super::authority::SettingsOperationOrigin;
 use super::contract::{
-    AgentMutability, SettingKey, SettingsActionReference, SettingsConfirmationReference,
-    SettingsFailureReason, SettingsOperationResult, SettingsOperationState, SettingsRequestBinding,
+    AgentMutability, MAX_SETTINGS_SNAPSHOT_BYTES, SettingKey, SettingsActionReference,
+    SettingsConfirmationReference, SettingsContractError, SettingsFailureReason,
+    SettingsOperationResult, SettingsOperationState, SettingsRequestBinding,
     SettingsUnavailableReason,
 };
 use super::service::SettingsServiceError;
@@ -63,6 +64,149 @@ pub struct SettingsOperationInspection {
     pub write: Option<SettingsWriteInspection>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub application: Option<SettingsApplicationState>,
+}
+
+impl SettingsOperationInspection {
+    pub fn validate(&self) -> Result<(), SettingsContractError> {
+        self.binding.validate()?;
+        let valid_origin = match self.origin {
+            SettingsOperationOrigin::LocalOwner { request_id } => {
+                request_id == self.binding.request_id
+                    && *request_id.as_uuid() == self.binding.client_session_id
+            }
+            SettingsOperationOrigin::NativeUi { session_id } => {
+                !session_id.is_nil() && session_id == self.binding.client_session_id
+            }
+            SettingsOperationOrigin::SettingsAgent {
+                session_id,
+                native_session_id,
+            } => !session_id.is_nil() && native_session_id == self.binding.client_session_id,
+        };
+        if !valid_origin || self.updated_at.get() < self.binding.issued_at.get() {
+            return Err(SettingsContractError::Invalid(
+                "operation origin or update time",
+            ));
+        }
+        match &self.phase {
+            SettingsOperationPhase::AwaitingConfirmation { reference } => {
+                if reference.id.is_nil()
+                    || reference.expires_at != self.binding.expires_at
+                    || self.binding.expected_revision.is_none()
+                {
+                    return Err(SettingsContractError::Invalid(
+                        "operation confirmation reference",
+                    ));
+                }
+            }
+            SettingsOperationPhase::AwaitingAction { reference } => {
+                if reference.id.is_nil() || reference.expires_at != self.binding.expires_at {
+                    return Err(SettingsContractError::Invalid("operation action reference"));
+                }
+            }
+            SettingsOperationPhase::InFlight { native_request_id } => {
+                if native_request_id.as_uuid().is_nil() {
+                    return Err(SettingsContractError::Invalid("native operation identity"));
+                }
+            }
+            SettingsOperationPhase::Applying {
+                expected_revision,
+                revision,
+            } => {
+                if self.write.as_ref().is_none_or(|write| {
+                    write.resolution.is_some()
+                        || write.expected_revision != *expected_revision
+                        || write.revision != *revision
+                }) {
+                    return Err(SettingsContractError::Invalid("applying write inspection"));
+                }
+            }
+            SettingsOperationPhase::Finished { result } => {
+                result.validate()?;
+                if result.request_id != self.binding.request_id
+                    || result.scope != self.binding.scope
+                    || matches!(
+                        result.state,
+                        SettingsOperationState::RequiresConfirmation { .. }
+                            | SettingsOperationState::RequiresUserAction { .. }
+                    )
+                {
+                    return Err(SettingsContractError::Invalid("finished operation result"));
+                }
+            }
+        }
+        if let Some(write) = &self.write {
+            if !matches!(
+                self.binding.scope,
+                super::contract::SettingsScope::Host { .. }
+            ) || write.expected_revision == 0
+                || write.expected_revision >= i64::MAX as u64
+                || write.expected_revision.checked_add(1) != Some(write.revision)
+                || self.binding.expected_revision != Some(write.expected_revision)
+                || write.changed_keys.len() > SettingKey::ALL.len()
+                || !write.changed_keys.windows(2).all(|keys| keys[0] < keys[1])
+                || write
+                    .changed_keys
+                    .iter()
+                    .any(|key| key.scope() != super::contract::SettingScopeKind::Host)
+            {
+                return Err(SettingsContractError::Invalid("operation write inspection"));
+            }
+            let valid_resolution = match (&self.phase, write.resolution) {
+                (SettingsOperationPhase::Applying { .. }, None) => true,
+                (SettingsOperationPhase::Finished { result }, None) => {
+                    result.state == SettingsOperationState::Unknown
+                }
+                (
+                    SettingsOperationPhase::Finished { result },
+                    Some(SettingsWriteResolution::Applied),
+                ) => {
+                    matches!(result.state, SettingsOperationState::Applied { revision }
+                        | SettingsOperationState::PendingApplication { revision }
+                        | SettingsOperationState::RestartRequired { revision } if revision == write.revision)
+                }
+                (
+                    SettingsOperationPhase::Finished { result },
+                    Some(SettingsWriteResolution::NotApplied),
+                ) => {
+                    matches!(
+                        result.state,
+                        SettingsOperationState::Failed { .. }
+                            | SettingsOperationState::Unavailable { .. }
+                            | SettingsOperationState::Cancelled
+                            | SettingsOperationState::Conflict { .. }
+                    )
+                }
+                _ => false,
+            };
+            if !valid_resolution {
+                return Err(SettingsContractError::Invalid("operation write resolution"));
+            }
+        }
+        if self.application.is_some()
+            && (!matches!(
+                self.phase,
+                SettingsOperationPhase::Finished {
+                    result: SettingsOperationResult {
+                        state: SettingsOperationState::PendingApplication { .. },
+                        ..
+                    }
+                }
+            ) || self
+                .write
+                .as_ref()
+                .is_none_or(|write| write.resolution != Some(SettingsWriteResolution::Applied)))
+        {
+            return Err(SettingsContractError::Invalid(
+                "terminal operation application",
+            ));
+        }
+        let encoded = serde_json::to_vec(self)
+            .map_err(|_| SettingsContractError::Invalid("operation inspection encoding"))?;
+        if encoded.len() > MAX_SETTINGS_SNAPSHOT_BYTES {
+            return Err(SettingsContractError::TooLarge);
+        }
+        Ok(())
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
