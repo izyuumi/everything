@@ -949,6 +949,14 @@ impl HostInner {
                 .await
             }
             LocalRequestPayload::Query {
+                query:
+                    query @ (crate::ipc::OwnerQuery::SettingsGrantCurrent { .. }
+                    | crate::ipc::OwnerQuery::SettingsGrantVersion { .. }
+                    | crate::ipc::OwnerQuery::SettingsGrantReceipt { .. }),
+            } => Ok(LocalResponsePayload::QueryResult {
+                result: self.settings_grant_query(call, query.clone()).await?,
+            }),
+            LocalRequestPayload::Query {
                 query: crate::ipc::OwnerQuery::SettingsOperation { request_id },
             } => {
                 let caller = self.settings_service.local_owner_cleanup_caller(call)?;
@@ -960,6 +968,13 @@ impl HostInner {
             }
             LocalRequestPayload::Query { query } => Ok(LocalResponsePayload::QueryResult {
                 result: self.query(query.clone(), call.cancellation.clone()).await?,
+            }),
+            LocalRequestPayload::OwnerOperation {
+                operation: crate::ipc::OwnerOperation::SetSettingsGrant { change },
+            } => Ok(LocalResponsePayload::OwnerOperationResult {
+                result: self
+                    .settings_grant_change(call, change.as_ref().clone())
+                    .await?,
             }),
             LocalRequestPayload::OwnerOperation {
                 operation:

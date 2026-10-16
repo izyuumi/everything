@@ -25,6 +25,7 @@ pub const MAX_LOCAL_COMMAND_BYTES: usize = 256 * 1_024;
 pub const MAX_LOCAL_CONNECTIONS: usize = 32;
 pub const LOCAL_COMMAND_CAPACITY: usize = 32;
 const MAX_SOCKET_PATH_BYTES: usize = 100;
+const MAX_SETTINGS_GRANT_FRAME_BYTES: usize = 32 * 1024;
 
 #[derive(Debug, Error)]
 pub enum LocalError {
@@ -114,11 +115,29 @@ pub enum LocalRequestPayload {
     },
 }
 
+impl LocalRequestPayload {
+    fn is_settings_grant(&self) -> bool {
+        matches!(
+            self,
+            Self::Query {
+                query: crate::ipc::OwnerQuery::SettingsGrantCurrent { .. }
+                    | crate::ipc::OwnerQuery::SettingsGrantVersion { .. }
+                    | crate::ipc::OwnerQuery::SettingsGrantReceipt { .. }
+            } | Self::OwnerOperation {
+                operation: crate::ipc::OwnerOperation::SetSettingsGrant { .. }
+            }
+        )
+    }
+}
+
 impl LocalRequest {
     pub fn new(payload: LocalRequestPayload) -> Result<Self, LocalError> {
         let request_id = match &payload {
             LocalRequestPayload::SubmitCommand { command } => command.command_id,
             LocalRequestPayload::OwnerCommand { command } => command.command_id(),
+            LocalRequestPayload::OwnerOperation {
+                operation: crate::ipc::OwnerOperation::SetSettingsGrant { change },
+            } => change.request_id,
             _ => CommandId::new(),
         };
         let request = Self {
@@ -138,6 +157,13 @@ impl LocalRequest {
             }
             LocalRequestPayload::OwnerOperation { operation } => {
                 operation.validate().map_err(LocalError::Protocol)?;
+                if let crate::ipc::OwnerOperation::SetSettingsGrant { change } = operation
+                    && change.request_id != self.request_id
+                {
+                    return Err(LocalError::Protocol(
+                        "Settings grant requires its original owner request ID",
+                    ));
+                }
             }
             LocalRequestPayload::NativeSettings { operation } => {
                 operation.validate().map_err(LocalError::Protocol)?;
@@ -179,8 +205,16 @@ impl LocalRequest {
                 }
             }
         }
-        encode(self, MAX_LOCAL_FRAME_BYTES)?;
+        encode(self, self.maximum_encoded_bytes())?;
         Ok(())
+    }
+
+    fn maximum_encoded_bytes(&self) -> usize {
+        if self.payload.is_settings_grant() {
+            MAX_SETTINGS_GRANT_FRAME_BYTES - std::mem::size_of::<u32>()
+        } else {
+            MAX_LOCAL_FRAME_BYTES
+        }
     }
 }
 
@@ -333,7 +367,7 @@ impl LocalResponse {
                 ));
             }
         }
-        encode(self, MAX_LOCAL_FRAME_BYTES)?;
+        encode(self, request.maximum_encoded_bytes())?;
         Ok(())
     }
 }
@@ -635,7 +669,13 @@ impl LocalClient {
             )
             .await
             .map_err(|_| LocalError::Timeout)??;
-            let response: LocalResponse = read_frame(&mut stream).await?;
+            let (response, received_bytes): (LocalResponse, usize) =
+                read_frame(&mut stream).await?;
+            if received_bytes > request.maximum_encoded_bytes() {
+                return Err(LocalError::Protocol(
+                    "response frame exceeds its byte limit",
+                ));
+            }
             response.validate_for(&request)?;
             Ok(response)
         };
@@ -656,7 +696,7 @@ async fn handle_connection(
     cancellation: CancellationToken,
 ) -> Result<(), LocalError> {
     authenticate(&stream, uid)?;
-    let original: Value = tokio::select! {
+    let (original, received_bytes): (Value, usize) = tokio::select! {
         biased;
         _ = cancellation.cancelled() => return Err(LocalError::Cancelled),
         request = tokio::time::timeout(options.frame_timeout, read_frame(&mut stream)) => request.map_err(|_| LocalError::Timeout)??,
@@ -676,6 +716,9 @@ async fn handle_connection(
     let request: LocalRequest = serde_json::from_value(original)
         .map_err(|_| LocalError::Protocol("invalid JSON frame or schema"))?;
     request.validate()?;
+    if received_bytes > request.maximum_encoded_bytes() {
+        return Err(LocalError::Protocol("request frame exceeds its byte limit"));
+    }
     let payload = if matches!(request.payload, LocalRequestPayload::Status) {
         LocalResponsePayload::Status { status }
     } else {
@@ -803,14 +846,16 @@ impl io::Write for FrameWriter {
 
 async fn read_frame<T: serde::de::DeserializeOwned>(
     stream: &mut UnixStream,
-) -> Result<T, LocalError> {
+) -> Result<(T, usize), LocalError> {
     let length = stream.read_u32().await? as usize;
     if length == 0 || length > MAX_LOCAL_FRAME_BYTES {
         return Err(LocalError::Protocol("frame length is out of bounds"));
     }
     let mut bytes = Zeroizing::new(vec![0u8; length]);
     stream.read_exact(&mut bytes).await?;
-    serde_json::from_slice(&bytes).map_err(|_| LocalError::Protocol("invalid JSON frame or schema"))
+    serde_json::from_slice(&bytes)
+        .map(|value| (value, length))
+        .map_err(|_| LocalError::Protocol("invalid JSON frame or schema"))
 }
 
 async fn write_frame(stream: &mut UnixStream, value: &impl Serialize) -> Result<(), LocalError> {

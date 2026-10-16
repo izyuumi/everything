@@ -4,6 +4,7 @@ pub(super) mod agent_tools;
 mod authority;
 pub mod contract;
 mod driver;
+pub(crate) mod grants;
 pub mod native;
 mod operations;
 pub mod service;
@@ -12,6 +13,10 @@ pub(crate) use authority::SettingsAgentBinding;
 pub use authority::{
     NativeSessionOpened, NativeSessionProof, SettingsAgentSession, SettingsCaller,
     SettingsOperationOrigin,
+};
+pub use grants::{
+    SettingsGrantChange, SettingsGrantConsent, SettingsGrantHead, SettingsGrantReceipt,
+    SettingsGrantReference, SettingsGrantState, SettingsGrantTarget, SettingsGrantVersion,
 };
 pub use operations::{
     SettingsApplicationState, SettingsOperationInspection, SettingsOperationPhase,
