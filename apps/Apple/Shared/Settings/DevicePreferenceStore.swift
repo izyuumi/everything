@@ -225,7 +225,7 @@ actor DevicePreferenceStore {
             case "conflict": outcome = .conflict(observedRevision: UInt64(revision))
             default: throw DevicePreferenceError.storage
             }
-            return (try PreferenceDatabase.data(row, 0), DevicePreferenceResult(requestID: requestID, deviceID: deviceID, outcome: outcome))
+            return (original: try PreferenceDatabase.data(row, 0), result: DevicePreferenceResult(requestID: requestID, deviceID: deviceID, outcome: outcome))
         }.first
     }
 }
