@@ -378,6 +378,7 @@ impl SettingsAgentSupervisor {
         stop_work: CancellationToken,
         stop_owner: CancellationToken,
     ) -> Result<(), HostError> {
+        let mut owner_stop_observed = false;
         loop {
             if (stop_work.is_cancelled() || stop_owner.is_cancelled())
                 && !self.draining.load(Ordering::Acquire)
@@ -446,7 +447,7 @@ impl SettingsAgentSupervisor {
                     }
                 }
                 _ = stop_work.cancelled(), if !self.draining.load(Ordering::Acquire) => { if self.close_all().await.is_err() { self.note_failure(); } }
-                _ = stop_owner.cancelled(), if !self.draining.load(Ordering::Acquire) => {}
+                _ = stop_owner.cancelled(), if !owner_stop_observed => { owner_stop_observed = true; }
                 _ = session_cancellations.next(), if !session_cancellations.is_empty() => {}
                 _ = tokio::time::sleep_until(timer) => {}
             }
