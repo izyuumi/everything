@@ -463,9 +463,10 @@ impl HostInner {
                 let _recovery = self.recovery.lock().await;
                 if !self.draining.load(Ordering::Acquire)
                     || !self.workers_drained.load(Ordering::Acquire)
+                    || !self.settings_transport_drained()
                 {
                     return Err(HostError::Invalid(
-                        "stranded running operations can be reconciled only after owned scheduler workers drain",
+                        "stranded running operations can be reconciled only after owned scheduler and receive workers drain",
                     ));
                 }
                 let report = self.broker.recover_after_drain().await?;

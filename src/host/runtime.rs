@@ -9,7 +9,7 @@ use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 
 use crate::agent::{Agent, AgentError, ConversationConfig};
-use crate::devices::{DeviceEndpoint, DeviceError, EndpointRole};
+use crate::devices::{DeviceEndpoint, DeviceError, EndpointRole, HostSettingsTransport};
 use crate::ipc::CommandReceipt;
 use crate::permissions::{Authorizer, ToolScopeRule};
 use crate::protocol::{ProtocolError, UnixMillis};
@@ -159,6 +159,7 @@ pub(super) struct HostInner {
     pub(super) draining: AtomicBool,
     pub(super) workers_drained: AtomicBool,
     pub(super) settings_work_drained: AtomicBool,
+    settings_transport: std::sync::OnceLock<HostSettingsTransport>,
     pub(super) recovery: Mutex<()>,
     pub(super) worker: std::sync::OnceLock<Arc<super::worker::service::WorkerCoordinator>>,
 }
@@ -460,6 +461,7 @@ impl HostService {
             draining: AtomicBool::new(false),
             workers_drained: AtomicBool::new(false),
             settings_work_drained: AtomicBool::new(false),
+            settings_transport: std::sync::OnceLock::new(),
             recovery: Mutex::new(()),
             worker: std::sync::OnceLock::new(),
         });
@@ -530,13 +532,20 @@ impl HostService {
         if let Some(origin) = inner.relay_origin.clone() {
             let host = inner.clone();
             let relay_stop = work_stop.clone();
+            let transport = super::settings::transport::host_settings_transport(
+                host.agent.clone(),
+                host.devices.clone(),
+                Arc::clone(&host.mutation),
+            )
+            .and_then(|(transport, owner)| {
+                host.settings_transport.set(transport).map_err(|_| {
+                    DeviceError::Invalid("settings transport owner was already registered")
+                })?;
+                Ok(owner)
+            });
             workers.spawn(async move {
-                let outcome = match super::settings::transport::host_settings_transport(
-                    host.agent.clone(),
-                    host.devices.clone(),
-                    Arc::clone(&host.mutation),
-                ) {
-                    Ok((_, owner)) => {
+                let outcome = match transport {
+                    Ok(owner) => {
                         host.devices
                             .run_relay_with_settings(
                                 origin,
@@ -648,6 +657,9 @@ impl HostService {
         {
             let _mutation = inner.mutation.lock().await;
             inner.draining.store(true, Ordering::Release);
+            if let Some(transport) = inner.settings_transport.get() {
+                transport.close_intake();
+            }
             if let Err(error) = inner.settings_service.stop_intake()
                 && result.is_ok()
             {
@@ -733,6 +745,7 @@ impl HostService {
         loop {
             if inner.workers_drained.load(Ordering::Acquire)
                 && inner.settings_agents.is_quiescent()
+                && inner.settings_transport_drained()
                 && !quiescence_proved
                 && quiescence.is_none()
             {
@@ -762,7 +775,7 @@ impl HostService {
                 let running = inner
                     .blocking(|host| global_running(&host.agent.store()))
                     .await;
-                if matches!((&report,&running), (Ok(report),Ok(false)) if report.running_count == 0 && report.unresolved_count == 0 && report.settings_unresolved_count == 0 && report.requirements.is_empty() && inner.settings_agents.is_quiescent())
+                if matches!((&report,&running), (Ok(report),Ok(false)) if report.running_count == 0 && report.unresolved_count == 0 && report.settings_unresolved_count == 0 && report.requirements.is_empty() && inner.settings_agents.is_quiescent() && inner.settings_transport_drained())
                 {
                     if composition_stopped
                         && service_work_stopped
@@ -902,6 +915,12 @@ impl HostService {
 }
 
 impl HostInner {
+    pub(super) fn settings_transport_drained(&self) -> bool {
+        self.settings_transport
+            .get()
+            .is_none_or(|transport| transport.receive_witness().snapshot().complete())
+    }
+
     pub(super) fn ensure_accepting(&self) -> Result<(), HostError> {
         if self.draining.load(Ordering::Acquire) {
             return Err(HostError::Draining);
@@ -1010,10 +1029,11 @@ impl HostInner {
                     || !self.workers_drained.load(Ordering::Acquire)
                     || !self.settings_work_drained.load(Ordering::Acquire)
                     || !self.settings_agents.is_quiescent()
+                    || !self.settings_transport_drained()
                     || self.agent.state_directory().is_none()
                 {
                     return Err(HostError::Invalid(
-                        "Settings uncertainty cleanup requires the leased Host and actual native, Broker and service drains",
+                        "Settings uncertainty cleanup requires the leased Host and actual native, receive, Broker and service drains",
                     ));
                 }
                 let command_id = *command_id;

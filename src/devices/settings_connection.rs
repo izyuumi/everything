@@ -101,6 +101,10 @@ impl SettingsConnectionIdentity {
 }
 
 impl HostSettingsTransport {
+    pub(crate) fn close_intake(&self) {
+        self.identity.close();
+    }
+
     #[cfg(unix)]
     pub(crate) fn receive_witness(&self) -> SettingsReceiveWitness {
         self.receive.clone()
