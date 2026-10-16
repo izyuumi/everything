@@ -3,7 +3,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use rusqlite::{Connection, Transaction};
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use thiserror::Error;
 use tokio::sync::OwnedMutexGuard;
 use uuid::Uuid;
@@ -11,20 +11,19 @@ use zeroize::Zeroizing;
 
 use crate::crypto::DevicePublicKeys;
 use crate::devices::{
-    AccessStatusRejection, BindingGeneration, DeviceAccess, DeviceError,
-    OwnedCommittedSettingsAccess, OwnedVerifiedSettingsAccess, ReplyBuildPermit,
-    SettingsAccessReplyPacket, SettingsReplyPublicationError, SettingsReplyQualification,
+    AccessStatusRejection, BindingGeneration, OwnedCommittedSettingsAccess,
+    OwnedVerifiedSettingsAccess, ReplyBuildPermit, SettingsAccessReplyPacket,
+    SettingsReplyPublicationError, SettingsReplyQualification,
 };
 use crate::host::settings::{SettingsGrantHead, SettingsGrantReference};
 use crate::protocol::{DeviceId, MessageId, UnixMillis};
-use crate::storage::{ConsumedSettingsReply, StorageError, Store, settings_grant_head_on};
+use crate::storage::{ConsumedSettingsReply, Store, settings_grant_head_on};
 
+use super::pins::ReplyPinError;
 use super::{
     SettingsGrantOwner, SettingsGrantState, SettingsReceiptAuthority, SettingsReplyProjectionError,
     SettingsServiceError, original_reply_text,
 };
-
-const MAX_ACCESS_IDENTITY_BYTES: usize = 16 * 1024;
 
 #[derive(Error)]
 pub(crate) enum SettingsAccessQualificationError {
@@ -39,6 +38,15 @@ pub(crate) enum SettingsAccessQualificationError {
 impl From<SettingsServiceError> for SettingsAccessQualificationError {
     fn from(error: SettingsServiceError) -> Self {
         Self::Authority(Box::new(error))
+    }
+}
+
+impl From<ReplyPinError> for SettingsAccessQualificationError {
+    fn from(error: ReplyPinError) -> Self {
+        match error {
+            ReplyPinError::Authority(cause) => Self::Authority(cause),
+            ReplyPinError::Metadata(cause) => Self::Metadata(cause),
+        }
     }
 }
 
@@ -417,69 +425,13 @@ impl SettingsReceiptAuthority {
         connection: &Connection,
         request: &OwnedVerifiedSettingsAccess,
     ) -> Result<(), SettingsAccessQualificationError> {
-        let mut statement = connection.prepare("SELECT device_id,configuration,revoked_at FROM transport_endpoint WHERE singleton=1")
-            .map_err(SettingsServiceError::from)?;
-        let mut rows = statement.query([]).map_err(SettingsServiceError::from)?;
-        let row = rows
-            .next()
-            .map_err(SettingsServiceError::from)?
-            .ok_or(SettingsServiceError::NotFound)?;
-        let configuration: AccessEndpointConfiguration =
-            serde_json::from_str(original_reply_text(row, 1, MAX_ACCESS_IDENTITY_BYTES)?)
-                .map_err(SettingsAccessQualificationError::Metadata)?;
-        if original_reply_text(row, 0, 36)? != self.core.authority.host_id.to_string()
-            || configuration.version != 1
-            || configuration.keys != self.core.endpoint.public_keys()
-            || !matches!(configuration.role, AccessEndpointRole::Host)
-        {
-            return Err(SettingsServiceError::OutsideScope.into());
-        }
-        if row
-            .get::<_, Option<i64>>(2)
-            .map_err(SettingsServiceError::from)?
-            .is_some()
-        {
-            return Err(SettingsServiceError::Device(DeviceError::EndpointRevoked).into());
-        }
-        drop(rows);
-        drop(statement);
         let source = request.authority_source();
-        let mut statement = connection
-            .prepare("SELECT public_identity,revoked_at FROM devices WHERE id=?1")
-            .map_err(SettingsServiceError::from)?;
-        let mut rows = statement
-            .query([source.verified_peer_keys().device_id.to_string()])
-            .map_err(SettingsServiceError::from)?;
-        let row = rows
-            .next()
-            .map_err(SettingsServiceError::from)?
-            .ok_or(SettingsServiceError::NotFound)?;
-        let peer: AccessPinnedPeer =
-            serde_json::from_str(original_reply_text(row, 0, MAX_ACCESS_IDENTITY_BYTES)?)
-                .map_err(SettingsAccessQualificationError::Metadata)?;
-        peer.keys
-            .validate()
-            .map_err(DeviceError::from)
-            .map_err(SettingsServiceError::from)?;
-        peer.access.validate().map_err(SettingsServiceError::from)?;
-        if peer.version != 1
-            || peer.keys != *source.verified_peer_keys()
-            || serde_json::to_value(&peer).map_err(SettingsAccessQualificationError::Metadata)?
-                != *source.pinned_identity()
-        {
-            return Err(SettingsServiceError::OutsideScope.into());
-        }
-        if row
-            .get::<_, Option<i64>>(1)
-            .map_err(SettingsServiceError::from)?
-            .is_some()
-        {
-            return Err(SettingsServiceError::Storage(StorageError::RevokedDevice(
-                peer.keys.device_id.to_string(),
-            ))
-            .into());
-        }
-        Ok(())
+        self.check_reply_pins_on(
+            connection,
+            source.verified_peer_keys(),
+            source.pinned_identity(),
+        )
+        .map_err(SettingsAccessQualificationError::from)
     }
 }
 
@@ -573,28 +525,6 @@ struct AccessReplyProvenance<'keys> {
     connection_epoch: Uuid,
     grant: Option<SettingsGrantReference>,
     parent_id: Option<Uuid>,
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct AccessEndpointConfiguration {
-    version: u16,
-    keys: DevicePublicKeys,
-    role: AccessEndpointRole,
-}
-
-#[derive(Deserialize)]
-#[serde(tag = "role", rename_all = "snake_case", deny_unknown_fields)]
-enum AccessEndpointRole {
-    Host,
-}
-
-#[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct AccessPinnedPeer {
-    version: u16,
-    keys: DevicePublicKeys,
-    access: DeviceAccess,
 }
 
 pub(crate) struct QualifiedSettingsAccessReply<'scope> {
