@@ -1,3 +1,6 @@
+mod inspection;
+pub use inspection::{ApprovalCursor, ApprovalPage, ApprovalSummary, MAX_APPROVAL_METADATA_BYTES};
+
 use crate::storage::{PermissionRow, StorageError, Store};
 use crate::tools::{ToolCapability, ToolDescriptor, ToolError, ToolRegistry};
 use serde::{Deserialize, Serialize};
@@ -14,6 +17,8 @@ const APPROVAL_LIFETIME_MS: i64 = 30 * 60 * 1_000;
 
 #[derive(Debug, Error)]
 pub enum PermissionError {
+    #[error("invalid approval inspection: {0}")]
+    InvalidInspection(&'static str),
     #[error("permission storage failed: {0}")]
     Storage(#[from] StorageError),
     #[error("tool validation failed: {0}")]

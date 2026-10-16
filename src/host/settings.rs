@@ -129,6 +129,11 @@ impl HostSettings {
                 SettingsError::Invalid("invalid default conversation configuration")
             })?;
         }
+        if self.loop_limits.absolute_deadline.is_some() {
+            return Err(SettingsError::Invalid(
+                "recurring host defaults cannot contain an absolute execution deadline",
+            ));
+        }
         self.loop_limits
             .validate()
             .map_err(|_| SettingsError::Invalid("invalid native execution limits"))?;
