@@ -1130,10 +1130,10 @@ impl SettingsReceiveWork {
     pub(in crate::devices) async fn next(
         &mut self,
     ) -> Result<Option<SettingsReceiveWorkEvent>, SettingsReceiveError> {
-        if let Err(error) = self.ledger.check_admission() {
-            if self.failure.is_none() {
-                self.failure = Some(error);
-            }
+        if let Err(error) = self.ledger.check_admission()
+            && self.failure.is_none()
+        {
+            self.failure = Some(error);
         }
         if self.failure.is_some() || self.retained_join.is_some() || self.unexpected_join.is_some()
         {
