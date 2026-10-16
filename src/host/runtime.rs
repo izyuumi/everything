@@ -170,7 +170,7 @@ enum HostWorker {
     Publication(Result<(), HostError>),
     Settings(Result<(), HostError>),
     SettingsAgent(Result<(), HostError>),
-    Relay(Result<(), DeviceError>),
+    Relay(Result<(), HostError>),
     Coordinator(Result<(), crate::worker::WorkerError>),
 }
 
@@ -537,24 +537,26 @@ impl HostService {
                 host.devices.clone(),
                 Arc::clone(&host.mutation),
             )
+            .map_err(HostError::from)
             .and_then(|(transport, owner)| {
+                host.settings_service.bind_paired_transport(&transport)?;
                 host.settings_transport.set(transport).map_err(|_| {
-                    DeviceError::Invalid("settings transport owner was already registered")
+                    HostError::Invalid("settings transport owner was already registered")
                 })?;
                 Ok(owner)
             });
             workers.spawn(async move {
                 let outcome = match transport {
-                    Ok(owner) => {
-                        host.devices
-                            .run_relay_with_settings(
-                                origin,
-                                relay_stop,
-                                host.relay_updates.clone(),
-                                owner,
-                            )
-                            .await
-                    }
+                    Ok(owner) => host
+                        .devices
+                        .run_relay_with_settings(
+                            origin,
+                            relay_stop,
+                            host.relay_updates.clone(),
+                            owner,
+                        )
+                        .await
+                        .map_err(HostError::from),
                     Err(error) => Err(error),
                 };
                 HostWorker::Relay(outcome)
