@@ -57,9 +57,14 @@ struct NativeSettingsOperation: Identifiable, Sendable {
               value.binding.expectedRevision == target.expectedRevision else { throw NativeSettingsSessionError.invalidResponse }
         if let original = inspection {
             guard original.binding == value.binding, original.origin == value.origin else { throw NativeSettingsSessionError.invalidResponse }
-            if value.updatedAt < original.updatedAt { return }
-            if case .finished(let previous) = original.phase, previous.state != .unknown {
-                guard value.phase == original.phase else { throw NativeSettingsSessionError.invalidResponse }
+            if case .finished(let previous) = original.phase {
+                if original.write == nil, value.write != nil { throw NativeSettingsSessionError.invalidResponse }
+                if value.phase != original.phase {
+                    guard previous.state == .unknown, let write = original.write, write.resolution == nil,
+                          case .finished = value.phase, value.write?.resolution != nil else {
+                        throw NativeSettingsSessionError.invalidResponse
+                    }
+                }
             }
             if let write = original.write {
                 guard let next = value.write, write.expectedRevision == next.expectedRevision,
