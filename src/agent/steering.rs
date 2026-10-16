@@ -213,16 +213,14 @@ impl InputInbox {
             .pending
             .iter()
             .find(|queued| queued.sequence == event.sequence.get())
-        {
-            if event.conversation_id != queued.command.conversation_id
+            && (event.conversation_id != queued.command.conversation_id
                 || event.causation_id != Some(queued.command.delivery_id)
                 || event.occurred_at != queued.command.accepted_at
-                || event.payload != queued.command.payload()
-            {
-                return Err(AgentError::InvalidData(
-                    "queued task input differs from its durable event",
-                ));
-            }
+                || event.payload != queued.command.payload())
+        {
+            return Err(AgentError::InvalidData(
+                "queued task input differs from its durable event",
+            ));
         }
         Ok(())
     }
