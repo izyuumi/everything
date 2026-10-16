@@ -16,6 +16,24 @@ final class HostModel {
     var closing = false
     var message: String?
     var lastRefresh: Date?
+    var scheduleEngine: HostScheduleEngine?
+    var scheduleJobs: [HostScheduleJob] = []
+    var scheduleCursor: OwnerID?
+    var schedulesLoading = false
+    var schedulesLoaded = false
+    var schedulesBrowsing = false
+    var schedulesError: String?
+    var schedulesUpdated: Date?
+    var selectedSchedule: HostScheduleJob?
+    var scheduleRuns: [HostScheduleRun] = []
+    var scheduleHistoryJob: OwnerID?
+    var scheduleHistoryCursor: JSONValue = .null
+    var scheduleHistoryLoading = false
+    var scheduleHistoryLoaded = false
+    var scheduleHistoryBrowsing = false
+    var scheduleHistoryError: String?
+    @ObservationIgnored private var scheduleGeneration = UUID()
+    @ObservationIgnored private var historyGeneration = UUID()
     var tasks: [HostTask] = []
     var conversations: [HostConversation] = []
     var selectedConversation: OwnerID?
@@ -60,6 +78,24 @@ final class HostModel {
         defaults.set(executable, forKey: "hostExecutable")
         defaults.set(stateDirectory, forKey: "hostStateDirectory")
         connected = false
+        scheduleGeneration = UUID()
+        historyGeneration = UUID()
+        scheduleEngine = nil
+        scheduleJobs = []
+        scheduleCursor = nil
+        selectedSchedule = nil
+        scheduleRuns = []
+        scheduleHistoryJob = nil
+        scheduleHistoryCursor = .null
+        schedulesLoading = false
+        scheduleHistoryLoading = false
+        schedulesLoaded = false
+        scheduleHistoryLoaded = false
+        schedulesBrowsing = false
+        scheduleHistoryBrowsing = false
+        schedulesError = nil
+        scheduleHistoryError = nil
+        schedulesUpdated = nil
         tasks = []
         conversations = []
         approvals = []
@@ -109,6 +145,95 @@ final class HostModel {
             guard original == connection, !Task.isCancelled, !closing else { return }
             connected = false
             message = error.localizedDescription
+        }
+    }
+
+    func loadSchedules(more: Bool = false, automatic: Bool = false) async {
+        guard !closing, !schedulesLoading, !more || (scheduleCursor != nil && scheduleJobs.count < 100) else { return }
+        let generation = UUID()
+        scheduleGeneration = generation
+        schedulesLoading = true
+        defer { if scheduleGeneration == generation { schedulesLoading = false } }
+        let original = connection
+        let version = connectionKey
+        let after = more ? scheduleCursor : nil
+        do {
+            if !more {
+                let status = try await client.request(.query("schedule_engine"), connection: original)
+                let engine = try HostScheduleEngine(status)
+                guard original == connection, version == connectionKey, generation == scheduleGeneration, !closing, !Task.isCancelled else { return }
+                scheduleEngine = engine
+                if automatic && schedulesBrowsing { return }
+            }
+            let query: JSONValue = .object(["kind": .string("list"), "after_id": after.map { .string($0.string) } ?? .null, "enabled": .null, "include_deleted": .bool(true), "limit": .integer(10)])
+            let response = try await client.request(.query("schedule", fields: ["query": query]), connection: original)
+            let page = try HostSchedulePage(response, connection: original, after: after)
+            guard original == connection, version == connectionKey, generation == scheduleGeneration, !closing, !Task.isCancelled else { return }
+            let previous = more ? scheduleJobs : []
+            guard previous.count + page.jobs.count <= 100,
+                  Set((previous + page.jobs).map(\.id)).count == previous.count + page.jobs.count else { throw OwnerClientError.invalidResponse }
+            scheduleJobs = previous + page.jobs
+            scheduleCursor = page.next
+            schedulesLoaded = true
+            schedulesBrowsing = more
+            schedulesError = nil
+            schedulesUpdated = Date()
+        } catch {
+            if original == connection, version == connectionKey, generation == scheduleGeneration, !closing, !Task.isCancelled {
+                schedulesError = error.localizedDescription
+            }
+        }
+    }
+
+    func selectSchedule(_ job: HostScheduleJob) {
+        guard !closing, job.source == connection else { return }
+        historyGeneration = UUID()
+        scheduleHistoryJob = job.id
+        scheduleRuns = []
+        scheduleHistoryCursor = .null
+        scheduleHistoryLoading = false
+        scheduleHistoryLoaded = false
+        scheduleHistoryBrowsing = false
+        scheduleHistoryError = nil
+        selectedSchedule = job
+    }
+
+    func loadScheduleHistory(_ job: HostScheduleJob, more: Bool = false, automatic: Bool = false) async {
+        guard !closing, job.source == connection, selectedSchedule?.id == job.id,
+              !automatic || !scheduleHistoryBrowsing,
+              !more || (scheduleHistoryJob == job.id && !scheduleHistoryLoading && scheduleHistoryCursor != .null && scheduleRuns.count < 100) else { return }
+        let generation = UUID()
+        historyGeneration = generation
+        scheduleHistoryLoading = true
+        defer { if historyGeneration == generation { scheduleHistoryLoading = false } }
+        let original = connection
+        let version = connectionKey
+        let before = more ? scheduleHistoryCursor : .null
+        if !more && scheduleHistoryJob != job.id {
+            scheduleHistoryJob = job.id
+            scheduleRuns = []
+            scheduleHistoryCursor = .null
+            scheduleHistoryLoaded = false
+            scheduleHistoryError = nil
+        }
+        do {
+            let query: JSONValue = .object(["kind": .string("history"), "job_id": .string(job.id.string), "before": before, "limit": .integer(10)])
+            let response = try await client.request(.query("schedule", fields: ["query": query]), connection: original)
+            let page = try HostScheduleHistory(response, job: job.id, before: before)
+            guard original == connection, version == connectionKey, generation == historyGeneration,
+                  selectedSchedule?.id == job.id, !closing, !Task.isCancelled else { return }
+            let previous = more ? scheduleRuns : []
+            guard scheduleHistoryJob == job.id, previous.allSatisfy({ $0.jobID == job.id }),
+                  previous.count + page.runs.count <= 100,
+                  Set((previous + page.runs).map(\.id)).count == previous.count + page.runs.count else { throw OwnerClientError.invalidResponse }
+            scheduleRuns = previous + page.runs
+            scheduleHistoryCursor = page.next
+            scheduleHistoryLoaded = true
+            scheduleHistoryBrowsing = more
+            scheduleHistoryError = nil
+        } catch {
+            if original == connection, version == connectionKey, generation == historyGeneration,
+               selectedSchedule?.id == job.id, !closing, !Task.isCancelled { scheduleHistoryError = error.localizedDescription }
         }
     }
 
