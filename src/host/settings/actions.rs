@@ -391,13 +391,16 @@ impl PendingPairingLease {
     }
 
     pub fn invitation(&self) -> Result<NativePairingInvitation, SettingsServiceError> {
-        if Instant::now() >= self.deadline || UnixMillis::now()?.get() >= self.expires_at.get() {
-            return Err(SettingsServiceError::Expired);
-        }
         let state = self
             .state
             .lock()
             .map_err(|_| SettingsServiceError::Poisoned)?;
+        if self._session.cancellation.is_cancelled()
+            || Instant::now() >= self.deadline
+            || UnixMillis::now()?.get() >= self.expires_at.get()
+        {
+            return Err(SettingsServiceError::Expired);
+        }
         if state.lifecycle != NativePairingLifecycle::Retained {
             return Err(SettingsServiceError::OutsideScope);
         }

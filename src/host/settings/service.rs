@@ -237,6 +237,27 @@ impl SettingsService {
             .await
     }
 
+    pub(crate) async fn inspect_native_operation(
+        &self,
+        caller: SettingsCaller,
+        request_id: CommandId,
+    ) -> Result<SettingsOperationInspection, SettingsServiceError> {
+        self.core.authority.validate(&caller, true)?;
+        let CallerSource::NativeUi(session_id) = caller.source else {
+            return Err(SettingsServiceError::OutsideScope);
+        };
+        self.blocking(move |core| {
+            core.authority.validate(&caller, true)?;
+            let record = core.repository.get(request_id)?;
+            core.check_principal(&caller, &record.identity)?;
+            if record.identity.binding.client_session_id != session_id {
+                return Err(SettingsServiceError::OutsideScope);
+            }
+            Ok(record.inspection())
+        })
+        .await
+    }
+
     pub(crate) async fn prepare_device_action(
         &self,
         caller: SettingsCaller,
