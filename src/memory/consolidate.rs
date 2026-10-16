@@ -15,8 +15,8 @@ use tokio_util::sync::CancellationToken;
 use crate::context::{ContextBudget, ContextBuilder, ContextInput, MemoryExcerpt, TaskContext};
 use crate::model::{ContentBlock, ModelEvent, ModelProvider, StopReason, ToolChoice};
 
-use super::wiki::{content_hash, parse_page, validate_page_path};
-use super::{Wiki, WikiError, WikiLimits};
+use super::wiki::{content_hash, validate_page_path};
+use super::{Wiki, WikiError};
 
 const APPLICATION_ID: i32 = 0x454d_4a42;
 const MAX_INPUT: usize = 128 * 1024;
@@ -1106,8 +1106,17 @@ impl MaintenanceState {
         if markdown.len() > MAX_PAGE {
             return Err(limit("consolidated page bytes", MAX_PAGE));
         }
-        parse_page(&path, markdown.clone(), &WikiLimits::default())?;
-        managed_entries(&markdown)?;
+        self.wiki
+            .preflight_page_write(&path, &markdown, old.is_some())?;
+        let visible_entries = managed_entries(&markdown)?;
+        if entry_ids
+            .iter()
+            .any(|id| !visible_entries.iter().any(|entry| entry.id == *id))
+        {
+            return Err(ConsolidationError::Invalid(
+                "generated entries must remain visible managed sections".into(),
+            ));
+        }
         let staged = StagedWrite {
             version: 1,
             page_path: path,
