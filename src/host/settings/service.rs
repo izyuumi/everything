@@ -1,4 +1,5 @@
 mod devices;
+mod persistence;
 
 pub use devices::NativeDeviceActionResult;
 

@@ -254,10 +254,7 @@ impl OperationRepository {
         if collision {
             return Err(SettingsServiceError::Conflict);
         }
-        let pending: i64 = transaction.query_row(
-            "SELECT count(*) FROM settings_operations o WHERE json_extract((SELECT record FROM settings_operation_updates u WHERE u.request_id=o.request_id ORDER BY sequence DESC LIMIT 1),'$.phase.phase') != 'finished'",
-            [], |row| row.get(0),
-        )?;
+        let pending = pending_count(&transaction)?;
         let awaiting = !matches!(phase, SettingsOperationPhase::Finished { .. });
         if matches!(
             phase,
@@ -551,27 +548,151 @@ impl OperationRepository {
         Ok(records)
     }
 
+    pub fn begin_write(
+        &self,
+        identity: OperationIdentity,
+        intent: SettingsWriteIntent,
+        check_current: impl Fn() -> Result<(), SettingsServiceError>,
+    ) -> Result<(OperationRecord, bool), SettingsServiceError> {
+        identity.validate()?;
+        intent.validate(&identity)?;
+        let encoded = encode(&identity, MAX_IDENTITY_BYTES)?;
+        let mut connection = self.store.connection()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let existing = read(&transaction, identity.binding.request_id)?;
+        let had_existing = existing.is_some();
+        if let Some(existing) = existing {
+            if existing.identity != identity {
+                return Err(SettingsServiceError::Conflict);
+            }
+            if let Some(write) = existing.write() {
+                if write.intent != intent {
+                    return Err(SettingsServiceError::Conflict);
+                }
+                return Ok((existing, false));
+            }
+            if !matches!(existing.phase(), SettingsOperationPhase::InFlight { native_request_id } if Some(*native_request_id)==intent.native_request_id)
+            {
+                return Err(SettingsServiceError::Conflict);
+            }
+        } else if intent.native_request_id.is_some() {
+            return Err(SettingsServiceError::NotFound);
+        }
+        if let Some(unresolved) = unresolved_write(&transaction)? {
+            return Err(SettingsServiceError::WriteBlocked {
+                request_id: unresolved.identity.binding.request_id,
+            });
+        }
+        if !had_existing {
+            let collision: bool = transaction.query_row(
+                "SELECT EXISTS(SELECT 1 FROM settings_native_requests WHERE request_id=?1)",
+                [identity.binding.request_id.to_string()],
+                |row| row.get(0),
+            )?;
+            if collision {
+                return Err(SettingsServiceError::Conflict);
+            }
+            if pending_count(&transaction)? >= MAX_PENDING {
+                return Err(SettingsServiceError::Capacity);
+            }
+        }
+        reserve_capacity(
+            &transaction,
+            !had_existing,
+            false,
+            3,
+            Some(identity.binding.request_id),
+        )?;
+        check_current()?;
+        let now = UnixMillis::now()?;
+        if now.get() >= identity.binding.expires_at.get() {
+            return Err(SettingsServiceError::Expired);
+        }
+        if !had_existing {
+            transaction.execute(
+                "INSERT INTO settings_operations(request_id,identity,created_at,expires_at) VALUES (?1,?2,?3,?4)",
+                params![identity.binding.request_id.to_string(),encoded,identity.binding.issued_at.get() as i64,identity.binding.expires_at.get() as i64],
+            )?;
+        }
+        let update = UpdateRecord {
+            write: Some(SettingsWriteRecord {
+                intent,
+                resolution: None,
+            }),
+            pairing: None,
+            phase: SettingsOperationPhase::Applying {
+                expected_revision: identity
+                    .binding
+                    .expected_revision
+                    .ok_or(SettingsServiceError::CorruptJournal)?,
+                revision: identity
+                    .binding
+                    .expected_revision
+                    .ok_or(SettingsServiceError::CorruptJournal)?
+                    + 1,
+            },
+            observation: None,
+            updated_at: now,
+        };
+        validate_update(&identity, &update)?;
+        append(&transaction, identity.binding.request_id, &update)?;
+        check_current()?;
+        if UnixMillis::now()?.get() >= identity.binding.expires_at.get() {
+            return Err(SettingsServiceError::Expired);
+        }
+        transaction.commit()?;
+        Ok((OperationRecord { identity, update }, true))
+    }
+
+    pub fn finish_write(
+        &self,
+        expected: &OperationIdentity,
+        intent: &SettingsWriteIntent,
+        resolution: Option<SettingsWriteResolution>,
+        result: SettingsOperationResult,
+    ) -> Result<SettingsOperationInspection, SettingsServiceError> {
+        let mut connection = self.store.connection()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let record = read(&transaction, expected.binding.request_id)?
+            .ok_or(SettingsServiceError::NotFound)?;
+        if record.identity != *expected {
+            return Err(SettingsServiceError::Conflict);
+        }
+        let write = record.write().ok_or(SettingsServiceError::Conflict)?;
+        if write.intent != *intent {
+            return Err(SettingsServiceError::Conflict);
+        }
+        if let SettingsOperationPhase::Finished { result: previous } = record.phase() {
+            if write.resolution == resolution && previous == &result {
+                return Ok(record.inspection());
+            }
+            if write.resolution.is_some() {
+                return Err(SettingsServiceError::Conflict);
+            }
+        }
+        let update = UpdateRecord {
+            write: Some(SettingsWriteRecord {
+                intent: intent.clone(),
+                resolution,
+            }),
+            pairing: None,
+            phase: SettingsOperationPhase::Finished { result },
+            observation: None,
+            updated_at: UnixMillis::now()?,
+        };
+        validate_update(expected, &update)?;
+        append(&transaction, expected.binding.request_id, &update)?;
+        transaction.commit()?;
+        Ok(OperationRecord {
+            identity: record.identity,
+            update,
+        }
+        .inspection())
+    }
+
     pub fn unresolved_write(&self) -> Result<Option<OperationRecord>, SettingsServiceError> {
         let connection = self.store.connection()?;
-        let mut statement = connection.prepare("SELECT o.request_id FROM settings_operations o JOIN settings_operation_updates u ON u.sequence=(SELECT max(sequence) FROM settings_operation_updates WHERE request_id=o.request_id) WHERE EXISTS(SELECT 1 FROM settings_operation_updates h WHERE h.request_id=o.request_id AND json_type(h.record,'$.write')='object') AND coalesce(json_extract(u.record,'$.write.resolution') IN ('applied','not_applied'),0)=0 ORDER BY o.request_id LIMIT 2")?;
-        let mut rows = statement.query([])?;
-        let mut found = None;
-        while let Some(row) = rows.next()? {
-            if found.is_some() {
-                return Err(SettingsServiceError::CorruptJournal);
-            }
-            let request_id = bounded_text(row, 0, 36)?.parse()?;
-            let record =
-                read(&connection, request_id)?.ok_or(SettingsServiceError::CorruptJournal)?;
-            if record
-                .write()
-                .is_none_or(|write| write.resolution.is_some())
-            {
-                return Err(SettingsServiceError::CorruptJournal);
-            }
-            found = Some(record);
-        }
-        Ok(found)
+        unresolved_write(&connection)
     }
 }
 
@@ -683,16 +804,69 @@ fn prepare_capacity(
     transaction: &Transaction<'_>,
     awaiting: bool,
 ) -> Result<(), SettingsServiceError> {
-    let (identities,updates):(i64,i64)=transaction.query_row("SELECT (SELECT count(*) FROM settings_operations)+(SELECT count(*) FROM settings_native_requests),(SELECT count(*) FROM settings_operation_updates)",[],|row|Ok((row.get(0)?,row.get(1)?)))?;
-    let (native_reserve,update_reserve):(i64,i64)=transaction.query_row("WITH phases AS (SELECT json_extract((SELECT record FROM settings_operation_updates u WHERE u.request_id=o.request_id ORDER BY sequence DESC LIMIT 1),'$.phase.phase') AS phase FROM settings_operations o) SELECT coalesce(sum(CASE WHEN phase IN ('awaiting_action','awaiting_confirmation') THEN 1 ELSE 0 END),0), coalesce(sum(CASE WHEN phase IN ('awaiting_action','awaiting_confirmation') THEN 2 WHEN phase='in_flight' THEN 1 ELSE 0 END),0) FROM phases",[],|row|Ok((row.get(0)?,row.get(1)?)))?;
-    let extra_id = if awaiting { 2 } else { 1 };
-    let extra_updates = if awaiting { 3 } else { 1 };
-    if identities + native_reserve + extra_id > MAX_IDENTITIES
-        || updates + update_reserve + extra_updates > MAX_UPDATES
+    reserve_capacity(
+        transaction,
+        true,
+        awaiting,
+        if awaiting { 5 } else { 0 },
+        None,
+    )
+}
+
+fn reserve_capacity(
+    transaction: &Transaction<'_>,
+    new_identity: bool,
+    future_native: bool,
+    future_updates: i64,
+    replacing: Option<CommandId>,
+) -> Result<(), SettingsServiceError> {
+    let (identities, updates): (i64, i64) = transaction.query_row(
+        "SELECT (SELECT count(*) FROM settings_operations)+(SELECT count(*) FROM settings_native_requests),(SELECT count(*) FROM settings_operation_updates)",
+        [], |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    let (native_reserve, update_reserve): (i64, i64) = transaction.query_row(
+        "WITH current AS (SELECT (SELECT record FROM settings_operation_updates u WHERE u.request_id=o.request_id ORDER BY sequence DESC LIMIT 1) AS record FROM settings_operations o WHERE ?1 IS NULL OR o.request_id != ?1) SELECT coalesce(sum(CASE WHEN json_extract(record,'$.phase.phase') IN ('awaiting_action','awaiting_confirmation') THEN 1 ELSE 0 END),0),coalesce(sum(CASE WHEN json_extract(record,'$.phase.phase') IN ('awaiting_action','awaiting_confirmation') THEN 5 WHEN json_extract(record,'$.phase.phase')='in_flight' THEN 4 WHEN json_extract(record,'$.phase.phase')='applying' THEN 3 WHEN json_type(record,'$.write')='object' AND json_type(record,'$.write.resolution')='null' THEN 2 WHEN json_extract(record,'$.phase.result.state.kind')='pending_application' THEN 1 ELSE 0 END),0) FROM current",
+        [replacing.map(|id| id.to_string())], |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    if identities + native_reserve + i64::from(new_identity) + i64::from(future_native)
+        > MAX_IDENTITIES
+        || updates + update_reserve + 1 + future_updates > MAX_UPDATES
     {
         return Err(SettingsServiceError::Capacity);
     }
     Ok(())
+}
+
+fn pending_count(connection: &rusqlite::Connection) -> Result<i64, SettingsServiceError> {
+    Ok(connection.query_row(
+        "WITH current AS (SELECT (SELECT record FROM settings_operation_updates u WHERE u.request_id=o.request_id ORDER BY sequence DESC LIMIT 1) AS record FROM settings_operations o) SELECT count(*) FROM current WHERE json_extract(record,'$.phase.phase') != 'finished' OR (json_type(record,'$.write')='object' AND json_type(record,'$.write.resolution')='null')",
+        [], |row| row.get(0),
+    )?)
+}
+
+fn unresolved_write(
+    connection: &rusqlite::Connection,
+) -> Result<Option<OperationRecord>, SettingsServiceError> {
+    let mut statement = connection.prepare("SELECT o.request_id FROM settings_operations o WHERE EXISTS(SELECT 1 FROM settings_operation_updates h WHERE h.request_id=o.request_id AND json_type(h.record,'$.write')='object') ORDER BY o.request_id LIMIT 1025")?;
+    let mut rows = statement.query([])?;
+    let mut found = None;
+    let mut inspected = 0;
+    while let Some(row) = rows.next()? {
+        if inspected == MAX_IDENTITIES {
+            return Err(SettingsServiceError::CorruptJournal);
+        }
+        inspected += 1;
+        let request_id = bounded_text(row, 0, 36)?.parse()?;
+        let record = read(connection, request_id)?.ok_or(SettingsServiceError::CorruptJournal)?;
+        let write = record.write().ok_or(SettingsServiceError::CorruptJournal)?;
+        if write.resolution.is_none() {
+            if found.is_some() {
+                return Err(SettingsServiceError::CorruptJournal);
+            }
+            found = Some(record);
+        }
+    }
+    Ok(found)
 }
 
 fn identity_capacity(transaction: &Transaction<'_>) -> Result<(), SettingsServiceError> {
@@ -894,6 +1068,10 @@ impl SettingsWriteIntent {
             || self.before.revision >= i64::MAX as u64
             || self.after.revision != self.before.revision + 1
             || identity.binding.expected_revision != Some(self.before.revision)
+            || !matches!(
+                identity.binding.scope,
+                super::contract::SettingsScope::Host { .. }
+            )
             || self.changed_keys.len() > SettingKey::ALL.len()
             || !self.changed_keys.windows(2).all(|keys| keys[0] < keys[1])
         {
@@ -921,6 +1099,9 @@ impl SettingsWriteIntent {
                     super::authority::SettingsOperationOrigin::LocalOwner { .. }
                 ) && self.native_request_id.is_none()
                     && request.changed_keys == self.changed_keys
+                    && !self.changed_keys.iter().any(|key| {
+                        key.agent_mutability() == AgentMutability::RequiresNativeConfirmation
+                    })
                     && request.restart_required == self.restart_required => {}
             _ => return Err(SettingsServiceError::CorruptJournal),
         }
