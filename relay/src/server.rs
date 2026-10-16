@@ -169,20 +169,20 @@ async fn websocket(State(state): State<ServerState>, upgrade: WebSocketUpgrade) 
         .on_upgrade(move |mut socket| async move {
             let _token = token;
             let result = run_session(&mut socket, &state).await;
-            if let Err(error) = result {
-                if !matches!(error, RelayError::Cancelled) {
-                    let code = error_code(&error);
-                    eprintln!("relay WebSocket session ended: {code:?}");
-                    let frame = RelayServerMessage::Error {
-                        schema_version: RELAY_SCHEMA_VERSION,
-                        code,
-                    };
-                    if send_frame(&mut socket, &frame, &state.cancellation)
-                        .await
-                        .is_err()
-                    {
-                        eprintln!("relay could not send the session error to a disconnected peer");
-                    }
+            if let Err(error) = result
+                && !matches!(error, RelayError::Cancelled)
+            {
+                let code = error_code(&error);
+                eprintln!("relay WebSocket session ended: {code:?}");
+                let frame = RelayServerMessage::Error {
+                    schema_version: RELAY_SCHEMA_VERSION,
+                    code,
+                };
+                if send_frame(&mut socket, &frame, &state.cancellation)
+                    .await
+                    .is_err()
+                {
+                    eprintln!("relay could not send the session error to a disconnected peer");
                 }
             }
             match timeout(Duration::from_secs(1), socket.send(Message::Close(None))).await {

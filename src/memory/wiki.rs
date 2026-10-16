@@ -608,12 +608,11 @@ fn append_chunks(
         while !section.markdown.is_char_boundary(end) {
             end -= 1;
         }
-        if end < section.end {
-            if let Some(newline) = section.markdown[start..end].rfind('\n') {
-                if newline >= limits.max_chunk_bytes / 2 {
-                    end = start + newline + 1;
-                }
-            }
+        if end < section.end
+            && let Some(newline) = section.markdown[start..end].rfind('\n')
+            && newline >= limits.max_chunk_bytes / 2
+        {
+            end = start + newline + 1;
         }
         let text = &section.markdown[start..end];
         if !text.trim().is_empty() {

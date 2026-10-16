@@ -433,10 +433,10 @@ impl Authorizer {
         let rows = self.validate_snapshot(conversation_id, now)?;
         let mut pending = Vec::new();
         for row in rows {
-            if let StoredRecord::Approval { request } = decode_record(&row)?.record {
-                if self.status_for_request(&request, now)? == ApprovalStatus::Pending {
-                    pending.push(request);
-                }
+            if let StoredRecord::Approval { request } = decode_record(&row)?.record
+                && self.status_for_request(&request, now)? == ApprovalStatus::Pending
+            {
+                pending.push(request);
             }
         }
         Ok(pending)
@@ -523,14 +523,13 @@ impl Authorizer {
         if row.revoked_at.is_some() {
             return Ok(());
         }
-        if let Err(error) = self.store.revoke_permission(grant_id, now) {
-            if self
+        if let Err(error) = self.store.revoke_permission(grant_id, now)
+            && self
                 .store
                 .permission(grant_id)?
                 .is_none_or(|row| row.revoked_at.is_none())
-            {
-                return Err(error.into());
-            }
+        {
+            return Err(error.into());
         }
         Ok(())
     }
