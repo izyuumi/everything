@@ -1,3 +1,4 @@
+mod routing;
 mod session;
 mod settings;
 
@@ -19,8 +20,8 @@ use crate::protocol::{
 };
 use crate::storage::{
     DeviceRow, OutboxRow, RemoteCommandCompletion, RemoteCommandCursor, RemoteCommandRow,
-    RemoteCommandState, StorageError, Store, TransportInboxCursor, TransportInboxRow,
-    TransportOutboxInsert, TransportPruneReport,
+    RemoteCommandState, StorageError, Store, TransportInboxCursor, TransportInboxMetadata,
+    TransportInboxRejection, TransportInboxRow, TransportOutboxInsert, TransportPruneReport,
 };
 use qrcode::{QrCode, render::svg};
 use serde::{Deserialize, Serialize};
@@ -484,18 +485,38 @@ impl DeviceEndpoint {
             store: self.inner.store.clone(),
             pinned_identity: serde_json::to_value(&peer)?,
             envelope_digest: digest,
+            outcome: DurableInboxOutcome::Unobserved,
         };
-        match self
+        let opened = self
             .inner
             .identity
-            .open(&peer.keys, envelope, now.get(), &mut guard)
-        {
-            Ok(_plaintext) => {
+            .open(&peer.keys, envelope, now.get(), &mut guard);
+        match (opened, guard.outcome) {
+            (Ok(_plaintext), DurableInboxOutcome::OrdinaryNew) => {
                 self.inner.inbox_ready.notify_one();
                 Ok(EnvelopeAcceptance::New)
             }
-            Err(CryptoError::Replay) => Ok(EnvelopeAcceptance::Duplicate),
-            Err(error) => Err(error.into()),
+            (Ok(plaintext), DurableInboxOutcome::RejectedNew) => {
+                drop(plaintext);
+                Ok(EnvelopeAcceptance::New)
+            }
+            (
+                Err(CryptoError::Replay),
+                DurableInboxOutcome::OrdinaryDuplicate | DurableInboxOutcome::RejectedDuplicate,
+            ) => Ok(EnvelopeAcceptance::Duplicate),
+            (
+                Err(CryptoError::ReplayStorage(message)),
+                DurableInboxOutcome::RejectedFailure(failure),
+            ) if message == PRIVATE_INBOX_STORAGE_FAILURE => Err(failure.into_device_error()),
+            (Err(error @ CryptoError::ReplayStorage(_)), DurableInboxOutcome::OrdinaryFailure) => {
+                Err(error.into())
+            }
+            (Err(error), DurableInboxOutcome::Unobserved)
+                if !matches!(&error, CryptoError::Replay | CryptoError::ReplayStorage(_)) =>
+            {
+                Err(error.into())
+            }
+            _ => Err(DeviceError::Invalid("durable inbox result is inconsistent")),
         }
     }
 
@@ -1189,11 +1210,43 @@ impl DeviceEndpoint {
     }
 }
 
+const PRIVATE_INBOX_STORAGE_FAILURE: &str = "private_ingress_storage_failure";
+
 struct DurableInbox {
     store: Store,
     pinned_identity: Value,
     envelope_digest: String,
+    outcome: DurableInboxOutcome,
 }
+
+enum DurableInboxOutcome {
+    Unobserved,
+    OrdinaryNew,
+    OrdinaryDuplicate,
+    OrdinaryFailure,
+    RejectedNew,
+    RejectedDuplicate,
+    RejectedFailure(PrivateInboxFailure),
+}
+
+enum PrivateInboxFailure {
+    Storage(StorageError),
+    ReceiptTimeOutOfRange,
+    ExpiryOutOfRange,
+}
+
+impl PrivateInboxFailure {
+    fn into_device_error(self) -> DeviceError {
+        match self {
+            Self::Storage(error) => DeviceError::Storage(error),
+            Self::ReceiptTimeOutOfRange => {
+                DeviceError::Invalid("private receipt time exceeds storage range")
+            }
+            Self::ExpiryOutOfRange => DeviceError::Invalid("private expiry exceeds storage range"),
+        }
+    }
+}
+
 impl ReplayGuard for DurableInbox {
     fn record_if_new(
         &mut self,
@@ -1201,6 +1254,28 @@ impl ReplayGuard for DurableInbox {
         plaintext: &[u8],
         now_ms: u64,
     ) -> Result<bool, CryptoError> {
+        if !matches!(&self.outcome, DurableInboxOutcome::Unobserved) {
+            return Err(CryptoError::ReplayStorage(
+                PRIVATE_INBOX_STORAGE_FAILURE.into(),
+            ));
+        }
+        match routing::classify(plaintext) {
+            routing::RoutingDecision::Ordinary => self.record_ordinary(record, plaintext, now_ms),
+            routing::RoutingDecision::Rejected(reason) => {
+                self.record_rejected(record, now_ms, reason)
+            }
+        }
+    }
+}
+
+impl DurableInbox {
+    fn record_ordinary(
+        &mut self,
+        record: ReplayRecord,
+        plaintext: &[u8],
+        now_ms: u64,
+    ) -> Result<bool, CryptoError> {
+        self.outcome = DurableInboxOutcome::OrdinaryFailure;
         let receipt = TransportInboxRow {
             message_id: record.message_id.to_string(),
             sender: record.sender.to_string(),
@@ -1213,9 +1288,62 @@ impl ReplayGuard for DurableInbox {
             expires_at: i64::try_from(record.expires_at_ms)
                 .map_err(|_| CryptoError::ReplayStorage("expiry exceeds storage range".into()))?,
         };
-        self.store
+        match self
+            .store
             .accept_transport_inbox(&receipt, &self.pinned_identity)
-            .map_err(|error| CryptoError::ReplayStorage(error.to_string()))
+        {
+            Ok(fresh) => {
+                self.outcome = if fresh {
+                    DurableInboxOutcome::OrdinaryNew
+                } else {
+                    DurableInboxOutcome::OrdinaryDuplicate
+                };
+                Ok(fresh)
+            }
+            Err(error) => Err(CryptoError::ReplayStorage(error.to_string())),
+        }
+    }
+
+    fn record_rejected(
+        &mut self,
+        record: ReplayRecord,
+        now_ms: u64,
+        reason: TransportInboxRejection,
+    ) -> Result<bool, CryptoError> {
+        let received_at = i64::try_from(now_ms)
+            .map_err(|_| self.record_private_failure(PrivateInboxFailure::ReceiptTimeOutOfRange))?;
+        let expires_at = i64::try_from(record.expires_at_ms)
+            .map_err(|_| self.record_private_failure(PrivateInboxFailure::ExpiryOutOfRange))?;
+        let message_id = record.message_id.to_string();
+        let sender = record.sender.to_string();
+        let recipient = record.recipient.to_string();
+        let receipt = TransportInboxMetadata {
+            message_id: &message_id,
+            sender: &sender,
+            recipient: &recipient,
+            envelope_digest: &self.envelope_digest,
+            received_at,
+            expires_at,
+        };
+        match self
+            .store
+            .reject_transport_inbox(&receipt, &self.pinned_identity, reason)
+        {
+            Ok(fresh) => {
+                self.outcome = if fresh {
+                    DurableInboxOutcome::RejectedNew
+                } else {
+                    DurableInboxOutcome::RejectedDuplicate
+                };
+                Ok(fresh)
+            }
+            Err(error) => Err(self.record_private_failure(PrivateInboxFailure::Storage(error))),
+        }
+    }
+
+    fn record_private_failure(&mut self, failure: PrivateInboxFailure) -> CryptoError {
+        self.outcome = DurableInboxOutcome::RejectedFailure(failure);
+        CryptoError::ReplayStorage(PRIVATE_INBOX_STORAGE_FAILURE.into())
     }
 }
 
