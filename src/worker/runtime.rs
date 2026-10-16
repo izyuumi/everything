@@ -418,18 +418,19 @@ async fn reconcile(core: &RuntimeCore) -> Result<(), WorkerError> {
     let jobs = core.endpoint.jobs().await?;
     let mut busy = false;
     for job in &jobs {
-        if !job.cancellation_acknowledged && !job.state.is_terminal() {
-            if let Some(request_id) = job.cancellation_command_id {
-                core.endpoint
-                    .send_executor(
-                        WorkerMessage::CancellationAccepted {
-                            binding: job.binding.clone(),
-                            request_id,
-                        },
-                        UnixMillis::now()?,
-                    )
-                    .await?;
-            }
+        if !job.cancellation_acknowledged
+            && !job.state.is_terminal()
+            && let Some(request_id) = job.cancellation_command_id
+        {
+            core.endpoint
+                .send_executor(
+                    WorkerMessage::CancellationAccepted {
+                        binding: job.binding.clone(),
+                        request_id,
+                    },
+                    UnixMillis::now()?,
+                )
+                .await?;
         }
         let Some(manifest) = job.manifest.as_ref() else {
             continue;
@@ -456,10 +457,12 @@ async fn reconcile(core: &RuntimeCore) -> Result<(), WorkerError> {
         if !native.task.status.is_terminal() {
             busy = true;
         }
-        if job.result.is_none() && job.rejection.is_none() && !revoked {
-            if let Some(status) = result_status(&native) {
-                publish_result(core, job, &native, status).await?;
-            }
+        if job.result.is_none()
+            && job.rejection.is_none()
+            && !revoked
+            && let Some(status) = result_status(&native)
+        {
+            publish_result(core, job, &native, status).await?;
         }
     }
     if busy || core.broker.is_quarantined() {
