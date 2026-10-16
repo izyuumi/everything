@@ -17,6 +17,8 @@ use crate::scheduler::{
     DiscoveryServices, Scheduler, SchedulerError, SchedulerLimits, SchedulerServices,
     SchedulerToolBinding, SchedulerTools, TaskProviderFactory,
 };
+use crate::scheduling::controls::{ControlError, ScheduleControls};
+use crate::scheduling::tools::{ScheduleToolBinding, ScheduleTools};
 use crate::selector::{SEARCH_TOOLS_NAME, SearchTools, SelectorError, ToolSelector};
 use crate::service::{ServiceError, StateLease};
 use crate::storage::{StorageError, Store};
@@ -51,6 +53,10 @@ pub enum HostError {
     Agent(#[from] AgentError),
     #[error(transparent)]
     Scheduler(#[from] SchedulerError),
+    #[error(transparent)]
+    ScheduleEngine(#[from] crate::scheduling::engine::EngineError),
+    #[error(transparent)]
+    ScheduleControl(#[from] ControlError),
     #[error(transparent)]
     Tool(#[from] ToolError),
     #[error(transparent)]
@@ -101,6 +107,7 @@ pub struct HostService {
     server: LocalServer,
     calls: mpsc::Receiver<LocalCall>,
     _scheduler_binding: SchedulerToolBinding,
+    _schedule_binding: ScheduleToolBinding,
 }
 
 pub(super) struct HostInner {
@@ -112,6 +119,8 @@ pub(super) struct HostInner {
     pub(super) registry: Arc<ToolRegistry>,
     pub(super) authorizer: Arc<Authorizer>,
     pub(super) scheduler: Scheduler,
+    pub(super) schedule_engine: crate::scheduling::engine::ScheduleEngine,
+    pub(super) schedule_controls: Arc<ScheduleControls>,
     pub(super) broker: ToolBroker,
     pub(super) changed: Notify,
     pub(super) mutation: Mutex<()>,
@@ -147,6 +156,7 @@ impl HostService {
             authorizer,
             discovery,
             task_tools,
+            schedule_tools,
             relay_origin,
             _preparation_lease,
         ) = tokio::task::spawn_blocking(move || {
@@ -166,6 +176,8 @@ impl HostService {
                 BuiltinTools::new(BuiltinConfig::default())?.register_into(&mut registry)?;
             let task_tools = SchedulerTools::new();
             scopes.extend(task_tools.register_into(&mut registry)?);
+            let schedule_tools = ScheduleTools::new();
+            scopes.extend(schedule_tools.register_into(&mut registry)?);
             let catalog_authorizer = Arc::new(Authorizer::new(
                 store.clone(),
                 Arc::new(registry.clone()),
@@ -185,6 +197,7 @@ impl HostService {
                 authorizer,
                 DiscoveryServices { selector, search },
                 task_tools,
+                schedule_tools,
                 relay_origin,
                 preparation_lease,
             ))
@@ -228,6 +241,38 @@ impl HostService {
                 return Err(error.into());
             }
         };
+        let schedule_engine = match crate::scheduling::engine::ScheduleEngine::start(
+            agent.clone(),
+            scheduler.clone(),
+            registry.clone(),
+        )
+        .await
+        {
+            Ok(engine) => engine,
+            Err(error) => {
+                scheduler.shutdown().await?;
+                return Err(error.into());
+            }
+        };
+        let schedule_controls =
+            match ScheduleControls::new(agent.clone(), schedule_engine.clone(), authorizer.clone())
+            {
+                Ok(controls) => controls,
+                Err(error) => {
+                    schedule_engine.shutdown().await?;
+                    scheduler.shutdown().await?;
+                    return Err(error.into());
+                }
+            };
+        let schedule_binding = match schedule_tools.bind(&schedule_controls, &scheduler) {
+            Ok(binding) => binding,
+            Err(error) => {
+                schedule_controls.shutdown().await?;
+                schedule_engine.shutdown().await?;
+                scheduler.shutdown().await?;
+                return Err(error.into());
+            }
+        };
         let (relay_updates, relay_status) =
             watch::channel(crate::devices::RelaySessionStatus::Stopped);
         let (receipts, _) = watch::channel(0);
@@ -242,6 +287,8 @@ impl HostService {
             registry,
             authorizer,
             scheduler,
+            schedule_engine,
+            schedule_controls,
             broker,
             changed: Notify::new(),
             mutation: Mutex::new(()),
@@ -261,6 +308,7 @@ impl HostService {
             server,
             calls,
             _scheduler_binding: scheduler_binding,
+            _schedule_binding: schedule_binding,
         })
     }
 
@@ -276,6 +324,7 @@ impl HostService {
             server,
             mut calls,
             _scheduler_binding,
+            _schedule_binding,
         } = self;
         let work_stop = cancellation.child_token();
         let local_stop = CancellationToken::new();
@@ -327,7 +376,11 @@ impl HostService {
                 biased;
                 _ = cancellation.cancelled() => break Ok(()),
                 ready = &mut initial_pass => break match ready {
-                    Ok(()) => inner.scheduler.activate().await.map_err(HostError::from),
+                    Ok(()) => async {
+                        inner.scheduler.activate().await?;
+                        inner.schedule_engine.activate()?;
+                        Ok::<_, HostError>(())
+                    }.await,
                     Err(_) => Err(HostError::Worker),
                 },
                 joined = workers.join_next() => match joined {
@@ -381,11 +434,30 @@ impl HostService {
         {
             let _mutation = inner.mutation.lock().await;
             inner.draining.store(true, Ordering::Release);
+            inner.schedule_controls.close();
         }
         inner.receipt_changed();
         work_stop.cancel();
         let scheduler_owner = inner.clone();
         let mut shutdown = Some(tokio::spawn(async move {
+            loop {
+                match scheduler_owner.schedule_controls.shutdown().await {
+                    Ok(()) => break,
+                    Err(_) => tracing::error!(
+                        "schedule controls retain admitted work; engine and state ownership retained"
+                    ),
+                }
+                tokio::time::sleep(Duration::from_secs(1)).await;
+            }
+            loop {
+                match scheduler_owner.schedule_engine.shutdown().await {
+                    Ok(()) => break,
+                    Err(_) => tracing::error!(
+                        "schedule admission cleanup remains unconfirmed; native scheduler and state ownership retained"
+                    ),
+                }
+                tokio::time::sleep(Duration::from_secs(1)).await;
+            }
             loop {
                 match scheduler_owner.scheduler.shutdown().await {
                     Ok(report) => return Ok::<_, HostError>(report),
@@ -524,6 +596,7 @@ impl HostService {
             }
         }
         drop(_scheduler_binding);
+        drop(_schedule_binding);
         result
     }
 }
@@ -589,12 +662,16 @@ impl HostInner {
                 .await
             }
             LocalRequestPayload::Query { query } => Ok(LocalResponsePayload::QueryResult {
-                result: self.query(query.clone()).await?,
+                result: self.query(query.clone(), call.cancellation.clone()).await?,
             }),
             LocalRequestPayload::OwnerOperation { operation } => {
                 Ok(LocalResponsePayload::OwnerOperationResult {
                     result: self
-                        .operate(operation.clone(), call.request.request_id)
+                        .operate(
+                            operation.clone(),
+                            call.request.request_id,
+                            call.cancellation.clone(),
+                        )
                         .await?,
                 })
             }
@@ -639,6 +716,7 @@ impl HostInner {
             }
             LocalRequestPayload::Wait { request } => {
                 let mut changed = self.scheduler.subscribe();
+                let mut scheduled = self.schedule_engine.subscribe();
                 let mut metadata = self.metadata_changed.subscribe();
                 let conversation = self.agent.conversation(request.conversation_id).await?;
                 if request.after_sequence > conversation.info.last_sequence {
@@ -652,6 +730,7 @@ impl HostInner {
                         result = tokio::time::timeout(Duration::from_millis(request.timeout_ms), async {
                             tokio::select! {
                                 result = changed.changed() => result,
+                                result = scheduled.changed() => result,
                                 result = metadata.changed() => result,
                             }
                         }) => {
@@ -681,6 +760,37 @@ impl HostInner {
 
 pub(super) fn public_failure(error: &HostError) -> LocalFailure {
     let (code, message) = match error {
+        HostError::Local(LocalError::Cancelled) => (
+            LocalFailureCode::Cancelled,
+            "operation was cancelled; inspect durable state before retrying a mutation",
+        ),
+        HostError::ScheduleControl(ControlError::Cancelled)
+        | HostError::ScheduleEngine(crate::scheduling::engine::EngineError::Cancelled) => (
+            LocalFailureCode::Cancelled,
+            "schedule operation was cancelled; inspect durable state before retrying a mutation",
+        ),
+        HostError::ScheduleControl(ControlError::OutsideScope) => (
+            LocalFailureCode::PermissionDenied,
+            "schedule operation exceeds its captured authority",
+        ),
+        HostError::ScheduleControl(ControlError::Busy) => {
+            (LocalFailureCode::Busy, "schedule control admission is busy")
+        }
+        HostError::ScheduleControl(ControlError::Stopped | ControlError::ShutdownPending)
+        | HostError::ScheduleEngine(_) => (
+            LocalFailureCode::Unavailable,
+            "schedule controls or engine are unavailable; inspect actual status",
+        ),
+        HostError::ScheduleControl(
+            ControlError::Schedule(_) | ControlError::Invalid(_) | ControlError::ReplyTooLarge,
+        ) => (
+            LocalFailureCode::InvalidRequest,
+            "schedule request is invalid or conflicts with durable state; inspect its identity and revision",
+        ),
+        HostError::ScheduleControl(ControlError::OutcomeUnknown(_)) => (
+            LocalFailureCode::Internal,
+            "schedule mutation outcome is unknown; inspect the original job or occurrence before an explicit retry",
+        ),
         HostError::Draining => (
             LocalFailureCode::Unavailable,
             "host is draining; inspect status and complete explicit cleanup before restarting",
