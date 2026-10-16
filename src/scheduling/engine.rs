@@ -14,8 +14,9 @@ use crate::tools::ToolRegistry;
 
 use super::attempts::{ScheduledAttempt, capture_policy, occurrence_deadline};
 use super::clock::{ClockError, latest_at_or_before, next_after};
+use super::execution::{AttemptResultKind, AttemptUsage, native_usage, terminal_usage};
 use super::{
-    DueClaim, DueDisposition, MissedRunPolicy, OccurrenceId, RunOutcome, RunState, ScheduleError,
+    DueClaim, DueDisposition, MissedRunPolicy, OccurrenceId, RunOutcome, ScheduleError,
     ScheduleRepository, ScheduledJob, ScheduledJobId, ScheduledRun,
 };
 
@@ -59,6 +60,9 @@ pub struct EngineStatus {
     pub blocked_jobs: usize,
     pub blocked: Vec<BlockedSchedule>,
     pub last_error: Option<String>,
+    pub pending_deliveries: usize,
+    pub delivery_error: Option<String>,
+    pub delivery_preparation_error: Option<String>,
 }
 
 #[derive(Clone)]
@@ -97,6 +101,8 @@ struct Actor {
     admission: Arc<Semaphore>,
     blocked: BTreeMap<ScheduledJobId, Blocked>,
     recovery_cursor: Option<OccurrenceId>,
+    delivery_cursor: Option<OccurrenceId>,
+    delivery_poll: Option<Instant>,
 }
 
 impl ScheduleEngine {
@@ -109,7 +115,7 @@ impl ScheduleEngine {
         let resources = (repository.clone(), agent.clone());
         tokio::task::spawn_blocking(move || {
             let resources = resources;
-            resources.0.first_attempt(OccurrenceId::new())
+            resources.0.execution_ready()
         })
         .await
         .map_err(|_| EngineError::Worker)??;
@@ -129,6 +135,8 @@ impl ScheduleEngine {
             admission: Arc::new(Semaphore::new(1)),
             blocked: BTreeMap::new(),
             recovery_cursor: None,
+            delivery_cursor: None,
+            delivery_poll: None,
         };
         tokio::spawn(actor.run());
         Ok(Self {
@@ -244,6 +252,14 @@ impl Actor {
     }
 
     async fn cycle(&mut self) -> Result<Duration, EngineError> {
+        if self.delivery_poll.is_none_or(|at| at.elapsed() >= AUDIT) {
+            self.delivery_poll = Some(Instant::now());
+            if let Err(error) = self.process_deliveries().await {
+                self.status.send_modify(|status| {
+                    status.delivery_error = Some(error.to_string().chars().take(256).collect())
+                });
+            }
+        }
         let cursor = self.recovery_cursor;
         let runs = self
             .work(move |repository, _| Ok(repository.unfinished_runs(cursor, BATCH)?))
@@ -313,10 +329,12 @@ impl Actor {
         }))
     }
 
-    async fn process_run(&self, mut run: ScheduledRun) -> Result<(), EngineError> {
+    async fn process_run(&self, run: ScheduledRun) -> Result<(), EngineError> {
         let occurrence = run.occurrence_id;
+        self.work(move |repository, _| Ok(repository.reserve_run_delivery(occurrence)?))
+            .await?;
         let existing = self
-            .work(move |repository, _| Ok(repository.first_attempt(occurrence)?))
+            .work(move |repository, _| Ok(repository.latest_attempt(occurrence)?))
             .await?;
         let deadline = occurrence_deadline(&run)?;
         let now = wall_now()?;
@@ -335,10 +353,52 @@ impl Actor {
                 .await?
             }
         };
+        let attempt_number = attempt.attempt_number;
+        if let Some(result) = self
+            .work(move |repository, _| Ok(repository.attempt_result(occurrence, attempt_number)?))
+            .await?
+        {
+            if result.next_retry_at.is_none() {
+                return Err(
+                    ScheduleError::Invalid("settled attempt has no unfinished retry").into(),
+                );
+            }
+            if now >= deadline || now < result.settled_at {
+                return self
+                    .finish(
+                        &run,
+                        RunOutcome::Cancelled {
+                            reason: "scheduled retry expired or wall clock moved backwards".into(),
+                        },
+                    )
+                    .await;
+            }
+            if result.next_retry_at.is_some_and(|at| now < at) {
+                return Ok(());
+            }
+            let attempt = self
+                .work(move |repository, _| Ok(repository.reserve_retry(occurrence, now)?))
+                .await?;
+            return self.admit_and_observe(run, attempt).await;
+        }
+        self.admit_and_observe(run, attempt).await
+    }
+
+    async fn admit_and_observe(
+        &self,
+        mut run: ScheduledRun,
+        attempt: ScheduledAttempt,
+    ) -> Result<(), EngineError> {
+        let occurrence = run.occurrence_id;
+        let deadline = attempt.deadline;
+        let number = attempt.attempt_number;
+        let admitted = self
+            .work(move |repository, _| Ok(repository.attempt_admitted(occurrence, number)?))
+            .await?;
         let mut snapshot = match self.scheduler.status(attempt.task_id).await {
             Ok(snapshot) => snapshot,
             Err(SchedulerError::NotFound(_)) => {
-                if run.state == RunState::Running {
+                if admitted {
                     return self.finish(&run,RunOutcome::Unknown {reason:"durably admitted native task is missing; owner reconciliation required".into()}).await;
                 }
                 let now = wall_now()?;
@@ -368,13 +428,14 @@ impl Actor {
             Err(error) => return Err(error.into()),
         };
         validate_snapshot(&attempt, &run, &snapshot)?;
-        if run.state == RunState::Claimed {
+        if !admitted {
             snapshot = self.scheduler.enqueue(submission(&attempt)).await?;
             validate_snapshot(&attempt, &run, &snapshot)?;
-            let recorded_at = wall_now()?.max(run.updated_at);
+            let captured = attempt.clone();
+            let recorded = wall_now()?;
             run = self
                 .work(move |repository, _| {
-                    Ok(repository.start_run(occurrence, run.revision, recorded_at)?)
+                    Ok(repository.mark_attempt_admitted(&captured, recorded)?)
                 })
                 .await?;
         }
@@ -382,24 +443,141 @@ impl Actor {
         if !snapshot.task.status.is_terminal() && (now >= deadline || now < run.claimed_at) {
             snapshot = self.scheduler.cancel(attempt.task_id).await?;
         }
+        if matches!(snapshot.waiting, Some(WaitingReason::ProviderUnavailable))
+            && matches!(
+                snapshot.task.status,
+                TaskStatus::WaitingForChildren | TaskStatus::Failed
+            )
+        {
+            let id = attempt.occurrence_id;
+            let number = attempt.attempt_number;
+            let existing = self
+                .work(move |repository, _| Ok(repository.factory_retirement(id, number)?))
+                .await?;
+            let intent = match existing {
+                Some(intent) => Some(intent),
+                None if snapshot.task.status == TaskStatus::WaitingForChildren
+                    && now < deadline
+                    && now >= run.claimed_at =>
+                {
+                    let captured = attempt.clone();
+                    Some(
+                        self.work(move |repository, _| {
+                            Ok(repository.reserve_factory_retirement(&captured, now)?)
+                        })
+                        .await?,
+                    )
+                }
+                None => None,
+            };
+            if let Some(intent) = intent {
+                snapshot = self
+                    .scheduler
+                    .retire_provider_unavailable(
+                        attempt.task_id,
+                        attempt.input_command_id,
+                        intent.command_id,
+                    )
+                    .await?;
+                validate_snapshot(&attempt, &run, &snapshot)?;
+                if snapshot.task.status != TaskStatus::Failed
+                    || !matches!(snapshot.waiting, Some(WaitingReason::ProviderUnavailable))
+                {
+                    return Err(ScheduleError::Invalid(
+                        "factory retirement returned an unexpected task boundary",
+                    )
+                    .into());
+                }
+                let settled = wall_now()?;
+                let expired = settled >= deadline || settled < attempt.accepted_at;
+                let outcome = if expired {
+                    RunOutcome::Cancelled {
+                        reason:
+                            "scheduled execution deadline expired or wall clock moved backwards"
+                                .into(),
+                    }
+                } else {
+                    RunOutcome::Failed {
+                        code: "provider_factory_unavailable".into(),
+                        message: "Provider construction failed before native execution.".into(),
+                    }
+                };
+                let kind = if expired {
+                    AttemptResultKind::Terminal
+                } else {
+                    AttemptResultKind::FactoryFailure
+                };
+                self.work(move |repository, _| {
+                    Ok(repository.settle_attempt(
+                        &attempt,
+                        kind,
+                        AttemptUsage {
+                            known: true,
+                            ..AttemptUsage::default()
+                        },
+                        &outcome,
+                        settled,
+                    )?)
+                })
+                .await?;
+                return Ok(());
+            }
+        }
         if snapshot.task.status.is_terminal() {
-            let conversation = self.agent.conversation(attempt.conversation_id).await?;
-            if conversation.config != run.definition.target.configuration {
-                return Err(ScheduleError::Invalid(
-                    "native conversation differs from the captured configuration",
-                )
-                .into());
+            let task_id = attempt.task_id;
+            let (terminal, evidence) = self
+                .work(move |repository, _| {
+                    Ok(crate::scheduler::task_snapshot_with_evidence(
+                        &repository.store,
+                        task_id,
+                    )?)
+                })
+                .await?;
+            validate_snapshot(&attempt, &run, &terminal)?;
+            if !terminal.task.status.is_terminal() {
+                return Err(ScheduleError::Invalid("terminal task observation changed").into());
             }
-            let native = conversation.native_run();
-            if let Some(native) = &native {
-                validate_native(&attempt, native)?;
-            }
+            snapshot = terminal;
+            let (usage, native_unknown) = match evidence.as_ref() {
+                Some(evidence) => {
+                    terminal_usage(&attempt, &run.definition.target.configuration, evidence)?
+                }
+                None => {
+                    let native = match self.agent.conversation(attempt.conversation_id).await {
+                        Ok(conversation)
+                            if conversation.config == run.definition.target.configuration =>
+                        {
+                            conversation.native_run().filter(|native| {
+                                native.task_id == attempt.task_id
+                                    && native.command_id == attempt.input_command_id
+                            })
+                        }
+                        Ok(_) => None,
+                        Err(error) => {
+                            self.error(&EngineError::Agent(error));
+                            None
+                        }
+                    };
+                    let native_unknown = native.as_ref().is_some_and(native_outcome_unknown);
+                    match native
+                        .as_ref()
+                        .map(|native| native_usage(&attempt, Some(native)))
+                    {
+                        Some(Ok(usage)) => (usage, native_unknown),
+                        Some(Err(error)) => {
+                            self.error(&EngineError::Schedule(error));
+                            (native_usage(&attempt, None)?, native_unknown)
+                        }
+                        None => (native_usage(&attempt, None)?, false),
+                    }
+                }
+            };
             let task_id = attempt.task_id;
             let journal_unknown = self
                 .work(move |repository, _| Ok(repository.terminal_journal_unknown(task_id)?))
                 .await?;
             let outcome = if uncertain(snapshot.waiting.as_ref())
-                || native.as_ref().is_some_and(native_outcome_unknown)
+                || native_unknown
                 || journal_unknown
             {
                 RunOutcome::Unknown {
@@ -424,11 +602,78 @@ impl Actor {
                                 .unwrap_or("native scheduled task failed"),
                         ),
                     },
-                    _ => return Ok(()),
+                    _ => {
+                        return Err(
+                            ScheduleError::Invalid("unsupported terminal task status").into()
+                        );
+                    }
                 }
             };
-            self.finish(&run, outcome).await?;
+            self.work(move |repository, _| {
+                Ok(repository.settle_attempt(
+                    &attempt,
+                    AttemptResultKind::Terminal,
+                    usage,
+                    &outcome,
+                    now,
+                )?)
+            })
+            .await?;
         }
+        Ok(())
+    }
+
+    async fn process_deliveries(&mut self) -> Result<(), EngineError> {
+        let now = wall_now()?;
+        match self
+            .work(move |repository, _| Ok(repository.prepare_terminal_deliveries(BATCH, now)?))
+            .await
+        {
+            Ok(progress) if progress.capacity_deferred => self.status.send_modify(|status| {
+                status.delivery_preparation_error = Some(
+                    ScheduleError::Capacity("pending scheduled delivery reservations").to_string(),
+                )
+            }),
+            Ok(progress) if progress.prepared > 0 => self
+                .status
+                .send_modify(|status| status.delivery_preparation_error = None),
+            Ok(_) => {}
+            Err(EngineError::Cancelled) => return Err(EngineError::Cancelled),
+            Err(error) => self.status.send_modify(|status| {
+                status.delivery_preparation_error =
+                    Some(error.to_string().chars().take(256).collect())
+            }),
+        }
+        let cursor = self.delivery_cursor;
+        let deliveries = self
+            .work(move |repository, _| Ok(repository.pending_deliveries(cursor, BATCH)?))
+            .await?;
+        self.delivery_cursor = deliveries.last().map(|delivery| delivery.occurrence_id);
+        self.status
+            .send_modify(|status| status.delivery_error = None);
+        for delivery in deliveries {
+            self.check_stop()?;
+            match self
+                .agent
+                .publish_scheduled_result(delivery.command.clone())
+                .await
+            {
+                Ok(receipt) => {
+                    self.work(move |repository, _| {
+                        Ok(repository.acknowledge_delivery(&delivery, receipt.sequence)?)
+                    })
+                    .await?;
+                }
+                Err(error) => self.status.send_modify(|status| {
+                    status.delivery_error = Some(error.to_string().chars().take(256).collect())
+                }),
+            }
+        }
+        let pending = self
+            .work(|repository, _| Ok(repository.pending_delivery_count()?))
+            .await?;
+        self.status
+            .send_modify(|status| status.pending_deliveries = pending);
         Ok(())
     }
 
@@ -531,33 +776,6 @@ fn outcome_preview(value: &str) -> String {
         end -= 1;
     }
     value[..end].replace('\0', " ")
-}
-
-fn validate_native(attempt: &ScheduledAttempt, native: &NativeRunInfo) -> Result<(), EngineError> {
-    let policy = &attempt.execution;
-    if native.task_id != attempt.task_id
-        || native.command_id != attempt.input_command_id
-        || native.workspace_root != policy.workspace_root
-        || native.mode != policy.mode
-        || native
-            .allowed_tools
-            .iter()
-            .cloned()
-            .collect::<std::collections::BTreeSet<_>>()
-            != *policy
-                .allowed_tools
-                .as_ref()
-                .ok_or(ScheduleError::Invalid("uncaptured scheduled allowlist"))?
-        || native.deadline_ms > attempt.deadline.get()
-        || native.model_attempts > policy.limits.max_model_attempts
-        || native.tool_calls > policy.limits.max_tool_calls
-    {
-        return Err(ScheduleError::Invalid(
-            "saved native run differs from the immutable scheduled policy",
-        )
-        .into());
-    }
-    Ok(())
 }
 
 fn native_outcome_unknown(run: &NativeRunInfo) -> bool {
