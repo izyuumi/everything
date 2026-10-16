@@ -10,6 +10,7 @@ use tokio::sync::{Notify, OwnedMutexGuard, oneshot};
 use tokio::task::{Id, JoinSet};
 use uuid::Uuid;
 
+use super::access::{AccessReceiptOutput, AccessWorkState, OwnedCommittedSettingsAccess};
 use super::{
     BindingHistory, CommittedBindSource, CommittedSettingsCommandSource,
     OwnedCommittedSettingsBind, OwnedCommittedSettingsCommand, OwnedHistoricalSettingsCommand,
@@ -75,6 +76,7 @@ pub(in crate::devices) struct SettingsReceiveWork {
     context: Option<Arc<ReceiveContext>>,
     closed: bool,
     failure: Option<SettingsReceiveError>,
+    retained_join: Option<JoinedReceiveWork>,
 }
 
 struct PendingInput {
@@ -106,13 +108,23 @@ struct WorkerOutput {
     completion: Result<WorkCompletion, SettingsReceiveError>,
     retained_command: Option<OwnedVerifiedSettingsCommand>,
     command_outcome: Option<SettingsCommandOutcome>,
+    access: Option<AccessWorkState>,
     frame: Option<FrameWitness>,
+}
+
+type JoinedReceiveWork = Result<(Id, WorkerOutput), tokio::task::JoinError>;
+
+enum AccessJoinedDisposition {
+    Fresh,
+    Settled,
+    Capacity,
 }
 
 pub(super) struct CommandWorkState {
     pub(super) authority: Option<SettingsReceiptAuthority>,
     pub(super) command: Option<OwnedVerifiedSettingsCommand>,
     pub(super) outcome: Option<SettingsCommandOutcome>,
+    pub(super) access: Option<AccessWorkState>,
 }
 
 pub(super) struct GuardScope {
@@ -237,6 +249,7 @@ type TerminalQuarantine = (
     Option<Arc<BindingHistory>>,
     Arc<Ledger>,
     Option<SettingsReceiveError>,
+    Option<JoinedReceiveWork>,
 );
 
 impl ReplyBuildStamp {
@@ -578,6 +591,7 @@ impl SettingsReceiveWork {
             context: None,
             closed: true,
             failure: None,
+            retained_join: None,
         }
     }
 
@@ -991,6 +1005,13 @@ impl SettingsReceiveWork {
     pub(in crate::devices) async fn next(
         &mut self,
     ) -> Result<Option<SettingsReceiveEvent>, SettingsReceiveError> {
+        if self.retained_join.is_some() {
+            self.close_intake();
+            return Err(self
+                .failure
+                .clone()
+                .unwrap_or(SettingsReceiveError::Bookkeeping));
+        }
         if let Some(pending) = self.pending.as_mut() {
             let guard = pending.waiting.as_mut().await;
             let Some(pending) = self.pending.take() else {
@@ -1036,40 +1057,67 @@ impl SettingsReceiveWork {
         let Some(joined) = self.jobs.join_next_with_id().await else {
             return Ok(None);
         };
-        {
+        self.retained_join = Some(joined);
+        if let Some(Ok((_, output))) = self.retained_join.as_mut() {
+            output.guard.active.store(false, Ordering::Release);
+            drop(output.guard.guard.take());
+        }
+        let accounted = (|| {
             let mut counts = self.ledger.counts.lock().map_err(|_| self.ledger.fail())?;
             counts.jobs = counts
                 .jobs
                 .checked_sub(1)
                 .ok_or_else(|| self.ledger.fail())?;
+            Ok::<_, SettingsReceiveError>(())
+        })();
+        if let Err(error) = accounted {
+            self.failure = Some(error.clone());
+            self.close_intake();
+            return Err(error);
         }
-        let (id, output) = match joined {
-            Ok(value) => value,
-            Err(error) => {
+        let id = match self.retained_join.as_ref() {
+            Some(Ok((id, _))) => *id,
+            Some(Err(error)) => {
                 if let Some(receipt) = self.receipts.remove(&error.id()) {
                     let _ = receipt.send(Err(SettingsReceiveError::Worker));
                 }
                 self.failure = Some(SettingsReceiveError::Worker);
                 self.ledger.fail();
-                self.closed = true;
+                self.close_intake();
                 return Err(SettingsReceiveError::Worker);
+            }
+            None => {
+                self.latch_failure();
+                return Err(SettingsReceiveError::Bookkeeping);
             }
         };
         let Some(receipt) = self.receipts.remove(&id) else {
-            self.failure = Some(self.ledger.fail());
-            self.closed = true;
-            drop(output);
+            self.latch_failure();
             return Err(SettingsReceiveError::Bookkeeping);
+        };
+        if matches!(self.retained_join.as_ref(), Some(Ok((_, output))) if output.access.is_some()) {
+            return self.finish_access_join(receipt);
+        }
+        let output = match self.retained_join.take() {
+            Some(Ok((_, output))) => output,
+            retained => {
+                self.retained_join = retained;
+                self.latch_failure();
+                let _ = receipt.send(Err(SettingsReceiveError::Bookkeeping));
+                return Err(SettingsReceiveError::Bookkeeping);
+            }
         };
         let WorkerOutput {
             receipt_authority,
             completion,
             retained_command,
             command_outcome,
+            access,
             guard,
             context,
             frame,
         } = output;
+        drop(access);
         if frame.is_none() {
             self.failure = Some(self.ledger.fail());
             self.closed = true;
@@ -1143,6 +1191,215 @@ impl SettingsReceiveWork {
         }
     }
 
+    fn access_join_disposition(&self) -> Result<AccessJoinedDisposition, SettingsReceiveError> {
+        let Some(Ok((_, output))) = self.retained_join.as_ref() else {
+            return Err(self.ledger.fail());
+        };
+        let Some(access) = output.access.as_ref() else {
+            return Err(self.ledger.fail());
+        };
+        if output.frame.is_none()
+            || output.retained_command.is_some()
+            || output.command_outcome.is_some()
+        {
+            return Err(self.ledger.fail());
+        }
+        if let Some(verified) = access.verified() {
+            let context = self.context.as_ref().ok_or_else(|| self.ledger.fail())?;
+            let source = verified.authority_source();
+            if output.receipt_authority.is_some()
+                || !source.matches_context(&context.agent, &context.endpoint, &context.mutation)
+            {
+                return Err(self.ledger.fail());
+            }
+            self.check_unjoined_build(
+                access.witness().ok_or_else(|| self.ledger.fail())?,
+                source.connection(),
+                source.verified_peer_keys().device_id,
+            )?;
+            if let Ok(completion) = &output.completion {
+                let id = match &completion.receipt {
+                    SettingsTransportReceipt::PrivateCommitted { message_id }
+                    | SettingsTransportReceipt::PrivateDuplicate { message_id }
+                    | SettingsTransportReceipt::PrivateRejected { message_id, .. } => message_id,
+                    SettingsTransportReceipt::Ordinary { .. } => return Err(self.ledger.fail()),
+                };
+                if source
+                    .receipt_metadata()
+                    .map_err(SettingsReceiveError::AccessSource)?
+                    .message_id
+                    != id.to_string()
+                {
+                    return Err(self.ledger.fail());
+                }
+            }
+        }
+        match (&output.completion, access) {
+            (
+                Ok(WorkCompletion {
+                    receipt: SettingsTransportReceipt::PrivateCommitted { .. },
+                    bind: None,
+                }),
+                AccessWorkState::Verified {
+                    issue: None,
+                    reply: Some(reply),
+                    verified,
+                },
+            ) => {
+                let source = verified.authority_source();
+                if reply.reservation_id.is_nil()
+                    || reply.local_device_id != source.intent().host_id
+                    || reply.peer_device_id != source.verified_peer_keys().device_id
+                    || reply.created_at >= reply.expires_at
+                    || reply.expires_at > source.intent().expires_at
+                    || reply.provenance.len() > 2048
+                {
+                    return Err(self.ledger.fail());
+                }
+                Ok(AccessJoinedDisposition::Fresh)
+            }
+            (
+                Ok(WorkCompletion {
+                    receipt: SettingsTransportReceipt::PrivateDuplicate { .. },
+                    bind: None,
+                }),
+                AccessWorkState::Verified {
+                    issue: None,
+                    reply: None,
+                    ..
+                },
+            ) => Ok(AccessJoinedDisposition::Settled),
+            (
+                Ok(WorkCompletion {
+                    receipt: SettingsTransportReceipt::PrivateRejected { .. },
+                    bind: None,
+                }),
+                AccessWorkState::Verified {
+                    issue: Some(SettingsReceiveError::AccessAdmission(error)),
+                    reply: None,
+                    ..
+                },
+            ) if error.is_policy_rejection() => Ok(AccessJoinedDisposition::Settled),
+            (
+                Ok(WorkCompletion {
+                    receipt: SettingsTransportReceipt::PrivateRejected { .. },
+                    bind: None,
+                }),
+                AccessWorkState::Rejected(SettingsReceiveError::AccessSource(
+                    super::AccessStatusRejection::Expired
+                    | super::AccessStatusRejection::OutsideScope,
+                )),
+            ) => Ok(AccessJoinedDisposition::Settled),
+            (
+                Err(SettingsReceiveError::Capacity),
+                AccessWorkState::Rejected(SettingsReceiveError::Capacity),
+            ) => Ok(AccessJoinedDisposition::Capacity),
+            (
+                Err(SettingsReceiveError::AccessAdmission(error)),
+                AccessWorkState::Verified {
+                    issue: Some(SettingsReceiveError::AccessAdmission(original)),
+                    reply: None,
+                    ..
+                },
+            ) if Arc::ptr_eq(error, original) && error.is_capacity() => {
+                Ok(AccessJoinedDisposition::Capacity)
+            }
+            (Err(error), _) => Err(error.clone()),
+            _ => Err(self.ledger.fail()),
+        }
+    }
+
+    fn finish_access_join(
+        &mut self,
+        receipt: oneshot::Sender<Result<SettingsTransportReceipt, SettingsReceiveError>>,
+    ) -> Result<Option<SettingsReceiveEvent>, SettingsReceiveError> {
+        let disposition = match self.access_join_disposition() {
+            Ok(disposition) => disposition,
+            Err(error) => {
+                self.ledger.fail();
+                self.failure = Some(error.clone());
+                self.close_intake();
+                let _ = receipt.send(Err(error.clone()));
+                return Err(error);
+            }
+        };
+        match (disposition, self.retained_join.take()) {
+            (
+                AccessJoinedDisposition::Fresh,
+                Some(Ok((
+                    _,
+                    WorkerOutput {
+                        completion:
+                            Ok(WorkCompletion {
+                                receipt: result,
+                                bind: None,
+                            }),
+                        access:
+                            Some(AccessWorkState::Verified {
+                                issue: None,
+                                reply: Some(reply),
+                                verified,
+                            }),
+                        frame: Some(frame),
+                        ..
+                    },
+                ))),
+            ) => {
+                let owner = OwnedCommittedSettingsAccess::from_joined(AccessReceiptOutput {
+                    reply,
+                    verified,
+                });
+                let _ = receipt.send(Ok(result));
+                drop(frame);
+                Ok(Some(SettingsReceiveEvent::CommittedAccess(owner)))
+            }
+            (
+                AccessJoinedDisposition::Settled,
+                Some(Ok((
+                    _,
+                    WorkerOutput {
+                        completion:
+                            Ok(WorkCompletion {
+                                receipt: result,
+                                bind: None,
+                            }),
+                        access: Some(access),
+                        frame: Some(frame),
+                        ..
+                    },
+                ))),
+            ) => {
+                drop(access);
+                let _ = receipt.send(Ok(result));
+                drop(frame);
+                Ok(Some(SettingsReceiveEvent::ReceiptSettled))
+            }
+            (
+                AccessJoinedDisposition::Capacity,
+                Some(Ok((
+                    _,
+                    WorkerOutput {
+                        completion: Err(error),
+                        access: Some(access),
+                        frame: Some(frame),
+                        ..
+                    },
+                ))),
+            ) => {
+                drop(access);
+                let _ = receipt.send(Err(error.clone()));
+                drop(frame);
+                Err(error)
+            }
+            (_, retained) => {
+                self.retained_join = retained;
+                self.latch_failure();
+                let _ = receipt.send(Err(SettingsReceiveError::Bookkeeping));
+                Err(SettingsReceiveError::Bookkeeping)
+            }
+        }
+    }
+
     pub(in crate::devices) fn close_intake(&mut self) {
         self.closed = true;
         self.ledger.closed.store(true, Ordering::Release);
@@ -1159,6 +1416,7 @@ impl SettingsReceiveWork {
     pub(in crate::devices) fn report(&self) -> SettingsReceiveDrain {
         let mut report = self.ledger.snapshot();
         report.bookkeeping_ok &= self.failure.is_none()
+            && self.retained_join.is_none()
             && self.receipts.len() == self.jobs.len()
             && self.build.is_some() == report.reply_build_active
             && self
@@ -1224,6 +1482,7 @@ impl Drop for SettingsReceiveWork {
                 self.history.take(),
                 Arc::clone(&self.ledger),
                 self.failure.take(),
+                self.retained_join.take(),
             );
             let _ = Box::leak(Box::new(retained));
         }
@@ -1291,6 +1550,7 @@ fn run(mut input: WorkerInput) -> WorkerOutput {
         authority: input.receipt_authority.take(),
         command: None,
         outcome: None,
+        access: None,
     };
     let completion =
         match std::panic::catch_unwind(AssertUnwindSafe(|| super::execute(&input, &mut command))) {
@@ -1307,6 +1567,7 @@ fn run(mut input: WorkerInput) -> WorkerOutput {
         context: Arc::clone(&input.context),
         retained_command: command.command.take(),
         command_outcome: command.outcome.take(),
+        access: command.access.take(),
         frame: input.frame.take(),
     }
 }

@@ -23,14 +23,16 @@ use crate::crypto::{CryptoError, DevicePublicKeys, ReplayGuard, ReplayRecord};
 use crate::host::settings::SettingsGrantHead;
 use crate::protocol::{DeviceId, MessageId, UnixMillis};
 use crate::storage::{
-    SettingsBindAdmission, SettingsBindAdmissionError, SettingsBindReceiptCommit,
-    SettingsCommandAdmission, SettingsCommandAdmissionError, SettingsCommandReceiptCommit, Store,
-    StoredSettingsBindReply, TransportInboxMetadata, TransportInboxRejection,
+    SettingsAccessAdmissionError, SettingsAccessReceiptCommit, SettingsBindAdmission,
+    SettingsBindAdmissionError, SettingsBindReceiptCommit, SettingsCommandAdmission,
+    SettingsCommandAdmissionError, SettingsCommandReceiptCommit, Store, StoredSettingsBindReply,
+    TransportInboxMetadata, TransportInboxRejection,
 };
 
+use access::AccessWorkState;
 pub(crate) use access::{
-    AccessStatusRejection, AuthenticatedSettingsAccessSource, OwnedVerifiedSettingsAccess,
-    SettingsAccessStatusIntent,
+    AccessStatusRejection, AuthenticatedSettingsAccessSource, OwnedCommittedSettingsAccess,
+    OwnedVerifiedSettingsAccess, SettingsAccessStatusIntent,
 };
 use command::SettingsCommandOutcome;
 pub(crate) use command::{
@@ -61,6 +63,10 @@ pub(crate) enum SettingsReceiveError {
     Admission(#[source] Arc<SettingsBindAdmissionError>),
     #[error("private Settings command receipt admission failed")]
     CommandAdmission(#[source] Arc<SettingsCommandAdmissionError>),
+    #[error("private Settings access receipt admission failed")]
+    AccessAdmission(#[source] Arc<SettingsAccessAdmissionError>),
+    #[error("private Settings access source validation failed")]
+    AccessSource(#[source] AccessStatusRejection),
 }
 
 impl fmt::Debug for SettingsReceiveError {
@@ -75,6 +81,8 @@ impl SettingsReceiveError {
             || matches!(self, Self::RejectionStorage(error) if !matches!(error.as_ref(), crate::storage::StorageError::TransportCapacity(_)))
             || matches!(self, Self::Admission(error) if !error.is_capacity())
             || matches!(self, Self::CommandAdmission(error) if !error.is_capacity())
+            || matches!(self, Self::AccessAdmission(error) if !error.is_capacity())
+            || matches!(self, Self::AccessSource(AccessStatusRejection::Unavailable))
     }
 }
 
@@ -527,6 +535,7 @@ pub(crate) enum SettingsReceiveEvent {
     CommittedBind(OwnedCommittedSettingsBind),
     CommittedCommand(OwnedCommittedSettingsCommand),
     HistoricalCommand(OwnedHistoricalSettingsCommand),
+    CommittedAccess(OwnedCommittedSettingsAccess),
     ReceiptSettled,
 }
 
@@ -540,6 +549,7 @@ enum ReplayOutcome {
     Legacy,
     Committed(Box<OwnedCommittedSettingsBind>),
     Command,
+    Access,
     Duplicate,
     Failure(SettingsReceiveError),
 }
@@ -629,6 +639,9 @@ impl OwnedReplay<'_> {
         if let command::DecodedCommand::Update(intent) = command::decode(plaintext) {
             return self.update(record, plaintext.len(), now_ms, intent);
         }
+        if let access::DecodedAccessStatus::AccessStatus(intent) = access::decode(plaintext) {
+            return self.access(record, plaintext.len(), now_ms, intent);
+        }
         let reason =
             match wire::decode(plaintext) {
                 wire::DecodedBind::Bind(intent) => {
@@ -693,6 +706,100 @@ impl OwnedReplay<'_> {
             };
         self.outcome = ReplayOutcome::Legacy;
         self.legacy.record_rejected(record, now_ms, reason)
+    }
+
+    fn access(
+        &mut self,
+        record: ReplayRecord,
+        bytes: usize,
+        now_ms: u64,
+        intent: SettingsAccessStatusIntent,
+    ) -> Result<bool, CryptoError> {
+        if self.command.command.is_some()
+            || self.command.outcome.is_some()
+            || self.command.access.is_some()
+            || self.command.authority.is_none()
+        {
+            return Err(self.fail(SettingsReceiveError::Bookkeeping));
+        }
+        let envelope = self.verified_envelope(&record, now_ms)?;
+        let Some(authority) = self.command.authority.take() else {
+            return Err(self.fail(SettingsReceiveError::Bookkeeping));
+        };
+        let witness = match self.input.ledger.private(self.peer.keys.device_id, bytes) {
+            Ok(witness) => witness,
+            Err(error) => {
+                self.command.authority = Some(authority);
+                self.command.access = Some(AccessWorkState::Rejected(error.clone()));
+                return Err(self.fail(error));
+            }
+        };
+        let verified = match OwnedVerifiedSettingsAccess::from_verified(
+            envelope, intent, authority, witness,
+        ) {
+            Ok(verified) => verified,
+            Err(error) => {
+                let failure = SettingsReceiveError::AccessSource(error);
+                self.command.access = Some(AccessWorkState::Rejected(failure.clone()));
+                if matches!(
+                    error,
+                    AccessStatusRejection::Expired | AccessStatusRejection::OutsideScope
+                ) {
+                    self.outcome = ReplayOutcome::Legacy;
+                    return self.legacy.record_rejected(
+                        record,
+                        now_ms,
+                        TransportInboxRejection::SettingsUnavailable,
+                    );
+                }
+                return Err(self.fail(failure));
+            }
+        };
+        self.command.access = Some(AccessWorkState::Verified {
+            issue: None,
+            reply: None,
+            verified: Box::new(verified),
+        });
+        let Some(AccessWorkState::Verified {
+            issue,
+            reply,
+            verified,
+        }) = self.command.access.as_mut()
+        else {
+            return Err(self.fail(SettingsReceiveError::Bookkeeping));
+        };
+        let admitted = self
+            .input
+            .context
+            .agent
+            .store()
+            .admit_settings_access(verified);
+        match admitted {
+            Ok(SettingsAccessReceiptCommit::Duplicate) => {
+                self.outcome = ReplayOutcome::Duplicate;
+                Ok(false)
+            }
+            Ok(SettingsAccessReceiptCommit::Fresh { reply: committed }) => {
+                *reply = Some(committed);
+                self.outcome = ReplayOutcome::Access;
+                Ok(true)
+            }
+            Err(error) => {
+                let policy = error.is_policy_rejection();
+                let failure = SettingsReceiveError::AccessAdmission(Arc::new(error));
+                *issue = Some(failure.clone());
+                if policy {
+                    self.outcome = ReplayOutcome::Legacy;
+                    self.legacy.record_rejected(
+                        record,
+                        now_ms,
+                        TransportInboxRejection::SettingsUnavailable,
+                    )
+                } else {
+                    Err(self.fail(failure))
+                }
+            }
+        }
     }
 
     fn update(
@@ -825,6 +932,13 @@ fn execute(
             })
         }
         (Ok(raw), ReplayOutcome::Command) => {
+            drop(raw);
+            Ok(WorkCompletion {
+                receipt: SettingsTransportReceipt::PrivateCommitted { message_id: id },
+                bind: None,
+            })
+        }
+        (Ok(raw), ReplayOutcome::Access) => {
             drop(raw);
             Ok(WorkCompletion {
                 receipt: SettingsTransportReceipt::PrivateCommitted { message_id: id },
