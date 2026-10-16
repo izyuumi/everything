@@ -9,7 +9,7 @@ use crate::memory::embedding::Embedder;
 use crate::protocol::{CommandId, DeviceId, UnixMillis};
 use crate::selector::system_one::SelectionConfig;
 
-use super::ModelCredentialReference;
+use super::{CredentialStorage, ModelCredentialReference};
 
 pub const SETTINGS_CONTRACT_VERSION: u16 = 1;
 pub const MAX_SETTINGS_PATCH_BYTES: usize = 16 * 1024;
@@ -135,10 +135,40 @@ pub enum SettingApplyBehavior {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(
+    tag = "kind",
+    content = "url",
+    rename_all = "snake_case",
+    deny_unknown_fields
+)]
+pub enum SettingsModelEndpoint {
+    Official,
+    Loopback(String),
+}
+
+impl SettingsModelEndpoint {
+    pub fn as_native(&self) -> ProviderEndpoint {
+        match self {
+            Self::Official => ProviderEndpoint::Official,
+            Self::Loopback(endpoint) => ProviderEndpoint::Loopback(endpoint.clone()),
+        }
+    }
+}
+
+impl From<&ProviderEndpoint> for SettingsModelEndpoint {
+    fn from(endpoint: &ProviderEndpoint) -> Self {
+        match endpoint {
+            ProviderEndpoint::Official => Self::Official,
+            ProviderEndpoint::Loopback(endpoint) => Self::Loopback(endpoint.clone()),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ModelSelection {
     pub provider: ProviderKind,
-    pub endpoint: ProviderEndpoint,
+    pub endpoint: SettingsModelEndpoint,
     pub model: String,
 }
 
@@ -147,7 +177,7 @@ impl ModelSelection {
         bounded_text(&self.model, MAX_MODEL_BYTES)?;
         ConversationConfig {
             provider: self.provider,
-            endpoint: self.endpoint.clone(),
+            endpoint: self.endpoint.as_native(),
             model: self.model.clone(),
             instructions: "Validate settings model selection.".into(),
             max_output_tokens: 4096,
@@ -578,10 +608,46 @@ impl SettingsRequestBinding {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SettingsModelCredentialBinding {
+    pub provider: ProviderKind,
+    pub endpoint: SettingsModelEndpoint,
+    pub reference: Uuid,
+    pub storage: CredentialStorage,
+}
+
+impl SettingsModelCredentialBinding {
+    pub fn as_native(&self) -> ModelCredentialReference {
+        ModelCredentialReference {
+            provider: self.provider,
+            endpoint: self.endpoint.as_native(),
+            reference: self.reference,
+            storage: self.storage,
+        }
+    }
+}
+
+impl From<&ModelCredentialReference> for SettingsModelCredentialBinding {
+    fn from(binding: &ModelCredentialReference) -> Self {
+        Self {
+            provider: binding.provider,
+            endpoint: (&binding.endpoint).into(),
+            reference: binding.reference,
+            storage: binding.storage,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum SettingsCredentialBinding {
-    Model { binding: ModelCredentialReference },
-    SystemOne { endpoint: String, reference: Uuid },
+    Model {
+        binding: SettingsModelCredentialBinding,
+    },
+    SystemOne {
+        endpoint: String,
+        reference: Uuid,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -625,6 +691,7 @@ impl SettingsActionRequest {
                 }
                 match binding {
                     SettingsCredentialBinding::Model { binding } => binding
+                        .as_native()
                         .validate()
                         .map_err(|_| SettingsContractError::Invalid("model credential binding"))?,
                     SettingsCredentialBinding::SystemOne {
