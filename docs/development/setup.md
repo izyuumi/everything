@@ -1,6 +1,6 @@
 # Setup
 
-Install a current stable Rust toolchain with rustfmt and clippy, plus a C compiler for bundled SQLite dependencies as they are introduced. Clone the repository and run `cargo build --workspace --locked`.
+Install Rust 1.88 or newer with rustfmt and clippy, plus a C compiler for bundled SQLite dependencies. The current native MCP SDK sets this compiler floor, as recorded in [ADR-0003](../decisions/ADR-0003-native-mcp-sdk.md). Clone the repository and run `cargo build --workspace --locked`.
 
 Use `cargo run --bin everything -- --help` and `cargo run --bin everything-relay -- --help`. Apple development requires macOS and a supported Xcode installation; Linux cannot validate Apple runtime behavior.
 

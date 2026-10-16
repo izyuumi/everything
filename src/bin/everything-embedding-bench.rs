@@ -624,7 +624,7 @@ fn latency_report(mut samples: Vec<f64>) -> Result<LatencyReport, BenchmarkError
     }
     samples.sort_by(f64::total_cmp);
     let count = samples.len();
-    let p50_ms = if count % 2 == 0 {
+    let p50_ms = if count.is_multiple_of(2) {
         (samples[count / 2 - 1] + samples[count / 2]) / 2.0
     } else {
         samples[count / 2]
