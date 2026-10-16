@@ -173,15 +173,14 @@ impl SettingsService {
         let CallerSource::LocalOwner { request_id } = caller.source else {
             return Err(SettingsServiceError::OutsideScope);
         };
-        settings.validate()?;
         if settings.revision != expected_revision {
             return Err(SettingsServiceError::Conflict);
         }
-        let submitted = file_fingerprint(&settings)?;
         let mutation = self.enter(&caller, &cancellation).await?;
         self.blocking(move |core| {
             let retained_guard = WriteGuard::Ordinary(mutation);
             core.authority.validate(&caller, false)?;
+            let submitted = file_fingerprint(&settings)?;
             match core.repository.get(request_id) {
                 Ok(record) => {
                     core.check_principal(&caller, &record.identity)?;
@@ -202,6 +201,7 @@ impl SettingsService {
                 Err(error) => return Err(error),
             }
             core.require_resolved_file()?;
+            settings.validate()?;
             let current = core.settings.observed_snapshot()?;
             let prepared = core.settings.prepare_file(settings, expected_revision)?;
             let difference = updates::owner_difference(&current, &prepared.candidate)?;
@@ -561,6 +561,14 @@ impl ServiceCore {
             composition
                 .configure_selection(generation, settings, enabled)
                 .map_err(|cause| SettingsServiceError::Application(Box::new(cause)))?;
+            if let Some(current) = self
+                .applications
+                .lock()
+                .map_err(|_| SettingsServiceError::Poisoned)?
+                .get_mut(&operation_id)
+            {
+                current.selection = None;
+            }
         }
         self.applications
             .lock()

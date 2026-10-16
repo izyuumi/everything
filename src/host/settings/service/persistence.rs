@@ -216,6 +216,12 @@ impl super::ServiceCore {
         }
         if resolution.is_some() {
             self.release_file_resources(identity, intent)?;
+            if !intent.memory_changed && !intent.selection_changed {
+                self.applications
+                    .lock()
+                    .map_err(|_| SettingsServiceError::Poisoned)?
+                    .remove(&identity.binding.request_id);
+            }
         }
         Ok(inspection)
     }
