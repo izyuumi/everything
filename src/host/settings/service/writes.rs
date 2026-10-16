@@ -431,8 +431,9 @@ impl ServiceCore {
                 .applications
                 .lock()
                 .map_err(|_| SettingsServiceError::Poisoned)?;
-            if applications.len() >= 64
-                || applications.contains_key(&write.identity.binding.request_id)
+            if (write.intent.memory_changed || write.intent.selection_changed)
+                && (applications.len() >= 64
+                    || applications.contains_key(&write.identity.binding.request_id))
             {
                 return Err(SettingsServiceError::Capacity);
             }
@@ -509,17 +510,16 @@ impl ServiceCore {
             )?;
             Ok::<(), SettingsServiceError>(())
         })();
-        self.applications
-            .lock()
-            .map_err(|cause| SettingsServiceError::OutcomeUnknown {
-                request_id: write.identity.binding.request_id,
-                cause: Box::new({
-                    drop(cause);
-                    SettingsServiceError::Poisoned
-                }),
-                repair_error: None,
-            })?
-            .insert(write.identity.binding.request_id, capture);
+        if capture.semantic.is_some() || capture.selection.is_some() {
+            self.applications
+                .lock()
+                .map_err(|_| SettingsServiceError::OutcomeUnknown {
+                    request_id: write.identity.binding.request_id,
+                    cause: Box::new(SettingsServiceError::Poisoned),
+                    repair_error: None,
+                })?
+                .insert(write.identity.binding.request_id, capture);
+        }
         let inspection = self.reconcile_file(&write.identity, &write.intent)?;
         if let Err(cause) = attempted {
             tracing::warn!(operation_id=%write.identity.binding.request_id,"settings file attempt required authoritative original-file observation");
