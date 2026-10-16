@@ -1,6 +1,6 @@
 # Closed Bind response data
 
-The `settings_bind_reply.rs` leaf declares crate-private, Serialize-only data for the successful Bind response. The leaf remains uncompiled and unactivated. The module and crate-private exports are registered. Its genuine producer, current Bind qualification, registered build/store work, publication and client adoption remain separate integration work. Defining this data does not accept a Bind or create a parent.
+The `settings_bind_reply.rs` leaf declares crate-private, Serialize-only data for the successful Bind response. The leaf remains uncompiled and unactivated. The module and crate-private exports are registered. Current Bind qualification and projection are implemented in the same Core source. The genuine registered build/store producer, publication and client adoption remain integration work. Defining this data does not accept a Bind or create a parent.
 
 ## Complete packet
 
