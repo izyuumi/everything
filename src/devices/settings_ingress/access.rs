@@ -10,13 +10,13 @@ use tokio::sync::Mutex;
 use uuid::Uuid;
 
 use super::wire::{MAX_PRIVATE_REQUEST_BYTES, canonical_uuid, object};
-use super::{VerifiedSettingsEnvelope, work::PrivateWitness};
+use super::{SettingsReceiveError, VerifiedSettingsEnvelope, work::PrivateWitness};
 use crate::agent::Agent;
 use crate::crypto::DevicePublicKeys;
 use crate::devices::{DeviceEndpoint, EndpointRole, SettingsConnectionIdentity};
 use crate::host::settings::service::SettingsReceiptAuthority;
 use crate::protocol::{DeviceId, UnixMillis};
-use crate::storage::{Store, TransportInboxMetadata};
+use crate::storage::{Store, StoredSettingsAccessReply, TransportInboxMetadata};
 
 #[derive(Clone, PartialEq, Eq)]
 pub(crate) struct SettingsAccessStatusIntent {
@@ -37,6 +37,61 @@ pub(crate) struct OwnedVerifiedSettingsAccess {
     authority: SettingsReceiptAuthority,
     source: AuthenticatedSettingsAccessSource,
     _witness: PrivateWitness,
+}
+
+pub(super) struct AccessReceiptOutput {
+    pub(super) reply: StoredSettingsAccessReply,
+    pub(super) verified: Box<OwnedVerifiedSettingsAccess>,
+}
+
+pub(super) enum AccessWorkState {
+    Rejected(SettingsReceiveError),
+    Verified {
+        issue: Option<SettingsReceiveError>,
+        reply: Option<StoredSettingsAccessReply>,
+        verified: Box<OwnedVerifiedSettingsAccess>,
+    },
+}
+
+pub(crate) struct OwnedCommittedSettingsAccess {
+    reply: StoredSettingsAccessReply,
+    verified: Box<OwnedVerifiedSettingsAccess>,
+}
+
+impl AccessWorkState {
+    pub(super) fn verified(&self) -> Option<&OwnedVerifiedSettingsAccess> {
+        match self {
+            Self::Rejected(_) => None,
+            Self::Verified { verified, .. } => Some(verified),
+        }
+    }
+
+    pub(super) fn witness(&self) -> Option<&PrivateWitness> {
+        self.verified().map(|verified| &verified._witness)
+    }
+}
+
+impl OwnedCommittedSettingsAccess {
+    pub(super) fn from_joined(output: AccessReceiptOutput) -> Self {
+        Self {
+            reply: output.reply,
+            verified: output.verified,
+        }
+    }
+
+    pub(crate) fn verified_request(&self) -> &OwnedVerifiedSettingsAccess {
+        &self.verified
+    }
+
+    pub(crate) fn reply_reservation(&self) -> &StoredSettingsAccessReply {
+        &self.reply
+    }
+}
+
+impl fmt::Debug for OwnedCommittedSettingsAccess {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("OwnedCommittedSettingsAccess([joined receipt])")
+    }
 }
 
 struct AccessVerificationInput {

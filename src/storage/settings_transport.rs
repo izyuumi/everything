@@ -631,7 +631,15 @@ impl std::fmt::Debug for SettingsAccessAdmissionError {
 #[cfg(unix)]
 impl SettingsAccessAdmissionError {
     pub(crate) fn is_capacity(&self) -> bool {
-        matches!(self, Self::ReplayCapacity(_) | Self::ReplyCapacity(_))
+        use crate::host::settings::service::SettingsAccessQualificationError;
+
+        match self {
+            Self::ReplayCapacity(_) | Self::ReplyCapacity(_) => true,
+            Self::Authority(SettingsAccessQualificationError::Authority(error)) => {
+                matches!(error.as_ref(), SettingsServiceError::Capacity)
+            }
+            _ => false,
+        }
     }
 
     pub(crate) fn is_policy_rejection(&self) -> bool {
