@@ -7,6 +7,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use thiserror::Error;
 use uuid::Uuid;
 
@@ -38,6 +39,8 @@ pub enum ProtocolError {
     NonMonotonicTaskTimestamp,
     #[error("failed task requires a failure, and other task states must not contain one")]
     InvalidTaskFailure,
+    #[error("invalid permission inspection")]
+    InvalidPermissionInspection,
     #[error("invalid scheduled notification: {0}")]
     InvalidScheduledNotification(&'static str),
     #[error("invalid sync request: {0}")]
@@ -377,6 +380,102 @@ pub enum PermissionDecision {
     Deny,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExecutionMode {
+    ReadOnly,
+    TrustedWorkspace,
+    FullHost,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "PermissionInspectionWire")]
+pub struct PermissionInspection {
+    pub approval_id: String,
+    pub workspace_root: String,
+    pub mode: ExecutionMode,
+    pub capabilities: Vec<String>,
+    pub targets: Vec<String>,
+    pub arguments_json: String,
+    pub arguments_digest: String,
+    pub requested_at: UnixMillis,
+    pub expires_at: UnixMillis,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PermissionInspectionWire {
+    approval_id: String,
+    workspace_root: String,
+    mode: ExecutionMode,
+    capabilities: Vec<String>,
+    targets: Vec<String>,
+    arguments_json: String,
+    arguments_digest: String,
+    requested_at: UnixMillis,
+    expires_at: UnixMillis,
+}
+
+impl PermissionInspection {
+    pub fn validate(&self) -> Result<(), ProtocolError> {
+        if self.approval_id.trim().is_empty()
+            || self.approval_id.len() > 256
+            || self.approval_id.chars().any(char::is_control)
+            || !self.workspace_root.starts_with('/')
+            || self.workspace_root.len() > 4096
+            || self.workspace_root.chars().any(char::is_control)
+            || self.capabilities.len() > 64
+            || self.capabilities.iter().any(|value| {
+                !matches!(
+                    value.as_str(),
+                    "filesystem_read" | "filesystem_write" | "shell" | "network" | "mcp"
+                )
+            })
+            || self.targets.len() > 64
+            || self.targets.iter().any(|value| {
+                value.is_empty() || value.len() > 4096 || value.chars().any(char::is_control)
+            })
+            || self.arguments_json.len() > 16 * 1024
+            || serde_json::from_str::<Value>(&self.arguments_json).is_err()
+            || self.arguments_digest.len() != 64
+            || !self
+                .arguments_digest
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+            || format!("{:x}", Sha256::digest(self.arguments_json.as_bytes()))
+                != self.arguments_digest
+            || self.expires_at <= self.requested_at
+            || serde_json::to_vec(self)
+                .map_err(|_| ProtocolError::InvalidPermissionInspection)?
+                .len()
+                > 32 * 1024
+        {
+            return Err(ProtocolError::InvalidPermissionInspection);
+        }
+        Ok(())
+    }
+}
+
+impl TryFrom<PermissionInspectionWire> for PermissionInspection {
+    type Error = ProtocolError;
+
+    fn try_from(value: PermissionInspectionWire) -> Result<Self, Self::Error> {
+        let inspection = Self {
+            approval_id: value.approval_id,
+            workspace_root: value.workspace_root,
+            mode: value.mode,
+            capabilities: value.capabilities,
+            targets: value.targets,
+            arguments_json: value.arguments_json,
+            arguments_digest: value.arguments_digest,
+            requested_at: value.requested_at,
+            expires_at: value.expires_at,
+        };
+        inspection.validate()?;
+        Ok(inspection)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ConversationEvent {
@@ -412,6 +511,8 @@ pub enum ConversationEvent {
         operation_id: OperationId,
         tool_call_id: ToolCallId,
         tool_name: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        inspection: Option<Box<PermissionInspection>>,
     },
     PermissionDecided {
         operation_id: OperationId,
