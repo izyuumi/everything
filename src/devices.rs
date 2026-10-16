@@ -1,6 +1,11 @@
 mod session;
+mod settings;
 
 pub use session::RelaySessionStatus;
+pub use settings::{
+    DeviceSettingsPage, DeviceSettingsSummary, MAX_DEVICE_SETTINGS_PAGE,
+    MAX_DEVICE_SETTINGS_PAGE_BYTES, PairingCancellation,
+};
 
 use crate::crypto::{
     CryptoError, DeviceIdentity, DeviceIdentitySecrets, DevicePublicKeys, EncryptedEnvelope,
