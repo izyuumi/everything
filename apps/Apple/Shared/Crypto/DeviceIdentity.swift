@@ -82,6 +82,111 @@ struct EncryptedEnvelope: Sendable {
     }
 }
 
+enum ReplicaSettingsReplyCorrelation: Sendable, Equatable, CustomStringConvertible, CustomDebugStringConvertible {
+    case query(queryID: UUID)
+    case bind(bindingRequestID: UUID)
+
+    var description: String { "ReplicaSettingsReplyCorrelation([redacted])" }
+    var debugDescription: String { description }
+}
+
+struct ReplicaSettingsReplyMetadata: Sendable, CustomStringConvertible, CustomDebugStringConvertible {
+    let header: EnvelopeHeader
+    let inReplyTo: UUID
+    let correlation: ReplicaSettingsReplyCorrelation
+    let generation: RemoteSettingsGeneration?
+
+    fileprivate init(header: EnvelopeHeader, inReplyTo: UUID,
+                     correlation: ReplicaSettingsReplyCorrelation, generation: RemoteSettingsGeneration?) {
+        self.header = header
+        self.inReplyTo = inReplyTo
+        self.correlation = correlation
+        self.generation = generation
+    }
+
+    var description: String { "ReplicaSettingsReplyMetadata([redacted])" }
+    var debugDescription: String { description }
+}
+
+enum ReplicaSettingsMetadataDisposition: Sendable, CustomStringConvertible, CustomDebugStringConvertible {
+    case fresh
+    case duplicate
+
+    var description: String { "ReplicaSettingsMetadataDisposition([redacted])" }
+    var debugDescription: String { description }
+}
+
+fileprivate enum VerifiedReplicaSettingsBody: Sendable, CustomStringConvertible, CustomDebugStringConvertible {
+    case access(RemoteSettingsAccessReply)
+    case bind(RemoteSettingsBindReply)
+
+    var description: String { "VerifiedReplicaSettingsBody([redacted])" }
+    var debugDescription: String { description }
+}
+
+final class VerifiedReplicaSettingsReply: Sendable, CustomStringConvertible, CustomDebugStringConvertible {
+    private let envelope: EncryptedEnvelope
+    private let host: DevicePublicKeys
+    private let localID: UUID
+    private let body: VerifiedReplicaSettingsBody
+
+    fileprivate init(envelope: EncryptedEnvelope, host: DevicePublicKeys,
+                     localID: UUID, body: VerifiedReplicaSettingsBody) {
+        self.envelope = envelope
+        self.host = host
+        self.localID = localID
+        self.body = body
+    }
+
+    var metadata: ReplicaSettingsReplyMetadata {
+        switch body {
+        case .access(let reply):
+            let generation: RemoteSettingsGeneration?
+            switch reply.body {
+            case .summary(let summary): generation = summary.generation
+            case .grantUnavailable: generation = nil
+            }
+            return ReplicaSettingsReplyMetadata(header: envelope.header, inReplyTo: reply.inReplyTo,
+                                                correlation: .query(queryID: reply.queryID), generation: generation)
+        case .bind(let reply):
+            return ReplicaSettingsReplyMetadata(header: envelope.header, inReplyTo: reply.inReplyTo,
+                                                correlation: .bind(bindingRequestID: reply.bindingRequestID),
+                                                generation: reply.parent.generation)
+        }
+    }
+
+    func matchesVerifiedPeer(_ host: DevicePublicKeys, localID: UUID) -> Bool {
+        self.host == host && self.localID == localID
+    }
+
+    func commitMetadata(into store: ReplicaStore) async throws -> CommittedReplicaSettingsReply {
+        let fresh = try await store.rejectAuthenticated(envelope, host: host, localID: localID)
+        return CommittedReplicaSettingsReply(verified: self, disposition: fresh ? .fresh : .duplicate)
+    }
+
+    var description: String { "VerifiedReplicaSettingsReply([redacted])" }
+    var debugDescription: String { description }
+}
+
+final class CommittedReplicaSettingsReply: Sendable, CustomStringConvertible, CustomDebugStringConvertible {
+    private let verified: VerifiedReplicaSettingsReply
+    let disposition: ReplicaSettingsMetadataDisposition
+
+    fileprivate init(verified: VerifiedReplicaSettingsReply, disposition: ReplicaSettingsMetadataDisposition) {
+        self.verified = verified
+        self.disposition = disposition
+    }
+
+    var metadata: ReplicaSettingsReplyMetadata { verified.metadata }
+
+    func matchesVerifiedPeer(_ host: DevicePublicKeys, localID: UUID) -> Bool {
+        verified.matchesVerifiedPeer(host, localID: localID)
+    }
+
+    var description: String { "CommittedReplicaSettingsReply([redacted])" }
+    var debugDescription: String { description }
+}
+
 protocol DurableEnvelopeInbox: Sendable {
     func acceptAuthenticated(_ envelope: EncryptedEnvelope, plaintext: Data, host: DevicePublicKeys, localID: UUID) async throws -> Bool
     func rejectAuthenticated(_ envelope: EncryptedEnvelope, host: DevicePublicKeys, localID: UUID) async throws -> Bool
@@ -175,7 +280,7 @@ actor DeviceIdentity {
         return envelope
     }
 
-    func receive(_ envelope: EncryptedEnvelope, host: DevicePublicKeys, into inbox: any DurableEnvelopeInbox, now: UInt64) async throws -> Bool {
+    private func authenticatedPlaintext(_ envelope: EncryptedEnvelope, host: DevicePublicKeys, now: UInt64) throws -> Data {
         guard envelope.header.sender == host.deviceID, envelope.header.recipient == publicKeys.deviceID,
               host.deviceID != publicKeys.deviceID else { throw WireError.identity }
         try envelope.header.validate(now: now)
@@ -185,6 +290,40 @@ actor DeviceIdentity {
         let box = try ChaChaPoly.SealedBox(nonce: ChaChaPoly.Nonce(data: envelope.header.nonce), ciphertext: ciphertext, tag: tag)
         let plaintext = try ChaChaPoly.open(box, using: key(peer: host, header: envelope.header), authenticating: envelope.header.canonical)
         guard !plaintext.isEmpty, plaintext.count <= 1_048_576 else { throw WireError.size }
+        return plaintext
+    }
+
+    func verifySettingsAccessReply(_ envelope: EncryptedEnvelope, host: DevicePublicKeys) throws -> VerifiedReplicaSettingsReply {
+        let plaintext = try authenticatedPlaintext(envelope, host: host, now: WireID.now())
+        let reply = try RemoteSettingsWire.decodeAccessReply(plaintext)
+        guard reply.hostID == host.deviceID else { throw WireError.identity }
+        let maximum: Int
+        switch reply.body {
+        case .summary: maximum = 49_152
+        case .grantUnavailable: maximum = 4096
+        }
+        try validateSettingsReplyEnvelope(envelope, maximum: maximum)
+        return VerifiedReplicaSettingsReply(envelope: envelope, host: host,
+                                            localID: publicKeys.deviceID, body: .access(reply))
+    }
+
+    func verifySettingsBindReply(_ envelope: EncryptedEnvelope, host: DevicePublicKeys) throws -> VerifiedReplicaSettingsReply {
+        let plaintext = try authenticatedPlaintext(envelope, host: host, now: WireID.now())
+        let reply = try RemoteSettingsWire.decodeBindReply(plaintext)
+        guard reply.hostID == host.deviceID else { throw WireError.identity }
+        try validateSettingsReplyEnvelope(envelope, maximum: 49_152)
+        return VerifiedReplicaSettingsReply(envelope: envelope, host: host,
+                                            localID: publicKeys.deviceID, body: .bind(reply))
+    }
+
+    private func validateSettingsReplyEnvelope(_ envelope: EncryptedEnvelope, maximum: Int) throws {
+        guard envelope.header.expires > envelope.header.created,
+              envelope.header.expires - envelope.header.created <= 60_000 else { throw WireError.invalid }
+        _ = try envelope.wire.encoded(maximum: maximum)
+    }
+
+    func receive(_ envelope: EncryptedEnvelope, host: DevicePublicKeys, into inbox: any DurableEnvelopeInbox, now: UInt64) async throws -> Bool {
+        let plaintext = try authenticatedPlaintext(envelope, host: host, now: now)
         switch DevicePackets.routing(plaintext) {
         case .ordinary:
             return try await inbox.acceptAuthenticated(envelope, plaintext: plaintext, host: host, localID: publicKeys.deviceID)
