@@ -1,5 +1,18 @@
 import Foundation
 import Observation
+import UIKit
+
+enum ClientTab: Hashable {
+    case chat, approvals, settings
+}
+
+enum ClientSettingsDestination: Hashable {
+    case thisDevice
+}
+
+enum LocalSettingsCover: Hashable {
+    case rootSheet, globalError, deviceDisable, localConfirmation
+}
 
 @MainActor
 @Observable
@@ -10,14 +23,26 @@ final class AppModel {
     var busy = false
     var error: String?
     var connectionEnabled = false
-    var notificationsEnabled = false
+    private(set) var localSettings: ThisDeviceSettingsStore?
+    private(set) var localSettingsIssue: String?
+    private(set) var selectedTab: ClientTab = .chat
+    private(set) var settingsPath: [ClientSettingsDestination] = []
     var pairing: PairingSummary?
     var pairingRequest = ""
     @ObservationIgnored private var service: ReplicaService?
     @ObservationIgnored private var opening: (id: UUID, task: Task<ReplicaService, Error>)?
     @ObservationIgnored private let notifications = NotificationService()
     @ObservationIgnored private var refreshEpoch = UUID()
-    @ObservationIgnored private var lastCursors: [UUID: UInt64] = [:]
+    @ObservationIgnored private var localDeviceID: UUID?
+    @ObservationIgnored private var localIdentityInvalid = false
+    @ObservationIgnored private var localSceneActive = false
+    @ObservationIgnored private var platformObserved = false
+    @ObservationIgnored private var platformActive = false
+    @ObservationIgnored private var localDestinationVisible = false
+    @ObservationIgnored private var localCovers: Set<LocalSettingsCover> = []
+    @ObservationIgnored private var localDrainTask: Task<Void, Never>?
+    @ObservationIgnored private var localDrainPending = false
+    @ObservationIgnored private var localPermanentDrain = false
 
     func scene(active: Bool) async {
         if !active {
@@ -57,14 +82,7 @@ final class AppModel {
             let updated = try await service.viewState()
             guard refreshEpoch == captured, !Task.isCancelled else { return }
             if selectedConversation == nil { selectedConversation = updated.snapshot.conversations.first?.id }
-            for conversation in updated.snapshot.conversations {
-                if let previous = lastCursors[conversation.id], conversation.cursor > previous, notificationsEnabled {
-                    try await notifications.activity()
-                }
-                guard refreshEpoch == captured, !Task.isCancelled else { return }
-                lastCursors[conversation.id] = max(lastCursors[conversation.id] ?? 0, conversation.cursor)
-            }
-            guard refreshEpoch == captured, !Task.isCancelled else { return }
+            adoptLocalSettings(identity: updated.identity)
             state = updated
             let conversation = selectedConversation
             await service.selectConversation(conversation)
@@ -197,11 +215,120 @@ final class AppModel {
         }
     }
 
-    func authorizeNotifications() async {
-        await perform { notificationsEnabled = try await notifications.authorize() }
+    func localSceneChanged(active: Bool) {
+        localSceneActive = active
+        if !platformObserved {
+            platformObserved = true
+            platformActive = UIApplication.shared.applicationState == .active
+        }
+        updateLocalEligibility()
+    }
+
+    func localApplicationWillResignActive() {
+        platformObserved = true
+        platformActive = false
+        updateLocalEligibility()
+    }
+
+    func localApplicationDidBecomeActive() {
+        platformObserved = true
+        platformActive = UIApplication.shared.applicationState == .active
+        updateLocalEligibility()
+    }
+
+    func localTabChanged(_ tab: ClientTab) {
+        guard selectedTab != tab else { return }
+        localSettings?.setSurfaceVisible(false)
+        selectedTab = tab
+        updateLocalEligibility()
+    }
+
+    func localSettingsPathChanged(_ path: [ClientSettingsDestination]) {
+        localSettings?.setSurfaceVisible(false)
+        localDestinationVisible = false
+        guard path.count <= 1 else {
+            localSettingsIssue = "The local settings destination could not be opened."
+            requestLocalDrain()
+            return
+        }
+        settingsPath = path
+        if path.isEmpty { localCovers.remove(.localConfirmation) }
+        updateLocalEligibility()
+    }
+
+    func localDestinationChanged(presented: Bool) {
+        if !presented { localSettings?.setSurfaceVisible(false) }
+        localDestinationVisible = presented && settingsPath.last == .thisDevice
+        updateLocalEligibility()
+    }
+
+    func localCoverChanged(_ cover: LocalSettingsCover, presented: Bool) {
+        guard localCovers.contains(cover) != presented else { return }
+        if presented {
+            localSettings?.setSurfaceVisible(false)
+            localCovers.insert(cover)
+        } else {
+            localCovers.remove(cover)
+        }
+        updateLocalEligibility()
+    }
+
+    func dismissError() {
+        error = nil
+        localCoverChanged(.globalError, presented: false)
+    }
+
+    private func adoptLocalSettings(identity: DevicePublicKeys) {
+        if let localDeviceID {
+            guard localDeviceID != identity.deviceID, !localIdentityInvalid else { return }
+            localIdentityInvalid = true
+            localSettingsIssue = "The local preference identity changed. Existing work has been retained; reopen the app to inspect storage."
+            localSettings?.invalidate()
+            requestLocalDrain(permanent: true)
+            return
+        }
+        localDeviceID = identity.deviceID
+        do {
+            guard let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first else {
+                throw DevicePreferenceError.storage
+            }
+            let directory = support.appendingPathComponent("Everything", isDirectory: true).appendingPathComponent("DevicePreferences", isDirectory: true)
+            let owner = try ThisDeviceSettingsStore(directory: directory, deviceID: identity.deviceID)
+            localSettings = owner
+            owner.open()
+            updateLocalEligibility()
+        } catch {
+            localSettingsIssue = "Local preferences could not be initialized. Existing storage has not been replaced."
+        }
+    }
+
+    private func updateLocalEligibility() {
+        guard let localSettings else { return }
+        let active = localSceneActive && platformActive
+        let visible = selectedTab == .settings && localDestinationVisible && localCovers.isEmpty
+        if !active || !visible { localSettings.setSurfaceVisible(false) }
+        localSettings.setSceneActive(active)
+        localSettings.setSurfaceVisible(visible)
+        if !active || !visible { requestLocalDrain() }
+    }
+
+    private func requestLocalDrain(permanent: Bool = false) {
+        guard let owner = localSettings else { return }
+        localDrainPending = true
+        localPermanentDrain = localPermanentDrain || permanent
+        guard localDrainTask == nil else { return }
+        localDrainTask = Task { [self, owner] in
+            while localDrainPending {
+                localDrainPending = false
+                if localPermanentDrain { await owner.drain() }
+                else { await owner.drainSurface() }
+            }
+            localDrainTask = nil
+        }
     }
 
     private func present(_ error: Error) {
+        localCoverChanged(.globalError, presented: true)
         self.error = (error as? WireError)?.localizedDescription ?? "The operation could not be completed. Existing local work has been preserved."
     }
 }
