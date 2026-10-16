@@ -170,6 +170,9 @@ final class DeviceNotificationActions {
             try session.validate(generation: generation, expiresAt: identity.expiresAt, deadline: deadline)
             guard !cancellation.requested else { return result(requestID, identity.deviceID, .cancelled) }
             let currentAuthorization = await authorization.observe()
+            let latest = try await preferences.snapshot()
+            guard latest.deviceID == identity.deviceID else { return result(requestID, identity.deviceID, .failed(observation: nil)) }
+            guard latest.revision == identity.expectedRevision else { return result(requestID, identity.deviceID, .conflict(observedRevision: latest.revision)) }
             try session.validate(generation: generation, expiresAt: identity.expiresAt, deadline: deadline)
             guard !cancellation.requested else { return result(requestID, identity.deviceID, .cancelled) }
             switch currentAuthorization.authorization {

@@ -72,10 +72,16 @@ private final class PreferenceDatabase: @unchecked Sendable {
         }
     }
 
-    static func text(_ row: OpaquePointer, _ column: Int32) throws -> String {
+    static func text(_ row: OpaquePointer, _ column: Int32, maximumBytes: Int) throws -> String {
         guard sqlite3_column_type(row, column) == SQLITE_TEXT,
               let value = sqlite3_column_text(row, column) else { throw DevicePreferenceError.storage }
-        return String(cString: value)
+        let count = Int(sqlite3_column_bytes(row, column))
+        guard count > 0, count <= maximumBytes else { throw DevicePreferenceError.storage }
+        let bytes = UnsafeBufferPointer(start: value, count: count)
+        guard !bytes.contains(0), let decoded = String(bytes: bytes, encoding: .utf8) else {
+            throw DevicePreferenceError.storage
+        }
+        return decoded
     }
 
     static func data(_ row: OpaquePointer, _ column: Int32) throws -> Data {
@@ -126,7 +132,7 @@ actor DevicePreferenceStore {
             "CREATE TABLE IF NOT EXISTS requests(id TEXT PRIMARY KEY,original BLOB NOT NULL,outcome TEXT NOT NULL CHECK(outcome IN ('applied','conflict')),revision INTEGER NOT NULL CHECK(revision>0))"
         ] { try database.execute(sql) }
         try database.transaction {
-            let identities = try database.rows("SELECT device FROM preferences WHERE id=1") { try PreferenceDatabase.text($0, 0) }
+            let identities = try database.rows("SELECT device FROM preferences WHERE id=1") { try PreferenceDatabase.text($0, 0, maximumBytes: 36) }
             if let identity = identities.first {
                 guard identity == deviceID.uuidString.lowercased() else { throw DevicePreferenceError.wrongDevice }
             } else {
@@ -198,7 +204,7 @@ actor DevicePreferenceStore {
             let revision = sqlite3_column_int64(row, 1)
             let completion = sqlite3_column_int64(row, 2)
             let attention = sqlite3_column_int64(row, 3)
-            guard try PreferenceDatabase.text(row, 0) == deviceID.uuidString.lowercased(), revision > 0,
+            guard try PreferenceDatabase.text(row, 0, maximumBytes: 36) == deviceID.uuidString.lowercased(), revision > 0,
                   sqlite3_column_type(row, 1) == SQLITE_INTEGER,
                   sqlite3_column_type(row, 2) == SQLITE_INTEGER,
                   sqlite3_column_type(row, 3) == SQLITE_INTEGER,
@@ -214,7 +220,7 @@ actor DevicePreferenceStore {
             let revision = sqlite3_column_int64(row, 2)
             guard sqlite3_column_type(row, 2) == SQLITE_INTEGER, revision > 0 else { throw DevicePreferenceError.storage }
             let outcome: DevicePreferenceResult.Outcome
-            switch try PreferenceDatabase.text(row, 1) {
+            switch try PreferenceDatabase.text(row, 1, maximumBytes: 8) {
             case "applied": outcome = .applied(revision: UInt64(revision))
             case "conflict": outcome = .conflict(observedRevision: UInt64(revision))
             default: throw DevicePreferenceError.storage
