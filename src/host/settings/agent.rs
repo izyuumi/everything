@@ -291,6 +291,7 @@ struct SessionState {
 
 struct JoinedTurn {
     chat_id: Uuid,
+    turn_id: CommandId,
     completed: bool,
     invocations: Vec<InvocationResult>,
     local_cleanup_known: bool,
@@ -308,7 +309,7 @@ pub(crate) struct SettingsAgentSupervisor {
     opening: BTreeMap<CommandId, Arc<SettingsAgentSession>>,
     archived: VecDeque<(Uuid, SettingsChatStatus)>,
     workers: JoinSet<JoinedTurn>,
-    worker_sessions: HashMap<tokio::task::Id, Arc<Session>>,
+    worker_sessions: HashMap<tokio::task::Id, (Arc<Session>, CommandId)>,
     failed: bool,
     commands_open: bool,
     turn: Arc<Semaphore>,
@@ -415,11 +416,18 @@ impl SettingsAgentSupervisor {
                 biased;
                 joined = self.workers.join_next_with_id(), if !self.workers.is_empty() => {
                     let completed = match joined {
-                        Some(Ok((id, joined))) => { self.worker_sessions.remove(&id); Some(joined) }
+                        Some(Ok((id, joined))) => match self.worker_sessions.remove(&id) {
+                            Some((session, turn_id)) if joined.chat_id == session.id && joined.turn_id == turn_id => Some(joined),
+                            Some((session, turn_id)) => {
+                                self.note_failure();
+                                Some(cleanup_turn(&self.core, &session, turn_id, false, false).await)
+                            }
+                            None => { self.note_failure(); None }
+                        }
                         Some(Err(error)) => {
                             self.note_failure();
                             match self.worker_sessions.remove(&error.id()) {
-                                Some(session) => Some(cleanup_turn(&self.core, &session, false, false).await),
+                                Some((session, turn_id)) => Some(cleanup_turn(&self.core, &session, turn_id, false, false).await),
                                 None => None,
                             }
                         }
@@ -1058,6 +1066,11 @@ impl SettingsAgentSupervisor {
             Ok(())
         });
         if let Err(error) = presentation_reset {
+            self.sessions
+                .get_mut(&id)
+                .ok_or(HostError::Worker)?
+                .status
+                .phase = SettingsChatPhase::Unknown;
             self.note_failure();
             self.close_session(session).await?;
             return Err(error);
@@ -1069,6 +1082,11 @@ impl SettingsAgentSupervisor {
         {
             Ok(caller) => caller,
             Err(error) => {
+                self.sessions
+                    .get_mut(&id)
+                    .ok_or(HostError::Worker)?
+                    .status
+                    .phase = SettingsChatPhase::Unknown;
                 self.note_failure();
                 self.close_session(session).await?;
                 return Err(error.into());
@@ -1129,12 +1147,22 @@ impl SettingsAgentSupervisor {
         let (context, observation) = match context {
             Ok(captured) => captured,
             Err(error) => {
+                self.sessions
+                    .get_mut(&id)
+                    .ok_or(HostError::Worker)?
+                    .status
+                    .phase = SettingsChatPhase::Unknown;
                 self.note_failure();
                 self.close_session(session).await?;
                 return Err(error);
             }
         };
         if let Err(error) = self.core.tools.begin_turn(id) {
+            self.sessions
+                .get_mut(&id)
+                .ok_or(HostError::Worker)?
+                .status
+                .phase = SettingsChatPhase::Unknown;
             self.note_failure();
             self.close_session(session).await?;
             return Err(error.into());
@@ -1149,7 +1177,7 @@ impl SettingsAgentSupervisor {
             let retained = (permit, core, session);
             run_turn(&retained.1, &retained.2, turn_id, text, context).await
         });
-        self.worker_sessions.insert(worker.id(), tracked);
+        self.worker_sessions.insert(worker.id(), (tracked, turn_id));
         Ok(SettingsAssistantReply::Accepted {
             chat_id: id,
             turn_id,
@@ -1160,11 +1188,17 @@ impl SettingsAgentSupervisor {
         let Some(entry) = self.sessions.get_mut(&joined.chat_id) else {
             return Err(HostError::Worker);
         };
-        transfer_presentation(entry);
         entry.running = false;
         entry.local_idle = joined.workers_joined;
+        entry.status.phase = SettingsChatPhase::Unknown;
+        let original_status = entry.status.turn_id == Some(joined.turn_id);
+        if original_status {
+            transfer_presentation(entry);
+        }
         let session = Arc::clone(&entry.session);
-        let fence = session.profile.fence()?;
+        let fence = session.profile.fence()?.filter(|fence| {
+            original_status && fence.session_id == session.id && fence.command_id == joined.turn_id
+        });
         let Some(fence) = fence else {
             entry.status.phase = SettingsChatPhase::Unknown;
             entry.closing = true;
@@ -1470,7 +1504,11 @@ async fn run_turn(
     }).catch_unwind().await;
     let interrupted = interrupt_presentation(session, turn_id);
     presentation_failed |= interrupted.is_err();
-    let classified_stop = !presentation_failed
+    let original_fence = session.profile.fence().is_ok_and(|fence| {
+        fence.is_some_and(|fence| fence.session_id == session.id && fence.command_id == turn_id)
+    });
+    let classified_stop = original_fence
+        && !presentation_failed
         && (matches!(operation, Ok(Ok(_)))
             || matches!(operation, Ok(Err(_)))
                 && session
@@ -1480,6 +1518,7 @@ async fn run_turn(
     cleanup_turn(
         core,
         session,
+        turn_id,
         matches!(operation, Ok(Ok(true))),
         classified_stop,
     )
@@ -1489,22 +1528,24 @@ async fn run_turn(
 async fn cleanup_turn(
     core: &Arc<SettingsAgentComponents>,
     session: &Arc<Session>,
+    turn_id: CommandId,
     completed: bool,
     classified_stop: bool,
 ) -> JoinedTurn {
-    let foreground = match session.profile.fence() {
-        Ok(Some(fence)) => {
-            session
-                .agent
-                .reconcile_foreground_task(session.profile.conversation_id(), fence.command_id)
-                .await
-        }
-        Ok(None) => Ok(None),
-        Err(error) => Err(error),
-    };
+    let original_fence = session.profile.fence().is_ok_and(|fence| {
+        fence.is_some_and(|fence| fence.session_id == session.id && fence.command_id == turn_id)
+    });
+    let foreground = session
+        .agent
+        .reconcile_foreground_task(session.profile.conversation_id(), turn_id)
+        .await;
     let provider_idle = session.profile.accounting.close_and_wait().await;
     let local_preparation_failed = session.profile.accounting.local_preparation_failed();
-    let observed = session.agent.observe_settings_provider().await;
+    let observed = if original_fence {
+        session.agent.observe_settings_provider().await
+    } else {
+        Err(crate::agent::AgentError::ConfigurationMismatch)
+    };
     let broker_idle = session.profile.close_broker_and_wait().await;
     let invocations = core.tools.finish_turn(session.id).await;
     let report = core
@@ -1521,11 +1562,16 @@ async fn cleanup_turn(
         observed,
         Ok(()) | Err(crate::agent::AgentError::RestrictedProviderAccounting)
     );
-    let provider_observation = session.profile.provider_observation();
+    let provider_observation = if original_fence {
+        session.profile.provider_observation()
+    } else {
+        Err(crate::agent::AgentError::ConfigurationMismatch)
+    };
     let provider_terminal_observed = provider_observation
         .as_ref()
         .is_ok_and(|value| value.as_ref().is_some_and(|value| value.terminal_observed));
-    let local_cleanup_known = classified_stop
+    let local_cleanup_known = original_fence
+        && classified_stop
         && persisted
         && provider_observation.is_ok()
         && workers_joined
@@ -1542,10 +1588,14 @@ async fn cleanup_turn(
     let receipt_observation = match receipts {
         Some(receipts) => tokio::task::spawn_blocking(move || {
             let retained = retained;
-            let fence = retained.1.profile.fence()?;
-            let Some(fence) = fence else {
-                return Ok::<_, HostError>(true);
-            };
+            let fence = retained
+                .1
+                .profile
+                .fence()?
+                .filter(|fence| fence.session_id == retained.1.id && fence.command_id == turn_id)
+                .ok_or(HostError::Invalid(
+                    "Settings cleanup lacks its original fence",
+                ))?;
             let repository = super::operations::OperationRepository::new(retained.0.agent.store());
             for id in fence.mutation_ids {
                 let Some((_, disposition)) = receipts.iter().find(|(original, _)| *original == id)
@@ -1590,7 +1640,8 @@ async fn cleanup_turn(
         None => Err(HostError::Worker),
     };
     let mutation_links_known = matches!(receipt_observation, Ok(true));
-    let finalization_safe = classified_stop
+    let finalization_safe = original_fence
+        && classified_stop
         && matches!(local_preparation_failed, Ok(false))
         && foreground.is_ok()
         && persisted
@@ -1599,6 +1650,7 @@ async fn cleanup_turn(
         && receipt_observation.is_ok();
     JoinedTurn {
         chat_id: session.id,
+        turn_id,
         completed,
         invocations: invocations.unwrap_or_default(),
         local_cleanup_known,
