@@ -1,4 +1,6 @@
-use super::{DeviceEndpoint, DeviceError, EndpointRole, PeerRegistration, REGISTRATION_VERSION};
+use super::{
+    DeviceAccess, DeviceEndpoint, DeviceError, EndpointRole, PeerRegistration, REGISTRATION_VERSION,
+};
 use crate::crypto::DevicePublicKeys;
 use crate::protocol::{DeviceId, MessageId, UnixMillis};
 use crate::storage::StorageError;
@@ -26,6 +28,17 @@ pub struct DeviceSettingsPage {
     pub next_after: Option<DeviceId>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct DevicePairingApprovalState {
+    pub(crate) device_id: DeviceId,
+    pub(crate) public_keys: DevicePublicKeys,
+    pub(crate) access: DeviceAccess,
+    pub(crate) label: String,
+    pub(crate) pinned_at: UnixMillis,
+    pub(crate) paired_at: UnixMillis,
+    pub(crate) revoked_at: Option<UnixMillis>,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PairingCancellation {
     Cancelled,
@@ -46,6 +59,69 @@ pub enum DeviceSettingsRevocation {
 }
 
 impl DeviceEndpoint {
+    pub(crate) fn retire_pending_pairing(&self, pairing_id: MessageId) -> Result<(), DeviceError> {
+        if self.inner.role != EndpointRole::Host {
+            return Err(DeviceError::AccessDenied);
+        }
+        self.inner
+            .pairings
+            .lock()
+            .map_err(|_| DeviceError::Poisoned)?
+            .remove(&pairing_id);
+        Ok(())
+    }
+
+    pub(crate) fn pairing_approval_state(
+        &self,
+        pairing_id: MessageId,
+        expected: &DevicePublicKeys,
+        access: &DeviceAccess,
+    ) -> Result<Option<DevicePairingApprovalState>, DeviceError> {
+        if self.inner.role != EndpointRole::Host {
+            return Err(DeviceError::AccessDenied);
+        }
+        expected.validate()?;
+        access.validate()?;
+        let connection = self.inner.store.connection()?;
+        let mut statement = connection
+            .prepare(
+                "SELECT d.id,d.label,d.public_identity,d.created_at,d.revoked_at,p.device_id,p.completed_at FROM pairing_uses p LEFT JOIN devices d ON d.id=p.device_id WHERE p.pairing_id=?1 LIMIT 1",
+            )
+            .map_err(StorageError::from)?;
+        let mut rows = statement
+            .query([pairing_id.to_string()])
+            .map_err(StorageError::from)?;
+        let Some(row) = rows.next().map_err(StorageError::from)? else {
+            return Ok(None);
+        };
+        let id = text(row, 0, 36)?;
+        let device_id: DeviceId = id.parse().map_err(|_| DeviceError::MalformedRegistration)?;
+        if text(row, 5, 36)? != device_id.to_string() {
+            return Err(DeviceError::MalformedRegistration);
+        }
+        let label = text(row, 1, 256)?;
+        super::validate_label(label)?;
+        let registration = registration(row, id, device_id)?;
+        if registration.keys != *expected || registration.access != *access {
+            return Err(DeviceError::AccessDenied);
+        }
+        let pinned_at: i64 = row.get(3).map_err(StorageError::from)?;
+        let revoked_at: Option<i64> = row.get(4).map_err(StorageError::from)?;
+        if revoked_at.is_some_and(|revoked| revoked < pinned_at) {
+            return Err(DeviceError::MalformedRegistration);
+        }
+        let paired_at = stored_time(row.get(6).map_err(StorageError::from)?)?;
+        Ok(Some(DevicePairingApprovalState {
+            device_id,
+            public_keys: registration.keys,
+            access: registration.access,
+            label: label.to_owned(),
+            pinned_at: stored_time(pinned_at)?,
+            paired_at,
+            revoked_at: revoked_at.map(stored_time).transpose()?,
+        }))
+    }
+
     pub fn settings_devices(
         &self,
         after: Option<DeviceId>,
@@ -203,17 +279,7 @@ fn summary(
     let device_id: DeviceId = id.parse().map_err(|_| DeviceError::MalformedRegistration)?;
     let label = text(row, 1, 256)?;
     super::validate_label(label)?;
-    let registration: PeerRegistration =
-        serde_json::from_str(text(row, 2, MAX_REGISTRATION_BYTES)?)
-            .map_err(|_| DeviceError::MalformedRegistration)?;
-    if id != device_id.to_string()
-        || registration.version != REGISTRATION_VERSION
-        || registration.keys.device_id != device_id
-    {
-        return Err(DeviceError::MalformedRegistration);
-    }
-    registration.keys.validate()?;
-    registration.access.validate()?;
+    let registration = registration(row, id, device_id)?;
     let created_at: i64 = row.get(3).map_err(StorageError::from)?;
     let revoked_at: Option<i64> = row.get(4).map_err(StorageError::from)?;
     if created_at < 0 || revoked_at.is_some_and(|revoked| revoked < created_at) {
@@ -226,6 +292,30 @@ fn summary(
         revoked: revoked_at.is_some(),
         this_device: device_id == host_id,
     })
+}
+
+fn registration(
+    row: &rusqlite::Row<'_>,
+    id: &str,
+    device_id: DeviceId,
+) -> Result<PeerRegistration, DeviceError> {
+    let registration: PeerRegistration =
+        serde_json::from_str(text(row, 2, MAX_REGISTRATION_BYTES)?)
+            .map_err(|_| DeviceError::MalformedRegistration)?;
+    if id != device_id.to_string()
+        || registration.version != REGISTRATION_VERSION
+        || registration.keys.device_id != device_id
+    {
+        return Err(DeviceError::MalformedRegistration);
+    }
+    registration.keys.validate()?;
+    registration.access.validate()?;
+    Ok(registration)
+}
+
+fn stored_time(value: i64) -> Result<UnixMillis, DeviceError> {
+    let value = u64::try_from(value).map_err(|_| DeviceError::MalformedRegistration)?;
+    UnixMillis::try_from(value).map_err(|_| DeviceError::MalformedRegistration)
 }
 
 fn text<'row>(
