@@ -142,6 +142,56 @@ final class NativeSettingsStore {
         fileprivate let admission: NativeSettingsAdmission
     }
 
+    @MainActor
+    final class AssistantOpenAction: CustomStringConvertible, CustomDebugStringConvertible {
+        let requestID: UUID
+        fileprivate let ownerID: UUID
+        fileprivate let admission: NativeSettingsAssistantOpenAdmission
+
+        nonisolated var description: String { "NativeSettingsAssistantOpenAction([private])" }
+        nonisolated var debugDescription: String { description }
+
+        fileprivate init(ownerID: UUID, admission: NativeSettingsAssistantOpenAdmission) {
+            self.ownerID = ownerID
+            self.admission = admission
+            requestID = admission.requestID
+        }
+    }
+
+    @MainActor
+    final class AssistantSendAction: CustomStringConvertible, CustomDebugStringConvertible {
+        let turnID: UUID
+        fileprivate let ownerID: UUID
+        fileprivate let admission: NativeSettingsAssistantSendAdmission
+
+        nonisolated var description: String { "NativeSettingsAssistantSendAction([private])" }
+        nonisolated var debugDescription: String { description }
+
+        fileprivate init(ownerID: UUID, admission: NativeSettingsAssistantSendAdmission) {
+            self.ownerID = ownerID
+            self.admission = admission
+            turnID = admission.turnID
+        }
+    }
+
+    private enum AssistantReadIdentity: Hashable {
+        case open(UUID)
+        case closeOpen(UUID)
+        case poll(UUID)
+        case close(UUID)
+        case inspect(UUID, UUID, UUID)
+        case details(UUID, UUID, UUID, UUID, UInt64, Bool)
+    }
+
+    private struct AssistantSendReservation {
+        let openRequestID: UUID
+        let requestID: UUID
+        let turnID: UUID
+        var operationIDs: Set<UUID> = []
+        var materialized: Set<UUID> = []
+        var pending = true
+    }
+
     struct Cleanup: Identifiable, Sendable {
         let id: UUID
         let connectionKey: UUID
@@ -157,7 +207,7 @@ final class NativeSettingsStore {
 
         var hasIssues: Bool {
             guard let report else { return false }
-            return !report.failures.isEmpty || !report.unresolvedOperationIDs.isEmpty
+            return !report.failures.isEmpty || !report.unresolvedOperationIDs.isEmpty || !report.unresolvedAssistantOpenRequestIDs.isEmpty
         }
 
         var requiresRetention: Bool { hasIssues || !unlinkedCredentialOperationIDs.isEmpty }
@@ -180,6 +230,11 @@ final class NativeSettingsStore {
         var effects: [UUID: Task<Void, Never>] = [:]
         var credentials: [UUID: CredentialContext] = [:]
         var devices: [UUID: DeviceContext] = [:]
+        var assistantOpens: [UUID: AssistantOpenAction] = [:]
+        var assistantChats: [UUID: NativeSettingsSession.AssistantHandle] = [:]
+        var assistantSends: [UUID: AssistantSendReservation] = [:]
+        var assistantReads: [AssistantReadIdentity: UUID] = [:]
+        var retiredAssistantOpens: Set<UUID> = []
         var devicePage: SettingsDevicePage?
         var devicesReadID: UUID?
         var reloadAfterRead = false
@@ -371,6 +426,261 @@ final class NativeSettingsStore {
         if owner.work == nil { refresh() }
     }
 
+    func prepareAssistantOpen() throws -> AssistantOpenAction {
+        guard !isClosed, let owner = current, isCurrent(owner), isForeground,
+              owner.information != nil, owner.retirement == nil else { throw NativeSettingsSessionError.inactive }
+        guard identityCount(owner) < 64, owner.effects.count < 4 else { throw NativeSettingsSessionError.capacity }
+        let admission = try owner.lifecycle.prepareAssistantOpen()
+        let conflict = identityReserved(owner, id: admission.requestID)
+        let action = AssistantOpenAction(ownerID: owner.id, admission: admission)
+        owner.assistantOpens[action.requestID] = action
+        guard !conflict else { throw NativeSettingsSessionError.requestReused }
+        return action
+    }
+
+    func acceptAssistantDisclosure(_ chat: NativeSettingsSession.AssistantHandle) throws -> NativeSettingsAssistantConsent {
+        let owner = try assistantOwner(chat, live: true)
+        return try owner.lifecycle.acceptAssistantDisclosure(chat)
+    }
+
+    func prepareAssistantSend(_ chat: NativeSettingsSession.AssistantHandle,
+                              consent: NativeSettingsAssistantConsent, text: String) throws -> AssistantSendAction {
+        let owner = try assistantOwner(chat, live: true)
+        guard identityCount(owner) + 9 <= 64, owner.effects.count < 4 else { throw NativeSettingsSessionError.capacity }
+        guard !owner.assistantSends.values.contains(where: { $0.openRequestID == chat.openRequestID && $0.pending }) else {
+            throw NativeSettingsSessionError.operationUncertain
+        }
+        let admission = try owner.lifecycle.prepareAssistantSend(chat, consent: consent, text: text)
+        let conflict = identityReserved(owner, id: admission.turnID) || identityReserved(owner, id: admission.requestID)
+            || admission.turnID == admission.requestID
+        owner.assistantSends[admission.turnID] = AssistantSendReservation(openRequestID: chat.openRequestID,
+            requestID: admission.requestID, turnID: admission.turnID)
+        guard !conflict else { admission.cancel(); throw NativeSettingsSessionError.requestReused }
+        return AssistantSendAction(ownerID: owner.id, admission: admission)
+    }
+
+    func openAssistant(_ action: AssistantOpenAction,
+                       completion: @escaping @MainActor @Sendable (Result<NativeSettingsSession.AssistantOpenOutcome, NativeSettingsSessionError>) -> Void) throws {
+        let owner = try assistantOwner(action, live: true)
+        try startAssistantEffect(owner, id: action.requestID, work: {
+            try await owner.lifecycle.session.openAssistant(action.admission)
+        }, observe: { result in
+            if case .opened(let chat) = result {
+                guard chat.openRequestID == action.requestID else { throw NativeSettingsSessionError.invalidResponse }
+                if let original = owner.assistantChats[chat.opened.chatID], original !== chat { throw NativeSettingsSessionError.requestReused }
+                owner.assistantChats[chat.opened.chatID] = chat
+            } else {
+                switch result {
+                case .unavailable: owner.retiredAssistantOpens.insert(action.requestID)
+                case .state(let state): self.observeAssistantOpen(owner, action: action, state: state)
+                case .opened: break
+                }
+            }
+        }, completion: completion)
+    }
+
+    func sendAssistant(_ action: AssistantSendAction,
+                       completion: @escaping @MainActor @Sendable (Result<NativeSettingsSession.AssistantSendOutcome, NativeSettingsSessionError>) -> Void) throws {
+        guard let owner = owners[action.ownerID], owner.assistantSends[action.turnID]?.requestID == action.admission.requestID,
+              owner.assistantChats[action.admission.chat.opened.chatID] === action.admission.chat else {
+            throw NativeSettingsSessionError.invalidRequest
+        }
+        guard isCurrent(owner), isForeground else { throw NativeSettingsSessionError.inactive }
+        try startAssistantEffect(owner, id: action.turnID, work: {
+            try await owner.lifecycle.session.sendAssistant(action.admission)
+        }, observe: { outcome in
+            if case .unavailable = outcome {
+                owner.assistantSends[action.turnID]?.pending = false
+                owner.retiredAssistantOpens.insert(action.admission.chat.openRequestID)
+            }
+        }, completion: completion)
+    }
+
+    func assistantOpenStatus(_ action: AssistantOpenAction,
+                             completion: @escaping @MainActor @Sendable (Result<NativeSettingsAssistantWire.OpenState, NativeSettingsSessionError>) -> Void) throws {
+        let owner = try assistantOwner(action, live: false)
+        try startAssistantEffect(owner, id: UUID(), read: .open(action.requestID), work: { () async throws -> (NativeSettingsAssistantWire.OpenState, NativeSettingsSession.AssistantHandle?) in
+            let state = try await owner.lifecycle.session.assistantOpenStatus(action.admission)
+            if case .ready = state {
+                let recovered = try await owner.lifecycle.session.openAssistant(action.admission)
+                if case .opened(let chat) = recovered { return (state, chat) }
+            }
+            return (state, Optional<NativeSettingsSession.AssistantHandle>.none)
+        }, observe: { value in
+            if let chat = value.1 { owner.assistantChats[chat.opened.chatID] = chat }
+            self.observeAssistantOpen(owner, action: action, state: value.0)
+        }, completion: { value in completion(value.map { $0.0 }) })
+    }
+
+    func closeAssistantOpen(_ action: AssistantOpenAction,
+                            completion: @escaping @MainActor @Sendable (Result<NativeSettingsAssistantWire.OpenState, NativeSettingsSessionError>) -> Void) throws {
+        let owner = try assistantOwner(action, live: false)
+        owner.lifecycle.retireAssistant(action.admission)
+        owner.retiredAssistantOpens.insert(action.requestID)
+        try startAssistantEffect(owner, id: UUID(), read: .closeOpen(action.requestID), work: {
+            try await owner.lifecycle.session.closeAssistantOpen(action.admission)
+        }, observe: { state in self.observeAssistantOpen(owner, action: action, state: state) }, completion: completion)
+    }
+
+    func pollAssistant(_ chat: NativeSettingsSession.AssistantHandle,
+                       completion: @escaping @MainActor @Sendable (Result<NativeSettingsSession.AssistantObservation, NativeSettingsSessionError>) -> Void) throws {
+        let owner = try assistantOwner(chat, live: false)
+        try startAssistantEffect(owner, id: UUID(), read: .poll(chat.opened.chatID), work: {
+            try await owner.lifecycle.session.pollAssistant(chat)
+        }, observe: { value in try self.observeAssistant(owner, observation: value) }, completion: completion)
+    }
+
+    func closeAssistant(_ chat: NativeSettingsSession.AssistantHandle,
+                        completion: @escaping @MainActor @Sendable (Result<NativeSettingsSession.AssistantObservation, NativeSettingsSessionError>) -> Void) throws {
+        let owner = try assistantOwner(chat, live: false)
+        guard let original = owner.assistantOpens[chat.openRequestID] else { throw NativeSettingsSessionError.invalidRequest }
+        owner.lifecycle.retireAssistant(original.admission)
+        owner.retiredAssistantOpens.insert(chat.openRequestID)
+        try startAssistantEffect(owner, id: UUID(), read: .close(chat.opened.chatID), work: {
+            try await owner.lifecycle.session.closeAssistant(chat)
+        }, observe: { value in try self.observeAssistant(owner, observation: value) }, completion: completion)
+    }
+
+    func inspectAssistantOperation(_ original: NativeSettingsSession.AssistantOperationHandle,
+                                   completion: @escaping @MainActor @Sendable (Result<NativeSettingsAssistantWire.OperationLookup, NativeSettingsSessionError>) -> Void) throws {
+        let owner = try assistantOwner(original.chat, live: false)
+        try requireAssistantMembership(owner, original: original)
+        try startAssistantEffect(owner, id: UUID(), read: .inspect(original.chat.opened.chatID, original.turnID, original.operationID), work: {
+            try await owner.lifecycle.session.inspectAssistantOperation(original)
+        }, observe: { value in
+            if case .inspected(let operation) = value {
+                if owner.operations[original.operationID] != nil {
+                    try owner.operations[original.operationID]?.adopt(operation)
+                    self.publishOperations(owner)
+                }
+                if self.isCurrent(owner) { self.invalidateObservation(); self.requestRefresh() }
+            }
+        }, completion: completion)
+    }
+
+    func assistantActionDetails(_ original: NativeSettingsSession.AssistantOperationHandle, reference: NativeActionReference,
+                                completion: @escaping @MainActor @Sendable (Result<NativeSettingsSession.AssistantDetailsReceipt, NativeSettingsSessionError>) -> Void) throws {
+        let owner = try assistantOwner(original.chat, live: true)
+        try requireAssistantMembership(owner, original: original)
+        let confirmation: Bool
+        switch reference {
+        case .confirmation: confirmation = true
+        case .action: confirmation = false
+        }
+        try startAssistantEffect(owner, id: UUID(), read: .details(original.chat.opened.chatID, original.turnID, original.operationID, reference.id, reference.expiresAt, confirmation), work: {
+            try await owner.lifecycle.session.assistantActionDetails(original, reference: reference)
+        }, observe: { value in try self.adoptAssistantDetails(owner, receipt: value) }, completion: completion)
+    }
+
+    private func assistantOwner(_ action: AssistantOpenAction, live: Bool) throws -> Owner {
+        guard let owner = owners[action.ownerID], owner.assistantOpens[action.requestID] === action,
+              owner.retirement == nil else { throw NativeSettingsSessionError.closed }
+        if live, !isCurrent(owner) || !isForeground { throw NativeSettingsSessionError.inactive }
+        return owner
+    }
+
+    private func assistantOwner(_ chat: NativeSettingsSession.AssistantHandle, live: Bool) throws -> Owner {
+        guard let owner = owners.values.first(where: { $0.assistantChats[chat.opened.chatID] === chat }),
+              owner.assistantOpens[chat.openRequestID] != nil, owner.retirement == nil else { throw NativeSettingsSessionError.closed }
+        if live {
+            guard isCurrent(owner), isForeground else { throw NativeSettingsSessionError.inactive }
+            guard !owner.retiredAssistantOpens.contains(chat.openRequestID) else { throw NativeSettingsSessionError.closed }
+        }
+        return owner
+    }
+
+    private func requireAssistantMembership(_ owner: Owner, original: NativeSettingsSession.AssistantOperationHandle) throws {
+        guard let turn = owner.assistantSends[original.turnID], turn.openRequestID == original.chat.openRequestID,
+              turn.operationIDs.contains(original.operationID) else { throw NativeSettingsSessionError.invalidRequest }
+    }
+
+    private func observeAssistantOpen(_ owner: Owner, action: AssistantOpenAction, state: NativeSettingsAssistantWire.OpenState) {
+        switch state {
+        case .closing, .closed, .unavailable, .unknown: owner.retiredAssistantOpens.insert(action.requestID)
+        case .ready, .notAccepted: break
+        }
+    }
+
+    private func observeAssistant(_ owner: Owner, observation: NativeSettingsSession.AssistantObservation) throws {
+        let status = observation.status
+        guard owner.assistantChats[status.chatID] != nil else { throw NativeSettingsSessionError.invalidResponse }
+        if let turnID = status.turnID {
+            guard let turn = owner.assistantSends[turnID], owner.assistantChats[status.chatID]?.openRequestID == turn.openRequestID else {
+                throw NativeSettingsSessionError.invalidResponse
+            }
+            let members = turn.operationIDs.union(status.operationIDs)
+            guard members.count <= 8 else { throw NativeSettingsSessionError.capacity }
+            for id in members where !turn.operationIDs.contains(id) {
+                guard !identityReserved(owner, id: id) else { throw NativeSettingsSessionError.requestReused }
+            }
+            owner.assistantSends[turnID]?.operationIDs = members
+            switch status.phase {
+            case .completed:
+                owner.assistantSends[turnID]?.pending = false
+                if turn.pending, isCurrent(owner) { invalidateObservation(); requestRefresh() }
+            case .closed, .unavailable, .stoppedUncertain, .stoppedUnusable:
+                owner.assistantSends[turnID]?.pending = false
+                owner.retiredAssistantOpens.insert(turn.openRequestID)
+            case .closing, .unknown: owner.retiredAssistantOpens.insert(turn.openRequestID)
+            case .ready, .running: break
+            }
+        }
+    }
+
+    private func adoptAssistantDetails(_ owner: Owner, receipt: NativeSettingsSession.AssistantDetailsReceipt) throws {
+        let original = receipt.original
+        guard isCurrent(owner), isForeground, owner.assistantChats[original.chat.opened.chatID] === original.chat else {
+            throw NativeSettingsSessionError.inactive
+        }
+        try requireAssistantMembership(owner, original: original)
+        let id = original.operationID
+        let details = receipt.details
+        if owner.assistantSends[original.turnID]?.materialized.contains(id) == true {
+            guard owner.operations[id]?.target == details.target else { throw NativeSettingsSessionError.requestReused }
+            try owner.operations[id]?.adopt(details.operation)
+            publishOperations(owner)
+            return
+        }
+        guard owner.operations[id] == nil, let snapshot, let registry, !snapshotIsStale,
+              snapshot.scope == details.target.scope,
+              details.target.expectedRevision == nil || details.target.expectedRevision == snapshot.revision else {
+            invalidateObservation()
+            requestRefresh()
+            throw NativeSettingsSessionError.operationUncertain
+        }
+        var operation = NativeSettingsOperation(id: id, target: details.target, originalSnapshot: snapshot, originalRegistry: registry)
+        try operation.adopt(details.operation)
+        operation.wasSubmitted = true
+        owner.operations[id] = operation
+        owner.assistantSends[original.turnID]?.materialized.insert(id)
+        publishOperations(owner)
+    }
+
+    private func startAssistantEffect<Value: Sendable>(_ owner: Owner, id: UUID, read: AssistantReadIdentity? = nil,
+        work: @escaping @MainActor @Sendable () async throws -> Value,
+        observe: @escaping @MainActor @Sendable (Value) throws -> Void,
+        completion: @escaping @MainActor @Sendable (Result<Value, NativeSettingsSessionError>) -> Void) throws {
+        guard !isClosed, owner.retirement == nil, owner.effects.count < 4, owner.effects[id] == nil else {
+            throw NativeSettingsSessionError.capacity
+        }
+        if let read {
+            guard owner.assistantReads[read] == nil else { throw NativeSettingsSessionError.capacity }
+            guard !identityReserved(owner, id: id) else { throw NativeSettingsSessionError.requestReused }
+            owner.assistantReads[read] = id
+        }
+        owner.effects[id] = Task { [self, owner] in
+            let result: Result<Value, NativeSettingsSessionError>
+            do {
+                let value = try await work()
+                try observe(value)
+                result = .success(value)
+            } catch { result = .failure(sanitize(error)) }
+            owner.effects[id] = nil
+            if let read { owner.assistantReads.removeValue(forKey: read) }
+            completion(result)
+        }
+    }
+
     func save() {
         guard canSave, let draft else { return }
         do {
@@ -407,7 +717,7 @@ final class NativeSettingsStore {
         try target.validate()
         guard target.scope == snapshot.scope,
               target.expectedRevision == nil || target.expectedRevision == snapshot.revision,
-              owner.actions[target.requestID] == nil,
+              !identityReserved(owner, id: target.requestID),
               !owner.devices.values.contains(where: { $0.approval?.review.operationID == target.requestID }) else {
             throw NativeSettingsSessionError.invalidRequest
         }
@@ -579,7 +889,7 @@ final class NativeSettingsStore {
             let capture = try captureCredential(owner, expiry: context.capture.expiresAt, deadline: context.capture.deadline)
             try validateCredential(capture, owner: owner)
             let requestID = OwnerID()
-            guard owner.operations[requestID.value] == nil,
+            guard !identityReserved(owner, id: requestID.value),
                   !owner.credentials.values.contains(where: { $0.link?.plan.ownerRequest.id == requestID }) else {
                 throw NativeSettingsSessionError.requestReused
             }
@@ -663,7 +973,7 @@ final class NativeSettingsStore {
             after = next
         }
         let id = UUID()
-        guard owner.effects[id] == nil, owner.operations[id] == nil,
+        guard owner.effects[id] == nil, !identityReserved(owner, id: id),
               !owner.devices.values.contains(where: { $0.approval?.review.operationID == id }),
               !owner.credentials.values.contains(where: { $0.link?.plan.ownerRequest.id.value == id }) else {
             deviceIssue = .requestReused
@@ -786,7 +1096,7 @@ final class NativeSettingsStore {
                     expectedFingerprint: choice.fingerprint, access: choice.access)
             } catch { choice.candidate.discard(); throw error }
             let id = admission.review.operationID
-            guard owner.operations[id] == nil, owner.effects[id] == nil,
+            guard !identityReserved(owner, id: id), owner.effects[id] == nil,
                   !owner.devices.values.contains(where: { $0.approval?.review.operationID == id }),
                   !owner.credentials.values.contains(where: { $0.link?.plan.ownerRequest.id.value == id }) else {
                 admission.cancel()
@@ -1268,6 +1578,16 @@ final class NativeSettingsStore {
     private func identityCount(_ owner: Owner) -> Int {
         owner.operations.count + owner.credentials.values.filter { $0.initial || $0.link != nil }.count
             + owner.devices.values.filter { $0.request.action == .pair }.count
+            + owner.assistantOpens.count + owner.assistantSends.count
+            + owner.assistantSends.values.reduce(0) { $0 + 8 - $1.materialized.count }
+    }
+
+    private func identityReserved(_ owner: Owner, id: UUID) -> Bool {
+        owner.operations[id] != nil || owner.effects[id] != nil || owner.assistantOpens[id] != nil
+            || owner.assistantSends.values.contains { $0.turnID == id || $0.requestID == id || $0.operationIDs.contains(id) }
+            || owner.assistantChats.values.contains { $0.opened.chatID == id }
+            || owner.credentials.values.contains { $0.link?.plan.ownerRequest.id.value == id }
+            || owner.devices.values.contains { $0.approval?.review.operationID == id }
     }
 
     private func credential(_ handle: CredentialHandle) -> (Owner, CredentialContext)? {
@@ -1478,7 +1798,8 @@ final class NativeSettingsStore {
         }
         return NativeSettingsSession.DrainReport(failures: failures,
             unresolvedOperationIDs: unresolved.sorted { $0.uuidString < $1.uuidString },
-            pairingLifecycles: native.pairingLifecycles)
+            pairingLifecycles: native.pairingLifecycles,
+            unresolvedAssistantOpenRequestIDs: native.unresolvedAssistantOpenRequestIDs)
     }
 
     private func unlinkedCredentialIDs(_ owner: Owner) -> [UUID] {

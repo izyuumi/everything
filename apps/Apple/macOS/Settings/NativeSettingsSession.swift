@@ -8,6 +8,142 @@ actor NativeSettingsSession {
         let connectionKey: UUID
     }
 
+    final class AssistantHandle: @unchecked Sendable, CustomStringConvertible, CustomDebugStringConvertible {
+        let opened: NativeSettingsAssistantWire.Opened
+        let openRequestID: UUID
+        private let issuer: UUID
+        private let gate: NativeSettingsGate
+        private let parentID: UUID
+        private let hostID: UUID
+        private let deadline: ContinuousClock.Instant
+
+        var description: String { "NativeSettingsAssistantHandle([private])" }
+        var debugDescription: String { description }
+
+        fileprivate init(opened: NativeSettingsAssistantWire.Opened, original: NativeSettingsAssistantOpenAdmission,
+                         issuer: UUID, gate: NativeSettingsGate, parentID: UUID, hostID: UUID, deadline: ContinuousClock.Instant) {
+            self.opened = opened
+            openRequestID = original.requestID
+            self.issuer = issuer
+            self.gate = gate
+            self.parentID = parentID
+            self.hostID = hostID
+            self.deadline = deadline
+        }
+
+        func validateOwner(_ gate: NativeSettingsGate) throws {
+            guard self.gate === gate else { throw NativeSettingsSessionError.invalidRequest }
+        }
+
+        @MainActor
+        fileprivate func validatePresentation(_ gate: NativeSettingsGate) throws {
+            try validateOwner(gate)
+            guard NSApplication.shared.isActive else { throw NativeSettingsSessionError.inactive }
+            try gate.requireCurrentActivity()
+            try validateLifetime()
+        }
+
+        func validateLifetime() throws {
+            guard try NativeSettingsGate.wallTime() < opened.expiresAt, ContinuousClock.now < deadline else {
+                throw NativeSettingsSessionError.expired
+            }
+        }
+
+        fileprivate func validate(issuer: UUID, gate: NativeSettingsGate, parentID: UUID, hostID: UUID) throws {
+            try validateOwner(gate)
+            guard self.issuer == issuer, self.parentID == parentID, self.hostID == hostID else {
+                throw NativeSettingsSessionError.invalidRequest
+            }
+        }
+    }
+
+    final class AssistantOperationHandle: Sendable, CustomStringConvertible, CustomDebugStringConvertible {
+        let chat: AssistantHandle
+        let turnID: UUID
+        let operationID: UUID
+
+        var description: String { "NativeSettingsAssistantOperationHandle([private])" }
+        var debugDescription: String { description }
+
+        fileprivate init(chat: AssistantHandle, turnID: UUID, operationID: UUID) {
+            self.chat = chat
+            self.turnID = turnID
+            self.operationID = operationID
+        }
+    }
+
+    struct AssistantObservation: Sendable, CustomStringConvertible, CustomDebugStringConvertible {
+        let status: NativeSettingsAssistantWire.Status
+        let operations: [AssistantOperationHandle]
+
+        var description: String { "NativeSettingsAssistantObservation([private])" }
+        var debugDescription: String { description }
+
+        fileprivate init(status: NativeSettingsAssistantWire.Status, operations: [AssistantOperationHandle]) {
+            self.status = status
+            self.operations = operations
+        }
+    }
+
+    struct AssistantDetailsReceipt: Sendable {
+        let original: AssistantOperationHandle
+        let details: Details
+
+        fileprivate init(original: AssistantOperationHandle, details: Details) {
+            self.original = original
+            self.details = details
+        }
+    }
+
+    enum AssistantOpenOutcome: Sendable, CustomStringConvertible, CustomDebugStringConvertible {
+        case opened(AssistantHandle)
+        case state(NativeSettingsAssistantWire.OpenState)
+        case unavailable
+
+        var description: String { "NativeSettingsAssistantOpenOutcome([private])" }
+        var debugDescription: String { description }
+    }
+
+    enum AssistantSendOutcome: Sendable {
+        case accepted(chatID: UUID, turnID: UUID)
+        case unavailable
+    }
+
+    private struct AssistantOpenRecord {
+        let admission: NativeSettingsAssistantOpenAdmission
+        var task: Task<Result<AssistantOpenOutcome, NativeSettingsSessionError>, Never>?
+        var handle: AssistantHandle?
+        var knownChatID: UUID?
+        var state: NativeSettingsAssistantWire.OpenState?
+        var status: NativeSettingsAssistantWire.Status?
+        var retiring = false
+    }
+
+    private struct AssistantSendRecord {
+        let admission: NativeSettingsAssistantSendAdmission
+        var task: Task<Result<AssistantSendOutcome, NativeSettingsSessionError>, Never>?
+        var operations: [UUID: AssistantOperationHandle] = [:]
+        var materialized: Set<UUID> = []
+        var references: [UUID: NativeActionReference] = [:]
+        var modelAttempts: UInt32 = 0
+        var chargedTokens: UInt64 = 0
+        var reservedOutputTokens: UInt64 = 0
+        var pending = true
+    }
+
+    private enum AssistantReadKey: Hashable {
+        case open(UUID)
+        case closeOpen(UUID)
+        case poll(UUID)
+        case close(UUID)
+        case inspect(UUID, UUID, UUID)
+        case details(UUID, UUID, UUID, UUID, UInt64, Bool)
+    }
+
+    private struct AssistantReadFlight {
+        let task: Task<Result<NativeSettingsAssistantWire.Reply, NativeSettingsSessionError>, Never>
+    }
+
     struct Details: Equatable, Sendable {
         let operation: SettingsOperationInspection
         let target: SettingsActionTarget
@@ -90,12 +226,15 @@ actor NativeSettingsSession {
         let failures: [NativeSettingsSessionError]
         let unresolvedOperationIDs: [UUID]
         let pairingLifecycles: [UUID: NativeSettingsWire.PairingLifecycle]
+        let unresolvedAssistantOpenRequestIDs: [UUID]
 
         init(failures: [NativeSettingsSessionError], unresolvedOperationIDs: [UUID],
-             pairingLifecycles: [UUID: NativeSettingsWire.PairingLifecycle] = [:]) {
+             pairingLifecycles: [UUID: NativeSettingsWire.PairingLifecycle] = [:],
+             unresolvedAssistantOpenRequestIDs: [UUID] = []) {
             self.failures = failures
             self.unresolvedOperationIDs = unresolvedOperationIDs
             self.pairingLifecycles = pairingLifecycles
+            self.unresolvedAssistantOpenRequestIDs = unresolvedAssistantOpenRequestIDs
         }
     }
 
@@ -168,7 +307,16 @@ actor NativeSettingsSession {
     private var calls: [UUID: Task<Result<NativeSettingsWire.Response, NativeSettingsSessionError>, Never>] = [:]
     private var invitations: [UUID: RetainedInvitation] = [:]
     private var pairingApprovals: [UUID: PairingApprovalRecord] = [:]
-    private var retainedOperationCount: Int { records.count + pairingApprovals.count }
+    private let assistantIssuer = UUID()
+    private var assistantOpens: [UUID: AssistantOpenRecord] = [:]
+    private var assistantSends: [UUID: AssistantSendRecord] = [:]
+    private var assistantReads: [AssistantReadKey: AssistantReadFlight] = [:]
+    private var assistantDrainFailures: [NativeSettingsSessionError] = []
+    private var assistantDrainUnresolved: Set<UUID> = []
+    private var retainedOperationCount: Int {
+        records.count + pairingApprovals.count + assistantOpens.count + assistantSends.count
+            + assistantSends.values.reduce(0) { $0 + 8 - $1.materialized.count }
+    }
 
     init(client: OwnerIPCClient, connection: OwnerConnection, connectionKey: UUID, gate: NativeSettingsGate) {
         self.client = client
@@ -195,6 +343,364 @@ actor NativeSettingsSession {
         let value = try await task.value.get()
         try requireLive()
         return value
+    }
+
+    func openAssistant(_ admission: NativeSettingsAssistantOpenAdmission) async throws -> AssistantOpenOutcome {
+        try admission.validateOwner(gate)
+        if let original = assistantOpens[admission.requestID] {
+            guard original.admission === admission else { throw NativeSettingsSessionError.requestReused }
+            if original.retiring, let state = original.state { return .state(state) }
+            if case .ready = original.state, let handle = original.handle { return .opened(handle) }
+            if let task = original.task { return try await task.value.get() }
+        }
+        guard !closing else { throw NativeSettingsSessionError.closed }
+        try requireLive()
+        try retainAssistantOpen(admission)
+        guard assistantOpens[admission.requestID]?.retiring == false else { throw NativeSettingsSessionError.closed }
+        let task = Task { await self.finishAssistantOpen(admission) }
+        assistantOpens[admission.requestID]?.task = task
+        return try await task.value.get()
+    }
+
+    func assistantOpenStatus(_ admission: NativeSettingsAssistantOpenAdmission) async throws -> NativeSettingsAssistantWire.OpenState {
+        try requireAssistantRead()
+        try retainAssistantOpen(admission)
+        guard case .openState(_, let state) = try await assistantRead(.open(admission.requestID),
+            operation: .agentOpenStatus(openRequestID: admission.requestID)) else { throw NativeSettingsSessionError.invalidResponse }
+        try acceptAssistantOpenState(state, original: admission)
+        return state
+    }
+
+    func closeAssistantOpen(_ admission: NativeSettingsAssistantOpenAdmission) async throws -> NativeSettingsAssistantWire.OpenState {
+        try requireAssistantRead()
+        try retainAssistantOpen(admission)
+        return try await closeAssistantOriginal(admission)
+    }
+
+    func sendAssistant(_ admission: NativeSettingsAssistantSendAdmission) async throws -> AssistantSendOutcome {
+        try admission.validateOwner(gate)
+        if let original = assistantSends[admission.turnID] {
+            guard original.admission === admission, let task = original.task else { throw NativeSettingsSessionError.requestReused }
+            return try await task.value.get()
+        }
+        try requireLive()
+        try requireAssistant(admission.chat, live: true)
+        guard retainedOperationCount + 9 <= 64 else { throw NativeSettingsSessionError.capacity }
+        guard !assistantSends.values.contains(where: { $0.admission.chat === admission.chat && $0.pending }) else {
+            throw NativeSettingsSessionError.operationUncertain
+        }
+        guard !assistantIdentityExists(admission.turnID), !assistantIdentityExists(admission.requestID),
+              records[admission.turnID] == nil, pairingApprovals[admission.turnID] == nil,
+              records[admission.requestID] == nil, pairingApprovals[admission.requestID] == nil else {
+            throw NativeSettingsSessionError.requestReused
+        }
+        assistantSends[admission.turnID] = AssistantSendRecord(admission: admission)
+        let task = Task { await self.finishAssistantSend(admission) }
+        assistantSends[admission.turnID]?.task = task
+        return try await task.value.get()
+    }
+
+    func pollAssistant(_ chat: AssistantHandle) async throws -> AssistantObservation {
+        try requireAssistantRead()
+        try requireAssistant(chat, live: false)
+        if let state = assistantOpens[chat.openRequestID]?.state, assistantOriginalClosed(state) { throw NativeSettingsSessionError.closed }
+        guard case .status(let status) = try await assistantRead(.poll(chat.opened.chatID),
+            operation: .agentPoll(chatID: chat.opened.chatID)) else { throw NativeSettingsSessionError.invalidResponse }
+        return try acceptAssistantStatus(status, chat: chat)
+    }
+
+    func closeAssistant(_ chat: AssistantHandle) async throws -> AssistantObservation {
+        try requireAssistantRead()
+        try requireAssistant(chat, live: false)
+        if let state = assistantOpens[chat.openRequestID]?.state, assistantOriginalClosed(state) { throw NativeSettingsSessionError.closed }
+        assistantOpens[chat.openRequestID]?.retiring = true
+        for original in assistantSends.values where original.admission.chat === chat { original.admission.cancel() }
+        for original in assistantSends.values where original.admission.chat === chat {
+            if let task = original.task { _ = await task.value }
+        }
+        guard case .status(let status) = try await assistantRead(.close(chat.opened.chatID),
+            operation: .agentClose(chatID: chat.opened.chatID)) else { throw NativeSettingsSessionError.invalidResponse }
+        return try acceptAssistantStatus(status, chat: chat)
+    }
+
+    func inspectAssistantOperation(_ original: AssistantOperationHandle) async throws -> NativeSettingsAssistantWire.OperationLookup {
+        try requireAssistantRead()
+        try requireAssistantOperation(original, live: false)
+        guard case .operation(_, _, _, let lookup) = try await assistantRead(
+            .inspect(original.chat.opened.chatID, original.turnID, original.operationID),
+            operation: .agentInspectOperation(chatID: original.chat.opened.chatID, turnID: original.turnID,
+                                             operationID: original.operationID)) else { throw NativeSettingsSessionError.invalidResponse }
+        switch lookup {
+        case .notRecorded: assistantSends[original.turnID]?.references.removeValue(forKey: original.operationID)
+        case .inspected(let operation):
+            switch operation.phase {
+            case .awaitingConfirmation(let reference):
+                assistantSends[original.turnID]?.references[original.operationID] = .confirmation(reference: reference)
+            case .awaitingAction(let reference):
+                assistantSends[original.turnID]?.references[original.operationID] = .action(reference: reference)
+            default: assistantSends[original.turnID]?.references.removeValue(forKey: original.operationID)
+            }
+            if records[original.operationID] != nil { try accept(operation, id: original.operationID) }
+        }
+        return lookup
+    }
+
+    func assistantActionDetails(_ original: AssistantOperationHandle,
+                                reference: NativeActionReference) async throws -> AssistantDetailsReceipt {
+        try requireAssistantOperation(original, live: true)
+        guard assistantSends[original.turnID]?.references[original.operationID] == reference else {
+            throw NativeSettingsSessionError.invalidRequest
+        }
+        try reference.validate()
+        guard try NativeSettingsGate.wallTime() < reference.expiresAt else { throw NativeSettingsSessionError.expired }
+        let confirmation: Bool
+        switch reference {
+        case .confirmation: confirmation = true
+        case .action: confirmation = false
+        }
+        guard case .actionDetails(_, _, _, let operation, let target) = try await assistantRead(
+            .details(original.chat.opened.chatID, original.turnID, original.operationID, reference.id, reference.expiresAt, confirmation),
+            operation: .agentActionDetails(chatID: original.chat.opened.chatID, turnID: original.turnID,
+                                          operationID: original.operationID, reference: reference), liveChat: original.chat) else {
+            throw NativeSettingsSessionError.invalidResponse
+        }
+        try requireAssistantOperation(original, live: true)
+        guard assistantSends[original.turnID]?.references[original.operationID] == reference else {
+            throw NativeSettingsSessionError.invalidResponse
+        }
+        let id = original.operationID
+        if let existing = records[id] {
+            guard existing.target == target, assistantSends[original.turnID]?.materialized.contains(id) == true else {
+                throw NativeSettingsSessionError.requestReused
+            }
+        } else {
+            guard (assistantSends[original.turnID]?.materialized.count ?? 8) < 8,
+                  pairingApprovals[id] == nil else { throw NativeSettingsSessionError.capacity }
+            records[id] = Record(target: target, initialIntent: nil)
+            assistantSends[original.turnID]?.materialized.insert(id)
+        }
+        try accept(operation, id: id)
+        return AssistantDetailsReceipt(original: original, details: Details(operation: operation, target: target))
+    }
+
+    private func retainAssistantOpen(_ admission: NativeSettingsAssistantOpenAdmission) throws {
+        try admission.validateOwner(gate)
+        if let existing = assistantOpens[admission.requestID] {
+            guard existing.admission === admission else { throw NativeSettingsSessionError.requestReused }
+            return
+        }
+        guard retainedOperationCount < 64 else { throw NativeSettingsSessionError.capacity }
+        guard records[admission.requestID] == nil, pairingApprovals[admission.requestID] == nil,
+              !assistantIdentityExists(admission.requestID) else { throw NativeSettingsSessionError.requestReused }
+        assistantOpens[admission.requestID] = AssistantOpenRecord(admission: admission)
+    }
+
+    private func assistantIdentityExists(_ id: UUID) -> Bool {
+        assistantOpens[id] != nil || assistantOpens.values.contains { $0.knownChatID == id }
+            || assistantSends.values.contains { $0.admission.turnID == id || $0.admission.requestID == id || $0.operations[id] != nil }
+    }
+
+    private func requireAssistantRead() throws {
+        guard !closing, !finalizingDrain, !closeAcknowledged, proof != nil else { throw NativeSettingsSessionError.closed }
+    }
+
+    private func requireAssistant(_ chat: AssistantHandle, live: Bool) throws {
+        guard let proof, let information, !closeAcknowledged,
+              assistantOpens[chat.openRequestID]?.handle === chat else { throw NativeSettingsSessionError.closed }
+        try chat.validate(issuer: assistantIssuer, gate: gate, parentID: proof.sessionID, hostID: information.hostID)
+        if live {
+            try requireLive()
+            try chat.validateLifetime()
+            guard assistantOpens[chat.openRequestID]?.retiring == false else { throw NativeSettingsSessionError.closed }
+        }
+    }
+
+    private func requireAssistantOperation(_ original: AssistantOperationHandle, live: Bool) throws {
+        try requireAssistant(original.chat, live: live)
+        guard let turn = assistantSends[original.turnID], turn.admission.chat === original.chat,
+              turn.operations[original.operationID] === original else { throw NativeSettingsSessionError.invalidRequest }
+    }
+
+    private func assistantRead(_ key: AssistantReadKey, operation: NativeSettingsWire.Operation, liveChat: AssistantHandle? = nil) async throws -> NativeSettingsAssistantWire.Reply {
+        if let flight = assistantReads[key] { return try await flight.task.value.get() }
+        let task = Task<Result<NativeSettingsAssistantWire.Reply, NativeSettingsSessionError>, Never> {
+            do { return .success(try await self.assistantRPC(operation, liveChat: liveChat)) }
+            catch { return .failure(self.sanitize(error)) }
+        }
+        assistantReads[key] = AssistantReadFlight(task: task)
+        let result = await task.value
+        assistantReads.removeValue(forKey: key)
+        return try result.get()
+    }
+
+    private func assistantRPC(_ operation: NativeSettingsWire.Operation, requestID: UUID = UUID(),
+                              openAdmission: NativeSettingsAssistantOpenAdmission? = nil,
+                              sendAdmission: NativeSettingsAssistantSendAdmission? = nil,
+                              liveChat: AssistantHandle? = nil) async throws -> NativeSettingsAssistantWire.Reply {
+        guard case .assistant(let reply) = try await rpc(operation, requestID: requestID, assistantOpen: openAdmission,
+                                                         assistantSend: sendAdmission, assistantChat: liveChat) else {
+            throw NativeSettingsSessionError.invalidResponse
+        }
+        return reply
+    }
+
+    private func finishAssistantOpen(_ admission: NativeSettingsAssistantOpenAdmission) async -> Result<AssistantOpenOutcome, NativeSettingsSessionError> {
+        do {
+            try await admission.validatePresentation(gate)
+            try requireLive()
+            guard assistantOpens[admission.requestID]?.retiring == false else { throw NativeSettingsSessionError.closed }
+            switch try await assistantRPC(.agentOpen, requestID: admission.requestID, openAdmission: admission) {
+            case .opened(let opened):
+                try acceptAssistantOpenState(.ready(opened), original: admission)
+                guard let handle = assistantOpens[admission.requestID]?.handle else { throw NativeSettingsSessionError.invalidResponse }
+                return .success(.opened(handle))
+            case .openState(_, let state):
+                try acceptAssistantOpenState(state, original: admission)
+                if case .ready = state, let handle = assistantOpens[admission.requestID]?.handle { return .success(.opened(handle)) }
+                return .success(.state(state))
+            case .unavailable:
+                try acceptAssistantOpenState(.unavailable, original: admission)
+                return .success(.unavailable)
+            default: throw NativeSettingsSessionError.invalidResponse
+            }
+        } catch { return .failure(sanitize(error)) }
+    }
+
+    private func finishAssistantSend(_ admission: NativeSettingsAssistantSendAdmission) async -> Result<AssistantSendOutcome, NativeSettingsSessionError> {
+        defer { admission.cancel() }
+        do {
+            try await admission.validatePresentation(gate)
+            try requireAssistant(admission.chat, live: true)
+            let text = try admission.takeText(gate)
+            let operation = NativeSettingsWire.Operation.agentSend(chatID: admission.chat.opened.chatID,
+                turnID: admission.turnID, providerBindingSHA256: admission.chat.opened.providerBindingSHA256, text: text)
+            switch try await assistantRPC(operation, requestID: admission.requestID, sendAdmission: admission) {
+            case .accepted(let chatID, let turnID): return .success(.accepted(chatID: chatID, turnID: turnID))
+            case .unavailable:
+                assistantSends[admission.turnID]?.pending = false
+                assistantOpens[admission.chat.openRequestID]?.retiring = true
+                return .success(.unavailable)
+            default: throw NativeSettingsSessionError.invalidResponse
+            }
+        } catch { return .failure(sanitize(error)) }
+    }
+
+    private func acceptAssistantOpenState(_ state: NativeSettingsAssistantWire.OpenState,
+                                          original: NativeSettingsAssistantOpenAdmission) throws {
+        guard let existing = assistantOpens[original.requestID], existing.admission === original else {
+            throw NativeSettingsSessionError.invalidRequest
+        }
+        if let previous = existing.state, assistantOriginalClosed(previous) {
+            switch (previous, state) {
+            case (.unavailable, .unavailable): break
+            case (.closed(let old), .closed(let next)) where old == next: break
+            default: throw NativeSettingsSessionError.invalidResponse
+            }
+        }
+        switch state {
+        case .ready(let opened):
+            if let known = existing.knownChatID, known != opened.chatID { throw NativeSettingsSessionError.invalidResponse }
+            assistantOpens[original.requestID]?.knownChatID = opened.chatID
+            if let handle = existing.handle {
+                let old = handle.opened
+                guard old.chatID == opened.chatID, old.provider == opened.provider, old.model == opened.model,
+                      old.recipient == opened.recipient, old.providerBindingSHA256 == opened.providerBindingSHA256,
+                      old.tools == opened.tools, old.expiresAt == opened.expiresAt else { throw NativeSettingsSessionError.invalidResponse }
+            } else {
+                guard let proof, let information, let deadline else { throw NativeSettingsSessionError.closed }
+                let now = try NativeSettingsGate.wallTime()
+                let remaining = min(opened.expiresAt > now ? opened.expiresAt - now : 0, 300_000)
+                let childDeadline = min(deadline, min(original.capture.deadline,
+                    ContinuousClock.now.advanced(by: .milliseconds(Int64(remaining)))))
+                assistantOpens[original.requestID]?.handle = AssistantHandle(opened: opened, original: original,
+                    issuer: assistantIssuer, gate: gate, parentID: proof.sessionID, hostID: information.hostID, deadline: childDeadline)
+            }
+        case .closing(let chatID):
+            if let known = existing.knownChatID, known != chatID { throw NativeSettingsSessionError.invalidResponse }
+            assistantOpens[original.requestID]?.knownChatID = chatID
+        case .closed(let chatID):
+            if let known = existing.knownChatID, known != chatID { throw NativeSettingsSessionError.invalidResponse }
+            if let chatID { assistantOpens[original.requestID]?.knownChatID = chatID }
+            assistantOpens[original.requestID]?.retiring = true
+            assistantOpens[original.requestID]?.status = nil
+        case .unavailable:
+            assistantOpens[original.requestID]?.retiring = true
+            assistantOpens[original.requestID]?.status = nil
+        case .unknown(let chatID):
+            if let chatID {
+                if let known = existing.knownChatID, known != chatID { throw NativeSettingsSessionError.invalidResponse }
+                assistantOpens[original.requestID]?.knownChatID = chatID
+            }
+        case .notAccepted: break
+        }
+        assistantOpens[original.requestID]?.state = state
+    }
+
+    private func assistantOriginalClosed(_ state: NativeSettingsAssistantWire.OpenState) -> Bool {
+        switch state {
+        case .closed, .unavailable: true
+        default: false
+        }
+    }
+
+    private func closeAssistantOriginal(_ admission: NativeSettingsAssistantOpenAdmission) async throws -> NativeSettingsAssistantWire.OpenState {
+        assistantOpens[admission.requestID]?.retiring = true
+        if let task = assistantOpens[admission.requestID]?.task { _ = await task.value }
+        let sends = assistantSends.values.filter { $0.admission.chat.openRequestID == admission.requestID }
+        for original in sends { original.admission.cancel() }
+        for original in sends { if let task = original.task { _ = await task.value } }
+        guard case .openState(_, let state) = try await assistantRead(.closeOpen(admission.requestID),
+            operation: .agentCloseOpen(openRequestID: admission.requestID)) else { throw NativeSettingsSessionError.invalidResponse }
+        try acceptAssistantOpenState(state, original: admission)
+        return state
+    }
+
+    private func acceptAssistantStatus(_ status: NativeSettingsAssistantWire.Status, chat: AssistantHandle) throws -> AssistantObservation {
+        try requireAssistant(chat, live: false)
+        guard status.chatID == chat.opened.chatID else { throw NativeSettingsSessionError.invalidResponse }
+        let previous = assistantOpens[chat.openRequestID]?.status
+        if let previous {
+            guard status.textRevision >= previous.textRevision else { throw NativeSettingsSessionError.invalidResponse }
+            if status.textRevision == previous.textRevision {
+                guard status.turnID == previous.turnID, status.assistantText == previous.assistantText,
+                      status.provisional?.attemptID == previous.provisional?.attemptID,
+                      status.provisional?.state.rawValue == previous.provisional?.state.rawValue,
+                      status.provisional?.text == previous.provisional?.text else { throw NativeSettingsSessionError.invalidResponse }
+            }
+        }
+        var handles: [AssistantOperationHandle] = []
+        if let turnID = status.turnID {
+            guard let turn = assistantSends[turnID], turn.admission.chat === chat else { throw NativeSettingsSessionError.invalidResponse }
+            guard status.modelAttempts >= turn.modelAttempts, status.chargedTokens >= turn.chargedTokens,
+                  status.reservedOutputTokens >= turn.reservedOutputTokens else { throw NativeSettingsSessionError.invalidResponse }
+            let members = Set(turn.operations.keys).union(status.operationIDs)
+            guard members.count <= 8 else { throw NativeSettingsSessionError.capacity }
+            for id in status.operationIDs {
+                if let original = turn.operations[id] { handles.append(original); continue }
+                guard records[id] == nil, pairingApprovals[id] == nil,
+                      !assistantIdentityExists(id) else { throw NativeSettingsSessionError.requestReused }
+                let original = AssistantOperationHandle(chat: chat, turnID: turnID, operationID: id)
+                assistantSends[turnID]?.operations[id] = original
+                handles.append(original)
+            }
+            switch status.phase {
+            case .completed: assistantSends[turnID]?.pending = false
+            case .closed, .unavailable, .stoppedUncertain, .stoppedUnusable:
+                assistantSends[turnID]?.pending = false
+                assistantOpens[chat.openRequestID]?.retiring = true
+            case .ready, .running, .closing, .unknown: break
+            }
+        } else {
+            guard status.operationIDs.isEmpty, status.assistantText.isEmpty else { throw NativeSettingsSessionError.invalidResponse }
+        }
+        if let state = assistantOpens[chat.openRequestID]?.state, assistantOriginalClosed(state) { throw NativeSettingsSessionError.closed }
+        if let turnID = status.turnID {
+            assistantSends[turnID]?.modelAttempts = status.modelAttempts
+            assistantSends[turnID]?.chargedTokens = status.chargedTokens
+            assistantSends[turnID]?.reservedOutputTokens = status.reservedOutputTokens
+        }
+        assistantOpens[chat.openRequestID]?.status = status
+        return AssistantObservation(status: status, operations: handles)
     }
 
     func describe() async throws -> SettingRegistry {
@@ -237,6 +743,7 @@ actor NativeSettingsSession {
             guard original.target == target else { throw NativeSettingsSessionError.requestReused }
         } else {
             guard retainedOperationCount < 64 else { throw NativeSettingsSessionError.capacity }
+            guard !assistantIdentityExists(operationID) else { throw NativeSettingsSessionError.requestReused }
             records[operationID] = Record(target: target, initialIntent: nil)
         }
         try accept(operation, id: operationID)
@@ -351,6 +858,7 @@ actor NativeSettingsSession {
         try pruneInvitations()
         let review = admission.review
         guard retainedOperationCount < 64, pairingApprovals.count < 8 else { throw NativeSettingsSessionError.capacity }
+        guard !assistantIdentityExists(id) else { throw NativeSettingsSessionError.requestReused }
         guard !pairingApprovals.values.contains(where: { $0.admission.review.creationOperationID == review.creationOperationID }) else {
             throw NativeSettingsSessionError.requestReused
         }
@@ -557,9 +1065,16 @@ actor NativeSettingsSession {
         return try await pairingOriginal(operationID, cancel: true)
     }
 
-    func drain() async -> DrainReport {
+    func drain(assistantOpens originals: [NativeSettingsAssistantOpenAdmission] = []) async -> DrainReport {
         gate.invalidate()
         closing = true
+        for original in originals {
+            do { try retainAssistantOpen(original) }
+            catch {
+                assistantDrainFailures.append(sanitize(error))
+                assistantDrainUnresolved.insert(original.requestID)
+            }
+        }
         if let closingTask { return await closingTask.value }
         let task = Task { await self.finishDrain() }
         closingTask = task
@@ -598,6 +1113,7 @@ actor NativeSettingsSession {
         try admission.validate(for: gate)
         try requireLive()
         guard retainedOperationCount < 64 else { throw NativeSettingsSessionError.capacity }
+        guard !assistantIdentityExists(id) else { throw NativeSettingsSessionError.requestReused }
         records[id] = Record(target: target, initialIntent: admission.intent)
         let task = Task { await self.finishInitial(admission, operation: operation, id: id) }
         records[id]?.initialTask = task
@@ -750,9 +1266,15 @@ actor NativeSettingsSession {
 
     private func rpc(_ operation: NativeSettingsWire.Operation, requestID: UUID = UUID(),
                      pairingAdmission: NativePairingApprovalAdmission? = nil,
-                     pairingDeadline: ContinuousClock.Instant? = nil) async throws -> NativeSettingsWire.Response {
+                     pairingDeadline: ContinuousClock.Instant? = nil,
+                     assistantOpen: NativeSettingsAssistantOpenAdmission? = nil,
+                     assistantSend: NativeSettingsAssistantSendAdmission? = nil,
+                     assistantChat: AssistantHandle? = nil) async throws -> NativeSettingsWire.Response {
         guard calls.count < 4, !closeAcknowledged else { throw NativeSettingsSessionError.capacity }
         let originalProof = proof
+        let originalHostID = information?.hostID
+        let originalExpiry = information?.expiresAt
+        let originalDeadline = deadline
         let bytes: Data
         do { bytes = try NativeSettingsWire.encode(operation, requestID: requestID, proof: originalProof) }
         catch { throw NativeSettingsSessionError.invalidRequest }
@@ -768,10 +1290,23 @@ actor NativeSettingsSession {
                         throw NativeSettingsSessionError.expired
                     }
                 }
+                if let assistantOpen {
+                    try await assistantOpen.validatePresentation(gate)
+                    guard let originalExpiry, let originalDeadline, try NativeSettingsGate.wallTime() < originalExpiry,
+                          ContinuousClock.now < originalDeadline else { throw NativeSettingsSessionError.expired }
+                }
+                if let assistantSend { try await assistantSend.validatePresentation(gate) }
+                if let assistantChat { try await assistantChat.validatePresentation(gate) }
                 let response = try await client.requestSensitive(bytes, connection: connection)
-                do { return .success(try NativeSettingsWire.decode(response, for: operation, proof: originalProof)) }
+                do { return .success(try NativeSettingsWire.decode(response, for: operation, proof: originalProof,
+                                                                    requestID: requestID, hostID: originalHostID)) }
                 catch { return .failure(.invalidResponse) }
-            } catch { return .failure(.operationUncertain) }
+            } catch {
+                if assistantOpen != nil || assistantSend != nil || assistantChat != nil {
+                    return .failure(error as? NativeSettingsSessionError ?? .operationUncertain)
+                }
+                return .failure(.operationUncertain)
+            }
         }
         calls[identifier] = task
         let result = await task.value
@@ -883,7 +1418,8 @@ actor NativeSettingsSession {
     }
 
     private func finishDrain() async -> DrainReport {
-        var failures: [NativeSettingsSessionError] = []
+        var failures = assistantDrainFailures
+        var unresolvedAssistantOpens = assistantDrainUnresolved
         var pairingLifecycles: [UUID: NativeSettingsWire.PairingLifecycle] = [:]
         var pairingUnresolved: Set<UUID> = []
         if let openingTask, case .failure(let error) = await openingTask.value { failures.append(error) }
@@ -899,12 +1435,33 @@ actor NativeSettingsSession {
             if let task = record.executionTask, case .failure(let error) = await task.value { failures.append(error) }
             if let task = record.invitationTask, case .failure(let error) = await task.value { failures.append(error) }
         }
+        let assistantOriginals = assistantOpens.values.map(\.admission)
+        for original in assistantOriginals {
+            assistantOpens[original.requestID]?.retiring = true
+            if let task = assistantOpens[original.requestID]?.task { _ = await task.value }
+        }
+        for original in Array(assistantSends.values) {
+            original.admission.cancel()
+            if let task = original.task { _ = await task.value }
+        }
+        for flight in Array(assistantReads.values) { _ = await flight.task.value }
         finalizingDrain = true
         while !calls.isEmpty {
             let pending = Array(calls.values)
             for task in pending { _ = await task.value }
             await Task.yield()
         }
+        for original in assistantOriginals {
+            do {
+                guard proof != nil else { throw NativeSettingsSessionError.operationUncertain }
+                let state = try await closeAssistantOriginal(original)
+                guard assistantOriginalClosed(state) else { throw NativeSettingsSessionError.operationUncertain }
+            } catch {
+                unresolvedAssistantOpens.insert(original.requestID)
+                failures.append(sanitize(error))
+            }
+        }
+        if !unresolvedAssistantOpens.isEmpty, !failures.contains(.operationUncertain) { failures.append(.operationUncertain) }
         let identifiers = records.keys.sorted { $0.uuidString < $1.uuidString }
         if proof != nil {
             for id in identifiers {
@@ -937,11 +1494,13 @@ actor NativeSettingsSession {
                 do { _ = try await readPairingApproval(record.admission) }
                 catch { failures.append(sanitize(error)) }
             }
-            do {
-                guard case .closed = try await rpc(.close, requestID: closeRequestID) else { throw NativeSettingsSessionError.invalidResponse }
-                closeAcknowledged = true
-                proof = nil
-            } catch { failures.append(sanitize(error)) }
+            if unresolvedAssistantOpens.isEmpty {
+                do {
+                    guard case .closed = try await rpc(.close, requestID: closeRequestID) else { throw NativeSettingsSessionError.invalidResponse }
+                    closeAcknowledged = true
+                    proof = nil
+                } catch { failures.append(sanitize(error)) }
+            }
         }
         invitations.removeAll()
         let unresolved = identifiers.filter { id in
@@ -959,7 +1518,8 @@ actor NativeSettingsSession {
         }
         let unresolvedIDs = Set(unresolved + approvalUnresolved).union(pairingUnresolved)
         return DrainReport(failures: failures, unresolvedOperationIDs: unresolvedIDs.sorted { $0.uuidString < $1.uuidString },
-                           pairingLifecycles: pairingLifecycles)
+                           pairingLifecycles: pairingLifecycles,
+                           unresolvedAssistantOpenRequestIDs: unresolvedAssistantOpens.sorted { $0.uuidString < $1.uuidString })
     }
 
     private func sanitize(_ error: any Error) -> NativeSettingsSessionError {
