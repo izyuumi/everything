@@ -252,6 +252,17 @@ impl OperationRepository {
         self.changes.subscribe()
     }
 
+    fn notify_sequence(&self, sequence: u64) {
+        self.changes.send_if_modified(|last| {
+            if sequence > *last {
+                *last = sequence;
+                true
+            } else {
+                false
+            }
+        });
+    }
+
     pub fn get(&self, request_id: CommandId) -> Result<OperationRecord, SettingsServiceError> {
         let connection = self.store.connection()?;
         read(&connection, request_id)?.ok_or(SettingsServiceError::NotFound)
@@ -315,7 +326,7 @@ impl OperationRepository {
         check_current()?;
         transaction.commit()?;
         drop(connection);
-        self.changes.send_replace(sequence);
+        self.notify_sequence(sequence);
         Ok(OperationRecord { identity, update })
     }
 
@@ -399,7 +410,7 @@ impl OperationRepository {
         }
         transaction.commit()?;
         drop(connection);
-        self.changes.send_replace(sequence);
+        self.notify_sequence(sequence);
         Ok((
             OperationRecord {
                 identity: record.identity,
@@ -444,7 +455,7 @@ impl OperationRepository {
         let sequence = append(&transaction, expected.binding.request_id, &update)?;
         transaction.commit()?;
         drop(connection);
-        self.changes.send_replace(sequence);
+        self.notify_sequence(sequence);
         Ok(OperationRecord {
             identity: record.identity,
             update,
@@ -503,7 +514,7 @@ impl OperationRepository {
         let sequence = append(&transaction, expected.binding.request_id, &update)?;
         transaction.commit()?;
         drop(connection);
-        self.changes.send_replace(sequence);
+        self.notify_sequence(sequence);
         Ok(OperationRecord {
             identity: record.identity,
             update,
@@ -543,7 +554,7 @@ impl OperationRepository {
         let sequence = append(&transaction, expected.binding.request_id, &update)?;
         transaction.commit()?;
         drop(connection);
-        self.changes.send_replace(sequence);
+        self.notify_sequence(sequence);
         Ok(OperationRecord {
             identity: record.identity,
             update,
@@ -685,7 +696,7 @@ impl OperationRepository {
         }
         transaction.commit()?;
         drop(connection);
-        self.changes.send_replace(sequence);
+        self.notify_sequence(sequence);
         Ok((OperationRecord { identity, update }, true))
     }
 
@@ -730,7 +741,7 @@ impl OperationRepository {
         let sequence = append(&transaction, expected.binding.request_id, &update)?;
         transaction.commit()?;
         drop(connection);
-        self.changes.send_replace(sequence);
+        self.notify_sequence(sequence);
         Ok(OperationRecord {
             identity: record.identity,
             update,
@@ -783,7 +794,7 @@ impl OperationRepository {
         let sequence = append(&transaction, expected.binding.request_id, &update)?;
         transaction.commit()?;
         drop(connection);
-        self.changes.send_replace(sequence);
+        self.notify_sequence(sequence);
         Ok(OperationRecord {
             identity: record.identity,
             update,
