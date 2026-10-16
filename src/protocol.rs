@@ -420,6 +420,20 @@ pub enum ConversationEvent {
         command_id: CommandId,
         instruction: String,
     },
+    TaskWaitRequested {
+        task_id: TaskId,
+        command_id: CommandId,
+        children: Vec<TaskId>,
+    },
+    SubagentFinished {
+        task_id: TaskId,
+        command_id: CommandId,
+        wait_id: CommandId,
+        child_task_id: TaskId,
+        status: TaskStatus,
+        output: String,
+        outcome_unknown: bool,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

@@ -1,4 +1,5 @@
 use std::collections::BTreeSet;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 
 use futures_util::{StreamExt, stream};
@@ -13,7 +14,7 @@ use crate::context::{
 };
 use crate::permissions::{ApprovalRequest, ExecutionMode};
 use crate::protocol::{OperationId, TaskId, ToolCall, ToolResult};
-use crate::storage::TaskState;
+use crate::storage::{TaskState, ToolCallState};
 use crate::tools::{
     RetainedToolOwner, ToolRegistry,
     broker::{BrokerOutcome, OperationResult, TaskToolBroker, ToolInvocation},
@@ -34,6 +35,8 @@ pub struct LoopLimits {
     pub max_selected_tools: usize,
     pub max_charged_tokens: u64,
     pub max_duration_ms: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub absolute_deadline: Option<UnixMillis>,
 }
 
 impl Default for LoopLimits {
@@ -46,6 +49,7 @@ impl Default for LoopLimits {
             max_selected_tools: 64,
             max_charged_tokens: 1_000_000,
             max_duration_ms: 3_600_000,
+            absolute_deadline: None,
         }
     }
 }
@@ -98,6 +102,8 @@ pub enum PauseReason {
     ReconciliationRequired { operation_id: String },
     BrokerRejected { operation_id: String },
     InvalidModelResponse,
+    WaitingForEvents { wait_id: CommandId },
+    ChildOutcomeUnknown { child_task_id: TaskId },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -191,6 +197,8 @@ struct NativeTurn {
     definition: Definition,
     definition_digest: String,
     started_at_ms: u64,
+    #[serde(default)]
+    last_observed_wall_ms: u64,
     deadline_ms: u64,
     attempts: u32,
     tool_calls: u32,
@@ -234,6 +242,10 @@ enum CallPhase {
 }
 
 impl NativeCheckpoint {
+    pub(super) fn has_turn(&self) -> bool {
+        self.turn.is_some()
+    }
+
     pub(super) fn status(&self) -> LoopStatus {
         self.turn
             .as_ref()
@@ -264,16 +276,29 @@ impl NativeCheckpoint {
             definition.validate()?;
         }
         if let Some(turn) = &self.turn {
+            checkpoint.inputs.validate_task(turn.definition.task_id)?;
             let pending = checkpoint
                 .pending
                 .as_ref()
                 .ok_or(AgentError::InvalidData("native turn has no command"))?;
             turn.definition.limits.validate()?;
             ContextBuilder::new(turn.definition.budget.clone())?;
+            if let LoopStatus::Paused {
+                reason: PauseReason::WaitingForEvents { wait_id },
+            } = &turn.status
+                && (checkpoint.inputs.wait_id() != Some(*wait_id) || turn.round.is_some())
+            {
+                return Err(AgentError::InvalidData(
+                    "native child wait does not match its inbox",
+                ));
+            }
             if turn.command_id != pending.command.command_id
                 || definition_digest(&turn.definition)? != turn.definition_digest
-                || turn.deadline_ms < turn.started_at_ms
-                || turn.deadline_ms - turn.started_at_ms != turn.definition.limits.max_duration_ms
+                || turn.last_observed_wall_ms > i64::MAX as u64
+                || (turn.last_observed_wall_ms != 0
+                    && turn.last_observed_wall_ms < turn.started_at_ms)
+                || turn.deadline_ms
+                    != effective_deadline(turn.started_at_ms, &turn.definition.limits)?
                 || turn.attempts > turn.definition.limits.max_model_attempts
                 || turn.tool_calls > turn.definition.limits.max_tool_calls
             {
@@ -418,9 +443,12 @@ impl Agent {
                 Arc::clone(&admission),
             )
             .await?;
-        } else if conversation.checkpoint.native.is_some() {
+        } else if conversation.checkpoint.native.is_some()
+            || conversation.checkpoint.inputs.has_pending()
+        {
             return Err(AgentError::NativeSetupRequired);
         }
+        let stream_deadline = run_deadline(&conversation)?;
         let agent = self.clone();
         let child = cancellation.child_token();
         let cancel_on_drop = child.clone().drop_guard();
@@ -430,6 +458,9 @@ impl Agent {
             loop {
                 if child.is_cancelled() { Err(AgentError::Cancelled)?; }
                 if let Some(setup) = &setup {
+                    if let Some(reason) = agent.consume_native_inputs(&mut conversation, Arc::clone(&admission)).await? {
+                        yield TurnEvent::Paused { reason }; break;
+                    }
                     let status = native(&conversation)?.turn.as_ref().ok_or(AgentError::NoPendingTurn)?.status.clone();
                     match status {
                         LoopStatus::ProviderInFlight { .. } if setup.provider_resume != ProviderResume::RetryUncertain => {
@@ -438,9 +469,19 @@ impl Agent {
                         LoopStatus::ProviderInFlight { .. } => {
                             let mut checkpoint = conversation.checkpoint.clone(); turn_mut(&mut checkpoint)?.status = LoopStatus::Ready;
                             agent.save_native(&mut conversation, checkpoint, Vec::new(), Arc::clone(&admission)).await?;
+                            continue;
                         }
                         LoopStatus::Paused { reason } => {
                             if matches!(reason, PauseReason::OperationInFlight { .. }) || (setup.provider_resume == ProviderResume::RetryUncertain && matches!(reason, PauseReason::Cancellation | PauseReason::InterruptedTool)) {
+                                if matches!(reason, PauseReason::OperationInFlight { .. })
+                                    && !clock_allows(native(&conversation)?.turn.as_ref().ok_or(AgentError::NoPendingTurn)?, UnixMillis::now()?.get(), stream_deadline)
+                                {
+                                    let reason = agent.expired_round_reason(&conversation).await?;
+                                    let mut checkpoint = conversation.checkpoint.clone();
+                                    turn_mut(&mut checkpoint)?.status = LoopStatus::Paused { reason: reason.clone() };
+                                    agent.save_native(&mut conversation, checkpoint, Vec::new(), Arc::clone(&admission)).await?;
+                                    yield TurnEvent::Paused { reason }; break;
+                                }
                                 let mut checkpoint = conversation.checkpoint.clone();
                                 let turn = turn_mut(&mut checkpoint)?;
                                 if let Some(round) = &mut turn.round {
@@ -454,7 +495,7 @@ impl Agent {
                             } else { yield TurnEvent::Paused { reason }; break; }
                         }
                         LoopStatus::ExecutingTools | LoopStatus::AwaitingPermission => {
-                            let events = agent.execute_round(&mut conversation, Arc::clone(setup), &child, Arc::clone(&admission)).await?;
+                            let events = agent.execute_round(&mut conversation, Arc::clone(setup), &child, Arc::clone(&admission), stream_deadline).await?;
                             let mut stop = false;
                             for event in events { stop |= matches!(event, TurnEvent::Paused { .. } | TurnEvent::AwaitingPermission { .. }); yield event; }
                             if stop { break; }
@@ -474,7 +515,7 @@ impl Agent {
                         Ok((conversation, built, request))
                     }).await?;
                     conversation = captured;
-                    if let Some(reason) = next_attempt_limit(&conversation, &built)? {
+                    if let Some(reason) = next_attempt_limit(&conversation, &built, stream_deadline)? {
                         let mut checkpoint = conversation.checkpoint.clone(); turn_mut(&mut checkpoint)?.status = LoopStatus::Paused { reason: reason.clone() };
                         agent.save_native(&mut conversation, checkpoint, Vec::new(), Arc::clone(&admission)).await?;
                         yield TurnEvent::Paused { reason }; break;
@@ -485,10 +526,11 @@ impl Agent {
                     state.context.compaction = built.compaction.clone();
                     if built.request.continuation.is_none() { state.context.binding = None; checkpoint.continuation = None; }
                     let turn = state.turn.as_mut().ok_or(AgentError::NoPendingTurn)?;
+                    turn.last_observed_wall_ms = observed_floor(turn).max(UnixMillis::now()?.get());
                     turn.attempts += 1;
                     turn.charged_tokens = turn.charged_tokens.checked_add(reservation(&built)).ok_or(AgentError::ResourceLimit("token accounting"))?;
                     turn.status = LoopStatus::ProviderInFlight { attempt_id };
-                    agent.save_native(&mut conversation, checkpoint, Vec::new(), Arc::clone(&admission)).await?;
+                    if !agent.save_native(&mut conversation, checkpoint, Vec::new(), Arc::clone(&admission)).await? { continue; }
                     yield TurnEvent::ContextBuilt { usage: built.usage.clone(), citations: built.citations.clone(), omitted_memory: built.omitted_memory.clone(), continuation: built.continuation.clone() };
                     yield TurnEvent::ModelAttemptStarted { attempt_id };
                     Prepared::Context { built: Box::new(built), request }
@@ -500,7 +542,15 @@ impl Agent {
                     conversation = captured;
                     Prepared::Legacy(request)
                 };
-                let deadline = run_deadline(&conversation)?;
+                let deadline = stream_deadline.min(run_deadline(&conversation)?);
+                if let Some(turn) = conversation.checkpoint.native.as_ref().and_then(|native| native.turn.as_ref())
+                    && !clock_allows(turn, UnixMillis::now()?.get(), stream_deadline)
+                {
+                    let mut checkpoint = conversation.checkpoint.clone();
+                    turn_mut(&mut checkpoint)?.status = LoopStatus::Paused { reason: PauseReason::DurationLimit };
+                    agent.save_native(&mut conversation, checkpoint, Vec::new(), Arc::clone(&admission)).await?;
+                    yield TurnEvent::Paused { reason: PauseReason::DurationLimit }; break;
+                }
                 let (request, prepared) = prepared.into_parts();
                 let mut events = tokio::select! {
                     biased;
@@ -730,23 +780,27 @@ fn prepare_native(
             .command
             .command_id;
         let now = UnixMillis::now()?.get();
-        let deadline_ms = now
-            .checked_add(definition.limits.max_duration_ms)
-            .filter(|deadline| *deadline <= i64::MAX as u64)
-            .ok_or(AgentError::ResourceLimit("turn deadline"))?;
+        let deadline_ms = effective_deadline(now, &definition.limits)?;
         checkpoint.context.tools = definition.initial_tools.clone();
         checkpoint.turn = Some(NativeTurn {
             command_id,
             definition,
             definition_digest: digest,
             started_at_ms: now,
+            last_observed_wall_ms: now,
             deadline_ms,
             attempts: 0,
             tool_calls: 0,
             charged_tokens: 0,
             reported_input_tokens: 0,
             reported_output_tokens: 0,
-            status: LoopStatus::Ready,
+            status: if deadline_ms <= now {
+                LoopStatus::Paused {
+                    reason: PauseReason::DurationLimit,
+                }
+            } else {
+                LoopStatus::Ready
+            },
             round: None,
         });
     }
@@ -855,16 +909,27 @@ fn reservation(built: &BuiltContext) -> u64 {
         .saturating_add(u64::from(built.usage.reserved_output_tokens))
 }
 
+fn effective_deadline(started_at_ms: u64, limits: &LoopLimits) -> Result<u64, AgentError> {
+    let relative = started_at_ms
+        .checked_add(limits.max_duration_ms)
+        .filter(|deadline| *deadline <= i64::MAX as u64)
+        .ok_or(AgentError::ResourceLimit("turn deadline"))?;
+    Ok(limits
+        .absolute_deadline
+        .map_or(relative, |absolute| relative.min(absolute.get())))
+}
+
 fn next_attempt_limit(
     conversation: &Conversation,
     built: &BuiltContext,
+    stream_deadline: Instant,
 ) -> Result<Option<PauseReason>, AgentError> {
     let turn = native(conversation)?
         .turn
         .as_ref()
         .ok_or(AgentError::NoPendingTurn)?;
     let now = UnixMillis::now()?.get();
-    Ok(if now < turn.started_at_ms || now >= turn.deadline_ms {
+    Ok(if !clock_allows(turn, now, stream_deadline) {
         Some(PauseReason::DurationLimit)
     } else if turn.attempts >= turn.definition.limits.max_model_attempts {
         Some(PauseReason::ModelAttemptLimit)
@@ -879,6 +944,14 @@ fn next_attempt_limit(
     })
 }
 
+fn observed_floor(turn: &NativeTurn) -> u64 {
+    turn.last_observed_wall_ms.max(turn.started_at_ms)
+}
+
+fn clock_allows(turn: &NativeTurn, now: u64, stream_deadline: Instant) -> bool {
+    now >= observed_floor(turn) && now < turn.deadline_ms && Instant::now() < stream_deadline
+}
+
 fn run_deadline(conversation: &Conversation) -> Result<Instant, AgentError> {
     let remaining = match conversation
         .checkpoint
@@ -888,7 +961,7 @@ fn run_deadline(conversation: &Conversation) -> Result<Instant, AgentError> {
     {
         Some(turn) => {
             let now = UnixMillis::now()?.get();
-            if now < turn.started_at_ms {
+            if now < observed_floor(turn) {
                 0
             } else {
                 turn.deadline_ms
@@ -905,33 +978,157 @@ impl Agent {
     async fn save_native(
         &self,
         conversation: &mut Conversation,
-        mut checkpoint: Checkpoint,
+        checkpoint: Checkpoint,
         payloads: Vec<ConversationEvent>,
         admission: Admission,
+    ) -> Result<bool, AgentError> {
+        self.save_native_events(
+            conversation,
+            checkpoint,
+            payloads
+                .into_iter()
+                .map(|payload| (None, payload))
+                .collect(),
+            admission,
+        )
+        .await
+    }
+
+    async fn refresh_native_controls(
+        &self,
+        conversation: &mut Conversation,
+        admission: Admission,
     ) -> Result<(), AgentError> {
+        let write = self.write_gate(conversation.info.id)?.lock_owned().await;
         let owner = self.clone();
-        let id = conversation.info.id;
-        let command = checkpoint
-            .pending
+        let captured = conversation.clone();
+        *conversation = blocking(move || {
+            let retained_agent = owner;
+            let _write = write;
+            let _admission = admission;
+            let current = load_conversation(&retained_agent.store, captured.info.id)?;
+            let mut proposed = captured.checkpoint.clone();
+            steering::merge_controls(&captured, &current, &mut proposed)?;
+            Ok(current)
+        })
+        .await?;
+        Ok(())
+    }
+
+    async fn consume_native_inputs(
+        &self,
+        conversation: &mut Conversation,
+        admission: Admission,
+    ) -> Result<Option<PauseReason>, AgentError> {
+        self.refresh_native_controls(conversation, Arc::clone(&admission))
+            .await?;
+        let status = native(conversation)?.status();
+        if !matches!(
+            status,
+            LoopStatus::Ready
+                | LoopStatus::Paused {
+                    reason: PauseReason::WaitingForEvents { .. }
+                }
+        ) {
+            return Ok(None);
+        }
+        if native(conversation)?
+            .turn
             .as_ref()
-            .map(|pending| pending.command.command_id)
+            .is_some_and(|turn| turn.round.is_some())
+        {
+            return Err(AgentError::InvalidData(
+                "task inputs cannot split an unresolved tool round",
+            ));
+        }
+        if !conversation.checkpoint.inputs.has_pending() {
+            return Ok(match status {
+                LoopStatus::Paused {
+                    reason: PauseReason::WaitingForEvents { wait_id },
+                } => Some(PauseReason::WaitingForEvents { wait_id }),
+                _ => None,
+            });
+        }
+        let mut checkpoint = conversation.checkpoint.clone();
+        let consumed = checkpoint.inputs.consume()?;
+        let reason = consumed
+            .unknown_child
+            .map(|child_task_id| PauseReason::ChildOutcomeUnknown { child_task_id })
             .or_else(|| {
-                checkpoint
-                    .last_turn
-                    .as_ref()
-                    .map(|summary| summary.command_id)
-            })
-            .ok_or(AgentError::NoPendingTurn)?;
-        let expected_sequence = conversation.info.last_sequence;
-        let expected_revision = conversation.info.checkpoint_revision;
-        let (checkpoint, head, revision, messages) = blocking(move || {
+                consumed
+                    .wait_id
+                    .map(|wait_id| PauseReason::WaitingForEvents { wait_id })
+            });
+        turn_mut(&mut checkpoint)?.status = reason
+            .clone()
+            .map_or(LoopStatus::Ready, |reason| LoopStatus::Paused { reason });
+        self.save_native_events(conversation, checkpoint, consumed.events, admission)
+            .await?;
+        Ok(reason)
+    }
+
+    async fn save_native_events(
+        &self,
+        conversation: &mut Conversation,
+        mut checkpoint: Checkpoint,
+        payloads: Vec<(Option<CommandId>, ConversationEvent)>,
+        admission: Admission,
+    ) -> Result<bool, AgentError> {
+        let write = self.write_gate(conversation.info.id)?.lock_owned().await;
+        let owner = self.clone();
+        let captured = conversation.clone();
+        let (saved, committed) = blocking(move || {
             let retained_agent = owner;
             let _admission = admission;
-            let mut sequence = expected_sequence;
+            let _write = write;
+            let mut current = load_conversation(&retained_agent.store, captured.info.id)?;
+            steering::merge_controls(&captured, &current, &mut checkpoint)?;
+            let proposed_status = checkpoint.native.as_ref().map(NativeCheckpoint::status);
+            if checkpoint.inputs.has_pending()
+                && matches!(proposed_status, Some(LoopStatus::ProviderInFlight { .. }))
+                && matches!(
+                    captured
+                        .checkpoint
+                        .native
+                        .as_ref()
+                        .map(NativeCheckpoint::status),
+                    Some(LoopStatus::Ready)
+                )
+            {
+                return Ok((current, false));
+            }
+            if matches!(proposed_status, Some(LoopStatus::Completed))
+                && checkpoint.pending.is_some()
+            {
+                let native = checkpoint
+                    .native
+                    .as_mut()
+                    .ok_or(AgentError::NativeSetupRequired)?;
+                let turn = native.turn.as_mut().ok_or(AgentError::NoPendingTurn)?;
+                if checkpoint.inputs.has_pending() {
+                    turn.status = LoopStatus::Ready;
+                } else {
+                    native.last_run = Some(run_info(turn));
+                    native.turn = None;
+                    checkpoint.pending = None;
+                }
+            }
+            let command = checkpoint
+                .pending
+                .as_ref()
+                .map(|pending| pending.command.command_id)
+                .or_else(|| {
+                    checkpoint
+                        .last_turn
+                        .as_ref()
+                        .map(|summary| summary.command_id)
+                })
+                .ok_or(AgentError::NoPendingTurn)?;
+            let mut sequence = current.info.last_sequence;
+            let expected_revision = current.info.checkpoint_revision;
             let mut rows = Vec::new();
-            let mut messages = Vec::new();
             let now = UnixMillis::now()?;
-            for payload in payloads {
+            for (causation, payload) in payloads {
                 sequence = next_sequence(sequence)?;
                 if let ConversationEvent::MessageAppended { .. } = &payload {
                     checkpoint.message_head = sequence;
@@ -940,11 +1137,17 @@ impl Agent {
                         .checked_add(1)
                         .ok_or(AgentError::ResourceLimit("message count"))?;
                 }
-                let row = event_input(id, sequence, command, now, payload)?;
+                let row = event_input(
+                    current.info.id,
+                    sequence,
+                    causation.unwrap_or(command),
+                    now,
+                    payload,
+                )?;
                 let event: EventEnvelope = serde_json::from_value(row.payload.clone())
                     .map_err(|_| AgentError::InvalidData("new event encoding changed"))?;
                 if let ConversationEvent::MessageAppended { message } = event.payload {
-                    messages.push(RecordedMessage {
+                    current.messages.push(RecordedMessage {
                         event_id: event.event_id,
                         sequence: event.sequence,
                         causation_id: event.causation_id,
@@ -962,8 +1165,8 @@ impl Agent {
                 retained_agent
                     .store
                     .checkpoint_conversation_state(
-                        &id.to_string(),
-                        expected_sequence,
+                        &current.info.id.to_string(),
+                        current.info.last_sequence,
                         &journal_command,
                         &update,
                     )?
@@ -971,9 +1174,9 @@ impl Agent {
             } else {
                 retained_agent.store.append_with_state(
                     &AppendRequest {
-                        conversation_id: id.to_string(),
+                        conversation_id: current.info.id.to_string(),
                         command_id: journal_command,
-                        expected_sequence,
+                        expected_sequence: current.info.last_sequence,
                         events: rows,
                     },
                     &update,
@@ -982,20 +1185,20 @@ impl Agent {
                     .checked_add(1)
                     .ok_or(AgentError::ResourceLimit("checkpoint revision"))?
             };
-            Ok((checkpoint, sequence, revision, messages))
+            current.info.last_sequence = sequence;
+            current.info.checkpoint_revision = revision;
+            current.info.message_count = checkpoint.message_count;
+            current.info.pending_command_id = checkpoint
+                .pending
+                .as_ref()
+                .map(|pending| pending.command.command_id);
+            current.info.native_status = checkpoint.native.as_ref().map(NativeCheckpoint::status);
+            current.checkpoint = checkpoint;
+            Ok((current, true))
         })
         .await?;
-        conversation.info.last_sequence = head;
-        conversation.info.checkpoint_revision = revision;
-        conversation.info.message_count = checkpoint.message_count;
-        conversation.info.pending_command_id = checkpoint
-            .pending
-            .as_ref()
-            .map(|pending| pending.command.command_id);
-        conversation.info.native_status = checkpoint.native.as_ref().map(NativeCheckpoint::status);
-        conversation.messages.extend(messages);
-        conversation.checkpoint = checkpoint;
-        Ok(())
+        *conversation = saved;
+        Ok(committed)
     }
 }
 
@@ -1081,9 +1284,6 @@ impl Agent {
             turn.tool_calls += count_u32;
             if calls.is_empty() {
                 turn.status = LoopStatus::Completed;
-                native.last_run = Some(run_info(turn));
-                native.turn = None;
-                checkpoint.pending = None;
             } else {
                 turn.round = Some(Round { assistant_message_id: message.id, calls });
                 turn.status = if turn.charged_tokens > turn.definition.limits.max_charged_tokens {
@@ -1092,14 +1292,88 @@ impl Agent {
             }
             checkpoint.last_turn = Some(summary);
             checkpoint.continuation = response.continuation;
-            if let Some(run) = &native.last_run
-                && checkpoint.pending.is_none() { events.push(TurnEvent::RunCompleted { run: run.clone() }); }
             Ok((captured, checkpoint, payloads, events))
         }).await?;
         conversation = captured;
         self.save_native(&mut conversation, checkpoint, payloads, admission)
             .await?;
+        let mut events = events;
+        if conversation.checkpoint.pending.is_none() {
+            let run = conversation
+                .native_run()
+                .ok_or(AgentError::NativeSetupRequired)?;
+            events.push(TurnEvent::RunCompleted { run });
+        }
         Ok((conversation, events))
+    }
+
+    async fn expired_round_reason(
+        &self,
+        conversation: &Conversation,
+    ) -> Result<PauseReason, AgentError> {
+        let turn = native(conversation)?
+            .turn
+            .as_ref()
+            .ok_or(AgentError::NoPendingTurn)?;
+        let calls = turn
+            .round
+            .as_ref()
+            .ok_or(AgentError::InvalidData("expired tool phase lost its round"))?
+            .calls
+            .clone();
+        let id = conversation.info.id.to_string();
+        let task_id = turn.definition.task_id.to_string();
+        let workspace = turn.definition.workspace.clone();
+        let mode = turn.definition.mode;
+        let owner = self.clone();
+        blocking(move || {
+            let retained_agent = owner;
+            let mode = serde_json::to_value(mode).map_err(|_| AgentError::Worker)?;
+            let mut retained = PauseReason::DurationLimit;
+            for call in calls {
+                if let CallPhase::Blocked { reason, .. } = &call.phase
+                    && stop_priority(reason) > stop_priority(&retained)
+                {
+                    retained = reason.clone();
+                }
+                let operation_id = call.call.id.to_string();
+                if let Some(row) = retained_agent.store.tool_call(&operation_id)? {
+                    if row.id != operation_id
+                        || row.conversation_id != id
+                        || row.task_id.as_deref() != Some(task_id.as_str())
+                        || row.tool_name != call.call.name
+                        || row.request.get("arguments") != Some(&call.call.arguments)
+                        || row.request.get("workspace_root").and_then(Value::as_str)
+                            != Some(workspace.as_str())
+                        || row.request.get("mode") != Some(&mode)
+                        || row.request.get("version").and_then(Value::as_u64) != Some(1)
+                    {
+                        return Err(AgentError::InvalidData(
+                            "expired operation journal identity differs from its native call",
+                        ));
+                    }
+                    let reason = match row.state {
+                        ToolCallState::Unknown => {
+                            PauseReason::ReconciliationRequired { operation_id }
+                        }
+                        ToolCallState::Pending if matches!(call.phase, CallPhase::Dispatched) => {
+                            PauseReason::ReconciliationRequired { operation_id }
+                        }
+                        ToolCallState::Running => PauseReason::OperationInFlight { operation_id },
+                        ToolCallState::Succeeded
+                        | ToolCallState::Failed
+                        | ToolCallState::Cancelled
+                        | ToolCallState::Denied
+                        | ToolCallState::Pending => PauseReason::DurationLimit,
+                    };
+                    if stop_priority(&reason) > stop_priority(&retained) {
+                        retained = reason;
+                    }
+                }
+            }
+            Ok(retained)
+        })
+        .await
     }
 
     async fn execute_round(
@@ -1108,6 +1382,7 @@ impl Agent {
         setup: Arc<ToolRunSetup>,
         cancellation: &CancellationToken,
         admission: Admission,
+        stream_deadline: Instant,
     ) -> Result<Vec<TurnEvent>, AgentError> {
         let owner = self.clone();
         let scoped = setup.broker.clone();
@@ -1123,18 +1398,21 @@ impl Agent {
         let mut checkpoint = conversation.checkpoint.clone();
         let turn = turn_mut(&mut checkpoint)?;
         let task_id = turn.definition.task_id;
-        let deadline = run_deadline(conversation)?;
+        let deadline = stream_deadline.min(run_deadline(conversation)?);
         let current_time = UnixMillis::now()?.get();
-        if current_time < turn.started_at_ms || current_time >= turn.deadline_ms {
+        if !clock_allows(turn, current_time, stream_deadline) {
+            let reason = self.expired_round_reason(conversation).await?;
             turn.status = LoopStatus::Paused {
-                reason: PauseReason::DurationLimit,
+                reason: reason.clone(),
             };
             self.save_native(conversation, checkpoint, Vec::new(), admission)
                 .await?;
-            return Ok(vec![TurnEvent::Paused {
-                reason: PauseReason::DurationLimit,
-            }]);
+            return Ok(vec![TurnEvent::Paused { reason }]);
         }
+        turn.last_observed_wall_ms = observed_floor(turn).max(current_time);
+        let wall_deadline = turn.deadline_ms;
+        let observed_wall = Arc::new(AtomicU64::new(turn.last_observed_wall_ms));
+        let admission_stopped = Arc::new(AtomicBool::new(false));
         let round = turn
             .round
             .as_mut()
@@ -1163,17 +1441,31 @@ impl Agent {
         let _cancel_on_drop = token.clone().drop_guard();
         let broker = setup.broker.clone();
         let child = token.clone();
+        let call_observed_wall = Arc::clone(&observed_wall);
         let retained_owner = RetainedToolOwner::new(self.clone());
         let calls = stream::iter(requests)
             .map(move |(index, invocation)| {
                 let broker = broker.clone();
                 let token = child.clone();
+                let observed_wall = Arc::clone(&call_observed_wall);
+                let admission_stopped = Arc::clone(&admission_stopped);
                 let owner = retained_owner.clone();
                 async move {
-                    (
-                        index,
-                        broker.execute_retained(invocation, token, owner).await,
-                    )
+                    let now = UnixMillis::now()?.get();
+                    let floor = observed_wall.fetch_max(now, Ordering::AcqRel);
+                    if admission_stopped.load(Ordering::Acquire)
+                        || now < floor
+                        || now >= wall_deadline
+                        || Instant::now() >= deadline
+                    {
+                        admission_stopped.store(true, Ordering::Release);
+                        Ok::<_, AgentError>((index, None))
+                    } else {
+                        Ok((
+                            index,
+                            Some(broker.execute_retained(invocation, token, owner).await),
+                        ))
+                    }
                 }
             })
             .buffer_unordered(setup.limits.max_parallel_calls);
@@ -1191,10 +1483,27 @@ impl Agent {
                     result = calls.next() => result,
                 }
             };
-            let Some((index, returned)) = next else {
+            let Some(returned) = next else {
                 break;
             };
+            let (index, returned) = returned?;
             let mut checkpoint = conversation.checkpoint.clone();
+            let turn = turn_mut(&mut checkpoint)?;
+            turn.last_observed_wall_ms =
+                observed_floor(turn).max(observed_wall.load(Ordering::Acquire));
+            let Some(returned) = returned else {
+                let call = turn
+                    .round
+                    .as_mut()
+                    .and_then(|round| round.calls.get_mut(index))
+                    .ok_or(AgentError::InvalidData(
+                        "clock-stopped call lost its identity",
+                    ))?;
+                call.phase = CallPhase::Blocked { reason: PauseReason::DurationLimit, diagnostic: "Native deadline or observed clock rollback stopped this call before broker admission".into() };
+                self.save_native(conversation, checkpoint, Vec::new(), Arc::clone(&admission))
+                    .await?;
+                continue;
+            };
             let registry = Arc::clone(&setup.registry);
             let (checkpoint, payloads, emitted, stop) = blocking(move || {
                 let mut emitted = Vec::new();
@@ -1343,11 +1652,19 @@ impl Agent {
             })
             .or_else(|| {
                 round.calls.iter().find_map(|call| {
-                    if let CallPhase::Blocked { reason, .. } = &call.phase {
+                    if let CallPhase::Blocked { reason, .. } = &call.phase
+                        && !matches!(reason, PauseReason::DurationLimit)
+                    {
                         Some(reason.clone())
                     } else {
                         None
                     }
+                })
+            })
+            .or_else(|| {
+                round.calls.iter().find_map(|call| match &call.phase {
+                    CallPhase::Blocked { reason, .. } => Some(reason.clone()),
+                    _ => None,
                 })
             });
         let waiting = round
@@ -1407,6 +1724,14 @@ impl Agent {
         self.save_native(conversation, checkpoint, payloads, admission)
             .await?;
         Ok(events)
+    }
+}
+
+fn stop_priority(reason: &PauseReason) -> u8 {
+    match reason {
+        PauseReason::ReconciliationRequired { .. } | PauseReason::BrokerRejected { .. } => 3,
+        PauseReason::OperationInFlight { .. } => 2,
+        _ => 0,
     }
 }
 
