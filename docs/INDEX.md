@@ -12,7 +12,7 @@ Read [AGENTS.md](../AGENTS.md), then [implementation status](status/implementati
 
 ## Development
 
-[Setup](development/setup.md) · [CLI](development/cli.md) · [Headless host](development/host.md) · [System One setup](development/system-one.md) · [macOS client](development/macos-client.md) · [Conventions](development/conventions.md) · [Workflows](development/workflows.md) · [Backlog synchronization](development/backlog-sync.md) · [Validation](development/validation.md) · [Embedding benchmark](development/embedding-benchmark.md) · [Scheduler](development/scheduler.md)
+[Setup](development/setup.md) · [CLI](development/cli.md) · [Headless host](development/host.md) · [System One setup](development/system-one.md) · [macOS client](development/macos-client.md) · [iOS client](development/ios-client.md) · [Conventions](development/conventions.md) · [Workflows](development/workflows.md) · [Backlog synchronization](development/backlog-sync.md) · [Validation](development/validation.md) · [Embedding benchmark](development/embedding-benchmark.md) · [Scheduler](development/scheduler.md)
 
 ## Decisions
 
