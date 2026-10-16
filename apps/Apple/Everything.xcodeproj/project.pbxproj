@@ -4,6 +4,46 @@
     };
     "objectVersion" = "56";
     "objects" = {
+        "62E3F5EE2FA342ECB39783FD" = {
+            "isa" = "PBXFileReference";
+            "lastKnownFileType" = "sourcecode.swift";
+            "path" = "SettingsAssistantController.swift";
+            "sourceTree" = "<group>";
+        };
+        "B98F008AE52947C9B327DAD8" = {
+            "isa" = "PBXBuildFile";
+            "fileRef" = "62E3F5EE2FA342ECB39783FD";
+        };
+        "7AC000F5D5A5478488293056" = {
+            "isa" = "PBXFileReference";
+            "lastKnownFileType" = "sourcecode.swift";
+            "path" = "SettingsAssistantView.swift";
+            "sourceTree" = "<group>";
+        };
+        "4D57F53DD04B474EA6BA098E" = {
+            "isa" = "PBXBuildFile";
+            "fileRef" = "7AC000F5D5A5478488293056";
+        };
+        "DA0B63BE17AF4B67AC5D8195" = {
+            "isa" = "PBXFileReference";
+            "lastKnownFileType" = "sourcecode.swift";
+            "path" = "SettingsAssistantOperationView.swift";
+            "sourceTree" = "<group>";
+        };
+        "1469FEB2425144509BF6C3E1" = {
+            "isa" = "PBXBuildFile";
+            "fileRef" = "DA0B63BE17AF4B67AC5D8195";
+        };
+        "83B14B2535584D5BBDA75CC8" = {
+            "isa" = "PBXFileReference";
+            "lastKnownFileType" = "sourcecode.swift";
+            "path" = "SettingsAssistantNavigation.swift";
+            "sourceTree" = "<group>";
+        };
+        "70F3FEE0D90D4EC2A60DA7E9" = {
+            "isa" = "PBXBuildFile";
+            "fileRef" = "83B14B2535584D5BBDA75CC8";
+        };
         "808DDBA265D11AC693905E9F" = {
             "isa" = "PBXFileReference";
             "lastKnownFileType" = "sourcecode.swift";
@@ -380,6 +420,10 @@
         "EE990A23EDFE368C266222DC" = {
             "isa" = "PBXGroup";
             "children" = (
+                "62E3F5EE2FA342ECB39783FD",
+                "7AC000F5D5A5478488293056",
+                "DA0B63BE17AF4B67AC5D8195",
+                "83B14B2535584D5BBDA75CC8",
                 "F430089591C42075ADE22232",
                 "37134351D2F3D62F4831660F",
                 "23D44554EDC9338089918337",
@@ -492,6 +536,10 @@
             "isa" = "PBXSourcesBuildPhase";
             "buildActionMask" = "2147483647";
             "files" = (
+                "B98F008AE52947C9B327DAD8",
+                "4D57F53DD04B474EA6BA098E",
+                "1469FEB2425144509BF6C3E1",
+                "70F3FEE0D90D4EC2A60DA7E9",
                 "3DA6ECFC4D0376F5102DFE70",
                 "F77D0168812FD33BC283078B",
                 "5DD0C751C392C8F6847DCDF4",

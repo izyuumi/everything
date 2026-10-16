@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 import Observation
 
@@ -56,6 +57,10 @@ final class HostModel {
     @ObservationIgnored let settingsSurfaceID = UUID()
     let thisMacSettings: ThisMacSettingsStore?
     let nativeSettings: NativeSettingsStore
+    let settingsNavigation: SettingsAssistantNavigation
+    let settingsAssistant: SettingsAssistantController
+    @ObservationIgnored private var settingsWindowCovered = false
+    @ObservationIgnored private var settingsPresentationCovered = false
     @ObservationIgnored private var surfaceDrain: Task<Void, Never>?
     @ObservationIgnored private var surfaceDrainRequested = false
 
@@ -73,7 +78,17 @@ final class HostModel {
         thisMacSettings = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first.map {
             ThisMacSettingsStore(directory: $0.appendingPathComponent("Everything", isDirectory: true).appendingPathComponent("DevicePreferences", isDirectory: true))
         }
-        nativeSettings = NativeSettingsStore(client: client, connection: connection, connectionKey: connectionKey)
+        let nativeSettings = NativeSettingsStore(client: client, connection: connection, connectionKey: connectionKey)
+        self.nativeSettings = nativeSettings
+        let navigation = SettingsAssistantNavigation()
+        settingsNavigation = navigation
+        let assistant = SettingsAssistantController(store: nativeSettings, connectionKey: connectionKey,
+            navigation: SettingsAssistantController.Navigation(open: { [weak navigation] section in
+                guard let navigation else { return .dismissed }
+                return await navigation.open(section)
+            }, retire: { [weak navigation] in navigation?.retire() }))
+        settingsAssistant = assistant
+        nativeSettings.beforeRetire = { [weak assistant] in assistant?.parentWillRetire() }
     }
 
     var connection: OwnerConnection { activeConnection }
@@ -91,6 +106,7 @@ final class HostModel {
         nativeSettings.replaceConnection(selected, connectionKey: connectionKey)
         activeConnection = selected
         connectionVersion = connectionKey
+        settingsAssistant.applyConnectionKey(connectionKey)
         defaults.set(executable, forKey: "hostExecutable")
         defaults.set(stateDirectory, forKey: "hostStateDirectory")
         connected = false
@@ -527,7 +543,23 @@ final class HostModel {
         } catch { message = error.localizedDescription }
     }
 
-    func settingsWindowChanged(visible: Bool, active: Bool) {
+    func settingsWindowAttached(_ window: NSWindow?) {
+        settingsNavigation.attachWindow(window)
+        settingsAssistant.attachWindow(window)
+    }
+
+    func settingsPresentationChanged(covered: Bool) {
+        settingsPresentationCovered = covered
+        settingsAssistant.setCovered(settingsWindowCovered || settingsPresentationCovered)
+        if covered { settingsNavigation.retire() }
+    }
+
+    func settingsWindowChanged(visible: Bool, active: Bool, covered: Bool) {
+        settingsWindowCovered = covered
+        settingsAssistant.setCovered(settingsWindowCovered || settingsPresentationCovered)
+        if !visible || !active || covered { settingsNavigation.retire() }
+        settingsAssistant.setSurfaceVisible(visible && !closing)
+        settingsAssistant.setApplicationActive(active && !closing)
         guard !closing else {
             thisMacSettings?.setSurfaceVisible(false)
             nativeSettings.setSurfaceVisible(false)
@@ -547,6 +579,10 @@ final class HostModel {
     }
 
     func settingsWindowClosed() {
+        settingsAssistant.setSurfaceVisible(false)
+        settingsAssistant.parentWillRetire()
+        settingsNavigation.retire()
+        settingsPresentationCovered = false
         thisMacSettings?.setSurfaceVisible(false)
         nativeSettings.setSurfaceVisible(false)
         nativeSettings.close()
@@ -564,12 +600,18 @@ final class HostModel {
 
     func shutdownClient() async {
         closing = true
+        settingsAssistant.invalidate()
+        settingsNavigation.retire()
         nativeSettings.invalidate()
         thisMacSettings?.invalidate()
+        let assistantReports = await settingsAssistant.drain()
         if let surfaceDrain { await surfaceDrain.value }
         if let store = thisMacSettings { await store.drain() }
         let reports = await nativeSettings.drain()
         if reports.contains(where: { $0.hasIssues }) { message = "Native Settings drain reported issues. Original session reports were retained until app shutdown." }
+        if assistantReports.contains(where: { !$0.closed || $0.issue != nil }) {
+            message = "Ask Settings closure has unconfirmed outcomes. Original session metadata was retained until app shutdown."
+        }
         await client.shutdown()
     }
 }

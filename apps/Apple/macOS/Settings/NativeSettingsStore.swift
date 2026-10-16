@@ -310,6 +310,7 @@ final class NativeSettingsStore {
     @ObservationIgnored private var devicePageOwnerID: UUID?
     @ObservationIgnored private var devicePageGeneration: UUID?
     @ObservationIgnored private var drainTask: Task<[Cleanup], Never>?
+    @ObservationIgnored var beforeRetire: (@MainActor () -> Void)?
     private static let maximumOwners = 8
 
     init(client: OwnerIPCClient, connection: OwnerConnection, connectionKey: UUID) {
@@ -391,6 +392,7 @@ final class NativeSettingsStore {
 
     func replaceConnection(_ connection: OwnerConnection, connectionKey: UUID) {
         guard !isClosed else { return }
+        beforeRetire?()
         retireCurrent()
         self.connection = connection
         self.connectionKey = connectionKey
@@ -1004,11 +1006,13 @@ final class NativeSettingsStore {
     }
 
     func close() {
+        beforeRetire?()
         retireCurrent()
     }
 
     func invalidate() {
         guard !isClosed else { return }
+        beforeRetire?()
         isClosed = true
         surfaceVisible = false
         applicationActive = false
