@@ -499,7 +499,7 @@ final class NativeSettingsStore {
     func assistantOpenStatus(_ action: AssistantOpenAction,
                              completion: @escaping @MainActor @Sendable (Result<NativeSettingsAssistantWire.OpenState, NativeSettingsSessionError>) -> Void) throws {
         let owner = try assistantOwner(action, live: false)
-        try startAssistantEffect(owner, id: UUID(), read: .open(action.requestID), work: {
+        try startAssistantEffect(owner, id: UUID(), read: .open(action.requestID), work: { () async throws -> (NativeSettingsAssistantWire.OpenState, NativeSettingsSession.AssistantHandle?) in
             let state = try await owner.lifecycle.session.assistantOpenStatus(action.admission)
             if case .ready = state {
                 let recovered = try await owner.lifecycle.session.openAssistant(action.admission)
