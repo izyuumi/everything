@@ -890,6 +890,16 @@ async fn cleanup_turn(
     classified_stop: bool,
     assistant_text: String,
 ) -> JoinedTurn {
+    let foreground = match session.profile.fence() {
+        Ok(Some(fence)) => {
+            session
+                .agent
+                .reconcile_foreground_task(session.profile.conversation_id(), fence.command_id)
+                .await
+        }
+        Ok(None) => Ok(None),
+        Err(error) => Err(error),
+    };
     let provider_idle = session.profile.accounting.close_and_wait().await;
     let local_preparation_failed = session.profile.accounting.local_preparation_failed();
     let observed = session.agent.observe_settings_provider().await;
@@ -980,6 +990,7 @@ async fn cleanup_turn(
     let mutation_links_known = matches!(receipt_observation, Ok(true));
     let finalization_safe = classified_stop
         && matches!(local_preparation_failed, Ok(false))
+        && foreground.is_ok()
         && persisted
         && provider_observation.is_ok()
         && workers_joined
