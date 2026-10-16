@@ -56,6 +56,12 @@ PR #79 normally merges durable admission candidate `60f4fbf10bb7301ea6e408115ab5
 
 The union retains the pending-device reply archival guard, moves saved-run workspace reconstruction off Tokio and reduces oversized pending pages without advancing their cursor. Startup now declares a lease guard before all preparation Store holders and returns it last, preserving the lease through preparation errors and discarded blocking-worker output before the normal Agent/broker/server handoff. Native clocks, control checkpoints, immutable uncertainty, cancellation, owner cleanup, Wiki/device fixes and migrations five through seven remain preserved. This current source has formatting and source inspection only; fresh compilation, strict Clippy, CI and actual new boundary runtime checks are pending. Earlier Linux Host observations remain qualified in [Host architecture](../architecture/host.md#validation-status); successful live inference, new caller-drop/SQLite-lock behavior and macOS launchd/login are not newly verified. Optional #68 composition and deferred automated assertions in #32 remain separate.
 
+## Scheduling calculation integration checkpoint, 2026-10-16
+
+The #51 replacement extracts the reviewed calendar, due timer, atomic missed-range claim and immutable first-attempt ledger onto corrected headless Host prerequisite `b5d2d03609e47f482bf50dc457c06ed256c00a28`, normally merging the initial focused extraction without changing its calendar source. It imports no legacy PR #71 aggregate ancestry. Migration eight follows schemas five, six and seven once; existing clock dependencies and all unrelated source/manifests remain unchanged. The engine retains its complete Agent through actual blocking workers, filters every native Scheduler control including `wait_agents`, and checks exact native identity/policy plus immutable Running/Unknown tool journals and typed child uncertainty before any terminal mapping.
+
+Rust 1.88 formatting, source preservation and documentation-link inspection apply to this replacement. Exact-head compilation, required CI, lifecycle/clock/runtime observations and integration remain pending. The [engine contract](../contracts/scheduling-engine.md#validation) distinguishes earlier calendar and refused-loopback observations from this source; successful inference, actual OS clock changes and exhaustive forced-crash recovery are unverified. The prerequisite supplies the Host service; production scheduling activation and owner scheduling controls remain separate work; retries, cumulative cross-attempt accounting and result delivery remain #52. Automated coverage is deferred to [#32](https://github.com/izyuumi/everything/issues/32).
+
 ## Dependency graph and ownership
 
 | Issue | Objective | Prerequisites | State |
@@ -93,7 +99,7 @@ The union retains the pending-device reply archival guard, moves saved-run works
 | [#31](https://github.com/izyuumi/everything/issues/31) | Define generic embedding contract and index fingerprints | #1, #6 | Merged (#42) |
 | [#72](https://github.com/izyuumi/everything/issues/72) | Prevent outbound telemetry from local embeddings | #12, #21, #68 | Strict production embedding-only boundary in progress separately; no production-locality acceptance claimed here |
 | [#50](https://github.com/izyuumi/everything/issues/50) | Persist scheduled jobs and immutable run history | #2, #3, #10; migration order after #22/private checkpoints | Merged (#67) after current-head production CI; occurrence/replay observations qualified and automated assertions deferred to #32 |
-| [#51](https://github.com/izyuumi/everything/issues/51) | Calculate timezone-aware occurrences and dispatch due work | #24, #50 | Backlog |
+| [#51](https://github.com/izyuumi/everything/issues/51) | Calculate timezone-aware occurrences and dispatch due work | #24, #50 | Focused replacement for legacy PR #71 prepared; exact-head CI and integration pending |
 | [#52](https://github.com/izyuumi/everything/issues/52) | Enforce isolated scheduled execution and run policies | #24, #25, #50, #51 | Backlog |
 | [#53](https://github.com/izyuumi/everything/issues/53) | Add schedule CLI and native tool controls | #5, #11, #50, #51, #52 | Backlog |
 | [#54](https://github.com/izyuumi/everything/issues/54) | Deliver schedule status and encrypted client notifications | #22, #27, #28, #52, #53 | Backlog |
