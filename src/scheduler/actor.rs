@@ -1531,10 +1531,10 @@ impl Actor {
                 } else if let Some(reason) = uncertainty {
                     task.checkpoint.waiting = Some(reason);
                     task.checkpoint.diagnostic=Some("Task execution cancelled; its previous native outcome remains uncertain and is not retryable".into());
-                    repository::save(&self.store(), &mut task, TaskStatus::Failed)?;
+                    self.save_terminal(&mut task, TaskStatus::Failed).await?;
                 } else {
                     task.checkpoint.waiting = None;
-                    repository::save(&self.store(), &mut task, TaskStatus::Cancelled)?;
+                    self.save_terminal(&mut task, TaskStatus::Cancelled).await?;
                 }
                 self.repair_child_deliveries().await?;
                 continue;
@@ -1614,6 +1614,27 @@ impl Actor {
         Ok(progress)
     }
 
+    async fn save_terminal(
+        &self,
+        task: &mut StoredTask,
+        status: TaskStatus,
+    ) -> Result<(), SchedulerError> {
+        if !status.is_terminal() || task.checkpoint.task.status.is_terminal() {
+            return Err(SchedulerError::Conflict(task.definition.initial.id));
+        }
+        let conversation = self
+            .services
+            .agent
+            .conversation(task.definition.initial.conversation_id)
+            .await?;
+        task.checkpoint.terminal_evidence = Some(super::evidence::TerminalTaskEvidence::capture(
+            &task.definition,
+            task.checkpoint.active_command,
+            &conversation,
+        )?);
+        repository::save(&self.store(), task, status)
+    }
+
     async fn finish(&mut self, outcome: ExecutionOutcome) -> Result<(), SchedulerError> {
         let wake_active = self.wake_active.remove(&outcome.task_id);
         let mut task = repository::load(&self.store(), outcome.task_id)?;
@@ -1657,9 +1678,9 @@ impl Actor {
                     repository::save(&self.store(), &mut task, TaskStatus::WaitingForChildren)?;
                 } else if task.checkpoint.cancel_requested && !task.checkpoint.queued.is_empty() {
                     task.checkpoint.diagnostic=Some("Committed final output retained; queued follow-up commands were cancelled without execution".into());
-                    repository::save(&self.store(), &mut task, TaskStatus::Cancelled)?;
+                    self.save_terminal(&mut task, TaskStatus::Cancelled).await?;
                 } else {
-                    repository::save(&self.store(), &mut task, TaskStatus::Completed)?;
+                    self.save_terminal(&mut task, TaskStatus::Completed).await?;
                 }
             }
             ExecutionStop::Cancelled => {
@@ -1675,10 +1696,10 @@ impl Actor {
                     } else if unknown {
                         task.checkpoint.waiting = Some(WaitingReason::Reconciliation);
                         task.checkpoint.diagnostic = Some("Task cancelled with an immutable unknown tool outcome; owner reconciliation remains required".into());
-                        repository::save(&self.store(), &mut task, TaskStatus::Failed)?;
+                        self.save_terminal(&mut task, TaskStatus::Failed).await?;
                     } else {
                         task.checkpoint.waiting = None;
-                        repository::save(&self.store(), &mut task, TaskStatus::Cancelled)?;
+                        self.save_terminal(&mut task, TaskStatus::Cancelled).await?;
                     }
                 } else {
                     task.checkpoint.waiting = Some(if unknown {
@@ -1712,15 +1733,15 @@ impl Actor {
                             task.checkpoint.waiting = Some(WaitingReason::Reconciliation);
                         }
                         task.checkpoint.diagnostic=Some(if unknown{"Task execution cancelled; its previous native outcome remains uncertain and is not retryable"}else{"Task execution and queued follow-up commands cancelled"}.into());
-                        repository::save(
-                            &self.store(),
+                        self.save_terminal(
                             &mut task,
                             if unknown {
                                 TaskStatus::Failed
                             } else {
                                 TaskStatus::Cancelled
                             },
-                        )?;
+                        )
+                        .await?;
                         self.repair_child_deliveries().await?;
                         return Ok(());
                     }
@@ -1786,7 +1807,7 @@ impl Actor {
             }
             ExecutionStop::Failed { diagnostic } => {
                 task.checkpoint.diagnostic = Some(diagnostic);
-                repository::save(&self.store(), &mut task, TaskStatus::Failed)?;
+                self.save_terminal(&mut task, TaskStatus::Failed).await?;
             }
         }
         self.repair_child_deliveries().await?;
@@ -1857,6 +1878,7 @@ fn initial_task(
             resumes: Vec::new(),
             child_wait: None,
             provider_retirement: None,
+            terminal_evidence: None,
         },
         state: crate::storage::TaskState::Queued,
     }

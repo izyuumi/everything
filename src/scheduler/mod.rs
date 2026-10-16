@@ -1,4 +1,5 @@
 mod actor;
+pub(crate) mod evidence;
 mod inputs;
 mod repository;
 mod tools;
@@ -18,7 +19,15 @@ pub fn task_snapshot(
     store: &crate::storage::Store,
     task: crate::protocol::TaskId,
 ) -> Result<TaskSnapshot, SchedulerError> {
-    repository::load(store, task).map(|task| task.snapshot())
+    task_snapshot_with_evidence(store, task).map(|(snapshot, _)| snapshot)
+}
+
+pub(crate) fn task_snapshot_with_evidence(
+    store: &crate::storage::Store,
+    task: crate::protocol::TaskId,
+) -> Result<(TaskSnapshot, Option<evidence::TerminalTaskEvidence>), SchedulerError> {
+    let task = repository::load(store, task)?;
+    Ok((task.snapshot(), task.checkpoint.terminal_evidence))
 }
 
 pub fn task_publication_records(
