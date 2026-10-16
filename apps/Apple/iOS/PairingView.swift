@@ -60,6 +60,7 @@ struct PairingView: View {
                 Task { await model.inspectInvitation(value) }
             }
             .ignoresSafeArea()
+            .modifier(InactivePrivacyCover())
         }
         .onDisappear { invitation = ""; acceptance = ""; Task { await model.cancelPairing() } }
     }
