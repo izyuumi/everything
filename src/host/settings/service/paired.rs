@@ -1,13 +1,15 @@
 mod access;
 
 pub(crate) use access::{
-    QualifiedSettingsAccess, SettingsAccessQualificationError, SettingsAccessReceiptPlan,
-    SettingsAccessReplyFamily, SettingsAccessReservationSpec,
+    QualifiedSettingsAccess, SettingsAccessQualificationError, SettingsAccessReplyFamily,
+    SettingsAccessReservationSpec,
 };
 
 mod replies;
 
-pub(crate) use replies::{QualifiedBindReply, SettingsReplyProjectionError};
+pub(crate) use replies::{
+    QualifiedBindReply, SettingsReplyComparison, SettingsReplyProjectionError,
+};
 
 use std::fmt;
 use std::sync::Arc;
