@@ -2,12 +2,14 @@ mod actor;
 pub(crate) mod evidence;
 mod inputs;
 mod repository;
+mod schedule_context;
 mod tools;
 mod types;
 mod worker;
 mod workspace;
 
 pub use actor::{Scheduler, ShutdownReport};
+pub use schedule_context::ScheduleCallerContext;
 pub use tools::{SCHEDULER_TOOL_NAMES, SchedulerToolBinding, SchedulerTools};
 pub use types::{
     DiscoveryServices, ExecutionPolicy, PreparedTaskInputs, SchedulerError, SchedulerLimits,

@@ -1,6 +1,6 @@
 # Implementation status
 
-Assessment date: 2026-10-15. The initial main branch contained only LICENSE and .gitignore. No pre-existing implementation or automated tests were present. All 31 open issues and comments were read before implementation. Issue #30 remains the authoritative roadmap.
+Initial assessment: 2026-10-15; current integration checkpoint: 2026-10-16. The initial main branch contained only LICENSE and .gitignore. No pre-existing implementation or automated tests were present. All 31 open issues and comments were read before implementation. Issue #30 remains the authoritative roadmap.
 
 ## Current integration
 
@@ -9,6 +9,12 @@ Foundation issues #1–#11, relay #13, Tool Broker #14, context #16, and embeddi
 No live remote model requests have been made. EmbeddingGemma 2 produced finite normalized vectors and relevant-document rankings locally at all four dimensions; its native backend is merged, and Linux/macOS measurements have been inspected. Disposable manual checks covered storage rollback/dedup/restart, wiki CRUD/consolidation/provenance/prepared-write recovery, crypto/replay/sync, permission restrictions, broker approval/replay/quarantine, context budgets and native local embedding cancellation. These observations are not automated coverage or a security audit.
 
 Rust 1.99.0 is installed. Apple SDKs and Mac hardware are unavailable locally; GitHub macOS CI supplies Rust builds and native embedding measurements. Swift interoperability and live model behavior remain unverified. Normal GitHub merge enforcement and passing CI are required.
+
+The current merged stack includes hybrid retrieval #69, steering/continuation #74/#75, ownership and inbox #76/#77, production Host #79, calendar #97, output reservations #98, task preparation #99, metadata publication #100, private terminal evidence #101, permission inspection #102, scheduled execution #103 and native macOS core #104. Each integrated source passed its required Rust CI. The current macOS core also passed actual SDK build and analysis in run `38855797938`; app/UI/launchd/cleanup and Host-lifetime runtime acceptance remain unverified.
+
+The current #53 candidate adds real Host Engine activation and owner/native schedule controls. Its exact replacement CI and current-source runtime walkthrough remain pending. Optional production memory/MCP/selection #68, strict embedding boundary main integration #72, iOS client integration, optional worker #29 and final schedule UI/documentation reconciliation remain in progress. No successful conversational/classifier inference or production security claim is made.
+
+The dated checkpoint sections below retain historical source and validation scopes. The dependency table records current integration state; a historical pending-check statement does not override a later passing PR result.
 
 ## Hybrid integration checkpoint, 2026-10-16
 
@@ -110,19 +116,21 @@ The whole-Agent scheduled publisher and bounded partial delivery-capacity progre
 | [#24](https://github.com/izyuumi/everything/issues/24) | Implement task scheduler and concurrent subagents | #3, #14, #23 | Merged (#70) after exact-head production CI; prior qualified concurrency/recovery observations retained; corrected shutdown timing/caller-drop runtime remains unverified; issue stays open for overall acceptance reconciliation and separate Host wiring |
 | [#25](https://github.com/izyuumi/everything/issues/25) | Implement steering and autonomous continuation | #23, #24 | Agent primitive (#74), Scheduler continuation (#75) and production Host (#79) merged after exact-head CI; runtime acceptance remains qualified and automated assertions deferred to #32 |
 | [#26](https://github.com/izyuumi/everything/issues/26) | Implement wiki consolidation and lint jobs | #6, #16 | Merged (#59); actual configured Wiki admission and managed metadata visibility corrected; qualified manual checks and production CI passed; automated assertions deferred to #32 |
-| [#27](https://github.com/izyuumi/everything/issues/27) | Build optional SwiftUI menu bar client | #18, #25 | Current-main native core includes reviewed owned CLI cleanup and a focused SDK build/analyze workflow; fresh exact-head CI and actual UI/launchd/cleanup/Quit-with-Host-running observations remain pending |
+| [#27](https://github.com/izyuumi/everything/issues/27) | Build optional SwiftUI menu bar client | #18, #25 | Merged native core (#104) after full Rust CI and actual Mac SDK build/analyze; app/UI/launchd/cleanup/Quit-with-Host-running acceptance unverified |
 | [#28](https://github.com/izyuumi/everything/issues/28) | Build native iOS E2EE chat client | #13, #22, #25 | Backlog |
 | [#29](https://github.com/izyuumi/everything/issues/29) | Implement optional scoped cloud worker delegation | #24, #25 | Backlog |
 | [#30](https://github.com/izyuumi/everything/issues/30) | META: Dependency roadmap for parallel agent implementation | None | Backlog |
 | [#31](https://github.com/izyuumi/everything/issues/31) | Define generic embedding contract and index fingerprints | #1, #6 | Merged (#42) |
+| [#68](https://github.com/izyuumi/everything/issues/68) | Compose memory, MCP and optional selection in the actual Host | #18–#26 as listed in the issue; strict locality #72 | Reviewed source #92 includes strict #96 and isolated startup-owner correction; clean current-main integration and new CI/runtime pending |
 | [#72](https://github.com/izyuumi/everything/issues/72) | Prevent outbound telemetry from local embeddings | #12, #21, #68 | Strict production embedding-only boundary in progress separately; no production-locality acceptance claimed here |
-| [#73](https://github.com/izyuumi/everything/issues/73) | Publish authoritative task and permission metadata | #22, #24, #25; corrected Host ownership | Publication replacement merged (#100) after exact-head CI; disposable actual-device and concurrent publication verification remain pending |
+| [#73](https://github.com/izyuumi/everything/issues/73) | Publish authoritative task and permission metadata | #22, #24, #25; corrected Host ownership | Publication #100 merged after full Rust CI; original task/current-state and exact permission snapshots implemented, final current-source encrypted walkthrough pending |
 | [#50](https://github.com/izyuumi/everything/issues/50) | Persist scheduled jobs and immutable run history | #2, #3, #10; migration order after #22/private checkpoints | Merged (#67) after current-head production CI; occurrence/replay observations qualified and automated assertions deferred to #32 |
-| [#51](https://github.com/izyuumi/everything/issues/51) | Calculate timezone-aware occurrences and dispatch due work | #24, #50 | Calendar replacement merged (#97) after exact-head CI; production Host activation and overall acceptance remain pending |
-| [#52](https://github.com/izyuumi/everything/issues/52) | Enforce isolated scheduled execution and run policies | #24, #25, #50, #51 | Focused current-main replacement for legacy PR #86 prepared; exact-head CI/runtime and integration pending |
-| [#53](https://github.com/izyuumi/everything/issues/53) | Add schedule CLI and native tool controls | #5, #11, #50, #51, #52 | Backlog |
+| [#51](https://github.com/izyuumi/everything/issues/51) | Calculate timezone-aware occurrences and dispatch due work | #24, #50 | Calendar #97 and execution #103 merged after full Rust CI; actual Host activation is included in the current #53 candidate, whose CI/runtime acceptance remain pending |
+| [#52](https://github.com/izyuumi/everything/issues/52) | Enforce isolated scheduled execution and run policies | #24, #25, #50, #51 | Execution #103, output #98, preparation #99 and original-task evidence #101 merged after full CI; current #53 supplies actual Host activation, pending fresh CI and runtime acceptance |
+| [#53](https://github.com/izyuumi/everything/issues/53) | Add schedule CLI and native tool controls | #5, #11, #50, #51, #52 | Current-main owner CLI and eight native tool controls implemented with exact scope/CAS/replay and owned drain; source review/formatting pass, fresh exact-head CI/runtime pending |
 | [#54](https://github.com/izyuumi/everything/issues/54) | Deliver schedule status and encrypted client notifications | #22, #27, #28, #52, #53 | Backlog |
 | [#55](https://github.com/izyuumi/everything/issues/55) | Document schedule behavior, contracts and decisions | #50–#54 | Incremental documentation; final reconciliation pending |
+| [#81](https://github.com/izyuumi/everything/issues/81) | Retain validated SQLite handles through connection lifetime | Store and Host ownership; optional worker #29 | Store/Agent #76 and actual Host #79 merged after full CI; optional worker correction and current live-WAL/clone/restart acceptance pending |
 
 The roadmap gained scheduling issues #50–#55 during implementation; all six and updated #30 have been read. The latest #17 covers offline discovery only and gates #20, a configurable generic System One classifier with TypeSafe preset and approved custom endpoints. Their implementations and PRs are separate. #31 owns the embedding contract. The roadmap's waves are scheduling guidance; explicit prerequisites take precedence (for example #19 requires #14).
 

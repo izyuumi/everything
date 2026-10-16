@@ -1,6 +1,6 @@
 # Agent kernel contract
 
-`Agent` shares its Store, host lifetime guard, acceptance gate, and per-conversation execution gates across clones. A trusted host constructs one Agent and one global ToolBroker. `Agent::open` owns the Unix foreground bootstrap; `Agent::from_store` requires the caller to own the state lock. `Agent::store()` returns the same shared Store for trusted composition, not an independent runtime lease.
+`Agent` shares its Store, host lifetime guard, acceptance gate, and per-conversation execution gates across clones. A trusted host constructs one Agent and one global ToolBroker. `Agent::open` owns the Unix foreground bootstrap; `Agent::from_store` requires the caller to own the state lock. `Agent::store()` returns the same shared Store for trusted composition, not an independent runtime lease. On Unix, `Agent::state_directory()` borrows the actual retained lease path, or returns `None` for an unleased Agent. Trusted host services use this path for fixed private state and retain an Agent clone throughout admitted work; the borrowed path does not acquire another lease.
 
 ## Commands and admission
 

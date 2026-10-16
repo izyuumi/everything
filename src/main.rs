@@ -45,6 +45,7 @@ struct Arguments {
 #[derive(Subcommand)]
 enum Command {
     Serve,
+    Schedule(everything::scheduling::commands::ScheduleArguments),
     Owner(OwnerArguments),
     Service(everything::service::cli::ServiceArguments),
     Init(InitArguments),
@@ -260,6 +261,8 @@ struct StatusArguments {
 #[derive(Debug, Error)]
 enum CliError {
     #[error(transparent)]
+    ScheduleCommand(#[from] everything::scheduling::commands::CommandError),
+    #[error(transparent)]
     Host(#[from] everything::host::runtime::HostError),
     #[error(transparent)]
     HostClient(#[from] everything::host::client::HostClientError),
@@ -346,6 +349,12 @@ async fn execute(arguments: Arguments, cancellation: CancellationToken) -> Resul
                 .run(cancellation)
                 .await
                 .map_err(CliError::from);
+        }
+        Command::Schedule(arguments) => {
+            return write_json(
+                everything::scheduling::commands::run(arguments, state_dir, cancellation).await?,
+            )
+            .await;
         }
         Command::Owner(arguments) => return owner_cli(state_dir, arguments, cancellation).await,
         Command::Service(arguments) => {

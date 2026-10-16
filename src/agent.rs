@@ -348,6 +348,11 @@ impl Agent {
         self.store.clone()
     }
 
+    #[cfg(unix)]
+    pub fn state_directory(&self) -> Option<&Path> {
+        self._foreground.as_ref().map(|lease| lease.path())
+    }
+
     pub fn from_store(store: Store) -> Self {
         Self {
             store,
