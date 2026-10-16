@@ -309,14 +309,16 @@ pub enum NativePairingLifecycle {
     Unavailable,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct NativePairingCreation {
     pub operation: SettingsOperationInspection,
     pub lifecycle: NativePairingLifecycle,
     pub invitation: Option<NativePairingInvitation>,
 }
 
-#[derive(Clone, Serialize)]
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct NativePairingInvitation {
     pub operation_id: CommandId,
     pub pairing_id: MessageId,

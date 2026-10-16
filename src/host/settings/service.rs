@@ -1,3 +1,7 @@
+mod devices;
+
+pub use devices::NativeDeviceActionResult;
+
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
@@ -101,6 +105,7 @@ struct ServiceCore {
     claims: Mutex<BTreeMap<CommandId, Arc<ActionClaim>>>,
     pending: Mutex<BTreeMap<CommandId, Instant>>,
     pairings: Mutex<BTreeMap<CommandId, Arc<PendingPairingLease>>>,
+    endpoint: DeviceEndpoint,
     agent: Agent,
 }
 
@@ -128,6 +133,7 @@ impl SettingsService {
                 claims: Mutex::new(BTreeMap::new()),
                 pending: Mutex::new(BTreeMap::new()),
                 pairings: Mutex::new(BTreeMap::new()),
+                endpoint: endpoint.clone(),
                 agent,
             }),
         };
@@ -626,14 +632,13 @@ impl SettingsService {
     pub(crate) async fn create_pairing(
         &self,
         effect: NativeHostEffectAdmission,
-        endpoint: DeviceEndpoint,
     ) -> Result<NativePairingCreation, SettingsServiceError> {
         if !Arc::ptr_eq(&self.core.authority, &effect.claim.authority) {
             return Err(SettingsServiceError::OutsideScope);
         }
         self.blocking(move |core| {
             let retained_effect = effect;
-            core.create_pairing(&retained_effect, endpoint)
+            core.create_pairing(&retained_effect)
         })
         .await
     }
@@ -836,8 +841,8 @@ impl ServiceCore {
     fn create_pairing(
         &self,
         effect: &NativeHostEffectAdmission,
-        endpoint: DeviceEndpoint,
     ) -> Result<NativePairingCreation, SettingsServiceError> {
+        let endpoint = self.endpoint.clone();
         if !matches!(
             effect.target(),
             SettingsActionTarget::Device(SettingsDeviceRequest {
