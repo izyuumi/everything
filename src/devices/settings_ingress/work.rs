@@ -129,12 +129,21 @@ type TerminalQuarantine = (
 );
 
 impl Ledger {
+    fn check_admission(&self) -> Result<(), SettingsReceiveError> {
+        if self.failed.load(Ordering::Acquire) || self.terminal.load(Ordering::Acquire) {
+            return Err(self.fail());
+        }
+        Ok(())
+    }
+
     pub(super) fn private(
         self: &Arc<Self>,
         peer: DeviceId,
         bytes: usize,
     ) -> Result<PrivateWitness, SettingsReceiveError> {
+        self.check_admission()?;
         let mut counts = self.counts.lock().map_err(|_| self.fail())?;
+        self.check_admission()?;
         let peer_count = counts.peers.get(&peer).copied().unwrap_or(0);
         let next = counts.bytes.checked_add(bytes).ok_or_else(|| self.fail())?;
         if bytes > super::wire::MAX_PRIVATE_REQUEST_BYTES
@@ -270,6 +279,7 @@ impl SettingsReceiveWork {
         envelope: EncryptedEnvelope,
         receipt_authority: SettingsReceiptAuthority,
     ) -> Result<PendingSettingsReceipt, SettingsReceiveError> {
+        self.ledger.check_admission()?;
         if self.closed || self.failure.is_some() || !connection.is_live() {
             return Err(SettingsReceiveError::Closed);
         }
@@ -291,6 +301,7 @@ impl SettingsReceiveWork {
             .cloned()
             .ok_or(SettingsReceiveError::Closed)?;
         let mut counts = self.ledger.counts.lock().map_err(|_| self.ledger.fail())?;
+        self.ledger.check_admission()?;
         if counts.frame {
             return Err(SettingsReceiveError::Capacity);
         }
