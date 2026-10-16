@@ -136,7 +136,9 @@ impl Tool for FilesystemTool {
         let redactor = self.redactor.clone();
         let operation = self.operation;
         let error_redactor = self.redactor.clone();
+        let retained_context = context.clone();
         tokio::task::spawn_blocking(move || {
+            let _retained_context = retained_context;
             check_cancelled(&worker_name, &cancellation)?;
             let directory =
                 open_root(&root).map_err(|error| no_effect(&worker_name, redactor.error(error)))?;

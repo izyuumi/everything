@@ -19,7 +19,9 @@ use crate::permissions::{
 };
 use crate::storage::{StorageError, Store, ToolCallRow, ToolCallState, ToolCleanupAttestation};
 
-use super::{ToolConcurrency, ToolError, ToolExecutionContext, ToolOutput, ToolRegistry};
+use super::{
+    RetainedToolOwner, ToolConcurrency, ToolError, ToolExecutionContext, ToolOutput, ToolRegistry,
+};
 
 const RECORD_VERSION: u16 = 1;
 const MAX_RECORD_BYTES: usize = 1_048_576;
@@ -270,6 +272,33 @@ impl ToolBroker {
         authorizer: Arc<Authorizer>,
         limits: BrokerLimits,
     ) -> Result<Self, BrokerError> {
+        Self::start_retained(store, registry, authorizer, limits, None).await
+    }
+
+    pub async fn start_with_owner(
+        store: Store,
+        registry: Arc<ToolRegistry>,
+        authorizer: Arc<Authorizer>,
+        limits: BrokerLimits,
+        owner: impl Send + Sync + 'static,
+    ) -> Result<Self, BrokerError> {
+        Self::start_retained(
+            store,
+            registry,
+            authorizer,
+            limits,
+            Some(RetainedToolOwner::new(owner)),
+        )
+        .await
+    }
+
+    async fn start_retained(
+        store: Store,
+        registry: Arc<ToolRegistry>,
+        authorizer: Arc<Authorizer>,
+        limits: BrokerLimits,
+        owner: Option<RetainedToolOwner>,
+    ) -> Result<Self, BrokerError> {
         validate_limits(&limits)?;
         let recovery = encode_record(&record(
             OperationResult::Unknown {
@@ -280,7 +309,7 @@ impl ToolBroker {
             None,
         ))?;
         let recovery_store = store.clone();
-        let (recovered_operations, recovery_report) = blocking(move || {
+        let (recovered_operations, recovery_report) = blocking(owner, move || {
             let recovered = recovery_store.mark_running_tool_calls_unknown(&recovery, now()?)?;
             Ok((recovered, inspect_cleanup(&recovery_store, recovered)?))
         })
@@ -318,8 +347,10 @@ impl ToolBroker {
 
     pub async fn recovery_report(&self) -> Result<RecoveryReport, BrokerError> {
         let inner = Arc::clone(&self.inner);
-        let mut report =
-            blocking(move || inspect_cleanup(&inner.store, inner.recovered_operations)).await?;
+        let mut report = blocking(None, move || {
+            inspect_cleanup(&inner.store, inner.recovered_operations)
+        })
+        .await?;
         report.restart_required = self.inner.restart_required.load(Ordering::Acquire);
         report.quarantined |= self.is_quarantined() || report.restart_required;
         Ok(report)
@@ -357,7 +388,7 @@ impl ToolBroker {
         let expected_result_digest = expected_result_digest.to_owned();
         let operator = operator.to_owned();
         let note = note.to_owned();
-        let mut report = blocking(move || {
+        let mut report = blocking(None, move || {
             let status = inner.store.tool_cleanup_status(&operation_id)?;
             if status.original_result_digest != expected_result_digest {
                 return Err(BrokerError::CleanupAttestationConflict { operation_id });
@@ -405,6 +436,17 @@ impl ToolBroker {
         invocation: ToolInvocation,
         cancellation: CancellationToken,
     ) -> Result<BrokerOutcome, BrokerError> {
+        self.execute_retained(authority, invocation, cancellation, None)
+            .await
+    }
+
+    async fn execute_retained(
+        &self,
+        authority: &ExecutionAuthority,
+        invocation: ToolInvocation,
+        cancellation: CancellationToken,
+        owner: Option<RetainedToolOwner>,
+    ) -> Result<BrokerOutcome, BrokerError> {
         if self.is_quarantined() {
             return Err(BrokerError::Quarantined);
         }
@@ -419,7 +461,7 @@ impl ToolBroker {
         let _cancel_on_drop = cancellation.clone().drop_guard();
         let supervised = tokio::spawn(async move {
             let _admission = admission;
-            inner.run(authority, invocation, cancellation).await
+            inner.run(authority, invocation, cancellation, owner).await
         });
         supervised.await.map_err(|error| {
             self.inner.quarantined.store(true, Ordering::Release);
@@ -448,6 +490,17 @@ impl TaskToolBroker {
             .execute(&self.authority, invocation, cancellation)
             .await
     }
+
+    pub(crate) async fn execute_retained(
+        &self,
+        invocation: ToolInvocation,
+        cancellation: CancellationToken,
+        owner: RetainedToolOwner,
+    ) -> Result<BrokerOutcome, BrokerError> {
+        self.broker
+            .execute_retained(&self.authority, invocation, cancellation, Some(owner))
+            .await
+    }
 }
 
 impl BrokerInner {
@@ -456,12 +509,13 @@ impl BrokerInner {
         authority: ExecutionAuthority,
         invocation: ToolInvocation,
         cancellation: CancellationToken,
+        owner: Option<RetainedToolOwner>,
     ) -> Result<BrokerOutcome, BrokerError> {
         let deadline = Instant::now() + self.limits.queue_timeout;
         let inner = Arc::clone(&self);
         let prepare_authority = authority.clone();
         let prepare_invocation = invocation.clone();
-        let (call, decision, concurrency) = blocking(move || {
+        let (call, decision, concurrency) = blocking(owner.clone(), move || {
             inner
                 .registry
                 .validate(&prepare_invocation.tool_name, &prepare_invocation.arguments)?;
@@ -517,16 +571,20 @@ impl BrokerInner {
                     OperationResult::Cancelled {
                         reason: Interruption::CancellationRequested,
                     },
+                    owner.clone(),
                 )
                 .await;
         }
-        if let Some(outcome) = self.enforce_decision(&call, decision).await? {
+        if let Some(outcome) = self
+            .enforce_decision(&call, decision, owner.clone())
+            .await?
+        {
             return Ok(outcome);
         }
         let admission = tokio::select! {
             biased;
-            _ = cancellation.cancelled() => return self.finish_pending(&call, OperationResult::Cancelled { reason: Interruption::CancellationRequested }).await,
-            _ = tokio::time::sleep_until(deadline) => return self.finish_pending(&call, OperationResult::Cancelled { reason: Interruption::QueueDeadline }).await,
+            _ = cancellation.cancelled() => return self.finish_pending(&call, OperationResult::Cancelled { reason: Interruption::CancellationRequested }, owner.clone()).await,
+            _ = tokio::time::sleep_until(deadline) => return self.finish_pending(&call, OperationResult::Cancelled { reason: Interruption::QueueDeadline }, owner.clone()).await,
             permit = Arc::clone(&self.execution).acquire_owned() => permit.map_err(|error| BrokerError::Worker(error.to_string()))?,
         };
         let gate = async {
@@ -541,8 +599,8 @@ impl BrokerInner {
         };
         let _gate = tokio::select! {
             biased;
-            _ = cancellation.cancelled() => return self.finish_pending(&call, OperationResult::Cancelled { reason: Interruption::CancellationRequested }).await,
-            _ = tokio::time::sleep_until(deadline) => return self.finish_pending(&call, OperationResult::Cancelled { reason: Interruption::QueueDeadline }).await,
+            _ = cancellation.cancelled() => return self.finish_pending(&call, OperationResult::Cancelled { reason: Interruption::CancellationRequested }, owner.clone()).await,
+            _ = tokio::time::sleep_until(deadline) => return self.finish_pending(&call, OperationResult::Cancelled { reason: Interruption::QueueDeadline }, owner.clone()).await,
             gate = gate => gate,
         };
         let _admission = admission;
@@ -554,12 +612,13 @@ impl BrokerInner {
             authority.task_id(),
             authority.workspace_root().to_path_buf(),
             cancellation.clone(),
-        )?;
+        )?
+        .with_retained_owner(owner.clone());
         let arguments = invocation_arguments(&call)?;
         let inner = Arc::clone(&self);
         let claim_call = call.clone();
         let claim_cancellation = cancellation.clone();
-        let claim = blocking(move || {
+        let claim = blocking(owner.clone(), move || {
             let decision = inner.authorizer.authorize(
                 &authority,
                 &invocation.operation_id,
@@ -596,16 +655,16 @@ impl BrokerInner {
         .await?;
         match claim {
             ExecutionClaim::Acquired => {}
-            ExecutionClaim::Competing => return self.refresh(&call.id).await,
+            ExecutionClaim::Competing => return self.refresh(&call.id, owner.clone()).await,
             ExecutionClaim::NotAllowed(decision) => {
                 return self
-                    .enforce_decision(&call, decision)
+                    .enforce_decision(&call, decision, owner.clone())
                     .await?
                     .ok_or_else(|| BrokerError::Worker("invalid execution claim".into()));
             }
             ExecutionClaim::Cancelled(reason) => {
                 return self
-                    .finish_pending(&call, OperationResult::Cancelled { reason })
+                    .finish_pending(&call, OperationResult::Cancelled { reason }, owner.clone())
                     .await;
             }
         }
@@ -730,7 +789,7 @@ impl BrokerInner {
                 ..
             }
         );
-        let persisted = blocking(move || {
+        let persisted = blocking(owner.clone(), move || {
             Ok(store.transition_tool_call(
                 &operation_id,
                 ToolCallState::Running,
@@ -755,7 +814,7 @@ impl BrokerInner {
                 cleanup_completed,
                 journal_error: Some(diagnostic(&error)),
             })?;
-            let attempt = blocking(move || {
+            let attempt = blocking(owner.clone(), move || {
                 Ok(store.transition_tool_call(
                     &operation_id,
                     ToolCallState::Running,
@@ -804,6 +863,7 @@ impl BrokerInner {
         &self,
         call: &ToolCallRow,
         decision: AuthorizationDecision,
+        owner: Option<RetainedToolOwner>,
     ) -> Result<Option<BrokerOutcome>, BrokerError> {
         match decision {
             AuthorizationDecision::Allow { .. } => Ok(None),
@@ -812,7 +872,7 @@ impl BrokerInner {
                 approval,
             })),
             AuthorizationDecision::Deny { reason } => Ok(Some(
-                self.finish_pending(call, OperationResult::Denied { reason })
+                self.finish_pending(call, OperationResult::Denied { reason }, owner)
                     .await?,
             )),
         }
@@ -822,6 +882,7 @@ impl BrokerInner {
         &self,
         call: &ToolCallRow,
         result: OperationResult,
+        owner: Option<RetainedToolOwner>,
     ) -> Result<BrokerOutcome, BrokerError> {
         let record = record(result, None);
         let encoded = encode_record(&record)?;
@@ -829,7 +890,7 @@ impl BrokerInner {
         let operation_id = call.id.clone();
         let next = record.result.state();
         let timestamp = now()?.max(call.updated_at);
-        let changed = blocking(move || {
+        let changed = blocking(owner.clone(), move || {
             match store.transition_tool_call(
                 &operation_id,
                 ToolCallState::Pending,
@@ -846,14 +907,18 @@ impl BrokerInner {
         if changed {
             completed(call.id.clone(), record, false)
         } else {
-            self.refresh(&call.id).await
+            self.refresh(&call.id, owner).await
         }
     }
 
-    async fn refresh(&self, operation_id: &str) -> Result<BrokerOutcome, BrokerError> {
+    async fn refresh(
+        &self,
+        operation_id: &str,
+        owner: Option<RetainedToolOwner>,
+    ) -> Result<BrokerOutcome, BrokerError> {
         let store = self.store.clone();
         let operation_id = operation_id.to_owned();
-        let call = blocking(move || {
+        let call = blocking(owner, move || {
             store
                 .tool_call(&operation_id)?
                 .ok_or(BrokerError::CorruptJournal { operation_id })
@@ -1045,11 +1110,15 @@ impl Write for RecordWriter {
 }
 
 async fn blocking<T: Send + 'static>(
+    owner: Option<RetainedToolOwner>,
     operation: impl FnOnce() -> Result<T, BrokerError> + Send + 'static,
 ) -> Result<T, BrokerError> {
-    tokio::task::spawn_blocking(operation)
-        .await
-        .map_err(|error| BrokerError::Worker(diagnostic(&error)))?
+    tokio::task::spawn_blocking(move || {
+        let _retained_owner = owner;
+        operation()
+    })
+    .await
+    .map_err(|error| BrokerError::Worker(diagnostic(&error)))?
 }
 
 fn now() -> Result<i64, BrokerError> {

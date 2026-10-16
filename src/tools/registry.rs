@@ -93,12 +93,14 @@ impl ToolRegistry {
         let entry = Arc::clone(self.get(name)?);
         context.check_cancelled()?;
         let validation_entry = Arc::clone(&entry);
+        let retained_context = context.clone();
         let runtime =
             tokio::runtime::Handle::try_current().map_err(|error| ToolError::ValidationWorker {
                 message: error.to_string(),
             })?;
         let arguments = runtime
             .spawn_blocking(move || {
+                let _retained_context = retained_context;
                 validate_arguments(&validation_entry, &arguments)?;
                 Ok(arguments)
             })

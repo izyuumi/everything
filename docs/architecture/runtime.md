@@ -54,6 +54,8 @@ The CLI uses only real registered `read_file`, `write_file`, `search_files`, `sh
 - Default limits are 16 model attempts, 64 tool calls, 16 calls per response, eight concurrent call futures, 64 selected tools, one million charged tokens, and one hour. Validated callers can tighten them, including a zero-tool-call budget. Limits and wall-clock rollback stop execution before dispatch.
 - Credentials come from the environment. Literal loopback HTTP(S) proxy selection is explicit and immutable per conversation. The foreground CLI does not proxy commands to an already running background owner.
 
+Immediately before polling a provider request, the kernel rechecks the saved start and deadline after durable checkpoint writes and yielded events. A clock value earlier than the saved start, or an expired saved deadline, selects the existing duration-stop path. The constructed monotonic timeout cannot exceed the configured run duration. This correction has source inspection only; actual wall-clock changes were not exercised.
+
 Automated coverage is deferred to [#32](https://github.com/izyuumi/everything/issues/32). Compilation and disposable local inspection do not verify live provider inference, provider billing, or successful opaque continuation through a live provider. This implementation is not a security audit or a claim of production readiness.
 
 ## Validation performed

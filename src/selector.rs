@@ -1,3 +1,5 @@
+pub mod system_one;
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex};
 
@@ -56,6 +58,8 @@ pub struct SelectedTool {
 #[serde(rename_all = "snake_case")]
 pub enum SelectionMethod {
     Local,
+    SystemOne,
+    LocalFallback,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -116,7 +120,7 @@ impl ToolSelector {
     ) -> Result<ToolSelection, SelectorError> {
         validate_query(query, limit)?;
         require_discovery(authority)?;
-        let candidates = self.candidates(authority, query)?;
+        let candidates = self.candidates(authority, query, false)?;
         selection(candidates, limit, SelectionMethod::Local, Vec::new())
     }
 
@@ -124,6 +128,7 @@ impl ToolSelector {
         &self,
         authority: &ExecutionAuthority,
         query: &str,
+        include_unmatched: bool,
     ) -> Result<Vec<SelectedTool>, SelectorError> {
         let query_terms = terms(query);
         let mut candidates = Vec::new();
@@ -140,7 +145,7 @@ impl ToolSelector {
             let description = terms(&descriptor.description);
             let score = query_terms.intersection(&names).count() * 4
                 + query_terms.intersection(&description).count();
-            if score == 0 && !query_terms.is_empty() {
+            if score == 0 && !query_terms.is_empty() && !include_unmatched {
                 continue;
             }
             let description = if permission == CandidatePermission::RequiresApproval {

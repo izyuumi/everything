@@ -15,7 +15,7 @@ use crate::permissions::{ApprovalRequest, ExecutionMode};
 use crate::protocol::{OperationId, TaskId, ToolCall, ToolResult};
 use crate::storage::TaskState;
 use crate::tools::{
-    ToolRegistry,
+    RetainedToolOwner, ToolRegistry,
     broker::{BrokerOutcome, OperationResult, TaskToolBroker, ToolInvocation},
 };
 
@@ -390,7 +390,9 @@ impl Agent {
             let owner = self.clone();
             let preparation = Arc::clone(setup);
             let (captured, native) = blocking(move || {
-                let definition = prepare_definition(&owner.store, &conversation, &preparation)?;
+                let retained_agent = owner;
+                let definition =
+                    prepare_definition(&retained_agent.store, &conversation, &preparation)?;
                 let native = prepare_native(&conversation, definition)?;
                 if native
                     .turn
@@ -465,7 +467,8 @@ impl Agent {
                 let prepared = if let Some(setup) = &setup {
                     let preparation = Arc::clone(setup); let owner = agent.clone();
                     let (captured, built, request) = blocking(move || {
-                        ensure_task(&owner.store, preparation.broker.authority().task_id(), preparation.broker.authority().conversation_id())?;
+                        let retained_agent = owner;
+                        ensure_task(&retained_agent.store, preparation.broker.authority().task_id(), preparation.broker.authority().conversation_id())?;
                         let built = build_context(&conversation, &preparation)?;
                         let request = built.request.clone();
                         Ok((conversation, built, request))
@@ -883,7 +886,16 @@ fn run_deadline(conversation: &Conversation) -> Result<Instant, AgentError> {
         .as_ref()
         .and_then(|native| native.turn.as_ref())
     {
-        Some(turn) => turn.deadline_ms.saturating_sub(UnixMillis::now()?.get()),
+        Some(turn) => {
+            let now = UnixMillis::now()?.get();
+            if now < turn.started_at_ms {
+                0
+            } else {
+                turn.deadline_ms
+                    .saturating_sub(now)
+                    .min(turn.definition.limits.max_duration_ms)
+            }
+        }
         None => 3_600_000,
     };
     Ok(Instant::now() + Duration::from_millis(remaining))
@@ -913,6 +925,7 @@ impl Agent {
         let expected_sequence = conversation.info.last_sequence;
         let expected_revision = conversation.info.checkpoint_revision;
         let (checkpoint, head, revision, messages) = blocking(move || {
+            let retained_agent = owner;
             let _admission = admission;
             let mut sequence = expected_sequence;
             let mut rows = Vec::new();
@@ -946,7 +959,7 @@ impl Agent {
             };
             let journal_command = CommandId::new().to_string();
             let revision = if rows.is_empty() {
-                owner
+                retained_agent
                     .store
                     .checkpoint_conversation_state(
                         &id.to_string(),
@@ -956,7 +969,7 @@ impl Agent {
                     )?
                     .revision
             } else {
-                owner.store.append_with_state(
+                retained_agent.store.append_with_state(
                     &AppendRequest {
                         conversation_id: id.to_string(),
                         command_id: journal_command,
@@ -1099,8 +1112,9 @@ impl Agent {
         let owner = self.clone();
         let scoped = setup.broker.clone();
         blocking(move || {
+            let retained_agent = owner;
             ensure_task(
-                &owner.store,
+                &retained_agent.store,
                 scoped.authority().task_id(),
                 scoped.authority().conversation_id(),
             )
@@ -1149,11 +1163,18 @@ impl Agent {
         let _cancel_on_drop = token.clone().drop_guard();
         let broker = setup.broker.clone();
         let child = token.clone();
+        let retained_owner = RetainedToolOwner::new(self.clone());
         let calls = stream::iter(requests)
             .map(move |(index, invocation)| {
                 let broker = broker.clone();
                 let token = child.clone();
-                async move { (index, broker.execute(invocation, token).await) }
+                let owner = retained_owner.clone();
+                async move {
+                    (
+                        index,
+                        broker.execute_retained(invocation, token, owner).await,
+                    )
+                }
             })
             .buffer_unordered(setup.limits.max_parallel_calls);
         tokio::pin!(calls);
