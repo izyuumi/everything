@@ -1,0 +1,35 @@
+# Local device appearance
+
+The shared `DevicePreferenceStore` implements the local appearance storage prerequisite for [#117](https://github.com/izyuumi/everything/issues/117). `DeviceAppearance` is the closed `system`, `light`, `dark` enum. `DeviceAppearancePatch` carries an original nonzero request ID, the exact nonzero store device ID, a positive signed-64-bit-compatible expected revision and one appearance value. `DeviceAppearanceSnapshot` returns that device ID, the actual shared revision and the saved appearance. The actor exposes `appearanceSnapshot()`, `applyAppearance(_:)` and `appearanceResult(for:)`.
+
+## One local authority
+
+Appearance and completion/attention notifications use the same actor, SQLite connection, preference singleton, device identity, revision and 8,192-request ledger. The existing notification patch/snapshot/result constructors and notification identity encoding are unchanged. The local Mac factory keeps its persisted preference-installation identity; the strict initializer still requires the supplied identity to match the stored identity. iOS composition must supply its genuine active replica identity. This local identity grants no Host, relay, pairing or OS authorization. See [typed scopes](settings.md) and the original [local identity contract](local-device-preferences.md).
+
+A single private closed mutation path handles exact replay, capacity, compare-and-set and receipt insertion inside `BEGIN IMMEDIATE`. A notification mutation preserves appearance; an appearance mutation preserves both Boolean values. An accepted mutation increments the same revision once, including a chosen-value no-op. A revision mismatch records the observed revision as a conflict without changing preferences. Independent section saves are separate compare-and-set operations: a completed save in one section can conflict with a stale draft or notification action in another. Callers must preserve that conflict rather than infer a combined atomic save or silently rebase a draft.
+
+## Original request identity
+
+Appearance has its own sorted-key JSON identity with `kind: appearance`, `contract_version: 1`, the original request ID, `device_preferences` scope/device ID, expected revision and closed appearance value. The existing notification identity has no added kind or appearance field. Both use the existing 16 KiB encoded-identity ceiling.
+
+The shared ledger records `notifications` or `appearance` as a closed request kind. Replay requires both the exact kind and the original encoded bytes before checking the current preference revision. Reusing an ID for changed input or another kind fails with `requestReused`. Notification `result(for:)` and appearance `appearanceResult(for:)` accept only their corresponding retained kind; neither inspector mutates or reapplies preferences. The common result reports the original request/device identity and applied or conflicting revision. It does not claim an old receipt describes the current appearance.
+
+Retained rows must have canonical nonzero IDs, bounded original bytes, a valid closed kind/outcome and a positive integer result revision. Their original JSON must decode to the appropriate typed patch and reproduce the exact canonical bytes. Applied revisions must equal that original patch's expected revision plus one; conflicts must differ from the original expected revision. Opening a store validates all retained rows and rejects any result revision beyond the current singleton revision. Requests are not evicted when the combined ledger reaches capacity.
+
+## Schema 2 and migration
+
+The existing `device-preferences-v1.sqlite3` filename remains authoritative. Schema 2 adds `preferences.appearance TEXT NOT NULL DEFAULT 'system'` with a closed three-value check, and `requests.kind TEXT NOT NULL DEFAULT 'notifications'` with a closed two-value check. There is no second database, request service, identity table or preference mirror.
+
+Bootstrap rereads `user_version` after acquiring the actual writer transaction. A version 0 database must have no application schema objects; it creates schema 2, one real identity, revision 1, notification defaults off and appearance `system`. This replaces the earlier partial-bootstrap allowance in the original local identity contract. Existing malformed or partial schemas are refused rather than repaired.
+
+A version 1 database must have the expected complete table/column structure, one canonical matching device identity, a valid Boolean snapshot and a bounded valid original request ledger. Within the same transaction, migration adds appearance `system`, tags historical requests `notifications` and sets version 2. It preserves the original request IDs, original BLOB bytes, outcomes, result revisions, preference identity, values and revision. Schema migration does not claim a user selected an appearance and does not increment the preference revision.
+
+Version 2 requires the complete expected schema and valid actual values. Structural validation rejects extra application objects, missing/extra/generated columns, unexpected column types/defaults/nullability/primary-key shape, missing singleton rows and malformed closed values. Wrong identity and unsupported versions fail explicitly. A failed open never substitutes `system` for unreadable version 2 data or recreates missing tables. Rollback failure poisons the connection and reports uncertainty.
+
+## Bounds and validation
+
+The store retains 4 KiB pages, a maximum 2,048-page main database, WAL with 128-page autocheckpoint, full synchronization and the existing 250 ms busy timeout. It verifies the configured page size and page cap. This limits main database pages; it is not an aggregate WAL, filesystem or process-memory guarantee. The shared request cap and 16 KiB original-byte ceiling remain independent admission bounds. Appearance reads use bounded strict UTF-8 text, reject embedded NUL and accept only the enum's maximum six-byte spelling. Existing private directory/file permissions, backup exclusion and iOS complete file protection remain in the store path.
+
+The complete two shared Swift leaves passed strict Swift 6 concurrency typechecking with warnings as errors on Linux against actual Foundation and a module importing the retained upstream SQLite C header. That is declaration/type verification; it does not execute SQLite or establish Apple SDK, migration, file-protection or UI behavior. Supported macOS/iOS build and static analysis, plus disposable first-open, real version-1 migration, exact replay/cross-kind conflict, corruption refusal, reopen and concurrent initialization observations remain required. No database was opened for this change's source-stage validation. Automated coverage remains deferred in [#32](https://github.com/izyuumi/everything/issues/32).
+
+No appearance UI, `preferredColorScheme` composition or remote capability is added by this storage increment. Native platform application of the actual saved local appearance belongs to subsequent iOS/macOS composition. Host controls, scoped remote grants and OS notification authorization remain separate authorities.
