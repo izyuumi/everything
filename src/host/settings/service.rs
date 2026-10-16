@@ -308,12 +308,6 @@ impl SettingsService {
         .await
     }
 
-    pub(crate) async fn startup_policy(
-        &self,
-    ) -> Result<SettingsStartupPolicy, SettingsServiceError> {
-        Ok(self.startup_context().await?.policy)
-    }
-
     pub(crate) fn open_native_session(
         &self,
         call: &LocalCall,
