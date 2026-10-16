@@ -11,12 +11,7 @@ struct EverythingIOSApp: App {
     var body: some Scene {
         WindowGroup {
             RootView(model: model)
-                .privacySensitive()
-                .overlay {
-                    if scenePhase != .active {
-                        Rectangle().fill(.background).ignoresSafeArea().overlay { Label("Everything", systemImage: "lock.fill").font(.title) }
-                    }
-                }
+                .modifier(InactivePrivacyCover())
                 .preferredColorScheme(colorScheme)
                 .onChange(of: model.localSettings?.savedAppearance, initial: true) { _, saved in
                     if let saved { appliedAppearance = saved }
@@ -39,6 +34,18 @@ struct EverythingIOSApp: App {
         case .light: .light
         case .dark: .dark
         case .system, nil: nil
+        }
+    }
+}
+
+struct InactivePrivacyCover: ViewModifier {
+    @Environment(\.scenePhase) private var scenePhase
+
+    func body(content: Content) -> some View {
+        content.privacySensitive().overlay {
+            if scenePhase != .active {
+                Rectangle().fill(.background).ignoresSafeArea().overlay { Label("Everything", systemImage: "lock.fill").font(.title) }
+            }
         }
     }
 }

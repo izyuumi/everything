@@ -75,8 +75,8 @@ struct RootView: View {
             if sheet == nil { model.localCoverChanged(.rootSheet, presented: false) }
         }) { item in
             switch item {
-            case .pairing: NavigationStack { PairingView(model: model) }
-            case .conversation: NavigationStack { AddConversationView(model: model) }
+            case .pairing: NavigationStack { PairingView(model: model) }.modifier(InactivePrivacyCover())
+            case .conversation: NavigationStack { AddConversationView(model: model) }.modifier(InactivePrivacyCover())
             }
         }
         .onDisappear { model.localDestinationChanged(presented: false) }
