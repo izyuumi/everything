@@ -87,3 +87,33 @@ A cancelled or uncertain pending conversation is preserved for inspection. Later
 Reuse that request ID and exact payload after an ambiguous response. The operation refuses any evidence of prior application, task admission, control semantics or incomplete initialization. It records an immutable rejection and frees pending capacity. For a paired-device command, its sender can receive the rejection reason/operator through normal encrypted result delivery. There is no automatic discard or implicit retry under a fresh identity.
 
 When a new admission reaches inbox capacity, the host makes one automatic attempt to compact terminal payloads older than seven days, then retries the same reservation. Command identity, origin and replay digests remain permanent. Pending commands, recent terminal payloads and outstanding paired-device replies are retained. This can release the retained-payload budget; it does not remove the pending-command or identity limits.
+
+## Startup MCP session credentials
+
+Use `serve --mcp-credential-environment-file PATH` to bootstrap explicit process-local MCP session references before server discovery. The file contains exact existing authorized binding metadata and source environment names, with no values. Read [the bootstrap contract](../contracts/mcp-session-bootstrap.md) for format, bounds, authorization and restart semantics. A running owner `StoreMcp(session)` is rejected because the existing MCP catalog is fixed at startup. Persistent native references are a separate explicit option. Managed launchd installation does not provision the binding file or source values.
+
+## Memory and optional services
+
+The revisioned settings query includes non-secret `memory`, `mcp` and `selection` configuration. Edit the complete returned document with its expected revision; service changes require a Host restart. Defaults use real Markdown/FTS retrieval, no maintenance model, disabled embeddings, local selection and no MCP servers. The `composition` query reports actual active settings and separate desired restart flags:
+
+```json
+{"kind":"query","query":{"kind":"composition"}}
+```
+
+Retrieve real local provenance without a model answer request:
+
+```json
+{"kind":"query","query":{"kind":"retrieve_memory","question":"orchard irrigation"}}
+```
+
+Use the existing typed maintenance requests with owner `memory_enqueue`, `memory_cancel`, `memory_retry` and `apply_memory_plan`; inspect each stable identity with `memory_job`. The [composition contract](../contracts/host-composition.md) lists these routes, and [consolidation](../contracts/consolidation.md) defines their source/citation and immutable preparation rules. Optional selection requires its exact one-shot `prepare_selection` disclosure and explicit `approve_selection` before admitting the same original command; configuration alone sends no classifier request.
+
+Opt-in embeddings additionally require a release build of both binaries:
+
+```sh
+cargo build --release --features local-embeddings --bin everything --bin everything-embedding-worker --locked
+```
+
+Install the worker adjacent to the Host, supply the verified runtime/model paths and digest, and enable only a supported dimension in owner settings. Strict Linux GNU x86_64/aarch64 execution requires `/usr/bin/bwrap` and the required namespaces. Unsupported or unavailable confinement reports an explicit diagnostic and keeps genuine FTS before configured artifact or vector access. The Host never loads an in-process embedding fallback. Rebuild is an explicit bounded owner operation after restart; see [memory settings and lifecycle](../contracts/host-memory.md). Current-main CI/runtime verification remains pending in [the composition checkpoint](../contracts/host-composition.md#current-main-integration).
+
+Scheduling uses the running host through [schedule commands](scheduling-cli.md); it never starts another scheduler or takes over host lifetime.
