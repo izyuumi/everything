@@ -153,6 +153,7 @@ struct WireSyncBatch: Sendable {
 enum DevicePackets {
     enum Routing: Sendable {
         case ordinary
+        case settings
         case rejected
     }
 
@@ -162,7 +163,7 @@ enum DevicePackets {
             guard try packet.required("schema_version").integer == 1 else { return .rejected }
             switch try packet.required("payload").field("kind").text {
             case "command", "command_result", "sync_request", "sync_batch", "sync_acknowledgement", "revoked": return .ordinary
-            case "settings": return .rejected
+            case "settings": return .settings
             default: return .rejected
             }
         } catch {

@@ -187,6 +187,47 @@ final class CommittedReplicaSettingsReply: Sendable, CustomStringConvertible, Cu
     var debugDescription: String { description }
 }
 
+enum ReplicaDeliveryDisposition: Sendable, CustomStringConvertible, CustomDebugStringConvertible {
+    case fresh
+    case duplicate
+
+    var description: String { "ReplicaDeliveryDisposition([redacted])" }
+    var debugDescription: String { description }
+}
+
+enum ReplicaClassifiedDeliveryResult: Sendable, CustomStringConvertible, CustomDebugStringConvertible {
+    case ordinary(ReplicaDeliveryDisposition)
+    case settingsAccess(VerifiedReplicaSettingsReply)
+    case settingsBind(VerifiedReplicaSettingsReply)
+    case refused(ReplicaDeliveryDisposition)
+
+    var description: String { "ReplicaClassifiedDeliveryResult([redacted])" }
+    var debugDescription: String { description }
+}
+
+final class ReplicaClassifiedDelivery: Sendable, CustomStringConvertible, CustomDebugStringConvertible {
+    private let received: ReceivedRelayFrame
+    private let value: ReplicaClassifiedDeliveryResult
+
+    fileprivate init(received: ReceivedRelayFrame, result: ReplicaClassifiedDeliveryResult) {
+        self.received = received
+        value = result
+    }
+
+    var result: ReplicaClassifiedDeliveryResult { value }
+
+    func matchesReceivedFrame(_ received: ReceivedRelayFrame) -> Bool {
+        guard self.received.originalByteCount == received.originalByteCount,
+              case .delivery(let original) = self.received.frame,
+              case .delivery(let candidate) = received.frame else { return false }
+        return original.header.canonical == candidate.header.canonical
+            && original.ciphertext == candidate.ciphertext && original.signature == candidate.signature
+    }
+
+    var description: String { "ReplicaClassifiedDelivery([redacted])" }
+    var debugDescription: String { description }
+}
+
 protocol DurableEnvelopeInbox: Sendable {
     func acceptAuthenticated(_ envelope: EncryptedEnvelope, plaintext: Data, host: DevicePublicKeys, localID: UUID) async throws -> Bool
     func rejectAuthenticated(_ envelope: EncryptedEnvelope, host: DevicePublicKeys, localID: UUID) async throws -> Bool
@@ -295,6 +336,11 @@ actor DeviceIdentity {
 
     func verifySettingsAccessReply(_ envelope: EncryptedEnvelope, host: DevicePublicKeys) throws -> VerifiedReplicaSettingsReply {
         let plaintext = try authenticatedPlaintext(envelope, host: host, now: WireID.now())
+        return try verifiedSettingsAccessReply(plaintext, envelope: envelope, host: host)
+    }
+
+    private func verifiedSettingsAccessReply(_ plaintext: Data, envelope: EncryptedEnvelope,
+                                             host: DevicePublicKeys) throws -> VerifiedReplicaSettingsReply {
         let reply = try RemoteSettingsWire.decodeAccessReply(plaintext)
         guard reply.hostID == host.deviceID else { throw WireError.identity }
         let maximum: Int
@@ -309,6 +355,11 @@ actor DeviceIdentity {
 
     func verifySettingsBindReply(_ envelope: EncryptedEnvelope, host: DevicePublicKeys) throws -> VerifiedReplicaSettingsReply {
         let plaintext = try authenticatedPlaintext(envelope, host: host, now: WireID.now())
+        return try verifiedSettingsBindReply(plaintext, envelope: envelope, host: host)
+    }
+
+    private func verifiedSettingsBindReply(_ plaintext: Data, envelope: EncryptedEnvelope,
+                                           host: DevicePublicKeys) throws -> VerifiedReplicaSettingsReply {
         let reply = try RemoteSettingsWire.decodeBindReply(plaintext)
         guard reply.hostID == host.deviceID else { throw WireError.identity }
         try validateSettingsReplyEnvelope(envelope, maximum: 49_152)
@@ -323,12 +374,67 @@ actor DeviceIdentity {
     }
 
     func receive(_ envelope: EncryptedEnvelope, host: DevicePublicKeys, into inbox: any DurableEnvelopeInbox, now: UInt64) async throws -> Bool {
-        let plaintext = try authenticatedPlaintext(envelope, host: host, now: now)
-        switch DevicePackets.routing(plaintext) {
+        let packet = try authenticatedPacket(envelope, host: host, now: now)
+        switch packet.routing {
         case .ordinary:
-            return try await inbox.acceptAuthenticated(envelope, plaintext: plaintext, host: host, localID: publicKeys.deviceID)
-        case .rejected:
+            return try await inbox.acceptAuthenticated(envelope, plaintext: packet.plaintext, host: host, localID: publicKeys.deviceID)
+        case .settings, .rejected:
             return try await inbox.rejectAuthenticated(envelope, host: host, localID: publicKeys.deviceID)
+        }
+    }
+
+    func receiveClassified(_ received: ReceivedRelayFrame, host: DevicePublicKeys,
+                           into store: ReplicaStore) async throws -> ReplicaClassifiedDelivery {
+        guard case .delivery(let envelope) = received.frame else { throw WireError.invalid }
+        let packet = try authenticatedPacket(envelope, host: host, now: WireID.now())
+        let result: ReplicaClassifiedDeliveryResult
+        switch packet.routing {
+        case .ordinary:
+            let fresh = try await store.acceptAuthenticated(envelope, plaintext: packet.plaintext, host: host, localID: publicKeys.deviceID)
+            result = .ordinary(fresh ? .fresh : .duplicate)
+        case .settings:
+            guard received.originalByteCount <= 364_544, packet.plaintext.count <= 32_768 else { throw WireError.size }
+            if let reply = try classifiedSettingsReply(packet.plaintext, envelope: envelope, host: host) {
+                result = reply
+            } else {
+                let fresh = try await store.rejectAuthenticated(envelope, host: host, localID: publicKeys.deviceID)
+                result = .refused(fresh ? .fresh : .duplicate)
+            }
+        case .rejected:
+            let fresh = try await store.rejectAuthenticated(envelope, host: host, localID: publicKeys.deviceID)
+            result = .refused(fresh ? .fresh : .duplicate)
+        }
+        return ReplicaClassifiedDelivery(received: received, result: result)
+    }
+
+    private struct AuthenticatedReplicaPacket: CustomStringConvertible, CustomDebugStringConvertible {
+        let plaintext: Data
+        let routing: DevicePackets.Routing
+
+        var description: String { "AuthenticatedReplicaPacket([redacted])" }
+        var debugDescription: String { description }
+    }
+
+    private func authenticatedPacket(_ envelope: EncryptedEnvelope, host: DevicePublicKeys,
+                                     now: UInt64) throws -> AuthenticatedReplicaPacket {
+        let plaintext = try authenticatedPlaintext(envelope, host: host, now: now)
+        return AuthenticatedReplicaPacket(plaintext: plaintext, routing: DevicePackets.routing(plaintext))
+    }
+
+    private func classifiedSettingsReply(_ plaintext: Data, envelope: EncryptedEnvelope,
+                                         host: DevicePublicKeys) throws -> ReplicaClassifiedDeliveryResult? {
+        do {
+            let packet = try WireValue.parse(plaintext, maximum: 32_768)
+            let family = try packet.field("payload").field("message").field("correlation").field("family").text
+            switch family {
+            case "query":
+                return .settingsAccess(try verifiedSettingsAccessReply(plaintext, envelope: envelope, host: host))
+            case "bind":
+                return .settingsBind(try verifiedSettingsBindReply(plaintext, envelope: envelope, host: host))
+            default: return nil
+            }
+        } catch let error as WireError where error == .invalid {
+            return nil
         }
     }
 }
