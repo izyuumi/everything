@@ -107,6 +107,14 @@ impl Composition {
         self.closed.store(true, Ordering::Release);
     }
 
+    pub(in crate::host) fn shares_agent(&self, agent: &crate::agent::Agent) -> bool {
+        self.agent.store().shares_connection(&agent.store())
+            && match (self.agent.state_lease(), agent.state_lease()) {
+                (Some(left), Some(right)) => Arc::ptr_eq(&left, &right),
+                _ => false,
+            }
+    }
+
     pub(super) fn suspend_selection(&self) -> Result<SelectionGeneration, HostError> {
         if self.closed.load(Ordering::Acquire) {
             return Err(HostError::Draining);
