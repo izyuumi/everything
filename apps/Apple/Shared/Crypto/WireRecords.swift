@@ -151,6 +151,25 @@ struct WireSyncBatch: Sendable {
 }
 
 enum DevicePackets {
+    enum Routing: Sendable {
+        case ordinary
+        case rejected
+    }
+
+    static func routing(_ plaintext: Data) -> Routing {
+        do {
+            let packet = try WireValue.parse(plaintext).object(keys: ["schema_version", "payload"], required: ["schema_version", "payload"])
+            guard try packet.required("schema_version").integer == 1 else { return .rejected }
+            switch try packet.required("payload").field("kind").text {
+            case "command", "command_result", "sync_request", "sync_batch", "sync_acknowledgement", "revoked": return .ordinary
+            case "settings": return .rejected
+            default: return .rejected
+            }
+        } catch {
+            return .rejected
+        }
+    }
+
     static func packet(_ payload: WireValue) -> WireValue { .object(["schema_version": .unsigned(1), "payload": payload]) }
     static func cursor(_ conversation: UUID, _ after: UInt64) -> WireValue { .object(["conversation_id": .id(conversation), "after_sequence": .unsigned(after)]) }
     static func sync(_ conversation: UUID, after: UInt64) -> WireValue {
