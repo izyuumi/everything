@@ -272,6 +272,33 @@ impl ToolBroker {
         authorizer: Arc<Authorizer>,
         limits: BrokerLimits,
     ) -> Result<Self, BrokerError> {
+        Self::start_retained(store, registry, authorizer, limits, None).await
+    }
+
+    pub async fn start_with_owner(
+        store: Store,
+        registry: Arc<ToolRegistry>,
+        authorizer: Arc<Authorizer>,
+        limits: BrokerLimits,
+        owner: impl Send + Sync + 'static,
+    ) -> Result<Self, BrokerError> {
+        Self::start_retained(
+            store,
+            registry,
+            authorizer,
+            limits,
+            Some(RetainedToolOwner::new(owner)),
+        )
+        .await
+    }
+
+    async fn start_retained(
+        store: Store,
+        registry: Arc<ToolRegistry>,
+        authorizer: Arc<Authorizer>,
+        limits: BrokerLimits,
+        owner: Option<RetainedToolOwner>,
+    ) -> Result<Self, BrokerError> {
         validate_limits(&limits)?;
         let recovery = encode_record(&record(
             OperationResult::Unknown {
@@ -282,7 +309,7 @@ impl ToolBroker {
             None,
         ))?;
         let recovery_store = store.clone();
-        let (recovered_operations, recovery_report) = blocking(None, move || {
+        let (recovered_operations, recovery_report) = blocking(owner, move || {
             let recovered = recovery_store.mark_running_tool_calls_unknown(&recovery, now()?)?;
             Ok((recovered, inspect_cleanup(&recovery_store, recovered)?))
         })

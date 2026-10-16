@@ -390,7 +390,9 @@ impl Agent {
             let owner = self.clone();
             let preparation = Arc::clone(setup);
             let (captured, native) = blocking(move || {
-                let definition = prepare_definition(&owner.store, &conversation, &preparation)?;
+                let retained_agent = owner;
+                let definition =
+                    prepare_definition(&retained_agent.store, &conversation, &preparation)?;
                 let native = prepare_native(&conversation, definition)?;
                 if native
                     .turn
@@ -465,7 +467,8 @@ impl Agent {
                 let prepared = if let Some(setup) = &setup {
                     let preparation = Arc::clone(setup); let owner = agent.clone();
                     let (captured, built, request) = blocking(move || {
-                        ensure_task(&owner.store, preparation.broker.authority().task_id(), preparation.broker.authority().conversation_id())?;
+                        let retained_agent = owner;
+                        ensure_task(&retained_agent.store, preparation.broker.authority().task_id(), preparation.broker.authority().conversation_id())?;
                         let built = build_context(&conversation, &preparation)?;
                         let request = built.request.clone();
                         Ok((conversation, built, request))
@@ -922,6 +925,7 @@ impl Agent {
         let expected_sequence = conversation.info.last_sequence;
         let expected_revision = conversation.info.checkpoint_revision;
         let (checkpoint, head, revision, messages) = blocking(move || {
+            let retained_agent = owner;
             let _admission = admission;
             let mut sequence = expected_sequence;
             let mut rows = Vec::new();
@@ -955,7 +959,7 @@ impl Agent {
             };
             let journal_command = CommandId::new().to_string();
             let revision = if rows.is_empty() {
-                owner
+                retained_agent
                     .store
                     .checkpoint_conversation_state(
                         &id.to_string(),
@@ -965,7 +969,7 @@ impl Agent {
                     )?
                     .revision
             } else {
-                owner.store.append_with_state(
+                retained_agent.store.append_with_state(
                     &AppendRequest {
                         conversation_id: id.to_string(),
                         command_id: journal_command,
@@ -1108,8 +1112,9 @@ impl Agent {
         let owner = self.clone();
         let scoped = setup.broker.clone();
         blocking(move || {
+            let retained_agent = owner;
             ensure_task(
-                &owner.store,
+                &retained_agent.store,
                 scoped.authority().task_id(),
                 scoped.authority().conversation_id(),
             )
