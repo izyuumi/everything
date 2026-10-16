@@ -18,8 +18,8 @@ pub use devices::NativeDeviceActionResult;
 pub(super) use paired::PairedWriteAdmission;
 #[cfg(unix)]
 pub(crate) use paired::{
-    PairedParentAdmission, PairedSettingsParent, PairedUpdateOutcome, QualifiedSettingsCommand,
-    SettingsReceiptAuthority,
+    OriginalReplySource, PairedParentAdmission, PairedSettingsParent, PairedUpdateOutcome,
+    QualifiedOriginalReply, QualifiedSettingsCommand, SettingsReceiptAuthority,
 };
 pub use pairing::{
     NativePairingAcceptance, NativePairingAccess, NativePairingApprovalInput,
