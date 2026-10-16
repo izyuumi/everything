@@ -39,6 +39,13 @@ pub(crate) struct OwnedVerifiedSettingsAccess {
     _witness: PrivateWitness,
 }
 
+struct AccessVerificationInput {
+    authority: SettingsReceiptAuthority,
+    envelope: VerifiedSettingsEnvelope,
+    intent: SettingsAccessStatusIntent,
+    witness: PrivateWitness,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Error)]
 pub(crate) enum AccessStatusRejection {
     #[error("original AccessStatus request is expired")]
@@ -156,25 +163,35 @@ impl OwnedVerifiedSettingsAccess {
         authority: SettingsReceiptAuthority,
         witness: PrivateWitness,
     ) -> Result<Self, AccessStatusRejection> {
-        if !intent.valid() {
+        let input = AccessVerificationInput {
+            authority,
+            envelope,
+            intent,
+            witness,
+        };
+        if !input.intent.valid() {
             return Err(AccessStatusRejection::OutsideScope);
         }
-        let deadline = envelope
+        let deadline = input
+            .envelope
             .clock
-            .deadline(intent.expires_at.get())
+            .deadline(input.intent.expires_at.get())
             .map_err(|_| AccessStatusRejection::Expired)?;
-        let source = AuthenticatedSettingsAccessSource {
-            intent,
-            envelope,
-            invocation: Arc::new(()),
-            deadline,
+        let invocation = Arc::new(());
+        let owner = Self {
+            authority: input.authority,
+            source: AuthenticatedSettingsAccessSource {
+                intent: input.intent,
+                envelope: input.envelope,
+                invocation,
+                deadline,
+            },
+            _witness: input.witness,
         };
-        source.check_precommit(&source.envelope.context.agent.store())?;
-        Ok(Self {
-            authority,
-            source,
-            _witness: witness,
-        })
+        owner
+            .source
+            .check_precommit(&owner.source.envelope.context.agent.store())?;
+        Ok(owner)
     }
 
     pub(crate) fn authority_source(&self) -> &AuthenticatedSettingsAccessSource {
