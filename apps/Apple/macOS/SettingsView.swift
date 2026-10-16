@@ -6,21 +6,40 @@ struct SettingsView: View {
     @Bindable var model: HostModel
     @State private var confirmingStop = false
     @State private var confirmingInstall = false
+    @State private var choosingPath = false
 
     var body: some View {
-        TabView {
+        TabView(selection: Binding(get: { model.settingsNavigation.selected }, set: { model.settingsNavigation.select($0) })) {
             hostSettings
                 .tabItem { Label("General", systemImage: "gearshape") }
+                .tag(SettingsAssistantNavigation.Destination.general)
+                .onAppear { model.settingsNavigation.destinationAppeared(.general) }
+                .onDisappear { model.settingsNavigation.destinationDisappeared(.general) }
             NativeSettingsControls(store: model.nativeSettings, section: .models, connectionEdited: model.connectionEdited)
                 .tabItem { Label("Models", systemImage: "cpu") }
+                .tag(SettingsAssistantNavigation.Destination.models)
+                .onAppear { model.settingsNavigation.destinationAppeared(.models) }
+                .onDisappear { model.settingsNavigation.destinationDisappeared(.models) }
             NativeSettingsControls(store: model.nativeSettings, section: .memory, connectionEdited: model.connectionEdited)
                 .tabItem { Label("Memory", systemImage: "brain") }
+                .tag(SettingsAssistantNavigation.Destination.memory)
+                .onAppear { model.settingsNavigation.destinationAppeared(.memory) }
+                .onDisappear { model.settingsNavigation.destinationDisappeared(.memory) }
             NativeSettingsControls(store: model.nativeSettings, section: .toolSelection, connectionEdited: model.connectionEdited)
                 .tabItem { Label("Tool Selection", systemImage: "wrench.and.screwdriver") }
+                .tag(SettingsAssistantNavigation.Destination.toolSelection)
+                .onAppear { model.settingsNavigation.destinationAppeared(.toolSelection) }
+                .onDisappear { model.settingsNavigation.destinationDisappeared(.toolSelection) }
             NativeDevicesControls(store: model.nativeSettings, connectionEdited: model.connectionEdited)
                 .tabItem { Label("Devices", systemImage: "desktopcomputer.and.iphone") }
+                .tag(SettingsAssistantNavigation.Destination.devices)
+                .onAppear { model.settingsNavigation.destinationAppeared(.devices) }
+                .onDisappear { model.settingsNavigation.destinationDisappeared(.devices) }
             NativeHostSettingsPane(store: model.nativeSettings, connectionEdited: model.connectionEdited)
                 .tabItem { Label("Host settings", systemImage: "slider.horizontal.3") }
+                .tag(SettingsAssistantNavigation.Destination.host)
+                .onAppear { model.settingsNavigation.destinationAppeared(.host) }
+                .onDisappear { model.settingsNavigation.destinationDisappeared(.host) }
             Group {
                 if let store = model.thisMacSettings {
                     ThisMacSettingsView(store: store)
@@ -30,12 +49,32 @@ struct SettingsView: View {
                 }
             }
             .tabItem { Label("Notifications", systemImage: "bell") }
+            .tag(SettingsAssistantNavigation.Destination.notifications)
+            .onAppear { model.settingsNavigation.destinationAppeared(.notifications) }
+            .onDisappear { model.settingsNavigation.destinationDisappeared(.notifications) }
         }
-        .frame(width: 700, height: 800)
+        .frame(minWidth: 700, minHeight: 800)
+        .inspector(isPresented: Binding(get: { model.settingsAssistant.expanded }, set: { model.settingsAssistant.setExpanded($0) })) {
+            SettingsAssistantView(controller: model.settingsAssistant)
+        }
+        .toolbar {
+            Button {
+                model.settingsAssistant.setExpanded(!model.settingsAssistant.expanded)
+            } label: {
+                Label("Ask Settings", systemImage: "sidebar.right")
+            }
+            .help("Show or hide the optional Settings assistant")
+            .accessibilityValue(model.settingsAssistant.expanded ? "Expanded" : "Collapsed")
+        }
         .onChange(of: model.connected) { _, connected in model.nativeSettings.hostAvailabilityChanged(connected) }
+        .onChange(of: model.nativeSettings.sessionPresent) { _, _ in model.settingsAssistant.ownershipChanged() }
+        .onChange(of: model.nativeSettings.information) { _, _ in model.settingsAssistant.ownershipChanged() }
+        .onChange(of: model.nativeSettings.cleanup.count) { _, _ in model.settingsAssistant.ownershipChanged() }
+        .onChange(of: model.nativeSettings.deviceOperations.filter(\.retired).map(\.id)) { _, _ in model.settingsAssistant.ownershipChanged() }
         .background {
             SettingsWindowObserver(bindingID: model.settingsSurfaceID,
-                                   onChange: { visible, active in model.settingsWindowChanged(visible: visible, active: active) },
+                                   onChange: { visible, active, covered in model.settingsWindowChanged(visible: visible, active: active, covered: covered) },
+                                   onWindow: { model.settingsWindowAttached($0) },
                                    onClose: { model.settingsWindowClosed() })
                 .frame(width: 0, height: 0)
         }
@@ -74,9 +113,9 @@ struct SettingsView: View {
                 if let status = model.serviceStatus { Text(status) }
                 HStack {
                     Button("Inspect service") { Task { await model.manageService("status") } }
-                    Button("Install…") { confirmingInstall = true }
+                    Button("Install…") { setInstallConfirmation(true) }
                     Button("Start") { Task { await model.manageService("start") } }
-                    Button("Stop service…", role: .destructive) { confirmingStop = true }
+                    Button("Stop service…", role: .destructive) { setStopConfirmation(true) }
                 }
                 HStack {
                     Button("Enable at login") { Task { await model.manageService("enable") } }
@@ -89,12 +128,12 @@ struct SettingsView: View {
         }
         .formStyle(.grouped)
         .padding(12).frame(width: 660, height: 740)
-        .confirmationDialog("Stop the per-user background service?", isPresented: $confirmingStop, titleVisibility: .visible) {
+        .confirmationDialog("Stop the per-user background service?", isPresented: Binding(get: { confirmingStop }, set: { setStopConfirmation($0) }), titleVisibility: .visible) {
             Button("Stop service", role: .destructive) { Task { await model.manageService("stop") } }
         } message: {
             Text("This is an explicit host stop request. Quitting the menu bar app leaves the host running.")
         }
-        .confirmationDialog("Install the per-user background service?", isPresented: $confirmingInstall, titleVisibility: .visible) {
+        .confirmationDialog("Install the per-user background service?", isPresented: Binding(get: { confirmingInstall }, set: { setInstallConfirmation($0) }), titleVisibility: .visible) {
             Button("Install service") { Task { await model.manageService("install") } }
         } message: {
             Text("The selected CLI writes your launchd user-agent configuration for this state directory. No administrator access is used.")
@@ -102,16 +141,39 @@ struct SettingsView: View {
     }
 
     private func choose(directory: Bool) {
+        guard !choosingPath else { return }
+        model.settingsPresentationChanged(covered: true)
+        choosingPath = true
         let panel = NSOpenPanel()
         panel.canChooseDirectories = directory
         panel.canChooseFiles = !directory
         panel.allowsMultipleSelection = false
         panel.begin { response in
+            defer {
+                choosingPath = false
+                refreshCoverage()
+            }
             guard response == .OK, let selected = panel.url else { return }
             let physical = selected.resolvingSymlinksInPath().path
             if directory { model.stateDirectory = physical }
             else { model.executable = physical }
         }
+    }
+
+    private func setStopConfirmation(_ value: Bool) {
+        if value { model.settingsPresentationChanged(covered: true) }
+        confirmingStop = value
+        if !value { refreshCoverage() }
+    }
+
+    private func setInstallConfirmation(_ value: Bool) {
+        if value { model.settingsPresentationChanged(covered: true) }
+        confirmingInstall = value
+        if !value { refreshCoverage() }
+    }
+
+    private func refreshCoverage() {
+        model.settingsPresentationChanged(covered: confirmingStop || confirmingInstall || choosingPath)
     }
 }
 
