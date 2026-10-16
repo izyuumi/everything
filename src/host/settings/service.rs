@@ -39,7 +39,7 @@ use super::authority::{
     SettingsCaller, SettingsOperationOrigin,
 };
 use super::contract::{
-    AgentMutability, SETTINGS_CONTRACT_VERSION, SettingsActionReference, SettingsActionRequest,
+    SETTINGS_CONTRACT_VERSION, SettingsActionReference, SettingsActionRequest,
     SettingsConfirmationReference, SettingsContractError, SettingsDeviceAction,
     SettingsDeviceRequest, SettingsOperationResult, SettingsOperationState, SettingsPatch,
     SettingsRequestBinding, SettingsScope, SettingsToolName, SettingsUnavailableReason,
@@ -414,26 +414,6 @@ impl SettingsService {
         };
         self.core.authority.require_tool(&caller, tool)?;
         self.prepare(caller, SettingsActionTarget::Device(request), cancellation)
-            .await
-    }
-
-    pub(crate) async fn prepare_protected_patch(
-        &self,
-        caller: SettingsCaller,
-        request: SettingsPatch,
-        cancellation: CancellationToken,
-    ) -> Result<SettingsOperationResult, SettingsServiceError> {
-        self.core
-            .authority
-            .require_tool(&caller, SettingsToolName::Update)?;
-        if !request.changes.iter().any(|change| {
-            change.key.agent_mutability() == AgentMutability::RequiresNativeConfirmation
-        }) {
-            return Err(SettingsServiceError::Invalid(
-                "patch does not require native confirmation",
-            ));
-        }
-        self.prepare(caller, SettingsActionTarget::Patch(request), cancellation)
             .await
     }
 

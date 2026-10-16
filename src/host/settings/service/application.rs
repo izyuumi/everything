@@ -79,7 +79,9 @@ impl SettingsService {
             if metadata.generation != generation.generation() {
                 return self.finish_application(work, failed()).await;
             }
-            if let Some(application) = &metadata.application {
+            if let Some(application) = &metadata.application
+                && application.generation == generation.generation()
+            {
                 if application.operation_id != operation_id
                     || application.settings_revision != work.intent.after.revision
                     || application.generation != generation.generation()

@@ -521,8 +521,23 @@ impl ServiceCore {
             })?
             .insert(write.identity.binding.request_id, capture);
         let inspection = self.reconcile_file(&write.identity, &write.intent)?;
-        if attempted.is_err() {
+        if let Err(cause) = attempted {
             tracing::warn!(operation_id=%write.identity.binding.request_id,"settings file attempt required authoritative original-file observation");
+            if matches!(
+                inspection.phase,
+                SettingsOperationPhase::Finished {
+                    result: super::super::contract::SettingsOperationResult {
+                        state: SettingsOperationState::Unknown,
+                        ..
+                    }
+                }
+            ) {
+                return Err(SettingsServiceError::OutcomeUnknown {
+                    request_id: write.identity.binding.request_id,
+                    cause: Box::new(cause),
+                    repair_error: None,
+                });
+            }
         }
         Ok(inspection)
     }
@@ -542,6 +557,13 @@ impl ServiceCore {
         let Some(capture) = capture else {
             return Ok(());
         };
+        if self.application_stop.is_cancelled() {
+            self.applications
+                .lock()
+                .map_err(|_| SettingsServiceError::Poisoned)?
+                .remove(&operation_id);
+            return Ok(());
+        }
         let composition = self.composition()?;
         if let Some(generation) = &capture.semantic {
             composition.memory.restore_semantics(generation)?;
