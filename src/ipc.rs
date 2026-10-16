@@ -28,6 +28,15 @@ pub struct RequestedRunOptions {
 }
 
 impl RequestedRunOptions {
+    pub(crate) fn validate(&self) -> Result<(), &'static str> {
+        if self.execution_mode == Some(ExecutionMode::SettingsRestricted) {
+            return Err(
+                "restricted Settings authority is unavailable through ordinary run options",
+            );
+        }
+        Ok(())
+    }
+
     pub fn is_empty(&self) -> bool {
         self.workspace.is_none()
             && self.execution_mode.is_none()
@@ -279,6 +288,11 @@ pub enum OwnerOperation {
         expected_revision: u64,
         expected_status: crate::agent::LoopStatus,
     },
+    AcknowledgeSettingsUncertainty {
+        command_id: CommandId,
+        exact_fence_sha256: String,
+        lost_ram_uncertainty_accepted: bool,
+    },
     AcknowledgeCleanup {
         operation_id: String,
         original_result_digest: String,
@@ -291,6 +305,23 @@ pub enum OwnerOperation {
 impl OwnerOperation {
     pub fn validate(&self) -> Result<(), &'static str> {
         match self {
+            Self::AcknowledgeSettingsUncertainty {
+                exact_fence_sha256,
+                lost_ram_uncertainty_accepted,
+                ..
+            } => {
+                if !*lost_ram_uncertainty_accepted
+                    || exact_fence_sha256.len() != 64
+                    || !exact_fence_sha256
+                        .bytes()
+                        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+                {
+                    return Err(
+                        "Settings uncertainty acknowledgement requires the exact fence and explicit lost-RAM uncertainty acceptance",
+                    );
+                }
+                Ok(())
+            }
             Self::WorkerCoordinator { operation } => operation
                 .validate()
                 .map_err(|_| "invalid worker coordinator operation"),
@@ -655,6 +686,9 @@ pub struct TaskExecutionMetadata {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum OwnerOperationResult {
+    SettingsUncertaintyAcknowledged {
+        acknowledgement: crate::host::settings::agent::SettingsUncertaintyAcknowledgement,
+    },
     WorkerCoordinator {
         result: Box<crate::host::worker::WorkerCoordinatorOperationResult>,
     },
@@ -844,6 +878,20 @@ impl OwnerOperationResult {
                 receipt.command_id == *command_id
                     && receipt.accepted_at == *expected_accepted_at
                     && receipt.phase == crate::host::inbox::CommandPhase::Rejected
+            }
+            (
+                OwnerOperation::AcknowledgeSettingsUncertainty {
+                    command_id,
+                    exact_fence_sha256,
+                    lost_ram_uncertainty_accepted,
+                },
+                Self::SettingsUncertaintyAcknowledged { acknowledgement },
+            ) => {
+                *lost_ram_uncertainty_accepted
+                    && acknowledgement.command_id == *command_id
+                    && acknowledgement.exact_fence_sha256 == *exact_fence_sha256
+                    && acknowledgement.lost_ram_uncertainty_accepted
+                    && !acknowledgement.owner_principal_id.is_nil()
             }
             (
                 OwnerOperation::AcknowledgeCleanup { .. } | OwnerOperation::ReconcileDrained,

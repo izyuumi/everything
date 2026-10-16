@@ -27,6 +27,8 @@ pub enum CredentialError {
     Cancelled,
     #[error("native credential worker failed")]
     Worker,
+    #[error("credential operation failed and model credential tracking is uncertain")]
+    MutationAndTrackingFailed,
 }
 
 #[derive(Clone)]

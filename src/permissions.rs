@@ -63,6 +63,11 @@ impl ExecutionAuthority {
         workspace_root: PathBuf,
         mode: ExecutionMode,
     ) -> Result<Self, PermissionError> {
+        if mode == ExecutionMode::SettingsRestricted {
+            return Err(PermissionError::InvalidAuthority(
+                "restricted mode requires a sealed Host profile".into(),
+            ));
+        }
         let conversation_id = conversation_id.into();
         let task_id = task_id.into();
         validate_identifier(&conversation_id)?;
@@ -89,6 +94,35 @@ impl ExecutionAuthority {
         })
     }
 
+    pub(crate) fn settings(
+        profile: &crate::agent::settings::SettingsProfile,
+        task_id: &str,
+        workspace_root: PathBuf,
+    ) -> Result<Self, PermissionError> {
+        let conversation_id = profile.conversation_id().to_string();
+        let mut authority = Self::new(
+            &conversation_id,
+            task_id,
+            workspace_root,
+            ExecutionMode::ReadOnly,
+        )?;
+        let names: BTreeSet<_> = profile
+            .definitions()
+            .iter()
+            .map(|tool| tool.name.clone())
+            .collect();
+        for name in &names {
+            profile
+                .check_tool(&conversation_id, task_id, name)
+                .map_err(|_| {
+                    PermissionError::InvalidAuthority("restricted profile is unavailable".into())
+                })?;
+        }
+        authority.mode = ExecutionMode::SettingsRestricted;
+        authority.allowed_tools = Some(Arc::new(names));
+        Ok(authority)
+    }
+
     pub fn child(
         &self,
         task_id: impl Into<String>,
@@ -107,7 +141,11 @@ impl ExecutionAuthority {
         let task_id = task_id.into();
         validate_identifier(&conversation_id)?;
         validate_identifier(&task_id)?;
-        if mode > self.mode || task_id == self.task_id {
+        if self.mode == ExecutionMode::SettingsRestricted
+            || mode == ExecutionMode::SettingsRestricted
+            || mode > self.mode
+            || task_id == self.task_id
+        {
             return Err(PermissionError::InvalidAuthority(
                 "child authority must have a distinct task and cannot increase execution mode"
                     .into(),
@@ -133,7 +171,12 @@ impl ExecutionAuthority {
         let task_id = task_id.into();
         validate_identifier(&conversation_id)?;
         validate_identifier(&task_id)?;
-        if mode > self.mode || task_id == self.task_id || conversation_id == self.conversation_id {
+        if self.mode == ExecutionMode::SettingsRestricted
+            || mode == ExecutionMode::SettingsRestricted
+            || mode > self.mode
+            || task_id == self.task_id
+            || conversation_id == self.conversation_id
+        {
             return Err(PermissionError::InvalidAuthority(
                 "child workspace authority requires distinct task and conversation IDs and cannot increase execution mode"
                     .into(),
@@ -409,6 +452,9 @@ impl Authorizer {
         arguments: &Value,
         now: i64,
     ) -> Result<AuthorizationDecision, PermissionError> {
+        if authority.mode == ExecutionMode::SettingsRestricted {
+            return Ok(deny("restricted calls require a sealed Broker capability"));
+        }
         validate_time(now)?;
         validate_identifier(operation_id)?;
         self.registry.validate(tool_name, arguments)?;

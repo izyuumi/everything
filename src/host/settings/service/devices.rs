@@ -42,6 +42,7 @@ impl SettingsService {
         after: Option<DeviceId>,
         limit: usize,
     ) -> Result<SettingsDevicePage, SettingsServiceError> {
+        let _work = self.invocation_guard(&caller, SettingsToolName::DevicesList, None)?;
         self.core
             .authority
             .require_tool(&caller, SettingsToolName::DevicesList)?;
@@ -90,7 +91,13 @@ impl SettingsService {
         request: SettingsDeviceRequest,
         cancellation: CancellationToken,
     ) -> Result<SettingsOperationResult, SettingsServiceError> {
+        let _work = self.invocation_guard(
+            &caller,
+            SettingsToolName::DevicesPair,
+            Some(request.request_id),
+        )?;
         if !matches!(request.action, SettingsDeviceAction::Pair) {
+            self.reject_invocation()?;
             return Err(SettingsServiceError::Invalid("pairing action"));
         }
         self.prepare_device_action(caller, request, cancellation)
@@ -103,7 +110,13 @@ impl SettingsService {
         request: SettingsDeviceRequest,
         cancellation: CancellationToken,
     ) -> Result<SettingsOperationResult, SettingsServiceError> {
+        let _work = self.invocation_guard(
+            &caller,
+            SettingsToolName::DevicesRevoke,
+            Some(request.request_id),
+        )?;
         if !matches!(request.action, SettingsDeviceAction::Revoke { .. }) {
+            self.reject_invocation()?;
             return Err(SettingsServiceError::Invalid("revocation action"));
         }
         self.prepare_device_action(caller, request, cancellation)

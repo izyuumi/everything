@@ -8,6 +8,9 @@ impl Agent {
         conversation_id: ConversationId,
         command_id: CommandId,
     ) -> Result<TaskRecord, AgentError> {
+        if let Some(profile) = &self.settings_profile {
+            profile.check_turn(conversation_id, command_id)?;
+        }
         let admission = self.admit(conversation_id)?;
         let owner = self.clone();
         blocking(move || {

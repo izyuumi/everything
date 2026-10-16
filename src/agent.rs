@@ -3,6 +3,7 @@ mod foreground;
 mod native;
 mod remote;
 mod scheduled;
+pub(crate) mod settings;
 mod steering;
 
 pub use control_events::{PermissionPublicationReceipt, TaskPublicationReceipt};
@@ -87,6 +88,8 @@ pub enum AgentError {
     LegacyContinuation,
     #[error("provider or conversation configuration does not match")]
     ConfigurationMismatch,
+    #[error("restricted provider accounting retained an invalid original observation")]
+    RestrictedProviderAccounting,
     #[error("text-only conversations cannot execute or resume tool calls")]
     ToolsUnsupported,
     #[error("host storage worker failed")]
@@ -338,6 +341,7 @@ struct Checkpoint {
 #[derive(Clone)]
 pub struct Agent {
     store: Store,
+    settings_profile: Option<Arc<settings::SettingsProfile>>,
     execution: Arc<AdmissionMutex<HashMap<ConversationId, Weak<Mutex<()>>>>>,
     acceptance: Arc<Mutex<()>>,
     writes: Arc<AdmissionMutex<HashMap<ConversationId, Weak<Mutex<()>>>>>,
@@ -363,6 +367,7 @@ impl Agent {
     pub fn from_store(store: Store) -> Self {
         Self {
             store,
+            settings_profile: None,
             execution: Arc::new(AdmissionMutex::new(HashMap::new())),
             acceptance: Arc::new(Mutex::new(())),
             writes: Arc::new(AdmissionMutex::new(HashMap::new())),
@@ -404,6 +409,12 @@ impl Agent {
         title: String,
         config: ConversationConfig,
     ) -> Result<Conversation, AgentError> {
+        if let Some(profile) = &self.settings_profile {
+            profile.check_conversation(id)?;
+            if command_id != profile.create_command_id() || config != *profile.configuration() {
+                return Err(AgentError::ConfigurationMismatch);
+            }
+        }
         let acceptance = self.acceptance.clone().lock_owned().await;
         let write = self.write_gate(id)?.lock_owned().await;
         let host = self.clone();
@@ -486,6 +497,12 @@ impl Agent {
     }
 
     pub async fn accept_text(&self, command: TextCommand) -> Result<TextAcceptance, AgentError> {
+        if let Some(profile) = &self.settings_profile {
+            profile.check_turn(command.conversation_id, command.command_id)?;
+            if command.text.len() > settings::MAX_INPUT {
+                return Err(AgentError::ResourceLimit("restricted input"));
+            }
+        }
         let acceptance = self.acceptance.clone().lock_owned().await;
         let write = self.write_gate(command.conversation_id)?.lock_owned().await;
         let host = self.clone();

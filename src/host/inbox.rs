@@ -100,7 +100,10 @@ impl InboxInput {
             ));
         }
         match self {
-            Self::Owner(OwnerCommand::Text { command, .. }) => validate_text(&command.text)?,
+            Self::Owner(OwnerCommand::Text { command, options }) => {
+                options.validate().map_err(InboxError::Invalid)?;
+                validate_text(&command.text)?;
+            }
             Self::Owner(OwnerCommand::Initialize {
                 title,
                 configuration,
