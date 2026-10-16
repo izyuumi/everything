@@ -238,6 +238,7 @@ final class NativeSettingsAssistantSendAdmission: @unchecked Sendable, CustomStr
     let turnID = UUID()
     let chat: NativeSettingsSession.AssistantHandle
     let capture: NativeSettingsGate.Capture
+    let started: ContinuousClock.Instant
     private let consent: NativeSettingsAssistantConsent
     private let owner: NativeSettingsGate
     private let lock = NSLock()
@@ -248,7 +249,8 @@ final class NativeSettingsAssistantSendAdmission: @unchecked Sendable, CustomStr
     var debugDescription: String { description }
 
     fileprivate init(chat: NativeSettingsSession.AssistantHandle, consent: NativeSettingsAssistantConsent,
-                     owner: NativeSettingsGate, capture: NativeSettingsGate.Capture, text: String) {
+                     owner: NativeSettingsGate, capture: NativeSettingsGate.Capture, started: ContinuousClock.Instant, text: String) {
+        self.started = started
         self.chat = chat
         self.consent = consent
         self.owner = owner
@@ -346,6 +348,33 @@ final class NativeSettingsLifecycle {
         return admission
     }
 
+    func prepareAssistantAction(_ intent: NativeSettingsIntent,
+                                receipt: NativeSettingsSession.AssistantDetailsReceipt) throws -> NativeSettingsAdmission {
+        try intent.validate()
+        let invocation: NativeActionInvocation
+        switch (intent, receipt.details.target) {
+        case (.confirmDevice(let value), .device): invocation = value
+        case (.present(let value), .native(let request)):
+            guard case .openSection = request.action else { throw NativeSettingsSessionError.invalidRequest }
+            invocation = value
+        default: throw NativeSettingsSessionError.invalidRequest
+        }
+        guard invocation.operationID == receipt.original.operationID,
+              case .awaitingAction(let reference) = receipt.details.operation.phase,
+              invocation.reference == .action(reference: reference) else { throw NativeSettingsSessionError.invalidRequest }
+        let captured = try receipt.capturePresentation(for: gate)
+        if let original = admissions[invocation.operationID]?.first(where: { $0.intent.execution }) {
+            guard original.intent == intent, original.expiresAt == reference.expiresAt else { throw NativeSettingsSessionError.requestReused }
+            return original
+        }
+        guard drainTask == nil, admissions[invocation.operationID] != nil || admissions.count < 64 else {
+            throw NativeSettingsSessionError.capacity
+        }
+        let admission = NativeSettingsAdmission(intent: intent, expiresAt: reference.expiresAt, owner: gate, initial: .success(captured))
+        admissions[invocation.operationID, default: []].append(admission)
+        return admission
+    }
+
     func prepareAssistantOpen() throws -> NativeSettingsAssistantOpenAdmission {
         guard drainTask == nil, assistantOpens.count + admissions.count < 64,
               let opening else { throw NativeSettingsSessionError.capacity }
@@ -376,8 +405,9 @@ final class NativeSettingsLifecycle {
         try consent.validate(chat, gate: gate)
         guard text.utf8.count <= 8192, !text.contains("\0"),
               !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { throw NativeSettingsSessionError.invalidRequest }
+        let started = ContinuousClock.now
         let admission = NativeSettingsAssistantSendAdmission(chat: chat, consent: consent, owner: gate,
-            capture: try gate.capture(expiresAt: chat.opened.expiresAt), text: text)
+            capture: try gate.capture(expiresAt: chat.opened.expiresAt), started: started, text: text)
         guard assistantSends[admission.turnID] == nil, assistantOpens[admission.turnID] == nil,
               admissions[admission.turnID] == nil else { throw NativeSettingsSessionError.requestReused }
         assistantSends[admission.turnID] = admission
