@@ -12,6 +12,14 @@ AgentPoll and AgentClose authenticate the retained native cleanup proof, includi
 
 Closing a child preserves its native parent and siblings. Closing the native parent cancels its owned children through the existing Authority. No native client controls Host lifetime.
 
+## Supervisor shutdown
+
+The existing Settings supervisor separates work draining from owner termination. Work cancellation closes child intake and begins actual child cleanup. Its first owner-cancellation wake remains enabled after work draining begins; the supervisor records that wake once, so an already-cancelled owner token cannot cause a busy loop while original workers or cleanup remain outstanding.
+
+Owner cancellation permits the supervisor to return only after its actual preparation, worker registry and child cleanup are quiescent. It preserves the existing original worker joins, failure quarantine and Host state ownership. The Host requests owner termination after its broader drain; cancellation alone does not certify completed cleanup or known effects.
+
+This correction follows the disposable Linux shutdown timeout recorded in #167. Fresh compiled CLI verification of graceful SIGINT shutdown and same-state reopen remains required; source inspection and formatting do not establish that runtime outcome. Automated cancellation and ordering coverage remains deferred to #32.
+
 ## Original Open recovery
 
 AgentOpenStatus and AgentCloseOpen carry the authenticated cleanup proof and the original Open request ID. The same supervisor retains at most 1024 non-evicted Open records. Every insertion and transition measures the complete encoded original ID plus typed metadata against 512 bytes. Records contain only the native parent, original ID, state and optional child ID; they contain no proof, error string, chat text, Status or provider handle.
