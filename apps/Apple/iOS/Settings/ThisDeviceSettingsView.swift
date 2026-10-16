@@ -65,7 +65,7 @@ struct ThisDeviceSettingsView: View {
                 } else {
                     Text("Saved notification preferences are unavailable.")
                 }
-                Text("These preferences are saved on this iPhone independently of the Host connection. OS permission is shown separately below. Completion and attention delivery is currently unavailable; these choices can still be saved locally.")
+                Text("These preferences are saved on this iPhone independently of the Host connection. When system permission allows, Everything can show task completion and permission-request alerts while the app is active and synchronization is enabled. OS permission is shown separately below.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                 HStack {
