@@ -4,5 +4,6 @@ pub mod credentials;
 pub mod inbox;
 mod owner;
 pub mod providers;
+pub mod publication;
 pub mod runtime;
 pub mod settings;

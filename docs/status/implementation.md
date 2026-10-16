@@ -62,6 +62,12 @@ The #51 replacement extracts the reviewed calendar, due timer, atomic missed-ran
 
 Rust 1.88 formatting, source preservation and documentation-link inspection apply to this replacement. Exact-head compilation, required CI, lifecycle/clock/runtime observations and integration remain pending. The [engine contract](../contracts/scheduling-engine.md#validation) distinguishes earlier calendar and refused-loopback observations from this source; successful inference, actual OS clock changes and exhaustive forced-crash recovery are unverified. The prerequisite supplies the Host service; production scheduling activation and owner scheduling controls remain separate work; retries, cumulative cross-attempt accounting and result delivery remain #52. Automated coverage is deferred to [#32](https://github.com/izyuumi/everything/issues/32).
 
+## Task and permission publication integration checkpoint, 2026-10-16
+
+The #73 replacement extracts the reviewed task-state and exact permission-decision publication feature onto corrected preparation prerequisite `7b67e066d64bf3cb902272a68b6209e8972aef5d`, preserving its current Host, calendar, native output allowances and Scheduler semantics. It imports no legacy PR #85/#84 aggregate ancestry. Four new SQL workers retain the complete Agent and state lease; immutable event/command identities, own-Store decision proof, private-checkpoint CAS and bounded metadata/input merge remain intact. The Host composes one supervised initial/audit/final publisher and exposes bounded owner diagnostics. Public task snapshots converge to authoritative current state without invented intermediate transitions or an effect-safe cleanup attestation.
+
+Rust 1.88 formatting, source/manifest/schema/link inspection and independent source review apply to this focused replacement. Fresh exact-head compilation, required CI, new caller-drop/runtime verification and integration remain pending. The [publication contract](../contracts/control-events.md#focused-replacement-validation) qualifies earlier schema-seven failure-only Host/relay/replica and seeded rejection observations. Successful inference, Apple interoperability, complete transient transition history and security readiness are not claimed. Automated assertions remain deferred to [#32](https://github.com/izyuumi/everything/issues/32).
+
 ## Dependency graph and ownership
 
 | Issue | Objective | Prerequisites | State |
@@ -98,6 +104,7 @@ Rust 1.88 formatting, source preservation and documentation-link inspection appl
 | [#30](https://github.com/izyuumi/everything/issues/30) | META: Dependency roadmap for parallel agent implementation | None | Backlog |
 | [#31](https://github.com/izyuumi/everything/issues/31) | Define generic embedding contract and index fingerprints | #1, #6 | Merged (#42) |
 | [#72](https://github.com/izyuumi/everything/issues/72) | Prevent outbound telemetry from local embeddings | #12, #21, #68 | Strict production embedding-only boundary in progress separately; no production-locality acceptance claimed here |
+| [#73](https://github.com/izyuumi/everything/issues/73) | Publish authoritative task and permission metadata | #22, #24, #25; corrected Host ownership | Focused replacement for legacy PR #85 prepared; exact-head CI and integration pending |
 | [#50](https://github.com/izyuumi/everything/issues/50) | Persist scheduled jobs and immutable run history | #2, #3, #10; migration order after #22/private checkpoints | Merged (#67) after current-head production CI; occurrence/replay observations qualified and automated assertions deferred to #32 |
 | [#51](https://github.com/izyuumi/everything/issues/51) | Calculate timezone-aware occurrences and dispatch due work | #24, #50 | Focused replacement for legacy PR #71 prepared; exact-head CI and integration pending |
 | [#52](https://github.com/izyuumi/everything/issues/52) | Enforce isolated scheduled execution and run policies | #24, #25, #50, #51 | Backlog |

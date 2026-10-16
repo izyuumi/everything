@@ -136,6 +136,9 @@ impl HostInner {
                 })
                 .await
             }
+            OwnerQuery::Publication => Ok(OwnerQueryResult::Publication {
+                status: self.publication.borrow().clone(),
+            }),
             OwnerQuery::Settings => {
                 self.blocking(|host| {
                     Ok(OwnerQueryResult::Settings {
