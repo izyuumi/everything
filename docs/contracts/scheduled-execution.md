@@ -65,3 +65,9 @@ A qualified missing-task walkthrough retained a genuine earlier factory attempt,
 A separately qualified migration walkthrough applied real migrations 1–8, seeded valid claimed/running first-attempt records with legacy None output policy and opened the actual Store. Migration 9 preserved every original identity and exact serialized policy byte, distinguished claimed from already-running admission, initialized counters and passed integrity/foreign-key checks. These seeded records establish migration behavior, not observed historical execution.
 
 Successful inference, paid tool success, arbitrary process crashes, OS clock manipulation, full retained-quota exhaustion and Apple runtime behavior remain unverified. No embedding inference was run. Automated calendar, race, crash, budget, notification and platform verification is deferred to #32.
+
+## 2026-10-16 copied-core observations
+
+The [dated acceptance record](../development/scheduling-acceptance.md#headless-cli-and-scheduled-accounting) documents actual copied dbee/schema 12 CLI execution using the current component terminal-evidence consumer: 5 genuine NoAttempt factory failures and 1 Observed refused request retaining 1 model request/128 reserved output tokens/0 tools and scheduling Unknown. Exact owner acknowledgement/replay and graceful reopen preserved original evidence without another IP connect. These are separate occurrences, not a new three-attempt retry/backoff observation.
+
+The independent native-adapter phase kept Engineinactive, with 33 manual rows(3 Claimed/30 Skipped) and 0 scheduled attempts/results. It does not repeat the historical retry, supplied terminal-metadata, quota or fault-injection sequence above. Current partial-capacity/reentry/foreign-summary/caller-drop acceptance remains separately limited. The 1024-byte terminal-evidence reserve is a checkpoint-byte bound, independent from output-token accounting.
