@@ -121,6 +121,7 @@ The whole-Agent scheduled publisher and bounded partial delivery-capacity progre
 | [#29](https://github.com/izyuumi/everything/issues/29) | Implement optional scoped cloud worker delegation | #24, #25 | Backlog |
 | [#30](https://github.com/izyuumi/everything/issues/30) | META: Dependency roadmap for parallel agent implementation | None | Backlog |
 | [#31](https://github.com/izyuumi/everything/issues/31) | Define generic embedding contract and index fingerprints | #1, #6 | Merged (#42) |
+| [#68](https://github.com/izyuumi/everything/issues/68) | Compose memory, MCP and optional selection in the actual Host | #18–#26 as listed in the issue; strict locality #72 | Reviewed source #92 includes strict #96 and isolated startup-owner correction; clean current-main integration and new CI/runtime pending |
 | [#72](https://github.com/izyuumi/everything/issues/72) | Prevent outbound telemetry from local embeddings | #12, #21, #68 | Strict production embedding-only boundary in progress separately; no production-locality acceptance claimed here |
 | [#73](https://github.com/izyuumi/everything/issues/73) | Publish authoritative task and permission metadata | #22, #24, #25; corrected Host ownership | Publication #100 merged after full Rust CI; original task/current-state and exact permission snapshots implemented, final current-source encrypted walkthrough pending |
 | [#50](https://github.com/izyuumi/everything/issues/50) | Persist scheduled jobs and immutable run history | #2, #3, #10; migration order after #22/private checkpoints | Merged (#67) after current-head production CI; occurrence/replay observations qualified and automated assertions deferred to #32 |
@@ -129,6 +130,8 @@ The whole-Agent scheduled publisher and bounded partial delivery-capacity progre
 | [#53](https://github.com/izyuumi/everything/issues/53) | Add schedule CLI and native tool controls | #5, #11, #50, #51, #52 | Current-main owner CLI and eight native tool controls implemented with exact scope/CAS/replay and owned drain; source review/formatting pass, fresh exact-head CI/runtime pending |
 | [#54](https://github.com/izyuumi/everything/issues/54) | Deliver schedule status and encrypted client notifications | #22, #27, #28, #52, #53 | Backlog |
 | [#55](https://github.com/izyuumi/everything/issues/55) | Document schedule behavior, contracts and decisions | #50–#54 | Incremental documentation; final reconciliation pending |
+
+| [#81](https://github.com/izyuumi/everything/issues/81) | Retain validated SQLite handles through connection lifetime | Store and Host ownership; optional worker #29 | Store/Agent #76 and actual Host #79 merged after full CI; optional worker correction and current live-WAL/clone/restart acceptance pending |
 
 The roadmap gained scheduling issues #50–#55 during implementation; all six and updated #30 have been read. The latest #17 covers offline discovery only and gates #20, a configurable generic System One classifier with TypeSafe preset and approved custom endpoints. Their implementations and PRs are separate. #31 owns the embedding contract. The roadmap's waves are scheduling guidance; explicit prerequisites take precedence (for example #19 requires #14).
 
