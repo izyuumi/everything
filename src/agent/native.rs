@@ -624,6 +624,8 @@ impl Agent {
                             admitted = profile.admit_source(child.clone()) => admitted,
                         }?)
                     } else { None };
+                    #[cfg(not(unix))]
+                    let source_admission = None;
                     let attempt_id = CommandId::new();
                     let mut checkpoint = conversation.checkpoint.clone();
                     let state = checkpoint.native.as_mut().ok_or(AgentError::NativeSetupRequired)?;
@@ -636,21 +638,18 @@ impl Agent {
                     turn.reserved_output_tokens = Some(reserved_output_tokens);
                     turn.charged_tokens = turn.charged_tokens.checked_add(reservation(&built)).ok_or(AgentError::ResourceLimit("token accounting"))?;
                     turn.status = LoopStatus::ProviderInFlight { attempt_id };
-                    if agent.settings_profile.is_some() {
+                    let floor = if agent.settings_profile.is_some() {
                         let floor = NativeAttemptFloor { attempt_id, model_attempts: turn.attempts, tool_calls: turn.tool_calls,
                             charged_tokens: turn.charged_tokens, reserved_output_tokens, reported_input_tokens: turn.reported_input_tokens,
                             reported_output_tokens: turn.reported_output_tokens, reservation: reservation(&built), deadline_ms: turn.deadline_ms,
                             observed_wall_ms: turn.last_observed_wall_ms };
                         settings_preflight(&checkpoint)?;
-                        let owner = agent.clone();
-                        blocking(move || { let owner = owner; owner.settings_profile.as_ref().ok_or(AgentError::ConfigurationMismatch)?.before_attempt(floor) }).await?;
-                    }
-                    if !agent.save_native(&mut conversation, checkpoint, Vec::new(), Arc::clone(&admission)).await? {
+                        Some(floor)
+                    } else { None };
+                    if !agent.save_native_admitted(&mut conversation, checkpoint, Vec::new(), Arc::clone(&admission), source_admission, floor).await? {
                         if agent.settings_profile.is_some() { Err(AgentError::Cancelled)?; }
                         continue;
                     }
-                    #[cfg(unix)]
-                    drop(source_admission);
                     yield TurnEvent::ContextBuilt { usage: built.usage.clone(), citations: built.citations.clone(), omitted_memory: built.omitted_memory.clone(), continuation: built.continuation.clone() };
                     yield TurnEvent::ModelAttemptStarted { attempt_id };
                     Prepared::Context { built: Box::new(built), request }
@@ -1264,15 +1263,29 @@ impl Agent {
     async fn save_native_events(
         &self,
         conversation: &mut Conversation,
+        checkpoint: Checkpoint,
+        payloads: Vec<(Option<CommandId>, ConversationEvent)>,
+        admission: Admission,
+    ) -> Result<bool, AgentError> {
+        self.save_native_admitted(conversation, checkpoint, payloads, admission, None, None)
+            .await
+    }
+
+    async fn save_native_admitted(
+        &self,
+        conversation: &mut Conversation,
         mut checkpoint: Checkpoint,
         payloads: Vec<(Option<CommandId>, ConversationEvent)>,
         admission: Admission,
+        source_admission: Option<tokio::sync::OwnedMutexGuard<()>>,
+        attempt_floor: Option<NativeAttemptFloor>,
     ) -> Result<bool, AgentError> {
         let write = self.write_gate(conversation.info.id)?.lock_owned().await;
         let owner = self.clone();
         let captured = conversation.clone();
         let (saved, committed) = blocking(move || {
             let retained_agent = owner;
+            let _source_admission = source_admission;
             let _admission = admission;
             let _write = write;
             let mut current = load_conversation(&retained_agent.store, captured.info.id)?;
@@ -1350,22 +1363,6 @@ impl Agent {
                 }
                 rows.push(row);
             }
-            if let (Some(profile), Some(turn)) = (
-                &retained_agent.settings_profile,
-                checkpoint
-                    .native
-                    .as_ref()
-                    .and_then(|native| native.turn.as_ref()),
-            ) {
-                profile.native_counters(
-                    turn.command_id,
-                    turn.tool_calls,
-                    turn.charged_tokens,
-                    output_reservation(turn)?,
-                    turn.reported_input_tokens,
-                    turn.reported_output_tokens,
-                )?;
-            }
             let update = ConversationStateUpdate {
                 expected_revision,
                 payload: checkpoint_payload(&checkpoint)?,
@@ -1405,7 +1402,30 @@ impl Agent {
                 }
                 let append_bytes = encoded_len(&append, settings::MAX_APPEND)?;
                 profile.journal().settings_memory_capacity(
-                    checkpoint_bytes + future + 2 * append_bytes + 4 * settings::MAX_BROKER_RECORD,
+                    checkpoint_bytes + future + 2 * append_bytes + 8 * settings::MAX_BROKER_RECORD,
+                )?;
+            }
+            if let Some(floor) = attempt_floor {
+                retained_agent
+                    .settings_profile
+                    .as_ref()
+                    .ok_or(AgentError::ConfigurationMismatch)?
+                    .before_attempt(floor)?;
+            }
+            if let (Some(profile), Some(turn)) = (
+                &retained_agent.settings_profile,
+                checkpoint
+                    .native
+                    .as_ref()
+                    .and_then(|native| native.turn.as_ref()),
+            ) {
+                profile.native_counters(
+                    turn.command_id,
+                    turn.tool_calls,
+                    turn.charged_tokens,
+                    output_reservation(turn)?,
+                    turn.reported_input_tokens,
+                    turn.reported_output_tokens,
                 )?;
             }
             let journal_command = append.command_id.clone();

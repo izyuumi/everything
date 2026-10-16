@@ -27,7 +27,7 @@ pub(crate) const MAX_EVENT: usize = 192 * 1024;
 pub(crate) const MAX_APPEND: usize = 512 * 1024;
 pub(crate) const MAX_CHECKPOINT: usize = 2 * 1024 * 1024;
 pub(crate) const MAX_BROKER_RECORD: usize = 64 * 1024;
-const TRANSITION_HEADROOM: usize = MAX_CHECKPOINT + 2 * MAX_APPEND + 4 * MAX_BROKER_RECORD;
+const TRANSITION_HEADROOM: usize = MAX_CHECKPOINT + 4 * MAX_APPEND + 8 * MAX_BROKER_RECORD;
 const OUTCOME_SLOTS: usize = 32;
 
 #[derive(Clone, Copy, Serialize)]
@@ -174,7 +174,8 @@ impl SettingsProfile {
         command: CommandId,
     ) -> Result<(), AgentError> {
         self.check_conversation(id)?;
-        let state = self.state.lock().map_err(|_| AgentError::Worker)?;
+        let mut state = self.state.lock().map_err(|_| AgentError::Worker)?;
+        check_turn_deadline(&mut state)?;
         if state.turn.as_ref().is_none_or(|turn| {
             turn.command_id != command || turn.phase != SettingsFencePhase::Armed
         }) {
@@ -263,6 +264,7 @@ impl SettingsProfile {
         self.check_live()?;
         self.journal.settings_memory_capacity(TRANSITION_HEADROOM)?;
         let mut state = self.state.lock().map_err(|_| AgentError::Worker)?;
+        check_turn_deadline(&mut state)?;
         let turn = state.turn.as_mut().ok_or(AgentError::NoPendingTurn)?;
         if turn.phase != SettingsFencePhase::Armed
             || floor.model_attempts <= turn.model_attempts
@@ -327,6 +329,19 @@ impl SettingsProfile {
         Ok(())
     }
 
+    pub(crate) fn provider_observation(&self) -> Result<Option<ProviderObservation>, AgentError> {
+        let state = self.state.lock().map_err(|_| AgentError::Worker)?;
+        state
+            .attempt
+            .as_ref()
+            .map(|attempt| {
+                self.accounting
+                    .snapshot(attempt.attempt_id)
+                    .map_err(AgentError::from)
+            })
+            .transpose()
+    }
+
     pub(crate) fn observe_provider(&self) -> Result<Option<ProviderObservation>, AgentError> {
         let mut state = self.state.lock().map_err(|_| AgentError::Worker)?;
         let Some(attempt) = &state.attempt else {
@@ -355,13 +370,13 @@ impl SettingsProfile {
             .ok_or(AgentError::ResourceLimit("restricted reported output"))?
             .max(next.reported_output_tokens);
         next.provider_complete |= observation.terminal_observed;
-        next.usage_complete |= observation.response_valid && !observation.invalid;
+        next.usage_complete |= observation.terminal_observed && !observation.invalid;
         if state.turn.as_ref() != Some(&next) {
             self.main.update_settings_turn(&next)?;
             state.turn = Some(next);
         }
         if observation.invalid {
-            return Err(AgentError::InvalidData("restricted provider accounting"));
+            return Err(AgentError::RestrictedProviderAccounting);
         }
         Ok(Some(observation))
     }
@@ -435,8 +450,7 @@ impl SettingsProfile {
         self.check_tool(&self.conversation_id().to_string(), task, tool)?;
         let id: CommandId = operation.parse()?;
         reserve_outcome(&mut self.state.lock().map_err(|_| AgentError::Worker)?, id)?;
-        self.journal
-            .settings_memory_capacity(2 * MAX_BROKER_RECORD)?;
+        self.journal.settings_memory_capacity(TRANSITION_HEADROOM)?;
         Ok(SettingsToolCapability {
             profile: Arc::clone(self),
             operation_id: operation.into(),
@@ -487,18 +501,39 @@ impl SettingsProfile {
     }
 
     pub(crate) fn finish_turn(&self, phase: SettingsFencePhase) -> Result<(), AgentError> {
-        let _observation = self.observe_provider()?;
+        let observation = match self.observe_provider() {
+            Ok(observation) => observation,
+            Err(AgentError::RestrictedProviderAccounting)
+                if matches!(
+                    phase,
+                    SettingsFencePhase::StoppedUnusable | SettingsFencePhase::Unknown
+                ) =>
+            {
+                self.provider_observation()?
+            }
+            Err(error) => return Err(error),
+        };
         let mut state = self.state.lock().map_err(|_| AgentError::Worker)?;
         let mut next = state.turn.clone().ok_or(AgentError::NoPendingTurn)?;
         if phase == SettingsFencePhase::Armed {
             return Err(AgentError::InvalidData("restricted terminal phase"));
         }
-        if phase == SettingsFencePhase::StoppedUncertain {
+        if matches!(
+            phase,
+            SettingsFencePhase::StoppedUncertain | SettingsFencePhase::StoppedUnusable
+        ) {
             if next.tool_calls != 0 || !next.mutation_ids.is_empty() {
                 return Err(AgentError::ConfigurationMismatch);
             }
-            next.provider_complete = false;
-            next.usage_complete = false;
+            let terminal = observation
+                .as_ref()
+                .is_some_and(|value| value.terminal_observed);
+            if (phase == SettingsFencePhase::StoppedUnusable) != terminal {
+                return Err(AgentError::ConfigurationMismatch);
+            }
+            next.provider_complete = terminal;
+            next.usage_complete =
+                terminal && observation.as_ref().is_some_and(|value| !value.invalid);
         }
         next.phase = phase;
         self.main.update_settings_turn(&next)?;

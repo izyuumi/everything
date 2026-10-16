@@ -352,6 +352,57 @@ impl SettingsService {
         self.core.authority.native(call, proof, true)
     }
 
+    pub(crate) fn settings_cleanup_principal(
+        &self,
+        caller: &SettingsCaller,
+    ) -> Result<Uuid, SettingsServiceError> {
+        self.core.authority.validate_owner_cleanup(caller)?;
+        Ok(self.core.authority.principal())
+    }
+
+    pub(crate) async fn inspect_settings_cleanup(
+        &self,
+        caller: SettingsCaller,
+        command_id: CommandId,
+        expected_fence_sha256: String,
+    ) -> Result<(), SettingsServiceError> {
+        self.core.authority.validate_owner_cleanup(&caller)?;
+        self.blocking(move |core| {
+            core.authority.validate_owner_cleanup(&caller)?;
+            let store = core.agent.store();
+            let fence = store
+                .settings_turn(command_id)?
+                .ok_or(SettingsServiceError::NotFound)?;
+            let session = store
+                .settings_session(fence.session_id)?
+                .ok_or(SettingsServiceError::NotFound)?;
+            if fence.sha256()? != expected_fence_sha256
+                || session.principal_id != core.authority.principal()
+            {
+                return Err(SettingsServiceError::OutsideScope);
+            }
+            for id in fence.mutation_ids {
+                match core.repository.get(id) {
+                    Ok(record)
+                        if record.identity.origin
+                            == (SettingsOperationOrigin::SettingsAgent {
+                                session_id: session.session_id,
+                                native_session_id: session.native_session_id,
+                            })
+                            && record.identity.binding.principal_id == session.principal_id =>
+                    {
+                        record.inspection().validate()?;
+                    }
+                    Err(SettingsServiceError::NotFound) => {}
+                    Ok(_) => return Err(SettingsServiceError::OutsideScope),
+                    Err(error) => return Err(error),
+                }
+            }
+            Ok(())
+        })
+        .await
+    }
+
     pub fn begin_settings_session(
         &self,
         caller: SettingsCaller,

@@ -88,6 +88,8 @@ pub enum AgentError {
     LegacyContinuation,
     #[error("provider or conversation configuration does not match")]
     ConfigurationMismatch,
+    #[error("restricted provider accounting retained an invalid original observation")]
+    RestrictedProviderAccounting,
     #[error("text-only conversations cannot execute or resume tool calls")]
     ToolsUnsupported,
     #[error("host storage worker failed")]

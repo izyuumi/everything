@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -6,7 +6,7 @@ use futures_util::{FutureExt, StreamExt};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::panic::AssertUnwindSafe;
-use tokio::sync::{Mutex, Semaphore, mpsc, oneshot};
+use tokio::sync::{Mutex, Notify, Semaphore, mpsc, oneshot};
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
@@ -58,6 +58,7 @@ pub enum SettingsChatPhase {
     Closed,
     Unavailable,
     StoppedUncertain,
+    StoppedUnusable,
     Unknown,
 }
 
@@ -85,6 +86,16 @@ pub enum SettingsAssistantReply {
     Unavailable,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SettingsUncertaintyAcknowledgement {
+    pub command_id: CommandId,
+    pub exact_fence_sha256: String,
+    pub owner_principal_id: Uuid,
+    pub attested_at: UnixMillis,
+    pub lost_ram_uncertainty_accepted: bool,
+}
+
 pub(crate) enum SettingsAgentCommand {
     Open {
         caller: SettingsCaller,
@@ -104,7 +115,6 @@ pub(crate) enum SettingsAgentCommand {
         native_session_id: Uuid,
         chat_id: Uuid,
     },
-    Drain,
 }
 
 struct Request {
@@ -116,6 +126,7 @@ pub(crate) struct SettingsAgentRuntime {
     commands: mpsc::Sender<Request>,
     draining: Arc<AtomicBool>,
     quiescent: Arc<AtomicBool>,
+    changed: Arc<Notify>,
 }
 
 pub(crate) struct SettingsAgentComponents {
@@ -154,6 +165,8 @@ struct JoinedTurn {
     invocations: Vec<InvocationResult>,
     local_cleanup_known: bool,
     workers_joined: bool,
+    mutation_links_known: bool,
+    provider_terminal_observed: bool,
 }
 
 pub(crate) struct SettingsAgentSupervisor {
@@ -162,9 +175,13 @@ pub(crate) struct SettingsAgentSupervisor {
     sessions: BTreeMap<Uuid, SessionState>,
     archived: VecDeque<(Uuid, SettingsChatStatus)>,
     workers: JoinSet<JoinedTurn>,
+    worker_sessions: HashMap<tokio::task::Id, Arc<Session>>,
+    failed: bool,
+    commands_open: bool,
     turn: Arc<Semaphore>,
     draining: Arc<AtomicBool>,
     quiescent: Arc<AtomicBool>,
+    changed: Arc<Notify>,
 }
 
 impl SettingsAgentRuntime {
@@ -172,11 +189,13 @@ impl SettingsAgentRuntime {
         let (commands, receiver) = mpsc::channel(8);
         let draining = Arc::new(AtomicBool::new(false));
         let quiescent = Arc::new(AtomicBool::new(true));
+        let changed = Arc::new(Notify::new());
         (
             Arc::new(Self {
                 commands,
                 draining: Arc::clone(&draining),
                 quiescent: Arc::clone(&quiescent),
+                changed: Arc::clone(&changed),
             }),
             SettingsAgentSupervisor {
                 core: Arc::new(core),
@@ -184,9 +203,13 @@ impl SettingsAgentRuntime {
                 sessions: BTreeMap::new(),
                 archived: VecDeque::with_capacity(16),
                 workers: JoinSet::new(),
+                worker_sessions: HashMap::with_capacity(1),
+                failed: false,
+                commands_open: true,
                 turn: Arc::new(Semaphore::new(1)),
                 draining,
                 quiescent,
+                changed,
             },
         )
     }
@@ -204,6 +227,10 @@ impl SettingsAgentRuntime {
         result.await.map_err(|_| HostError::Worker)?
     }
 
+    pub(crate) async fn changed(&self) {
+        self.changed.notified().await;
+    }
+
     pub(crate) fn is_quiescent(&self) -> bool {
         self.draining.load(Ordering::Acquire) && self.quiescent.load(Ordering::Acquire)
     }
@@ -216,43 +243,92 @@ impl SettingsAgentSupervisor {
         stop_owner: CancellationToken,
     ) -> Result<(), HostError> {
         loop {
-            if stop_work.is_cancelled() && !self.draining.load(Ordering::Acquire) {
-                self.close_all().await?;
+            if (stop_work.is_cancelled() || stop_owner.is_cancelled())
+                && !self.draining.load(Ordering::Acquire)
+            {
+                if self.close_all().await.is_err() {
+                    self.note_failure();
+                }
             }
-            if stop_owner.is_cancelled() && self.workers.is_empty() {
+            self.refresh_quiescent();
+            if stop_owner.is_cancelled() && self.quiescent.load(Ordering::Acquire) {
                 self.commands.close();
-                return Ok(());
+                return if self.failed {
+                    Err(HostError::Worker)
+                } else {
+                    Ok(())
+                };
             }
-            self.expire_sessions().await?;
-            let expiry = self
+            if self.expire_sessions().await.is_err() {
+                self.note_failure();
+            }
+            let mut session_cancellations = self
                 .sessions
                 .values()
-                .filter(|session| !session.closing)
-                .map(|session| session.session.binding.deadline)
-                .min();
-            let timer = expiry
-                .map(tokio::time::Instant::from_std)
+                .filter(|entry| !entry.closing)
+                .map(|entry| entry.session.binding.cancellation.clone().cancelled_owned())
+                .collect::<futures_util::stream::FuturesUnordered<_>>();
+            let timer = self
+                .sessions
+                .values()
+                .filter(|entry| !entry.closing)
+                .map(|entry| tokio::time::Instant::from_std(entry.session.binding.deadline))
+                .min()
                 .unwrap_or_else(|| {
                     tokio::time::Instant::now() + std::time::Duration::from_secs(300)
                 });
             tokio::select! {
                 biased;
-                joined = self.workers.join_next(), if !self.workers.is_empty() => {
-                    match joined {
-                        Some(Ok(joined)) => self.finish(joined).await?,
-                        Some(Err(_)) => { self.core.broker.quarantine_settings(); self.close_all().await?; return Err(HostError::Worker); }
-                        None => {}
+                joined = self.workers.join_next_with_id(), if !self.workers.is_empty() => {
+                    let completed = match joined {
+                        Some(Ok((id, joined))) => { self.worker_sessions.remove(&id); Some(joined) }
+                        Some(Err(error)) => {
+                            self.note_failure();
+                            match self.worker_sessions.remove(&error.id()) {
+                                Some(session) => Some(cleanup_turn(&self.core, &session, false, String::new()).await),
+                                None => None,
+                            }
+                        }
+                        None => None,
+                    };
+                    if let Some(joined) = completed && self.finish(joined).await.is_err() { self.note_failure(); }
+                    if self.failed && self.close_all().await.is_err() { self.note_failure(); }
+                }
+                request = self.commands.recv(), if self.commands_open => {
+                    match request {
+                        Some(request) => {
+                            let result = self.handle(request.command).await;
+                            if request.reply.send(result).is_err() { tracing::debug!("private Settings reply receiver disconnected"); }
+                        }
+                        None => { self.commands_open = false; if self.close_all().await.is_err() { self.note_failure(); } }
                     }
                 }
-                request = self.commands.recv() => {
-                    let Some(request) = request else { self.close_all().await?; if self.workers.is_empty() { return Ok(()); } continue; };
-                    let result = self.handle(request.command).await;
-                    if request.reply.send(result).is_err() { tracing::debug!("private Settings reply receiver disconnected"); }
-                }
-                _ = stop_work.cancelled(), if !self.draining.load(Ordering::Acquire) => { self.close_all().await?; }
-                _ = stop_owner.cancelled(), if self.workers.is_empty() => {}
+                _ = stop_work.cancelled(), if !self.draining.load(Ordering::Acquire) => { if self.close_all().await.is_err() { self.note_failure(); } }
+                _ = stop_owner.cancelled(), if !self.draining.load(Ordering::Acquire) => {}
+                _ = session_cancellations.next(), if !session_cancellations.is_empty() => {}
                 _ = tokio::time::sleep_until(timer) => {}
             }
+        }
+    }
+
+    fn note_failure(&mut self) {
+        self.failed = true;
+        self.draining.store(true, Ordering::Release);
+        self.core.broker.quarantine_settings();
+        for entry in self.sessions.values() {
+            entry.session.profile.retire();
+        }
+    }
+
+    fn refresh_quiescent(&self) {
+        let idle = self.workers.is_empty()
+            && self.worker_sessions.is_empty()
+            && self
+                .sessions
+                .values()
+                .all(|entry| !entry.running && entry.local_idle);
+        if self.quiescent.swap(idle, Ordering::AcqRel) != idle {
+            self.changed.notify_one();
         }
     }
 
@@ -321,10 +397,6 @@ impl SettingsAgentSupervisor {
                     .ok_or(HostError::Worker)?;
                 Ok(SettingsAssistantReply::Status { status })
             }
-            SettingsAgentCommand::Drain => {
-                self.close_all().await?;
-                Ok(SettingsAssistantReply::Unavailable)
-            }
         }
     }
 
@@ -333,6 +405,17 @@ impl SettingsAgentSupervisor {
             return Ok(SettingsAssistantReply::Unavailable);
         }
         let child = Arc::new(self.core.service.begin_settings_session(caller)?);
+        let opened = self.prepare_session(Arc::clone(&child)).await;
+        if !matches!(opened, Ok(SettingsAssistantReply::Opened { .. })) {
+            self.core.service.close_settings_agent(&child).await?;
+        }
+        opened
+    }
+
+    async fn prepare_session(
+        &mut self,
+        child: Arc<SettingsAgentSession>,
+    ) -> Result<SettingsAssistantReply, HostError> {
         let binding = self.core.service.settings_agent_binding(&child)?;
         let captured = match self
             .core
@@ -421,6 +504,7 @@ impl SettingsAgentSupervisor {
                 configuration,
             )
             .await?;
+        session.profile.check_live()?;
         self.core.tools.bind(&child, &session.profile)?;
         let status = SettingsChatStatus {
             chat_id: id,
@@ -499,6 +583,7 @@ impl SettingsAgentSupervisor {
             ));
         }
         let request_digest = digest(&(turn_id, &binding_digest, &text))?;
+        let another_turn = !self.workers.is_empty();
         let entry = self.sessions.get_mut(&id).ok_or(HostError::Worker)?;
         if let Some((_, original)) = entry.seen.iter().find(|(original, _)| *original == turn_id) {
             if *original != request_digest {
@@ -514,6 +599,7 @@ impl SettingsAgentSupervisor {
         if self.draining.load(Ordering::Acquire)
             || entry.closing
             || entry.running
+            || another_turn
             || entry.seen.len() >= 8
         {
             return Ok(SettingsAssistantReply::Unavailable);
@@ -529,12 +615,20 @@ impl SettingsAgentSupervisor {
         entry.status.phase = SettingsChatPhase::Running;
         entry.status.turn_id = Some(turn_id);
         entry.status.assistant_text.clear();
+        entry.status.operation_ids.clear();
+        entry.status.model_attempts = 0;
+        entry.status.charged_tokens = 0;
+        entry.status.reserved_output_tokens = 0;
+        entry.status.provider_complete = false;
+        entry.status.usage_complete = false;
         self.quiescent.store(false, Ordering::Release);
         let core = Arc::clone(&self.core);
-        self.workers.spawn(async move {
+        let tracked = Arc::clone(&session);
+        let worker = self.workers.spawn(async move {
             let retained = (permit, core, session);
             run_turn(&retained.1, &retained.2, turn_id, text).await
         });
+        self.worker_sessions.insert(worker.id(), tracked);
         Ok(SettingsAssistantReply::Accepted {
             chat_id: id,
             turn_id,
@@ -552,31 +646,27 @@ impl SettingsAgentSupervisor {
         let Some(fence) = fence else {
             entry.status.phase = SettingsChatPhase::Unavailable;
             entry.closing = true;
+            self.close_session(session).await?;
+            self.refresh_quiescent();
             return Ok(());
         };
-        let links_known = fence.mutation_ids.iter().all(|id| {
-            joined.invocations.iter().any(|result| {
-                result.operation_id == *id
-                    && match result.disposition {
-                        SettingsInvocationDisposition::RejectedBeforeAdmission => true,
-                        SettingsInvocationDisposition::Recorded { operation_id } => {
-                            operation_id == *id
-                        }
-                        _ => false,
-                    }
-            })
-        });
-        let known = joined.local_cleanup_known && links_known;
+        let known = joined.local_cleanup_known && joined.mutation_links_known;
         let phase = if known
-            && (fence.model_attempts == 0 || fence.provider_complete && fence.usage_complete)
-        {
-            SettingsFencePhase::Settled
-        } else if known
+            && !joined.completed
+            && fence.model_attempts > 0
             && fence.tool_calls == 0
             && fence.mutation_ids.is_empty()
             && joined.invocations.is_empty()
         {
-            SettingsFencePhase::StoppedUncertain
+            if joined.provider_terminal_observed {
+                SettingsFencePhase::StoppedUnusable
+            } else {
+                SettingsFencePhase::StoppedUncertain
+            }
+        } else if known
+            && (fence.model_attempts == 0 || fence.provider_complete && fence.usage_complete)
+        {
+            SettingsFencePhase::Settled
         } else {
             SettingsFencePhase::Unknown
         };
@@ -600,6 +690,7 @@ impl SettingsAgentSupervisor {
             SettingsFencePhase::Settled if joined.completed => SettingsChatPhase::Completed,
             SettingsFencePhase::Settled => SettingsChatPhase::Unavailable,
             SettingsFencePhase::StoppedUncertain => SettingsChatPhase::StoppedUncertain,
+            SettingsFencePhase::StoppedUnusable => SettingsChatPhase::StoppedUnusable,
             _ => SettingsChatPhase::Unknown,
         };
         entry.closing |= !joined.completed || phase != SettingsFencePhase::Settled;
@@ -609,9 +700,7 @@ impl SettingsAgentSupervisor {
         if entry.closing {
             self.close_session(session).await?;
         }
-        if self.workers.is_empty() {
-            self.quiescent.store(known, Ordering::Release);
-        }
+        self.refresh_quiescent();
         Ok(())
     }
 
@@ -630,17 +719,26 @@ impl SettingsAgentSupervisor {
             entry.status.phase = SettingsChatPhase::Closing;
             return Ok(());
         }
+        session.profile.close_broker_and_wait().await?;
         let _invocations = self.core.tools.finish_turn(session.id).await?;
         let report = self
             .core
             .broker
             .settings_report(Arc::clone(&session.profile))
             .await?;
+        if report.running_count == 0 {
+            self.sessions
+                .get_mut(&session.id)
+                .ok_or(HostError::Worker)?
+                .local_idle = true;
+        }
         let fence = session.profile.fence()?;
         let terminal = fence.as_ref().is_none_or(|fence| {
             matches!(
                 fence.phase,
-                SettingsFencePhase::Settled | SettingsFencePhase::StoppedUncertain
+                SettingsFencePhase::Settled
+                    | SettingsFencePhase::StoppedUncertain
+                    | SettingsFencePhase::StoppedUnusable
             )
         });
         if report.running_count != 0 || report.unresolved_count != 0 || !terminal {
@@ -664,17 +762,22 @@ impl SettingsAgentSupervisor {
     }
 
     async fn close_all(&mut self) -> Result<(), HostError> {
+        self.quiescent.store(false, Ordering::Release);
         self.draining.store(true, Ordering::Release);
         let sessions: Vec<_> = self
             .sessions
             .values()
             .map(|entry| Arc::clone(&entry.session))
             .collect();
+        let mut failed = false;
         for session in sessions {
-            self.close_session(session).await?;
+            if self.close_session(session).await.is_err() {
+                failed = true;
+            }
         }
-        if self.workers.is_empty() {
-            self.quiescent.store(true, Ordering::Release);
+        self.refresh_quiescent();
+        if failed {
+            return Err(HostError::Worker);
         }
         Ok(())
     }
@@ -690,8 +793,14 @@ impl SettingsAgentSupervisor {
             })
             .map(|entry| Arc::clone(&entry.session))
             .collect();
+        let mut failed = false;
         for session in expired {
-            self.close_session(session).await?;
+            if self.close_session(session).await.is_err() {
+                failed = true;
+            }
+        }
+        if failed {
+            return Err(HostError::Worker);
         }
         Ok(())
     }
@@ -718,7 +827,7 @@ async fn run_turn(
             match event? {
                 TurnEvent::Committed { message, .. } => {
                     assistant_text.clear();
-                    for content in message.content { if let MessageContent::Text { text } = content { if assistant_text.len() + text.len() <= MAX_TEXT { assistant_text.push_str(&text); } } }
+                    for content in message.content { if let MessageContent::Text { text } = content { if assistant_text.len().checked_add(text.len()).is_none_or(|length| length > MAX_TEXT) { return Err(HostError::Agent(crate::agent::AgentError::ResourceLimit("restricted assistant text"))); } assistant_text.push_str(&text); } }
                 }
                 _ => {}
             }
@@ -727,6 +836,21 @@ async fn run_turn(
         let completed = session.agent.conversation(session.profile.conversation_id()).await?.checkpoint.pending.is_none();
         Ok::<_, HostError>(completed)
     }).catch_unwind().await;
+    cleanup_turn(
+        core,
+        session,
+        matches!(operation, Ok(Ok(true))),
+        assistant_text,
+    )
+    .await
+}
+
+async fn cleanup_turn(
+    core: &Arc<SettingsAgentComponents>,
+    session: &Arc<Session>,
+    completed: bool,
+    assistant_text: String,
+) -> JoinedTurn {
     let observed = session.agent.observe_settings_provider().await;
     let broker_idle = session.profile.close_broker_and_wait().await;
     let invocations = core.tools.finish_turn(session.id).await;
@@ -739,18 +863,85 @@ async fn run_turn(
         && report
             .as_ref()
             .is_ok_and(|report| report.running_count == 0);
-    let local_cleanup_known = observed.is_ok()
+    let persisted = matches!(
+        observed,
+        Ok(()) | Err(crate::agent::AgentError::RestrictedProviderAccounting)
+    );
+    let provider_observation = session.profile.provider_observation();
+    let provider_terminal_observed = provider_observation
+        .as_ref()
+        .is_ok_and(|value| value.as_ref().is_some_and(|value| value.terminal_observed));
+    let local_cleanup_known = persisted
+        && provider_observation.is_ok()
         && workers_joined
         && report
             .as_ref()
             .is_ok_and(|report| report.unresolved_count == 0);
+    let retained = (Arc::clone(core), Arc::clone(session));
+    let receipts = invocations.as_ref().ok().map(|values| {
+        values
+            .iter()
+            .map(|value| (value.operation_id, value.disposition))
+            .collect::<Vec<_>>()
+    });
+    let mutation_links_known = match receipts {
+        Some(receipts) => tokio::task::spawn_blocking(move || {
+            let retained = retained;
+            let fence = retained.1.profile.fence()?;
+            let Some(fence) = fence else {
+                return Ok::<_, HostError>(true);
+            };
+            let repository = super::operations::OperationRepository::new(retained.0.agent.store());
+            for id in fence.mutation_ids {
+                let Some((_, disposition)) = receipts.iter().find(|(original, _)| *original == id)
+                else {
+                    return Ok(false);
+                };
+                match disposition {
+                    SettingsInvocationDisposition::RejectedBeforeAdmission => {}
+                    SettingsInvocationDisposition::Recorded { operation_id }
+                        if *operation_id == id =>
+                    {
+                        let record = repository.get(id)?;
+                        if record.identity.origin
+                            != (super::SettingsOperationOrigin::SettingsAgent {
+                                session_id: retained.1.id,
+                                native_session_id: retained.1.binding.native_session_id,
+                            })
+                            || record.identity.binding.principal_id
+                                != retained.1.binding.principal_id
+                        {
+                            return Ok(false);
+                        }
+                        match record.phase() {
+                            super::SettingsOperationPhase::AwaitingAction { .. }
+                            | super::SettingsOperationPhase::AwaitingConfirmation { .. } => {}
+                            super::SettingsOperationPhase::Finished { result }
+                                if !matches!(
+                                    result.state,
+                                    super::contract::SettingsOperationState::Unknown
+                                ) => {}
+                            _ => return Ok(false),
+                        }
+                    }
+                    _ => return Ok(false),
+                }
+            }
+            Ok(true)
+        })
+        .await
+        .is_ok_and(|result| matches!(result, Ok(true))),
+        None => false,
+    };
     JoinedTurn {
         chat_id: session.id,
-        completed: matches!(operation, Ok(Ok(true))),
+        completed,
         assistant_text,
         invocations: invocations.unwrap_or_default(),
         local_cleanup_known,
         workers_joined,
+        mutation_links_known,
+        provider_terminal_observed,
     }
 }
 

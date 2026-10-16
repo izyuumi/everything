@@ -456,6 +456,7 @@ impl ToolBroker {
                         fence.phase,
                         crate::storage::settings_agent::SettingsFencePhase::Settled
                             | crate::storage::settings_agent::SettingsFencePhase::StoppedUncertain
+                            | crate::storage::settings_agent::SettingsFencePhase::StoppedUnusable
                     )
                 {
                     return Err(restricted_error());
@@ -546,6 +547,68 @@ impl ToolBroker {
             }
             lease.armed = false;
             Ok(report)
+        })
+        .await
+    }
+
+    pub(crate) async fn acknowledge_settings_cleanup(
+        &self,
+        command_id: CommandId,
+        exact_fence_sha256: String,
+        owner_principal_id: Uuid,
+    ) -> Result<crate::storage::settings_agent::SettingsCleanupAttestation, BrokerError> {
+        let permits =
+            u32::try_from(self.inner.limits.max_in_flight).map_err(|_| restricted_error())?;
+        let inner = Arc::clone(&self.inner);
+        let (admission, exclusion) = tokio::time::timeout(self.inner.limits.queue_timeout, async {
+            let admission = Arc::clone(&inner.admission)
+                .acquire_many_owned(permits)
+                .await
+                .map_err(|_| BrokerError::RecoveryBusy)?;
+            let exclusion = Arc::clone(&inner.exclusion).write_owned().await;
+            Ok::<_, BrokerError>((admission, exclusion))
+        })
+        .await
+        .map_err(|_| BrokerError::RecoveryBusy)??;
+        blocking(None, move || {
+            let _admission = admission;
+            let _exclusion = exclusion;
+            let report = inspect_all(&inner)?;
+            if report.running_count != 0 || report.unresolved_count != 0 {
+                return Err(BrokerError::RecoveryBusy);
+            }
+            let fence = inner
+                .store
+                .settings_turn(command_id)?
+                .ok_or_else(restricted_error)?;
+            let existing = inner.store.settings_cleanup(command_id)?;
+            let acknowledgement = match existing {
+                Some(existing) => {
+                    if existing.exact_fence_sha256 != exact_fence_sha256
+                        || existing.owner_principal_id != owner_principal_id
+                    {
+                        return Err(restricted_error());
+                    }
+                    existing
+                }
+                None => crate::storage::settings_agent::SettingsCleanupAttestation {
+                    version: 1,
+                    command_id,
+                    exact_fence_sha256,
+                    owner_principal_id,
+                    attested_at: crate::protocol::UnixMillis::now()
+                        .map_err(|_| BrokerError::Clock)?
+                        .max(fence.last_observed_wall),
+                    lost_ram_uncertainty_accepted: true,
+                },
+            };
+            inner.store.attest_settings_cleanup(&acknowledgement)?;
+            let report = inspect_all(&inner)?;
+            inner.quarantined.store(
+                report.quarantined || inner.restart_required.load(Ordering::Acquire),
+                Ordering::Release,
+            );
+            Ok(acknowledgement)
         })
         .await
     }
@@ -644,6 +707,9 @@ impl ToolBroker {
         owner: Option<RetainedToolOwner>,
         profile: Option<Arc<SettingsProfile>>,
     ) -> Result<BrokerOutcome, BrokerError> {
+        if (authority.mode() == ExecutionMode::SettingsRestricted) != profile.is_some() {
+            return Err(restricted_error());
+        }
         if self.is_quarantined() {
             return Err(BrokerError::Quarantined);
         }

@@ -424,6 +424,9 @@ struct PermissionInspectionWire {
 
 impl PermissionInspection {
     pub fn validate(&self) -> Result<(), ProtocolError> {
+        if self.mode == ExecutionMode::SettingsRestricted {
+            return Err(ProtocolError::InvalidPermissionInspection);
+        }
         if self.approval_id.trim().is_empty()
             || self.approval_id.len() > 256
             || self.approval_id.chars().any(char::is_control)

@@ -1,6 +1,6 @@
 pub mod actions;
 pub mod agent;
-mod agent_tools;
+pub(super) mod agent_tools;
 mod authority;
 pub mod contract;
 mod driver;
@@ -170,6 +170,11 @@ pub struct HostSettings {
 
 impl HostSettings {
     pub fn validate(&self) -> Result<(), SettingsError> {
+        if self.execution_mode == ExecutionMode::SettingsRestricted {
+            return Err(SettingsError::Invalid(
+                "restricted Settings authority cannot be configured",
+            ));
+        }
         if self.revision == 0 || self.revision > i64::MAX as u64 {
             return Err(SettingsError::Invalid("settings revision is out of range"));
         }
