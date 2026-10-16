@@ -253,7 +253,7 @@ impl SettingsReceiptAuthority {
                 .map_err(SettingsAccessQualificationError::Metadata)?;
         if original_reply_text(row, 0, 36)? != self.core.authority.host_id.to_string()
             || configuration.version != 1
-            || configuration.keys != *self.core.endpoint.public_keys()
+            || configuration.keys != self.core.endpoint.public_keys()
             || !matches!(configuration.role, AccessEndpointRole::Host)
         {
             return Err(SettingsServiceError::OutsideScope.into());
