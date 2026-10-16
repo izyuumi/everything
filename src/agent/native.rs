@@ -15,7 +15,7 @@ use crate::permissions::{ApprovalRequest, ExecutionMode};
 use crate::protocol::{OperationId, TaskId, ToolCall, ToolResult};
 use crate::storage::TaskState;
 use crate::tools::{
-    ToolRegistry,
+    RetainedToolOwner, ToolRegistry,
     broker::{BrokerOutcome, OperationResult, TaskToolBroker, ToolInvocation},
 };
 
@@ -1158,11 +1158,18 @@ impl Agent {
         let _cancel_on_drop = token.clone().drop_guard();
         let broker = setup.broker.clone();
         let child = token.clone();
+        let retained_owner = RetainedToolOwner::new(self.clone());
         let calls = stream::iter(requests)
             .map(move |(index, invocation)| {
                 let broker = broker.clone();
                 let token = child.clone();
-                async move { (index, broker.execute(invocation, token).await) }
+                let owner = retained_owner.clone();
+                async move {
+                    (
+                        index,
+                        broker.execute_retained(invocation, token, owner).await,
+                    )
+                }
             })
             .buffer_unordered(setup.limits.max_parallel_calls);
         tokio::pin!(calls);
