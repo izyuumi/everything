@@ -1160,6 +1160,7 @@ final class NativeSettingsStore {
               context.request.action == .pair || ceremony.compared else { return }
         do {
             try validateDevice(context.capture, owner: owner)
+            try validateAssistantDevice(context, owner: owner)
             try ceremony.validate()
             let invocation = NativeActionInvocation(operationID: handle.id, nativeRequestID: UUID(), reference: .action(reference: reference))
             let admission: NativeSettingsAdmission
@@ -1227,6 +1228,7 @@ final class NativeSettingsStore {
               owner.effects[handle.id] != nil else { return }
         do {
             try validateDevice(context.capture, owner: owner)
+            try validateAssistantDevice(context, owner: owner)
             let choice = try ceremony.takeChoice()
             let admission: NativePairingApprovalAdmission
             do {
@@ -1348,6 +1350,12 @@ final class NativeSettingsStore {
         guard try NativeSettingsGate.wallTime() < capture.expiresAt, ContinuousClock.now < capture.deadline else {
             throw NativeSettingsSessionError.expired
         }
+    }
+
+    private func validateAssistantDevice(_ context: DeviceContext, owner: Owner) throws {
+        guard let receipt = context.assistant else { return }
+        guard try assistantOwner(receipt.original.chat, live: true) === owner else { throw NativeSettingsSessionError.invalidRequest }
+        try requireAssistantMembership(owner, original: receipt.original)
     }
 
     private func canContinueDevice(_ owner: Owner, context: DeviceContext) -> Bool {
