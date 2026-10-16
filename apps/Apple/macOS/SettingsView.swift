@@ -11,6 +11,8 @@ struct SettingsView: View {
         TabView {
             hostSettings
                 .tabItem { Label("General", systemImage: "gearshape") }
+            NativeHostSettingsPane(store: model.nativeSettings, connectionEdited: model.connectionEdited)
+                .tabItem { Label("Host settings", systemImage: "slider.horizontal.3") }
             Group {
                 if let store = model.thisMacSettings {
                     ThisMacSettingsView(store: store)
@@ -100,6 +102,146 @@ struct SettingsView: View {
             let physical = selected.resolvingSymlinksInPath().path
             if directory { model.stateDirectory = physical }
             else { model.executable = physical }
+        }
+    }
+}
+
+@MainActor
+private struct NativeHostSettingsPane: View {
+    let store: NativeSettingsStore
+    let connectionEdited: Bool
+
+    var body: some View {
+        Form {
+            Section("Native Host settings: read only") {
+                LabeledContent("Session", value: store.status)
+                HStack {
+                    Button("Open Host settings") { store.open() }
+                        .disabled(!store.canOpen || connectionEdited)
+                    Button("Refresh") { store.refresh() }
+                        .disabled(!store.canRefresh || connectionEdited)
+                    Button("Close session") { store.close() }
+                        .disabled(!store.sessionPresent)
+                }
+                if store.isOpening { ProgressView("Opening the original native session…") }
+                if store.isRefreshing { ProgressView("Reading Host settings…") }
+                if connectionEdited { Text("Apply connection edits with Connect in General before opening Host settings.").foregroundStyle(.secondary) }
+                if let issue = store.issue { Text(issue.errorDescription ?? "Native Host settings are unavailable.").foregroundStyle(.red) }
+                if let information = store.information {
+                    LabeledContent("Host", value: information.hostID.uuidString.lowercased())
+                    LabeledContent("Original session expiry", value: Date(timeIntervalSince1970: Double(information.expiresAt) / 1000).formatted())
+                }
+                if let observedAt = store.observedAt { Text("Last read \(observedAt.formatted())").font(.caption).foregroundStyle(.secondary) }
+                Text("Open creates a temporary session for the applied General connection. Refresh does not renew it. Closing Settings closes the session and leaves the independent Host running.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            if let snapshot = store.snapshot {
+                Section("Last observed Host values") {
+                    LabeledContent("Settings revision", value: String(snapshot.revision))
+                    if store.snapshotIsStale { Text("These values are stale. An explicit refresh requires the original active session.").foregroundStyle(.secondary) }
+                    ForEach(snapshot.entries, id: \.key.rawValue) { entry in
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text(label(entry.key)).font(.headline)
+                            LabeledContent("Saved", value: value(entry.desired))
+                            LabeledContent("Effective", value: value(entry.effective))
+                            LabeledContent("State", value: state(entry.state))
+                            if let reason = entry.unavailableReason { Text(unavailable(reason)).font(.caption).foregroundStyle(.secondary) }
+                        }
+                        .padding(.vertical, 4)
+                    }
+                }
+            }
+            if let registry = store.registry {
+                Section("Host setting descriptions") {
+                    ForEach(registry.descriptors.filter { $0.scope == .host }, id: \.key.rawValue) { descriptor in
+                        DisclosureGroup(label(descriptor.key)) {
+                            LabeledContent("Default", value: value(descriptor.defaultValue))
+                            LabeledContent("Application", value: descriptor.applyBehavior.rawValue.replacingOccurrences(of: "_", with: " "))
+                            if case .optionalDimensions(let choices) = descriptor.constraints {
+                                if let choices { Text("Allowed dimensions: \(choices.map { String($0) }.joined(separator: ", "))") }
+                                else { Text("Embedding model metadata is unavailable.") }
+                            }
+                        }
+                    }
+                }
+            }
+            if !store.cleanup.isEmpty || store.capacityReached {
+                Section("Original session cleanup") {
+                    ForEach(store.cleanup) { cleanup in
+                        VStack(alignment: .leading, spacing: 4) {
+                            if let report = cleanup.report {
+                                Text("Earlier session cleanup reported issues. Its original state is retained.")
+                                ForEach(Array(report.failures.prefix(4).enumerated()), id: \.offset) { _, failure in
+                                    Text(failure.errorDescription ?? "The original drain has an unconfirmed outcome.")
+                                        .font(.caption)
+                                }
+                                if report.failures.count > 4 { Text("\(report.failures.count) total drain issues are retained.").font(.caption) }
+                                if !report.unresolvedOperationIDs.isEmpty { Text("\(report.unresolvedOperationIDs.count) original operations remain unresolved.").font(.caption) }
+                            } else { ProgressView("Closing the original Host session…") }
+                            Text("Original connection: \(cleanup.connectionKey.uuidString.lowercased())").font(.caption).textSelection(.enabled)
+                        }
+                    }
+                    if store.capacityReached { Text("The retained session limit is reached. Existing reports are preserved; a new session cannot be opened.").foregroundStyle(.secondary) }
+                }
+            }
+        }
+        .formStyle(.grouped)
+        .padding(12)
+        .textSelection(.enabled)
+    }
+
+    private func label(_ key: SettingKey) -> String {
+        switch key {
+        case .modelSelection: "Model"
+        case .toolSelection: "Tool selection"
+        case .embeddingsEnabled: "Local embeddings"
+        case .embeddingsDimensions: "Embedding dimensions"
+        case .embeddingsModel: "Embedding model"
+        case .notificationsCompletion: "Completion notifications"
+        case .notificationsAttention: "Attention notifications"
+        case .notificationAuthorization: "Notification authorization"
+        }
+    }
+
+    private func value(_ value: SettingValue?) -> String {
+        guard let value else { return "Not reported" }
+        switch value {
+        case .model(let selection):
+            guard let selection else { return "No model selected" }
+            let endpoint: String
+            switch selection.endpoint {
+            case .official: endpoint = "Official endpoint"
+            case .loopback(let url): endpoint = url
+            }
+            return selection.provider.rawValue + " · " + selection.model + " · " + endpoint
+        case .toolSelection(.local): return "Local discovery"
+        case .toolSelection(.systemOne(let endpoint, let model)): return "System One · " + model + " · " + endpoint
+        case .boolean(let enabled): return enabled ? "Enabled" : "Disabled"
+        case .dimensions(let dimensions): return dimensions.map { String($0) } ?? "Model default"
+        case .embeddingModel(let model): return model ?? "Unavailable"
+        case .notificationAuthorization(let state): return state.rawValue.replacingOccurrences(of: "_", with: " ")
+        }
+    }
+
+    private func state(_ state: SettingState) -> String {
+        switch state {
+        case .effective: "Effective"
+        case .pendingApplication: "Pending application"
+        case .restartRequired: "Restart required"
+        case .unavailable: "Unavailable"
+        }
+    }
+
+    private func unavailable(_ reason: SettingsUnavailableReason) -> String {
+        switch reason {
+        case .hostOffline: "Host is offline."
+        case .providerUnavailable: "The provider is unavailable. A saved model does not verify successful inference."
+        case .embeddingMetadataUnavailable: "Embedding model metadata is unavailable."
+        case .embeddingBoundaryUnavailable: "The local embedding boundary is unavailable; lexical retrieval remains available."
+        case .nativeActionUnavailable: "The native action is unavailable."
+        case .permissionDenied: "Permission was denied."
+        case .expired: "The original authority expired."
         }
     }
 }
