@@ -398,3 +398,495 @@ impl SettingsReceiptAuthority {
         })
     }
 }
+
+pub(crate) struct PairedUpdateOutcome {
+    result: Result<super::super::operations::SettingsOperationInspection, SettingsServiceError>,
+    request: Arc<crate::devices::OwnedCommittedSettingsCommand>,
+}
+
+impl fmt::Debug for PairedUpdateOutcome {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("PairedUpdateOutcome([owned])")
+    }
+}
+
+impl PairedUpdateOutcome {
+    pub(crate) fn into_parts(
+        self,
+    ) -> Result<
+        (
+            Result<super::super::operations::SettingsOperationInspection, SettingsServiceError>,
+            crate::devices::OwnedCommittedSettingsCommand,
+        ),
+        Box<Self>,
+    > {
+        let Self { result, request } = self;
+        match Arc::try_unwrap(request) {
+            Ok(request) => Ok((result, request)),
+            Err(request) => Err(Box::new(Self { result, request })),
+        }
+    }
+}
+
+pub(in crate::host::settings) struct PairedWriteAdmission<'request> {
+    core: &'request ServiceCore,
+    request: &'request crate::devices::OwnedCommittedSettingsCommand,
+    caller: &'request super::super::authority::SettingsCaller,
+    cancellation: tokio_util::sync::CancellationToken,
+}
+
+struct PairedUpdatePreflight {
+    cancellation: tokio_util::sync::CancellationToken,
+    core: Arc<ServiceCore>,
+    request: Arc<crate::devices::OwnedCommittedSettingsCommand>,
+}
+
+struct PairedUpdatePreflightOutcome {
+    result: Result<super::super::authority::SettingsCaller, SettingsServiceError>,
+    request: Arc<crate::devices::OwnedCommittedSettingsCommand>,
+}
+
+impl PairedUpdatePreflight {
+    fn run(self) -> PairedUpdatePreflightOutcome {
+        let result = self
+            .core
+            .paired_update_caller(&self.request, self.cancellation.clone());
+        PairedUpdatePreflightOutcome {
+            result,
+            request: self.request,
+        }
+    }
+}
+
+struct PairedUpdateWork {
+    caller: super::super::authority::SettingsCaller,
+    mutation: Option<tokio::sync::OwnedMutexGuard<()>>,
+    cancellation: tokio_util::sync::CancellationToken,
+    core: Arc<ServiceCore>,
+    request: Arc<crate::devices::OwnedCommittedSettingsCommand>,
+}
+
+impl PairedUpdateWork {
+    fn run(mut self) -> PairedUpdateOutcome {
+        let result = match self.mutation.take() {
+            Some(mutation) => self.core.update_paired_guarded(
+                &self.request,
+                &self.caller,
+                mutation,
+                self.cancellation.clone(),
+            ),
+            None => Err(SettingsServiceError::Poisoned),
+        };
+        PairedUpdateOutcome {
+            result,
+            request: self.request,
+        }
+    }
+}
+
+impl SettingsService {
+    pub(in crate::host) async fn update_paired(
+        &self,
+        request: crate::devices::OwnedCommittedSettingsCommand,
+        cancellation: tokio_util::sync::CancellationToken,
+    ) -> PairedUpdateOutcome {
+        let request = Arc::new(request);
+        if self.invocation.is_some() {
+            return PairedUpdateOutcome {
+                result: Err(SettingsServiceError::OutsideScope),
+                request,
+            };
+        }
+        let work = PairedUpdatePreflight {
+            cancellation: cancellation.clone(),
+            core: Arc::clone(&self.core),
+            request: Arc::clone(&request),
+        };
+        let checked = tokio::task::spawn_blocking(move || work.run()).await;
+        let caller = match checked {
+            Ok(PairedUpdatePreflightOutcome {
+                result: Ok(caller),
+                request: retained,
+            }) => {
+                drop(retained);
+                caller
+            }
+            Ok(PairedUpdatePreflightOutcome {
+                result: Err(error),
+                request: retained,
+            }) => {
+                drop(retained);
+                return PairedUpdateOutcome {
+                    result: Err(error),
+                    request,
+                };
+            }
+            Err(_) => {
+                return PairedUpdateOutcome {
+                    result: Err(SettingsServiceError::Worker),
+                    request,
+                };
+            }
+        };
+        let parent_cancelled = match self.core.authority.paired_update_cancellation(&caller) {
+            Ok(token) => token,
+            Err(error) => {
+                return PairedUpdateOutcome {
+                    result: Err(error),
+                    request,
+                };
+            }
+        };
+        let connection_cancelled = request
+            .committed_source()
+            .authority_source()
+            .connection()
+            .cancellation();
+        let deadline = request.committed_source().original_deadline();
+        let mutation = tokio::select! {
+            biased;
+            _ = self.core.application_stop.cancelled() => {
+                return PairedUpdateOutcome { result: Err(SettingsServiceError::Stopped), request };
+            }
+            _ = cancellation.cancelled() => {
+                return PairedUpdateOutcome { result: Err(SettingsServiceError::Cancelled), request };
+            }
+            _ = parent_cancelled.cancelled() => {
+                return PairedUpdateOutcome { result: Err(SettingsServiceError::Cancelled), request };
+            }
+            _ = connection_cancelled.cancelled() => {
+                return PairedUpdateOutcome { result: Err(SettingsServiceError::Cancelled), request };
+            }
+            _ = tokio::time::sleep_until(deadline.into()) => {
+                return PairedUpdateOutcome { result: Err(SettingsServiceError::Expired), request };
+            }
+            mutation = Arc::clone(&self.core.mutation).lock_owned() => mutation,
+        };
+        let work = PairedUpdateWork {
+            caller,
+            mutation: Some(mutation),
+            cancellation,
+            core: Arc::clone(&self.core),
+            request: Arc::clone(&request),
+        };
+        match tokio::task::spawn_blocking(move || work.run()).await {
+            Ok(outcome) => {
+                drop(request);
+                outcome
+            }
+            Err(_) => PairedUpdateOutcome {
+                result: Err(SettingsServiceError::Worker),
+                request,
+            },
+        }
+    }
+}
+
+impl ServiceCore {
+    fn paired_update_caller(
+        &self,
+        request: &crate::devices::OwnedCommittedSettingsCommand,
+        cancellation: tokio_util::sync::CancellationToken,
+    ) -> Result<super::super::authority::SettingsCaller, SettingsServiceError> {
+        self.check_committed_update(request)?;
+        let committed = request.committed_source();
+        let caller = self.authority.paired_update_caller(&committed)?;
+        let admission = PairedWriteAdmission::new(self, request, &caller, cancellation);
+        let identity = admission.identity()?;
+        let store = self.agent.store();
+        let mut main = store.connection()?;
+        let transaction = main.transaction_with_behavior(TransactionBehavior::Deferred)?;
+        admission.check_unlinked_on(&store, &transaction, &identity)?;
+        transaction.commit()?;
+        self.authority.check_paired_update(&caller)?;
+        Ok(caller)
+    }
+
+    fn check_committed_update(
+        &self,
+        request: &crate::devices::OwnedCommittedSettingsCommand,
+    ) -> Result<(), SettingsServiceError> {
+        let committed = request.committed_source();
+        let authority = committed.receipt_authority();
+        let source = committed.authority_source();
+        if self.application_stop.is_cancelled() {
+            return Err(SettingsServiceError::Stopped);
+        }
+        if !std::ptr::eq(self, Arc::as_ptr(&authority.core))
+            || !source.matches_context(&self.agent, &self.endpoint, &self.mutation)
+            || !Arc::ptr_eq(&authority.host, source.connection().host_identity())
+            || !source.connection().is_live()
+        {
+            return Err(SettingsServiceError::OutsideScope);
+        }
+        let owner = self.authority.paired_receipt_owner(&authority.host)?;
+        let original = committed.original();
+        let crate::storage::settings_originals::RemoteOriginalIdentity::Accepted(identity) =
+            &original.identity
+        else {
+            return Err(SettingsServiceError::OutsideScope);
+        };
+        let intent = source.intent();
+        let expected = RemoteAcceptedIdentity {
+            version: 1,
+            host_id: owner.host_id,
+            owner_principal_id: owner.principal_id,
+            peer_keys: source.verified_peer_keys().clone(),
+            request_id: intent.request_id,
+            remote_parent_id: intent.parent.parent_id,
+            grant_id: intent.parent.generation.grant_id,
+            grant_revision: intent.parent.generation.grant_revision,
+            host_epoch: intent.parent.generation.host_epoch,
+            connection_epoch: intent.parent.generation.connection_epoch,
+            admitted_at: identity.admitted_at,
+            issued_at: intent.issued_at,
+            expires_at: intent.expires_at,
+            command: RemotePublicCommand::Update {
+                expected_settings_revision: intent.update.expected_settings_revision,
+                enabled: intent.update.enabled,
+                dimensions: intent.update.dimensions.clone(),
+            },
+        };
+        let reply = committed.reply_reservation();
+        let floor = committed.receipt_floor();
+        let deadline = floor
+            .1
+            .checked_add(std::time::Duration::from_millis(
+                identity
+                    .expires_at
+                    .get()
+                    .checked_sub(floor.0.get())
+                    .ok_or(SettingsServiceError::Expired)?,
+            ))
+            .ok_or(SettingsServiceError::Expired)?;
+        if *identity != expected
+            || original.key != original.identity.key()
+            || original.link.is_some()
+            || original.close.is_some()
+            || original.terminal.is_some()
+            || reply.reservation_id.is_nil()
+            || reply.local_device_id != identity.host_id
+            || reply.peer_device_id != identity.peer_keys.device_id
+            || reply.created_at != identity.admitted_at
+            || reply.expires_at != identity.expires_at
+            || identity.admitted_at < floor.0
+            || committed.original_deadline() != deadline
+        {
+            return Err(SettingsServiceError::OutsideScope);
+        }
+        Ok(())
+    }
+}
+
+impl<'request> PairedWriteAdmission<'request> {
+    pub(super) fn new(
+        core: &'request ServiceCore,
+        request: &'request crate::devices::OwnedCommittedSettingsCommand,
+        caller: &'request super::super::authority::SettingsCaller,
+        cancellation: tokio_util::sync::CancellationToken,
+    ) -> Self {
+        Self {
+            core,
+            request,
+            caller,
+            cancellation,
+        }
+    }
+
+    pub(super) fn deadline(&self) -> Instant {
+        self.request.committed_source().original_deadline()
+    }
+
+    pub(super) fn check_unlinked(
+        &self,
+        identity: &super::super::operations::OperationIdentity,
+    ) -> Result<(), SettingsServiceError> {
+        let store = self.core.agent.store();
+        let mut main = store.connection()?;
+        let transaction = main.transaction_with_behavior(TransactionBehavior::Deferred)?;
+        self.check_unlinked_on(&store, &transaction, identity)?;
+        transaction.commit()?;
+        self.core.authority.check_paired_update(self.caller)?;
+        Ok(())
+    }
+
+    pub(in crate::host::settings) fn identity(
+        &self,
+    ) -> Result<super::super::operations::OperationIdentity, SettingsServiceError> {
+        use super::super::actions::SettingsActionTarget;
+        use super::super::contract::{
+            SETTINGS_CONTRACT_VERSION, SettingChange, SettingValue, SettingsPatch,
+            SettingsRequestBinding, SettingsScope,
+        };
+        use crate::storage::settings_originals::RemoteDimensionSelection;
+        let original = self.core.authority.paired_update_identity(self.caller)?;
+        let RemotePublicCommand::Update {
+            expected_settings_revision,
+            enabled,
+            dimensions,
+        } = &original.command
+        else {
+            return Err(SettingsServiceError::OutsideScope);
+        };
+        let mut changes = Vec::with_capacity(2);
+        if let Some(value) = enabled {
+            changes.push(SettingChange {
+                key: SettingKey::EmbeddingsEnabled,
+                value: SettingValue::Boolean { value: *value },
+            });
+        }
+        if let Some(value) = dimensions {
+            changes.push(SettingChange {
+                key: SettingKey::EmbeddingsDimensions,
+                value: SettingValue::Dimensions {
+                    value: match value {
+                        RemoteDimensionSelection::BackendDefault => None,
+                        RemoteDimensionSelection::Selected { dimensions } => Some(*dimensions),
+                    },
+                },
+            });
+        }
+        changes.sort_unstable_by_key(|change| change.key);
+        let scope = SettingsScope::Host {
+            host_id: original.host_id,
+        };
+        let target = SettingsActionTarget::Patch(SettingsPatch {
+            contract_version: SETTINGS_CONTRACT_VERSION,
+            request_id: original.request_id,
+            scope: scope.clone(),
+            expected_revision: *expected_settings_revision,
+            changes,
+            confirmation: None,
+        });
+        let identity = super::super::operations::OperationIdentity {
+            version: 2,
+            binding: SettingsRequestBinding {
+                request_id: original.request_id,
+                principal_id: *original.peer_keys.device_id.as_uuid(),
+                client_session_id: original.remote_parent_id,
+                scope,
+                expected_revision: Some(*expected_settings_revision),
+                exact_request_sha256: super::super::operations::request_digest(&target)?,
+                issued_at: original.issued_at,
+                expires_at: original.expires_at,
+            },
+            target,
+            origin: self.core.authority.origin(self.caller),
+        };
+        identity.validate()?;
+        Ok(identity)
+    }
+
+    pub(in crate::host::settings) fn check_unlinked_on(
+        &self,
+        store: &Store,
+        connection: &rusqlite::Connection,
+        identity: &super::super::operations::OperationIdentity,
+    ) -> Result<(), SettingsServiceError> {
+        let original = self.observe_on(store, connection, identity)?;
+        if original.link.is_some() {
+            return Err(SettingsServiceError::Conflict);
+        }
+        Ok(())
+    }
+
+    pub(in crate::host::settings) fn check_linked_on(
+        &self,
+        store: &Store,
+        connection: &rusqlite::Connection,
+        identity: &super::super::operations::OperationIdentity,
+    ) -> Result<(), SettingsServiceError> {
+        let original = self.observe_on(store, connection, identity)?;
+        if original.link
+            != Some(
+                crate::storage::settings_originals::RemoteOriginalLink::Operation {
+                    operation_id: identity.binding.request_id,
+                },
+            )
+        {
+            return Err(SettingsServiceError::Conflict);
+        }
+        Ok(())
+    }
+
+    pub(super) fn check_linked(
+        &self,
+        identity: &super::super::operations::OperationIdentity,
+    ) -> Result<(), SettingsServiceError> {
+        let store = self.core.agent.store();
+        let mut main = store.connection()?;
+        let transaction = main.transaction_with_behavior(TransactionBehavior::Deferred)?;
+        self.check_linked_on(&store, &transaction, identity)?;
+        transaction.commit()?;
+        self.core.authority.check_paired_update(self.caller)?;
+        Ok(())
+    }
+
+    fn observe_on(
+        &self,
+        store: &Store,
+        connection: &rusqlite::Connection,
+        identity: &super::super::operations::OperationIdentity,
+    ) -> Result<crate::storage::settings_originals::RemoteOriginalRecord, SettingsServiceError>
+    {
+        use crate::storage::settings_originals::read_original_on;
+        if self.cancellation.is_cancelled() {
+            return Err(SettingsServiceError::Cancelled);
+        }
+        self.core.check_committed_update(self.request)?;
+        if !self.core.agent.store().shares_connection(store) || *identity != self.identity()? {
+            return Err(SettingsServiceError::OutsideScope);
+        }
+        let committed = self.request.committed_source();
+        self.core
+            .authority
+            .paired_update_matches(self.caller, &committed)?;
+        let source = committed.authority_source();
+        let owner = self
+            .core
+            .authority
+            .paired_receipt_owner(&committed.receipt_authority().host)?;
+        let head =
+            settings_grant_head_on(connection, owner, source.verified_peer_keys().device_id)?
+                .ok_or(SettingsServiceError::OutsideScope)?;
+        let original = read_original_on(connection, committed.original().key)?
+            .ok_or(SettingsServiceError::NotFound)?;
+        let (wall, _) = self.core.authority.check_paired_update(self.caller)?;
+        if original.identity != committed.original().identity
+            || original.close.is_some()
+            || original.terminal.is_some()
+            || head.host_revoked
+            || head.peer_revoked
+            || head.grant.change.peer_keys != *source.verified_peer_keys()
+            || head.grant.revision != source.intent().parent.generation.grant_revision
+            || head.grant.change.target.grant_id != source.intent().parent.generation.grant_id
+            || wall < head.grant.change.target.issued_at
+            || wall >= head.grant.change.target.expires_at
+            || source.intent().expires_at > head.grant.change.target.expires_at
+        {
+            return Err(SettingsServiceError::OutsideScope);
+        }
+        let SettingsGrantState::Active {
+            readable_keys,
+            writable_keys,
+            ..
+        } = &head.grant.change.target.state
+        else {
+            return Err(SettingsServiceError::OutsideScope);
+        };
+        let super::super::actions::SettingsActionTarget::Patch(patch) = &identity.target else {
+            return Err(SettingsServiceError::OutsideScope);
+        };
+        if patch.changes.iter().any(|change| {
+            !readable_keys.contains(&change.key) || !writable_keys.contains(&change.key)
+        }) {
+            return Err(SettingsServiceError::OutsideScope);
+        }
+        self.core.check_committed_update(self.request)?;
+        if self.cancellation.is_cancelled() {
+            return Err(SettingsServiceError::Cancelled);
+        }
+        self.core.authority.check_paired_update(self.caller)?;
+        Ok(original)
+    }
+}

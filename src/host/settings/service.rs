@@ -15,9 +15,11 @@ mod writes;
 
 pub use changes::{SettingsChangeHint, SettingsChangePage, SettingsChangeState};
 pub use devices::NativeDeviceActionResult;
+pub(super) use paired::PairedWriteAdmission;
 #[cfg(unix)]
 pub(crate) use paired::{
-    PairedParentAdmission, PairedSettingsParent, QualifiedSettingsCommand, SettingsReceiptAuthority,
+    PairedParentAdmission, PairedSettingsParent, PairedUpdateOutcome, QualifiedSettingsCommand,
+    SettingsReceiptAuthority,
 };
 pub use pairing::{
     NativePairingAcceptance, NativePairingAccess, NativePairingApprovalInput,
@@ -1212,6 +1214,7 @@ impl ServiceCore {
             CallerSource::LocalOwner { .. } => self.authority.validate_owner_cleanup(caller),
             CallerSource::NativeUi(_) => self.authority.validate(caller, true),
             CallerSource::SettingsAgent { .. } => self.authority.validate(caller, false),
+            CallerSource::PairedSettings { .. } => Err(SettingsServiceError::OutsideScope),
         }
     }
 
@@ -1750,6 +1753,9 @@ impl ServiceCore {
         caller: &SettingsCaller,
         identity: &OperationIdentity,
     ) -> Result<(), SettingsServiceError> {
+        if matches!(caller.source, CallerSource::PairedSettings { .. }) {
+            return Err(SettingsServiceError::OutsideScope);
+        }
         if matches!(
             identity.origin,
             SettingsOperationOrigin::PairedSettings { .. }

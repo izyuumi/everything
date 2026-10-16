@@ -174,3 +174,107 @@ pub(super) fn validate_write_intent(
     }
     Ok(())
 }
+
+impl super::OperationRepository {
+    pub(in crate::host::settings) fn begin_paired_write(
+        &self,
+        identity: OperationIdentity,
+        intent: SettingsWriteIntent,
+        admission: &crate::host::settings::service::PairedWriteAdmission<'_>,
+    ) -> Result<(super::OperationRecord, bool), SettingsServiceError> {
+        use crate::protocol::UnixMillis;
+        use rusqlite::{TransactionBehavior, params};
+        if identity.version != 2
+            || !matches!(
+                identity.origin,
+                SettingsOperationOrigin::PairedSettings { .. }
+            )
+        {
+            return Err(SettingsServiceError::OutsideScope);
+        }
+        identity.validate()?;
+        intent.validate(&identity)?;
+        let encoded = super::encode(&identity, super::MAX_IDENTITY_BYTES)?;
+        let request_id = identity.binding.request_id;
+        let mut main = self.store.connection()?;
+        let transaction = main.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let prepared = (|| {
+            admission.check_unlinked_on(&self.store, &transaction, &identity)?;
+            if super::read(&transaction, request_id)?.is_some() {
+                return Err(SettingsServiceError::Conflict);
+            }
+            if let Some(unresolved) = super::unresolved_write(&transaction)? {
+                return Err(SettingsServiceError::WriteBlocked {
+                    request_id: unresolved.identity.binding.request_id,
+                });
+            }
+            let collision: bool = transaction.query_row(
+                "SELECT EXISTS(SELECT 1 FROM settings_native_requests WHERE request_id=?1)",
+                [request_id.to_string()],
+                |row| row.get(0),
+            )?;
+            if collision {
+                return Err(SettingsServiceError::Conflict);
+            }
+            if super::pending_count(&transaction)? >= super::MAX_PENDING {
+                return Err(SettingsServiceError::Capacity);
+            }
+            super::reserve_capacity(&transaction, true, false, 3, Some(request_id))?;
+            admission.check_unlinked_on(&self.store, &transaction, &identity)?;
+            transaction.execute(
+                "INSERT INTO settings_operations(request_id,identity,created_at,expires_at) VALUES (?1,?2,?3,?4)",
+                params![request_id.to_string(),encoded,identity.binding.issued_at.get() as i64,identity.binding.expires_at.get() as i64],
+            )?;
+            admission.check_linked_on(&self.store, &transaction, &identity)?;
+            let expected_revision = identity
+                .binding
+                .expected_revision
+                .ok_or(SettingsServiceError::CorruptJournal)?;
+            let revision = expected_revision
+                .checked_add(1)
+                .filter(|revision| *revision <= i64::MAX as u64)
+                .ok_or(SettingsServiceError::Conflict)?;
+            let update = UpdateRecord {
+                application: None,
+                write: Some(super::SettingsWriteRecord {
+                    intent,
+                    resolution: None,
+                }),
+                pairing: None,
+                phase: SettingsOperationPhase::Applying {
+                    expected_revision,
+                    revision,
+                },
+                observation: None,
+                updated_at: UnixMillis::now()?,
+            };
+            super::validate_update(&identity, &update)?;
+            let sequence = super::append(&transaction, request_id, &update)?;
+            admission.check_linked_on(&self.store, &transaction, &identity)?;
+            Ok((super::OperationRecord { identity, update }, sequence))
+        })();
+        let (record, sequence) = match prepared {
+            Ok(prepared) => prepared,
+            Err(cause) => {
+                return match transaction.rollback() {
+                    Ok(()) => Err(cause),
+                    Err(rollback) => Err(SettingsServiceError::OutcomeUnknown {
+                        request_id,
+                        cause: Box::new(cause),
+                        repair_error: Some(Box::new(rollback.into())),
+                    }),
+                };
+            }
+        };
+        transaction
+            .commit()
+            .map_err(|cause| SettingsServiceError::OutcomeUnknown {
+                request_id,
+                cause: Box::new(cause.into()),
+                repair_error: None,
+            })?;
+        drop(main);
+        self.notify_sequence(sequence);
+        Ok((record, true))
+    }
+}
