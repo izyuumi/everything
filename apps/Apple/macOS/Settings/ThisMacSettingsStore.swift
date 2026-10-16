@@ -21,6 +21,18 @@ final class ThisMacSettingsStore {
         }
     }
 
+    struct AppearanceDraft: Equatable {
+        let baseline: DeviceAppearanceSnapshot
+        var appearance: DeviceAppearance
+
+        init(snapshot: DeviceAppearanceSnapshot) {
+            baseline = snapshot
+            appearance = snapshot.appearance
+        }
+
+        var isModified: Bool { appearance != baseline.appearance }
+    }
+
     enum NotificationIssue {
         case inactive
         case capacity
@@ -46,11 +58,21 @@ final class ThisMacSettingsStore {
         var result: DeviceNotificationActionResult?
     }
 
+    private struct AppearanceRecord {
+        let patch: DeviceAppearancePatch
+        var result: DevicePreferenceResult?
+    }
+
     private(set) var snapshot: DevicePreferenceSnapshot?
     private(set) var draft: Draft?
     private(set) var pendingPatch: DevicePreferencePatch?
     private(set) var lastPreferenceResult: DevicePreferenceResult?
     private(set) var preferenceError: DevicePreferenceError?
+    private(set) var appearanceSnapshot: DeviceAppearanceSnapshot?
+    private(set) var appearanceDraft: AppearanceDraft?
+    private(set) var pendingAppearancePatch: DeviceAppearancePatch?
+    private(set) var lastAppearanceResult: DevicePreferenceResult?
+    private(set) var appearanceError: DevicePreferenceError?
     private(set) var notificationObservation: DeviceNotificationObservation?
     private(set) var lastNotificationResult: DeviceNotificationActionResult?
     private(set) var notificationIssue: NotificationIssue?
@@ -59,6 +81,8 @@ final class ThisMacSettingsStore {
     private(set) var isRefreshing = false
     private(set) var isSaving = false
     private(set) var isInspecting = false
+    private(set) var isSavingAppearance = false
+    private(set) var isInspectingAppearance = false
     private(set) var isAuthorizing = false
     private(set) var isObservingAuthorization = false
     private(set) var isClosed = false
@@ -71,11 +95,15 @@ final class ThisMacSettingsStore {
     private var surfaceVisible = false
     private var applicationActive = false
     private var snapshotReadFailed = true
+    private var appearanceReadFailed = true
     private var expectedReadback: DevicePreferenceSnapshot?
+    private var expectedAppearanceReadback: DeviceAppearanceSnapshot?
     private var preferenceRecords: [UUID: PreferenceRecord] = [:]
+    private var appearanceRecords: [UUID: AppearanceRecord] = [:]
     private var notificationRecords: [UUID: NotificationRecord] = [:]
     @ObservationIgnored private var openingTask: Task<Void, Never>?
     @ObservationIgnored private var refreshTask: Task<Void, Never>?
+    @ObservationIgnored private var snapshotReadTask: (id: UUID, task: Task<Void, Never>)?
     @ObservationIgnored private var writeTask: Task<Void, Never>?
     @ObservationIgnored private var inspectionTask: Task<Void, Never>?
     @ObservationIgnored private var authorizationTask: Task<Void, Never>?
@@ -98,17 +126,25 @@ final class ThisMacSettingsStore {
     }
 
     var hasDraftChanges: Bool { draft?.isModified == true }
+    var savedAppearance: DeviceAppearance? { appearanceSnapshot?.appearance }
+    var hasAppearanceDraftChanges: Bool { appearanceDraft?.isModified == true }
 
     var hasRevisionConflict: Bool {
-        guard let draft, let snapshot else { return false }
-        return draft.isModified && draft.baseline.revision != snapshot.revision
+        guard let draft else { return false }
+        return draft.isModified && draft.baseline.revision != latestKnownRevision
+    }
+
+    var hasAppearanceRevisionConflict: Bool {
+        guard let appearanceDraft else { return false }
+        return appearanceDraft.isModified && appearanceDraft.baseline.revision != latestKnownRevision
     }
 
     var isSnapshotStale: Bool { snapshotReadFailed || !isForeground }
+    var isAppearanceSnapshotStale: Bool { appearanceReadFailed || !applicationActive }
 
     var canEdit: Bool {
-        isForeground && snapshot != nil && pendingPatch == nil && expectedReadback == nil
-            && !snapshotReadFailed && !isSaving && !isInspecting && !isRefreshing
+        isForeground && snapshot != nil && !hasUnresolvedPreferenceWrite
+            && !snapshotReadFailed && !isOpening && !preferenceOperationPending && !isRefreshing
     }
 
     var canSave: Bool {
@@ -119,14 +155,32 @@ final class ThisMacSettingsStore {
     }
 
     var canReload: Bool {
-        !isClosed && pendingPatch == nil && !isSaving && !isInspecting && !isRefreshing
+        !isClosed && pendingPatch == nil && pendingAppearancePatch == nil
+            && !isOpening && !preferenceOperationPending && !isRefreshing
     }
 
-    var canInspect: Bool { !isClosed && pendingPatch != nil && !isSaving && !isInspecting }
+    var canInspect: Bool { !isClosed && pendingPatch != nil && !preferenceOperationPending }
+
+    var canEditAppearance: Bool {
+        isForeground && appearanceSnapshot != nil && !hasUnresolvedPreferenceWrite
+            && !appearanceReadFailed && !isOpening && !preferenceOperationPending && !isRefreshing
+    }
+
+    var canSaveAppearance: Bool {
+        canEditAppearance && hasAppearanceDraftChanges && !hasAppearanceRevisionConflict
+            && !isAuthorizing && retainedRecordCount < Self.maximumRecords
+            && appearanceDraft.map { $0.baseline.revision < UInt64(Int64.max) } == true
+    }
+
+    var canReloadAppearance: Bool { canReload }
+
+    var canInspectAppearance: Bool {
+        !isClosed && pendingAppearancePatch != nil && !preferenceOperationPending
+    }
 
     var canAuthorize: Bool {
         isForeground && preferences != nil && foregroundSession != nil && snapshot != nil && !snapshotReadFailed
-            && expectedReadback == nil && pendingPatch == nil && !isSaving && !isInspecting
+            && !hasUnresolvedPreferenceWrite && !isOpening && !preferenceOperationPending
             && !isAuthorizing && !isRefreshing && retainedRecordCount < Self.maximumRecords
     }
 
@@ -141,6 +195,18 @@ final class ThisMacSettingsStore {
         switch result.outcome {
         case .applied: return expectedReadback == nil ? "The original save applied on this Mac." : "The original save applied. Refresh its saved values before editing again."
         case .conflict: return "The original save conflicted with newer preferences. Your draft has been kept."
+        }
+    }
+
+    var appearanceStatus: String? {
+        if isSavingAppearance { return "Saving appearance on this Mac…" }
+        if isInspectingAppearance { return "Inspecting the original appearance save…" }
+        if pendingAppearancePatch != nil { return "This appearance save has no confirmed outcome. Inspect the original save before making another change." }
+        if hasAppearanceRevisionConflict { return "Saved preferences changed while you were editing appearance. Reload to review the current value." }
+        guard let result = lastAppearanceResult else { return nil }
+        switch result.outcome {
+        case .applied: return expectedAppearanceReadback == nil ? "The original appearance save applied on this Mac." : "The original appearance save applied. Refresh its saved value before editing again."
+        case .conflict: return "The original appearance save conflicted with newer preferences."
         }
     }
 
@@ -171,10 +237,12 @@ final class ThisMacSettingsStore {
             switch opened {
             case .success(let store):
                 preferences = store
-                await readSnapshot(from: store)
+                await readSnapshots(from: store)
             case .failure(let error):
                 preferenceError = error
+                appearanceError = error
                 snapshotReadFailed = true
+                appearanceReadFailed = true
             }
             isOpening = false
             openingTask = nil
@@ -199,7 +267,7 @@ final class ThisMacSettingsStore {
         if !isForeground { invalidateAuthorizationObservation() }
         updateForegroundSession()
         updateObserver()
-        if active && changed && surfaceVisible { refresh() }
+        if active && changed { refresh() }
     }
 
     func setCompletion(_ value: Bool) {
@@ -210,6 +278,11 @@ final class ThisMacSettingsStore {
     func setAttention(_ value: Bool) {
         guard canEdit else { return }
         draft?.attention = value
+    }
+
+    func setAppearance(_ value: DeviceAppearance) {
+        guard canEditAppearance else { return }
+        appearanceDraft?.appearance = value
     }
 
     func refresh() {
@@ -224,6 +297,12 @@ final class ThisMacSettingsStore {
         guard let preferences else { open(); return }
         startRefresh(preferences, discardDraft: true)
         if isForeground { observeAuthorization() }
+    }
+
+    func reloadAppearance() {
+        guard canReloadAppearance else { return }
+        guard let preferences else { open(); return }
+        startRefresh(preferences, discardDraft: false, discardAppearanceDraft: true)
     }
 
     func save() {
@@ -241,7 +320,7 @@ final class ThisMacSettingsStore {
         writeTask = Task { [self, preferences, patch] in
             do { receive(try await preferences.apply(patch), for: patch) }
             catch { preferenceError = error as? DevicePreferenceError ?? .storage }
-            await readSnapshot(from: preferences)
+            await readSnapshots(from: preferences)
             isSaving = false
             writeTask = nil
         }
@@ -254,8 +333,39 @@ final class ThisMacSettingsStore {
             do {
                 if let result = try await preferences.result(for: patch.requestID) { receive(result, for: patch) }
             } catch { preferenceError = error as? DevicePreferenceError ?? .storage }
-            await readSnapshot(from: preferences)
+            await readSnapshots(from: preferences)
             isInspecting = false
+            inspectionTask = nil
+        }
+    }
+
+    func saveAppearance() {
+        guard canSaveAppearance, let draft = appearanceDraft, let preferences else { return }
+        let patch = DeviceAppearancePatch(requestID: UUID(), deviceID: draft.baseline.deviceID, expectedRevision: draft.baseline.revision, appearance: draft.appearance)
+        do { try patch.validate() }
+        catch { appearanceError = .invalidRequest; return }
+        appearanceRecords[patch.requestID] = AppearanceRecord(patch: patch, result: nil)
+        pendingAppearancePatch = patch
+        isSavingAppearance = true
+        appearanceError = nil
+        writeTask = Task { [self, preferences, patch] in
+            do { receive(try await preferences.applyAppearance(patch), for: patch) }
+            catch { appearanceError = error as? DevicePreferenceError ?? .storage }
+            await readSnapshots(from: preferences)
+            isSavingAppearance = false
+            writeTask = nil
+        }
+    }
+
+    func inspectAppearanceSave() {
+        guard canInspectAppearance, let patch = pendingAppearancePatch, let preferences else { return }
+        isInspectingAppearance = true
+        inspectionTask = Task { [self, preferences, patch] in
+            do {
+                if let result = try await preferences.appearanceResult(for: patch.requestID) { receive(result, for: patch) }
+            } catch { appearanceError = error as? DevicePreferenceError ?? .storage }
+            await readSnapshots(from: preferences)
+            isInspectingAppearance = false
             inspectionTask = nil
         }
     }
@@ -298,7 +408,7 @@ final class ThisMacSettingsStore {
             default: break
             }
             if isForeground { observeAuthorization() }
-            await readSnapshot(from: preferences)
+            await readSnapshots(from: preferences)
             isAuthorizing = false
             authorizationTask = nil
         }
@@ -323,31 +433,83 @@ final class ThisMacSettingsStore {
 
     func drainSurface() async {
         let cancelledObserver = observerTask?.isCancelled == true ? observerTask : nil
-        let tasks = [openingTask, cancelledObserver, refreshTask, writeTask, inspectionTask, authorizationTask, authorizationObservationTask].compactMap { $0 }
+        let tasks = [openingTask, cancelledObserver, refreshTask, snapshotReadTask?.task, writeTask, inspectionTask, authorizationTask, authorizationObservationTask].compactMap { $0 }
         for task in tasks { await task.value }
     }
 
-    private var retainedRecordCount: Int { preferenceRecords.count + notificationRecords.count }
+    private var retainedRecordCount: Int { preferenceRecords.count + appearanceRecords.count + notificationRecords.count }
 
-    private func startRefresh(_ preferences: DevicePreferenceStore, discardDraft: Bool) {
+    private var preferenceOperationPending: Bool {
+        isSaving || isInspecting || isSavingAppearance || isInspectingAppearance
+    }
+
+    private var hasUnresolvedPreferenceWrite: Bool {
+        pendingPatch != nil || pendingAppearancePatch != nil || expectedReadback != nil || expectedAppearanceReadback != nil
+    }
+
+    private var latestKnownRevision: UInt64 {
+        max(max(snapshot?.revision ?? 0, appearanceSnapshot?.revision ?? 0), max(revision(of: lastPreferenceResult), revision(of: lastAppearanceResult)))
+    }
+
+    private func revision(of result: DevicePreferenceResult?) -> UInt64 {
+        guard let result else { return 0 }
+        switch result.outcome {
+        case .applied(let revision): return revision
+        case .conflict(let observedRevision): return observedRevision
+        }
+    }
+
+    private func startRefresh(_ preferences: DevicePreferenceStore, discardDraft: Bool, discardAppearanceDraft: Bool = false) {
         guard refreshTask == nil else { return }
         isRefreshing = true
         refreshTask = Task { [self, preferences] in
-            await readSnapshot(from: preferences, discardDraft: discardDraft)
+            await readSnapshots(from: preferences, discardDraft: discardDraft, discardAppearanceDraft: discardAppearanceDraft)
             isRefreshing = false
             refreshTask = nil
         }
     }
 
-    private func readSnapshot(from preferences: DevicePreferenceStore, discardDraft: Bool = false) async {
-        do { receive(try await preferences.snapshot(), discardDraft: discardDraft) }
+    private func readSnapshots(from preferences: DevicePreferenceStore, discardDraft: Bool = false, discardAppearanceDraft: Bool = false) async {
+        let task: Task<Void, Never>
+        if let reading = snapshotReadTask {
+            task = reading.task
+        } else {
+            let id = UUID()
+            let reading = Task { [self, preferences] in
+                await loadSnapshots(from: preferences)
+                if snapshotReadTask?.id == id { snapshotReadTask = nil }
+            }
+            snapshotReadTask = (id, reading)
+            task = reading
+        }
+        await task.value
+        if discardDraft, !snapshotReadFailed, pendingPatch == nil, expectedReadback == nil, let snapshot {
+            draft = Draft(snapshot: snapshot)
+        }
+        if discardAppearanceDraft, !appearanceReadFailed, pendingAppearancePatch == nil, expectedAppearanceReadback == nil, let appearanceSnapshot {
+            appearanceDraft = AppearanceDraft(snapshot: appearanceSnapshot)
+        }
+    }
+
+    private func loadSnapshots(from preferences: DevicePreferenceStore) async {
+        do { receive(try await preferences.snapshot(), discardDraft: false) }
         catch {
             preferenceError = error as? DevicePreferenceError ?? .storage
             snapshotReadFailed = true
         }
+        do { receive(try await preferences.appearanceSnapshot(), discardDraft: false) }
+        catch {
+            appearanceError = error as? DevicePreferenceError ?? .storage
+            appearanceReadFailed = true
+        }
     }
 
     private func receive(_ incoming: DevicePreferenceSnapshot, discardDraft: Bool) {
+        if let appearanceSnapshot, incoming.deviceID != appearanceSnapshot.deviceID {
+            preferenceError = .wrongDevice
+            snapshotReadFailed = true
+            return
+        }
         if let snapshot {
             guard incoming.deviceID == snapshot.deviceID else { preferenceError = .wrongDevice; snapshotReadFailed = true; return }
             guard incoming.revision >= snapshot.revision else { return }
@@ -366,6 +528,33 @@ final class ThisMacSettingsStore {
         if pendingPatch == nil && (discardDraft || draft == nil || draft?.isModified == false) { draft = Draft(snapshot: incoming) }
         if pendingPatch == nil { preferenceError = nil }
         updateForegroundSession()
+    }
+
+    private func receive(_ incoming: DeviceAppearanceSnapshot, discardDraft: Bool) {
+        if let snapshot, incoming.deviceID != snapshot.deviceID {
+            appearanceError = .wrongDevice
+            appearanceReadFailed = true
+            return
+        }
+        if let appearanceSnapshot {
+            guard incoming.deviceID == appearanceSnapshot.deviceID else { appearanceError = .wrongDevice; appearanceReadFailed = true; return }
+            guard incoming.revision >= appearanceSnapshot.revision else { return }
+            guard incoming.revision != appearanceSnapshot.revision || incoming == appearanceSnapshot else { appearanceError = .storage; appearanceReadFailed = true; return }
+        }
+        if let expectedAppearanceReadback {
+            guard incoming.revision >= expectedAppearanceReadback.revision else { appearanceReadFailed = true; return }
+            if incoming.revision == expectedAppearanceReadback.revision {
+                guard incoming == expectedAppearanceReadback else { appearanceError = .storage; appearanceReadFailed = true; return }
+                appearanceDraft = AppearanceDraft(snapshot: incoming)
+            }
+            self.expectedAppearanceReadback = nil
+        }
+        appearanceSnapshot = incoming
+        appearanceReadFailed = false
+        if pendingAppearancePatch == nil && (discardDraft || appearanceDraft == nil || appearanceDraft?.isModified == false) {
+            appearanceDraft = AppearanceDraft(snapshot: incoming)
+        }
+        if pendingAppearancePatch == nil { appearanceError = nil }
     }
 
     private func receive(_ result: DevicePreferenceResult, for patch: DevicePreferencePatch) {
@@ -393,6 +582,25 @@ final class ThisMacSettingsStore {
         lastPreferenceResult = result
         pendingPatch = nil
         preferenceError = nil
+    }
+
+    private func receive(_ result: DevicePreferenceResult, for patch: DeviceAppearancePatch) {
+        guard result.requestID == patch.requestID, result.deviceID == patch.deviceID,
+              let record = appearanceRecords[patch.requestID], record.patch == patch else {
+            appearanceError = .requestReused
+            return
+        }
+        switch result.outcome {
+        case .applied(let revision):
+            guard revision == patch.expectedRevision + 1, revision <= UInt64(Int64.max) else { appearanceError = .storage; return }
+            expectedAppearanceReadback = DeviceAppearanceSnapshot(deviceID: patch.deviceID, revision: revision, appearance: patch.appearance)
+        case .conflict(let observedRevision):
+            guard observedRevision > 0, observedRevision <= UInt64(Int64.max), observedRevision != patch.expectedRevision else { appearanceError = .storage; return }
+        }
+        appearanceRecords[patch.requestID]?.result = result
+        lastAppearanceResult = result
+        pendingAppearancePatch = nil
+        appearanceError = nil
     }
 
     private func updateForegroundSession() {
@@ -450,7 +658,7 @@ final class ThisMacSettingsStore {
                 do { try await Task.sleep(for: .seconds(2)) }
                 catch { break }
                 guard let self, self.isForeground, let preferences = self.preferences else { break }
-                await self.readSnapshot(from: preferences)
+                await self.readSnapshots(from: preferences)
             }
             guard let self, self.observerID == id else { return }
             self.observerTask = nil
