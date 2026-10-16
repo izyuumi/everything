@@ -49,7 +49,15 @@ impl HostInner {
             let mut progress = false;
             loop {
                 let page = self
-                    .blocking(move |host| Ok(host.inbox.pending_after(cursor, 64)?))
+                    .blocking(move |host| {
+                        let mut limit = 64;
+                        loop {
+                            match host.inbox.pending_after(cursor, limit) {
+                                Err(InboxError::Capacity) if limit > 1 => limit /= 2,
+                                result => break Ok(result?),
+                            }
+                        }
+                    })
                     .await?;
                 if page.is_empty() {
                     break;
