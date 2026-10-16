@@ -576,15 +576,22 @@ impl SettingsAgentSupervisor {
             }
             Some(record) => match record.state {
                 OpenRecordState::Preparing => SettingsOpenState::Unknown { chat_id: None },
-                OpenRecordState::Ready { chat_id } => SettingsOpenState::Ready {
-                    chat: self
-                        .sessions
-                        .get(&chat_id)
-                        .ok_or(HostError::Worker)?
-                        .opened
-                        .clone()
-                        .ok_or(HostError::Worker)?,
-                },
+                OpenRecordState::Ready { chat_id } => {
+                    let entry = self.sessions.get(&chat_id).ok_or(HostError::Worker)?;
+                    if entry.status.phase == SettingsChatPhase::Unknown
+                        || entry.session.profile.is_retired() && !entry.closing
+                    {
+                        SettingsOpenState::Unknown {
+                            chat_id: Some(chat_id),
+                        }
+                    } else if entry.closing {
+                        SettingsOpenState::Closing { chat_id }
+                    } else {
+                        SettingsOpenState::Ready {
+                            chat: entry.opened.clone().ok_or(HostError::Worker)?,
+                        }
+                    }
+                }
                 OpenRecordState::Closing { chat_id } => SettingsOpenState::Closing { chat_id },
                 OpenRecordState::Closed { chat_id } => SettingsOpenState::Closed { chat_id },
                 OpenRecordState::Unavailable => SettingsOpenState::Unavailable,
@@ -637,17 +644,29 @@ impl SettingsAgentSupervisor {
             } else if let Some(child) = self.opening.get(&id).cloned() {
                 self.core.service.close_settings_agent(&child).await?;
                 self.opening.remove(&id);
-                self.opens.get_mut(&id).ok_or(HostError::Worker)?.state = OpenRecordState::Closed {
-                    chat_id: Some(chat_id),
-                };
+                self.opens
+                    .get_mut(&id)
+                    .ok_or(HostError::Worker)?
+                    .set_state(
+                        id,
+                        OpenRecordState::Closed {
+                            chat_id: Some(chat_id),
+                        },
+                    )?;
             }
         }
         if let Some(child) = self.opening.get(&id).cloned() {
             self.core.service.close_settings_agent(&child).await?;
             self.opening.remove(&id);
-            self.opens.get_mut(&id).ok_or(HostError::Worker)?.state = OpenRecordState::Closed {
-                chat_id: session_id,
-            };
+            self.opens
+                .get_mut(&id)
+                .ok_or(HostError::Worker)?
+                .set_state(
+                    id,
+                    OpenRecordState::Closed {
+                        chat_id: session_id,
+                    },
+                )?;
         }
         self.refresh_quiescent();
         self.open_status(parent, id)
@@ -682,30 +701,47 @@ impl SettingsAgentSupervisor {
         if self.draining.load(Ordering::Acquire)
             || self.sessions.len() + self.opening.len() >= MAX_SETTINGS_SESSIONS
         {
-            self.opens.get_mut(&id).ok_or(HostError::Worker)?.state = OpenRecordState::Unavailable;
+            self.opens
+                .get_mut(&id)
+                .ok_or(HostError::Worker)?
+                .set_state(id, OpenRecordState::Unavailable)?;
             return Ok(SettingsAssistantReply::Unavailable);
         }
         self.quiescent.store(false, Ordering::Release);
         let child = match self.core.service.begin_settings_session(caller) {
             Ok(child) => Arc::new(child),
             Err(error) => {
-                self.opens.get_mut(&id).ok_or(HostError::Worker)?.state =
-                    OpenRecordState::Unavailable;
+                self.opens
+                    .get_mut(&id)
+                    .ok_or(HostError::Worker)?
+                    .set_state(id, OpenRecordState::Unavailable)?;
                 self.refresh_quiescent();
                 return Err(error.into());
             }
         };
         self.opening.insert(id, Arc::clone(&child));
         let binding = self.core.service.settings_agent_binding(&child)?;
-        self.opens.get_mut(&id).ok_or(HostError::Worker)?.state = OpenRecordState::Unknown {
-            chat_id: Some(binding.session_id),
-        };
+        self.opens
+            .get_mut(&id)
+            .ok_or(HostError::Worker)?
+            .set_state(
+                id,
+                OpenRecordState::Unknown {
+                    chat_id: Some(binding.session_id),
+                },
+            )?;
         let opened = self.prepare_session(Arc::clone(&child)).await;
         if matches!(opened, Ok(SettingsAssistantReply::Opened { .. })) {
             self.opening.remove(&id);
-            self.opens.get_mut(&id).ok_or(HostError::Worker)?.state = OpenRecordState::Ready {
-                chat_id: binding.session_id,
-            };
+            self.opens
+                .get_mut(&id)
+                .ok_or(HostError::Worker)?
+                .set_state(
+                    id,
+                    OpenRecordState::Ready {
+                        chat_id: binding.session_id,
+                    },
+                )?;
         } else {
             let cleaned = if let Some(session) = self
                 .sessions
@@ -727,14 +763,22 @@ impl SettingsAgentSupervisor {
             }
             self.opening.remove(&id);
             if self.sessions.contains_key(&binding.session_id) {
-                self.opens.get_mut(&id).ok_or(HostError::Worker)?.state =
-                    OpenRecordState::Unknown {
-                        chat_id: Some(binding.session_id),
-                    };
+                self.opens
+                    .get_mut(&id)
+                    .ok_or(HostError::Worker)?
+                    .set_state(
+                        id,
+                        OpenRecordState::Unknown {
+                            chat_id: Some(binding.session_id),
+                        },
+                    )?;
                 self.note_failure();
                 return Err(HostError::Worker);
             }
-            self.opens.get_mut(&id).ok_or(HostError::Worker)?.state = OpenRecordState::Unavailable;
+            self.opens
+                .get_mut(&id)
+                .ok_or(HostError::Worker)?
+                .set_state(id, OpenRecordState::Unavailable)?;
         }
         self.refresh_quiescent();
         opened
@@ -1214,12 +1258,15 @@ impl SettingsAgentSupervisor {
             transfer_presentation(entry);
         }
         let tools_bound = entry.tools_bound;
-        for record in self.opens.values_mut() {
+        for (id, record) in &mut self.opens {
             if matches!(record.state, OpenRecordState::Ready { chat_id } | OpenRecordState::Unknown { chat_id: Some(chat_id) } if chat_id == session.id)
             {
-                record.state = OpenRecordState::Closing {
-                    chat_id: session.id,
-                };
+                record.set_state(
+                    *id,
+                    OpenRecordState::Closing {
+                        chat_id: session.id,
+                    },
+                )?;
             }
         }
         if running {
@@ -1274,12 +1321,15 @@ impl SettingsAgentSupervisor {
         }
         let mut entry = self.sessions.remove(&session.id).ok_or(HostError::Worker)?;
         entry.status = presented_status(&entry)?;
-        for record in self.opens.values_mut() {
+        for (id, record) in &mut self.opens {
             if matches!(record.state, OpenRecordState::Closing { chat_id } if chat_id == session.id)
             {
-                record.state = OpenRecordState::Closed {
-                    chat_id: Some(session.id),
-                };
+                record.set_state(
+                    *id,
+                    OpenRecordState::Closed {
+                        chat_id: Some(session.id),
+                    },
+                )?;
             }
         }
         if entry.status.phase == SettingsChatPhase::Ready {
@@ -1315,7 +1365,7 @@ impl SettingsAgentSupervisor {
                         OpenRecordState::Unknown { chat_id } => chat_id,
                         _ => None,
                     };
-                    record.state = OpenRecordState::Closed { chat_id };
+                    record.set_state(id, OpenRecordState::Closed { chat_id })?;
                 }
             } else {
                 failed = true;
@@ -1654,4 +1704,20 @@ fn interrupt_presentation(session: &Session, turn_id: CommandId) -> Result<(), H
         }
     });
     result
+}
+
+impl OpenRecord {
+    fn set_state(&mut self, id: CommandId, state: OpenRecordState) -> Result<(), HostError> {
+        let updated = Self {
+            native_session_id: self.native_session_id,
+            state,
+        };
+        if serde_json::to_vec(&(id, &updated))?.len() > MAX_OPEN_RECORD_BYTES {
+            return Err(HostError::Invalid(
+                "Settings Open metadata exceeds its bound",
+            ));
+        }
+        self.state = state;
+        Ok(())
+    }
 }
