@@ -124,6 +124,57 @@ fileprivate enum VerifiedReplicaSettingsBody: Sendable, CustomStringConvertible,
     var debugDescription: String { description }
 }
 
+struct ReplicaSettingsAccessDisplaySummary: Sendable, CustomStringConvertible, CustomDebugStringConvertible {
+    let readableKeys: [SettingKey]
+    let writableKeys: [SettingKey]
+    let sessionConsent: RemoteSettingsConsent
+    let configuredSettingsRevision: UInt64?
+
+    fileprivate init(readableKeys: [SettingKey], writableKeys: [SettingKey],
+                     sessionConsent: RemoteSettingsConsent, configuredSettingsRevision: UInt64?) {
+        self.readableKeys = readableKeys
+        self.writableKeys = writableKeys
+        self.sessionConsent = sessionConsent
+        self.configuredSettingsRevision = configuredSettingsRevision
+    }
+
+    var description: String { "ReplicaSettingsAccessDisplaySummary([redacted])" }
+    var debugDescription: String { description }
+}
+
+enum ReplicaSettingsAccessDisplayStatus: Sendable, CustomStringConvertible, CustomDebugStringConvertible {
+    case available(ReplicaSettingsAccessDisplaySummary)
+    case grantUnavailable
+
+    var description: String { "ReplicaSettingsAccessDisplayStatus([redacted])" }
+    var debugDescription: String { description }
+}
+
+struct ReplicaSettingsAccessDisplay: Sendable, CustomStringConvertible, CustomDebugStringConvertible {
+    let status: ReplicaSettingsAccessDisplayStatus
+
+    fileprivate init(status: ReplicaSettingsAccessDisplayStatus) { self.status = status }
+
+    var description: String { "ReplicaSettingsAccessDisplay([redacted])" }
+    var debugDescription: String { description }
+}
+
+final class ReplicaSettingsAccessProjection: Sendable, CustomStringConvertible, CustomDebugStringConvertible {
+    let display: ReplicaSettingsAccessDisplay
+    let grantExpiresAt: UInt64?
+    private let generation: RemoteSettingsGeneration?
+
+    fileprivate init(display: ReplicaSettingsAccessDisplay, grantExpiresAt: UInt64?,
+                     generation: RemoteSettingsGeneration?) {
+        self.display = display
+        self.grantExpiresAt = grantExpiresAt
+        self.generation = generation
+    }
+
+    var description: String { "ReplicaSettingsAccessProjection([redacted])" }
+    var debugDescription: String { description }
+}
+
 final class VerifiedReplicaSettingsReply: Sendable, CustomStringConvertible, CustomDebugStringConvertible {
     private let envelope: EncryptedEnvelope
     private let host: DevicePublicKeys
@@ -164,6 +215,38 @@ final class VerifiedReplicaSettingsReply: Sendable, CustomStringConvertible, Cus
         return CommittedReplicaSettingsReply(verified: self, disposition: fresh ? .fresh : .duplicate)
     }
 
+    fileprivate func projectAccessDisplay(committed: CommittedReplicaSettingsReply,
+                                          qualification: ReplicaSettingsAccessQualification,
+                                          owner: isolated ReplicaService) throws -> ReplicaSettingsAccessProjection {
+        guard committed.matchesVerifiedObject(self) else { throw WireError.identity }
+        try owner.checkSettingsAccessDisplayProjection(qualification, committed: committed)
+        let now = try WireID.now()
+        try envelope.header.validate(now: now)
+        guard envelope.header.expires > envelope.header.created,
+              envelope.header.expires - envelope.header.created <= 60_000 else { throw WireError.invalid }
+        guard case .access(let reply) = body else { throw WireError.invalid }
+        switch reply.body {
+        case .summary(let summary):
+            guard summary.expiresAt > now, envelope.header.expires <= summary.expiresAt else {
+                throw WireError.expired
+            }
+        case .grantUnavailable: break
+        }
+        try qualification.consumeForAccessProjection(for: committed, owner: owner)
+        switch reply.body {
+        case .summary(let summary):
+            let displayed = ReplicaSettingsAccessDisplaySummary(
+                readableKeys: summary.readableKeys, writableKeys: summary.writableKeys,
+                sessionConsent: summary.sessionConsent, configuredSettingsRevision: summary.configuredSettingsRevision
+            )
+            return ReplicaSettingsAccessProjection(display: ReplicaSettingsAccessDisplay(status: .available(displayed)),
+                                                   grantExpiresAt: summary.expiresAt, generation: summary.generation)
+        case .grantUnavailable:
+            return ReplicaSettingsAccessProjection(display: ReplicaSettingsAccessDisplay(status: .grantUnavailable),
+                                                   grantExpiresAt: nil, generation: nil)
+        }
+    }
+
     var description: String { "VerifiedReplicaSettingsReply([redacted])" }
     var debugDescription: String { description }
 }
@@ -181,6 +264,16 @@ final class CommittedReplicaSettingsReply: Sendable, CustomStringConvertible, Cu
 
     func matchesVerifiedPeer(_ host: DevicePublicKeys, localID: UUID) -> Bool {
         verified.matchesVerifiedPeer(host, localID: localID)
+    }
+
+    fileprivate func matchesVerifiedObject(_ candidate: VerifiedReplicaSettingsReply) -> Bool {
+        verified === candidate
+    }
+
+    func projectAccessDisplay(qualifiedBy qualification: ReplicaSettingsAccessQualification,
+                              owner: isolated ReplicaService) throws -> ReplicaSettingsAccessProjection {
+        try qualification.checkCurrent(for: self, owner: owner)
+        return try verified.projectAccessDisplay(committed: self, qualification: qualification, owner: owner)
     }
 
     var description: String { "CommittedReplicaSettingsReply([redacted])" }
