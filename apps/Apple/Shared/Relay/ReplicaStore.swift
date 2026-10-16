@@ -604,7 +604,7 @@ actor ReplicaStore: DurableEnvelopeInbox {
         identity.append(Data(String(through).utf8))
         identity.append(0)
         identity.append(Data(category.rawValue.utf8))
-        return "everything.replica.notification.v1." + SHA256.hash(data: identity).map { String(format: "%02x", $0) }.joined()
+        return SHA256.hash(data: identity).map { String(format: "%02x", $0) }.joined()
     }
 
     func rejectGap(_ messageID: UUID, conversation: UUID, request: EncryptedEnvelope, host: DevicePublicKeys) throws {
