@@ -35,6 +35,8 @@ Original JSON is at most 256 KiB; effective options and terminal results are eac
 
 All APIs are synchronous SQLite operations. Async callers use bounded blocking workers and retain the actual Agent or state lease until those workers finish; this Store-backed repository does not create or retain that lease itself. Effective options are an opaque validated JSON persistence boundary; the host must decode them into the actual captured scheduler policy before application.
 
+Host startup declares its preparation lease guard before fallible Store and Agent construction, so errors and unwinding drop all later Store holders before that guard. Successful preparation returns the guard as its final tuple field; discarding a detached blocking worker's result drops every prepared Store holder before releasing this lease. The awaited guard remains bound through the normal handoff to the actual Agent, owner-preserving broker and local server. Store's validated database descriptor still closes after SQLite. These ordering guarantees have source and formatting inspection only; fresh CI, compilation/static gates and disposable caller-drop/SQLite-lock runtime validation remain pending.
+
 ## Observed validation
 
 The current headless Host union, pending-remote archival guard and adaptive dispatcher page sizing have source and Rust 1.88 formatting inspection only. Fresh compilation, strict Clippy, required CI and new retention/caller-drop runtime observations remain pending. The earlier observations below retain their own source and artifact scope.

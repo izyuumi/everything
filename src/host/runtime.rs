@@ -135,49 +135,58 @@ impl HostService {
         LocalServer::validate_state_path(state_directory.as_ref())?;
         let lease = StateLease::acquire(state_directory).await?;
         let prepared_lease = Arc::clone(&lease);
-        let (agent, settings, devices, registry, authorizer, discovery, task_tools, relay_origin) =
-            tokio::task::spawn_blocking(move || {
-                let database = prepared_lease.validate_database()?;
-                let store = Store::open_validated(
-                    prepared_lease.path().join("everything.sqlite3"),
-                    database,
-                )?;
-                let directory =
-                    cap_std::fs::Dir::from_std_file(prepared_lease.directory.file.try_clone()?);
-                let identity = crate::devices::load_or_create_identity_in(&directory)?;
-                let devices = DeviceEndpoint::new(store.clone(), identity, EndpointRole::Host)?;
-                let settings = SettingsRepository::open(Arc::clone(&prepared_lease))?;
-                let relay_origin = settings.snapshot()?.relay_origin;
-                let agent = Agent::from_leased_store(store.clone(), prepared_lease);
-                let mut registry = ToolRegistry::new();
-                let mut scopes =
-                    BuiltinTools::new(BuiltinConfig::default())?.register_into(&mut registry)?;
-                let task_tools = SchedulerTools::new();
-                scopes.extend(task_tools.register_into(&mut registry)?);
-                let catalog_authorizer = Arc::new(Authorizer::new(
-                    store.clone(),
-                    Arc::new(registry.clone()),
-                    scopes.clone(),
-                )?);
-                let selector = ToolSelector::new(&registry, catalog_authorizer)?;
-                let search = Arc::new(SearchTools::new(selector.clone()));
-                registry.register(search.clone())?;
-                scopes.insert(SEARCH_TOOLS_NAME.into(), ToolScopeRule::LocalReadOnly);
-                let registry = Arc::new(registry);
-                let authorizer = Arc::new(Authorizer::new(store, registry.clone(), scopes)?);
-                Ok::<_, HostError>((
-                    agent,
-                    settings,
-                    devices,
-                    registry,
-                    authorizer,
-                    DiscoveryServices { selector, search },
-                    task_tools,
-                    relay_origin,
-                ))
-            })
-            .await
-            .map_err(|_| HostError::Worker)??;
+        let (
+            agent,
+            settings,
+            devices,
+            registry,
+            authorizer,
+            discovery,
+            task_tools,
+            relay_origin,
+            _preparation_lease,
+        ) = tokio::task::spawn_blocking(move || {
+            let preparation_lease = Arc::clone(&prepared_lease);
+            let database = prepared_lease.validate_database()?;
+            let store =
+                Store::open_validated(prepared_lease.path().join("everything.sqlite3"), database)?;
+            let directory =
+                cap_std::fs::Dir::from_std_file(prepared_lease.directory.file.try_clone()?);
+            let identity = crate::devices::load_or_create_identity_in(&directory)?;
+            let devices = DeviceEndpoint::new(store.clone(), identity, EndpointRole::Host)?;
+            let settings = SettingsRepository::open(Arc::clone(&prepared_lease))?;
+            let relay_origin = settings.snapshot()?.relay_origin;
+            let agent = Agent::from_leased_store(store.clone(), prepared_lease);
+            let mut registry = ToolRegistry::new();
+            let mut scopes =
+                BuiltinTools::new(BuiltinConfig::default())?.register_into(&mut registry)?;
+            let task_tools = SchedulerTools::new();
+            scopes.extend(task_tools.register_into(&mut registry)?);
+            let catalog_authorizer = Arc::new(Authorizer::new(
+                store.clone(),
+                Arc::new(registry.clone()),
+                scopes.clone(),
+            )?);
+            let selector = ToolSelector::new(&registry, catalog_authorizer)?;
+            let search = Arc::new(SearchTools::new(selector.clone()));
+            registry.register(search.clone())?;
+            scopes.insert(SEARCH_TOOLS_NAME.into(), ToolScopeRule::LocalReadOnly);
+            let registry = Arc::new(registry);
+            let authorizer = Arc::new(Authorizer::new(store, registry.clone(), scopes)?);
+            Ok::<_, HostError>((
+                agent,
+                settings,
+                devices,
+                registry,
+                authorizer,
+                DiscoveryServices { selector, search },
+                task_tools,
+                relay_origin,
+                preparation_lease,
+            ))
+        })
+        .await
+        .map_err(|_| HostError::Worker)??;
         let credentials = CredentialVault::from_environment();
         let broker = ToolBroker::start_with_owner(
             agent.store(),
