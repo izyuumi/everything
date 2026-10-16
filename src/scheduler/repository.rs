@@ -1,0 +1,391 @@
+use rusqlite::{OptionalExtension, params};
+use serde::Serialize;
+use serde_json::Value;
+
+use crate::permissions::ExecutionAuthority;
+use crate::protocol::{TaskId, TaskStatus, UnixMillis};
+use crate::storage::{Store, TaskRow, TaskState};
+
+use super::types::*;
+
+const MAX_TASK_BYTES: usize = 786_432;
+const MAX_RETAINED_TASKS: i64 = 4096;
+
+pub(super) fn check_capacity(store: &Store, max_pending: usize) -> Result<(), SchedulerError> {
+    let connection = store.connection()?;
+    let (retained,pending):(i64,i64)=connection.query_row("SELECT count(*),coalesce(sum(state IN ('queued','running','waiting')),0) FROM tasks WHERE json_extract(input,'$.scheduler_version')=1",[],|row|Ok((row.get(0)?,row.get(1)?)))?;
+    if retained >= MAX_RETAINED_TASKS || pending >= max_pending as i64 {
+        return Err(SchedulerError::Capacity("retained or pending tasks"));
+    }
+    Ok(())
+}
+
+pub(super) fn has_running_operations(store: &Store, id: TaskId) -> Result<bool, SchedulerError> {
+    Ok(store.connection()?.query_row(
+        "SELECT EXISTS(SELECT 1 FROM tool_calls WHERE task_id=?1 AND state='running')",
+        [id.to_string()],
+        |row| row.get(0),
+    )?)
+}
+
+pub(super) fn has_unknown_operations(store: &Store, id: TaskId) -> Result<bool, SchedulerError> {
+    Ok(store.connection()?.query_row(
+        "SELECT EXISTS(SELECT 1 FROM tool_calls WHERE task_id=?1 AND state='unknown')",
+        [id.to_string()],
+        |row| row.get(0),
+    )?)
+}
+
+pub(super) fn encode(value: &impl Serialize) -> Result<Value, SchedulerError> {
+    let encoded = serde_json::to_vec(value)?;
+    if encoded.len() > MAX_TASK_BYTES {
+        return Err(SchedulerError::Capacity("task checkpoint bytes"));
+    }
+    Ok(serde_json::from_slice(&encoded)?)
+}
+
+pub(super) fn encode_checkpoint(checkpoint: &TaskCheckpoint) -> Result<Value, SchedulerError> {
+    let encoded = serde_json::to_vec(checkpoint)?;
+    let status_bytes = serde_json::to_vec(&checkpoint.last_output)?
+        .len()
+        .saturating_add(serde_json::to_vec(&checkpoint.diagnostic)?.len())
+        .saturating_add(serde_json::to_vec(&checkpoint.waiting)?.len())
+        .saturating_add(serde_json::to_vec(&checkpoint.task.failure)?.len())
+        .saturating_add(serde_json::to_vec(&checkpoint.task.status)?.len())
+        .saturating_add(serde_json::to_vec(&checkpoint.task.updated_at)?.len());
+    let reserve = if checkpoint.task.status.is_terminal() {
+        0
+    } else {
+        81_920_usize.saturating_sub(status_bytes)
+    };
+    if encoded
+        .len()
+        .checked_add(reserve)
+        .is_none_or(|length| length > MAX_TASK_BYTES)
+    {
+        return Err(SchedulerError::Capacity("task checkpoint bytes"));
+    }
+    Ok(serde_json::from_slice(&encoded)?)
+}
+
+pub(super) fn check_child_depth(store: &Store, id: TaskId) -> Result<(), SchedulerError> {
+    let mut task = load(store, id)?;
+    for _ in 1..16 {
+        let Some(parent) = task.definition.initial.parent_task_id else {
+            return Ok(());
+        };
+        task = load(store, parent)?;
+    }
+    Err(SchedulerError::Capacity("subagent nesting"))
+}
+
+pub(super) fn load(store: &Store, id: TaskId) -> Result<StoredTask, SchedulerError> {
+    let row = store
+        .task(&id.to_string())?
+        .ok_or(SchedulerError::NotFound(id))?;
+    decode(row)
+}
+
+pub(super) fn active_in_conversation(
+    store: &Store,
+    conversation: crate::protocol::ConversationId,
+) -> Result<Option<TaskSnapshot>, SchedulerError> {
+    let connection = store.connection()?;
+    let mut statement=connection.prepare("SELECT id FROM tasks WHERE conversation_id=?1 AND state IN ('queued','running','waiting') ORDER BY id LIMIT 2")?;
+    let ids = statement
+        .query_map([conversation.to_string()], |row| row.get::<_, String>(0))?
+        .collect::<Result<Vec<_>, _>>()?;
+    drop(statement);
+    drop(connection);
+    if ids.len() > 1 {
+        return Err(SchedulerError::Invalid(
+            "multiple active tasks own the conversation",
+        ));
+    }
+    ids.first()
+        .map(|id| load(store, id.parse()?).map(|task| task.snapshot()))
+        .transpose()
+}
+
+fn decode(row: TaskRow) -> Result<StoredTask, SchedulerError> {
+    if row.input.get("scheduler_version").is_none() {
+        return Err(SchedulerError::NotOwned(row.id.parse()?));
+    }
+    let definition: Definition = serde_json::from_value(row.input)?;
+    let checkpoint: TaskCheckpoint = serde_json::from_value(row.checkpoint)?;
+    definition.configuration.validate()?;
+    definition.execution.validate()?;
+    let initial = &definition.initial;
+    let current = &checkpoint.task;
+    if definition.scheduler_version != 1
+        || checkpoint.scheduler_version != 1
+        || initial.id.to_string() != row.id
+        || initial.conversation_id.to_string() != row.conversation_id
+        || initial.parent_task_id.map(|id| id.to_string()) != row.parent_task_id
+        || initial.status != TaskStatus::Queued
+        || current.id != initial.id
+        || current.conversation_id != initial.conversation_id
+        || current.parent_task_id != initial.parent_task_id
+        || current.originating_command_id != initial.originating_command_id
+        || current.instruction != initial.instruction
+        || current.created_at != initial.created_at
+        || timestamp(current.updated_at)? != row.updated_at
+        || timestamp(initial.created_at)? != row.created_at
+        || state(current.status) != row.state
+        || checkpoint.queued.len() > 32
+        || checkpoint.resumes.len() > 32
+        || definition.execution.allowed_tools.is_none()
+    {
+        return Err(SchedulerError::Invalid(
+            "task checkpoint identity or bounds are invalid",
+        ));
+    }
+    Ok(StoredTask {
+        definition,
+        checkpoint,
+        state: row.state,
+    })
+}
+
+pub(super) fn insert(
+    store: &Store,
+    task: &StoredTask,
+    max_pending: usize,
+) -> Result<bool, SchedulerError> {
+    let input = encode(&task.definition)?;
+    let checkpoint = encode_checkpoint(&task.checkpoint)?;
+    let mut connection = store.connection()?;
+    let transaction =
+        connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    let existing: Option<String> = transaction
+        .query_row(
+            "SELECT input FROM tasks WHERE id=?1",
+            [task.definition.initial.id.to_string()],
+            |row| row.get(0),
+        )
+        .optional()?;
+    if let Some(existing) = existing {
+        if serde_json::from_str::<Value>(&existing)? != input {
+            return Err(SchedulerError::Conflict(task.definition.initial.id));
+        }
+        return Ok(false);
+    }
+    let collision:bool=transaction.query_row("SELECT EXISTS(SELECT 1 FROM tasks WHERE conversation_id=?1 AND (state IN ('queued','running','waiting') OR json_extract(input,'$.initial.originating_command_id')=?2))",params![task.definition.initial.conversation_id.to_string(),task.definition.initial.originating_command_id.to_string()],|row|row.get(0))?;
+    if collision {
+        return Err(SchedulerError::Conflict(task.definition.initial.id));
+    }
+    let (retained,pending):(i64,i64)=transaction.query_row("SELECT count(*),coalesce(sum(state IN ('queued','running','waiting')),0) FROM tasks WHERE json_extract(input,'$.scheduler_version')=1",[],|row|Ok((row.get(0)?,row.get(1)?)))?;
+    if retained >= MAX_RETAINED_TASKS || pending >= max_pending as i64 {
+        return Err(SchedulerError::Capacity("retained or pending tasks"));
+    }
+    let initial = &task.definition.initial;
+    transaction.execute("INSERT INTO tasks(id,conversation_id,parent_task_id,state,input,checkpoint,created_at,updated_at) VALUES (?1,?2,?3,'queued',?4,?5,?6,?6)",params![initial.id.to_string(),initial.conversation_id.to_string(),initial.parent_task_id.map(|id|id.to_string()),serde_json::to_string(&input)?,serde_json::to_string(&checkpoint)?,timestamp(initial.created_at)?])?;
+    transaction.commit()?;
+    Ok(true)
+}
+
+pub(super) fn save(
+    store: &Store,
+    task: &mut StoredTask,
+    status: TaskStatus,
+) -> Result<(), SchedulerError> {
+    let now = UnixMillis::now()?;
+    if status != task.checkpoint.task.status {
+        task.checkpoint.task.transition(
+            status,
+            now,
+            if status == TaskStatus::Failed {
+                Some(crate::protocol::TaskFailure {
+                    code: if task.checkpoint.cancel_requested {
+                        "cancelled_outcome_uncertain"
+                    } else {
+                        "native_task_failed"
+                    }
+                    .into(),
+                    message: task
+                        .checkpoint
+                        .diagnostic
+                        .clone()
+                        .unwrap_or_else(|| "Native task failed".into()),
+                    retryable: false,
+                })
+            } else {
+                None
+            },
+        )?;
+    } else {
+        task.checkpoint.task.updated_at = now;
+    }
+    let next = state(status);
+    let payload = encode_checkpoint(&task.checkpoint)?;
+    if task.state == next {
+        store.checkpoint_task(
+            &task.definition.initial.id.to_string(),
+            task.state,
+            &payload,
+            timestamp(now)?,
+        )?;
+    } else {
+        store.transition_task(
+            &task.definition.initial.id.to_string(),
+            task.state,
+            next,
+            &payload,
+            timestamp(now)?,
+        )?;
+    }
+    task.state = next;
+    Ok(())
+}
+
+pub(super) fn state(status: TaskStatus) -> TaskState {
+    match status {
+        TaskStatus::Queued => TaskState::Queued,
+        TaskStatus::Running => TaskState::Running,
+        TaskStatus::AwaitingPermission | TaskStatus::WaitingForChildren => TaskState::Waiting,
+        TaskStatus::Completed => TaskState::Completed,
+        TaskStatus::Failed => TaskState::Failed,
+        TaskStatus::Cancelled => TaskState::Cancelled,
+    }
+}
+
+pub(super) fn unfinished(store: &Store, maximum: usize) -> Result<Vec<StoredTask>, SchedulerError> {
+    let connection = store.connection()?;
+    let mut statement=connection.prepare("SELECT id FROM tasks WHERE json_extract(input,'$.scheduler_version')=1 AND state IN ('queued','running','waiting') ORDER BY created_at,id LIMIT ?1")?;
+    let ids = statement
+        .query_map([maximum as i64 + 1], |row| row.get::<_, String>(0))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(crate::storage::StorageError::from)?;
+    drop(statement);
+    drop(connection);
+    if ids.len() > maximum {
+        return Err(SchedulerError::Capacity("recovered pending tasks"));
+    }
+    ids.into_iter().map(|id| load(store, id.parse()?)).collect()
+}
+
+pub(super) fn descendants(
+    store: &Store,
+    parent: TaskId,
+    maximum: usize,
+) -> Result<Vec<TaskId>, SchedulerError> {
+    let connection = store.connection()?;
+    let mut statement=connection.prepare("WITH RECURSIVE children(id) AS (SELECT id FROM tasks WHERE parent_task_id=?1 UNION SELECT tasks.id FROM tasks JOIN children ON tasks.parent_task_id=children.id) SELECT id FROM children LIMIT ?2")?;
+    let ids = statement
+        .query_map(params![parent.to_string(), maximum as i64 + 1], |row| {
+            row.get::<_, String>(0)
+        })?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(crate::storage::StorageError::from)?;
+    if ids.len() > maximum {
+        return Err(SchedulerError::Capacity("descendant task count"));
+    }
+    ids.into_iter()
+        .map(|id| id.parse().map_err(SchedulerError::from))
+        .collect()
+}
+
+pub(super) fn authorize_target(
+    store: &Store,
+    caller: TaskId,
+    target: TaskId,
+    allow_self: bool,
+) -> Result<(), SchedulerError> {
+    if caller == target {
+        return if allow_self {
+            Ok(())
+        } else {
+            Err(SchedulerError::OutsideScope)
+        };
+    }
+    let mut current = load(store, target)?;
+    for _ in 0..16 {
+        match current.definition.initial.parent_task_id {
+            Some(parent) if parent == caller => return Ok(()),
+            Some(parent) => current = load(store, parent)?,
+            None => break,
+        }
+    }
+    Err(SchedulerError::OutsideScope)
+}
+
+pub(super) fn authority(store: &Store, id: TaskId) -> Result<ExecutionAuthority, SchedulerError> {
+    let mut chain = vec![load(store, id)?];
+    while let Some(parent) = chain
+        .last()
+        .and_then(|task| task.definition.initial.parent_task_id)
+    {
+        if chain.len() >= 16 {
+            return Err(SchedulerError::Capacity("subagent nesting"));
+        }
+        if chain
+            .iter()
+            .any(|task| task.definition.initial.id == parent)
+        {
+            return Err(SchedulerError::Invalid("cyclic task ancestry"));
+        }
+        chain.push(load(store, parent)?);
+    }
+    chain.reverse();
+    let root = chain.first().ok_or(SchedulerError::NotFound(id))?;
+    let mut authority = root.definition.execution.authority(
+        root.definition.initial.conversation_id,
+        root.definition.initial.id,
+    )?;
+    for child in chain.iter().skip(1) {
+        let policy = &child.definition.execution;
+        super::workspace::validate(
+            &policy.workspace_root,
+            child
+                .definition
+                .initial
+                .parent_task_id
+                .ok_or(SchedulerError::Invalid("child parent is missing"))?,
+            child.definition.initial.id,
+        )?;
+        authority = authority
+            .child_in_workspace(
+                child.definition.initial.conversation_id.to_string(),
+                child.definition.initial.id.to_string(),
+                policy.workspace_root.clone(),
+                policy.mode,
+            )?
+            .restrict_tools(
+                policy
+                    .allowed_tools
+                    .clone()
+                    .ok_or(SchedulerError::Invalid("child policy was not captured"))?,
+            )?;
+    }
+    Ok(authority)
+}
+
+pub(super) fn command_exists(
+    store: &Store,
+    id: crate::protocol::CommandId,
+) -> Result<bool, SchedulerError> {
+    let connection = store.connection()?;
+    Ok(connection
+        .query_row(
+            "SELECT 1 FROM commands WHERE id=?1",
+            [id.to_string()],
+            |row| row.get::<_, i64>(0),
+        )
+        .optional()?
+        .is_some())
+}
+
+pub(super) fn cancelled_ancestor(store: &Store, id: TaskId) -> Result<bool, SchedulerError> {
+    let mut task = load(store, id)?;
+    for _ in 0..16 {
+        if task.checkpoint.cancel_requested || task.checkpoint.task.status == TaskStatus::Cancelled
+        {
+            return Ok(true);
+        }
+        let Some(parent) = task.definition.initial.parent_task_id else {
+            return Ok(false);
+        };
+        task = load(store, parent)?;
+    }
+    Err(SchedulerError::Capacity("task ancestry"))
+}

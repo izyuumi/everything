@@ -176,13 +176,57 @@ fn relative_path(name: &str, value: &str, allow_root: bool) -> Result<PathBuf, T
         || path
             .components()
             .any(|part| !matches!(part, Component::Normal(_)))
+        || path
+            .components()
+            .any(|part| matches!(part,Component::Normal(name) if reserved(name)))
     {
         return Err(no_effect(
             name,
-            "path requires normal workspace-relative components, at most 1024 bytes, without controls or backslashes",
+            "path requires normal workspace-relative components, at most 1024 bytes, without controls, backslashes, or reserved runtime metadata",
         ));
     }
     Ok(path.to_owned())
+}
+
+fn reserved(name: &std::ffi::OsStr) -> bool {
+    name.to_str().is_some_and(|name| {
+        name.eq_ignore_ascii_case(".everything-agents")
+            || name.eq_ignore_ascii_case(".everything-workspace.json")
+    })
+}
+
+fn same_entry(left: &Metadata, right: &Metadata) -> bool {
+    left.dev() == right.dev() && left.ino() == right.ino()
+}
+
+fn reserved_identity(directory: &Dir, name: &str, metadata: &Metadata) -> io::Result<bool> {
+    match directory.symlink_metadata(name) {
+        Ok(reserved) => Ok(same_entry(&reserved, metadata)),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error),
+    }
+}
+
+fn open_workspace_directory(directory: &Dir, path: &Path) -> io::Result<Dir> {
+    let child = open_directory(directory, path)?;
+    if reserved_identity(directory, ".everything-agents", &child.dir_metadata()?)? {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "reserved runtime directory",
+        ));
+    }
+    Ok(child)
+}
+
+fn ordinary_file(directory: &Dir, metadata: &Metadata) -> io::Result<()> {
+    regular(metadata)?;
+    if reserved_identity(directory, ".everything-workspace.json", metadata)? {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "reserved runtime metadata",
+        ));
+    }
+    Ok(())
 }
 
 fn open_root(root: &Path) -> io::Result<Dir> {
@@ -218,7 +262,7 @@ fn parent(directory: &Dir, path: &Path) -> io::Result<(Dir, std::ffi::OsString)>
         .to_owned();
     if let Some(path) = path.parent() {
         for part in path.components() {
-            current = open_directory(&current, Path::new(part.as_os_str()))?;
+            current = open_workspace_directory(&current, Path::new(part.as_os_str()))?;
         }
     }
     Ok((current, filename))
@@ -255,7 +299,8 @@ fn open_regular(
     directory: &Dir,
     filename: &std::ffi::OsStr,
 ) -> Result<cap_std::fs::File, OpenFailure> {
-    regular(
+    ordinary_file(
+        directory,
         &directory
             .symlink_metadata(filename)
             .map_err(OpenFailure::Before)?,
@@ -268,7 +313,8 @@ fn open_regular(
     let file = directory
         .open_with(filename, &options)
         .map_err(OpenFailure::Before)?;
-    regular(&file.metadata().map_err(OpenFailure::After)?).map_err(OpenFailure::After)?;
+    ordinary_file(directory, &file.metadata().map_err(OpenFailure::After)?)
+        .map_err(OpenFailure::After)?;
     Ok(file)
 }
 
@@ -328,9 +374,8 @@ fn write_file(
     let (directory, filename) =
         parent(directory, &path).map_err(|error| no_effect(name, redactor.error(error)))?;
     match directory.symlink_metadata(&filename) {
-        Ok(metadata) => {
-            regular(&metadata).map_err(|error| no_effect(name, redactor.error(error)))?
-        }
+        Ok(metadata) => ordinary_file(&directory, &metadata)
+            .map_err(|error| no_effect(name, redactor.error(error)))?,
         Err(error) if error.kind() == io::ErrorKind::NotFound => {}
         Err(error) => return Err(no_effect(name, redactor.error(error))),
     }
@@ -416,7 +461,7 @@ fn search_files(
         .try_clone()
         .map_err(|error| no_effect(name, redactor.error(error)))?;
     for part in path.components() {
-        root = open_directory(&root, Path::new(part.as_os_str()))
+        root = open_workspace_directory(&root, Path::new(part.as_os_str()))
             .map_err(|error| no_effect(name, redactor.error(error)))?;
     }
     let mut state = SearchState {
@@ -502,7 +547,12 @@ impl SearchState<'_> {
                 break;
             }
             match entry {
-                Ok(entry) => names.push(entry.file_name()),
+                Ok(entry) => {
+                    let name = entry.file_name();
+                    if !reserved(&name) {
+                        names.push(name);
+                    }
+                }
                 Err(error) => self.warning(error),
             }
             if self.stopped()? {
@@ -531,7 +581,7 @@ impl SearchState<'_> {
                 }
             };
             if metadata.is_dir() {
-                match open_directory(directory, Path::new(&name)) {
+                match open_workspace_directory(directory, Path::new(&name)) {
                     Ok(child) => self.visit(&child, &path, depth + 1)?,
                     Err(error) => self.warning(error),
                 }

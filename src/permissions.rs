@@ -121,6 +121,55 @@ impl ExecutionAuthority {
         })
     }
 
+    pub fn child_in_workspace(
+        &self,
+        conversation_id: impl Into<String>,
+        task_id: impl Into<String>,
+        workspace_root: PathBuf,
+        mode: ExecutionMode,
+    ) -> Result<Self, PermissionError> {
+        let conversation_id = conversation_id.into();
+        let task_id = task_id.into();
+        validate_identifier(&conversation_id)?;
+        validate_identifier(&task_id)?;
+        if mode > self.mode || task_id == self.task_id || conversation_id == self.conversation_id {
+            return Err(PermissionError::InvalidAuthority(
+                "child workspace authority requires distinct task and conversation IDs and cannot increase execution mode"
+                    .into(),
+            ));
+        }
+        if !workspace_root.is_absolute() {
+            return Err(PermissionError::InvalidAuthority(
+                "child workspace must be absolute".into(),
+            ));
+        }
+        let workspace_root = workspace_root.canonicalize().map_err(|error| {
+            PermissionError::InvalidAuthority(format!(
+                "child workspace cannot be resolved: {error}"
+            ))
+        })?;
+        if !workspace_root.is_dir() || workspace_root.to_str().is_none() {
+            return Err(PermissionError::InvalidAuthority(
+                "child workspace must be a UTF-8 directory".into(),
+            ));
+        }
+        if workspace_root == self.workspace_root
+            || !workspace_root.starts_with(&self.workspace_root)
+        {
+            return Err(PermissionError::InvalidAuthority(
+                "child workspace must be a strict physical descendant of the parent workspace"
+                    .into(),
+            ));
+        }
+        Ok(Self {
+            conversation_id,
+            task_id,
+            workspace_root,
+            mode,
+            allowed_tools: self.allowed_tools.clone(),
+        })
+    }
+
     pub fn restrict_tools(
         mut self,
         allowed_tools: BTreeSet<String>,
@@ -173,6 +222,7 @@ impl ExecutionAuthority {
 #[derive(Debug, Clone)]
 pub enum ToolScopeRule {
     LocalReadOnly,
+    RuntimeTask,
     Filesystem { path_pointers: Vec<String> },
     Host { service: String },
 }
@@ -307,6 +357,9 @@ impl Authorizer {
                 reason: "tool has no trusted host scope registration".into(),
             });
         };
+        if matches!(rule, ToolScopeRule::RuntimeTask) {
+            return Ok(ToolVisibility::Available);
+        }
         let privileged = descriptor.capabilities.iter().any(|capability| {
             matches!(
                 capability,
@@ -629,6 +682,9 @@ fn evaluate_mode(
     rule: &ToolScopeRule,
     scope: &AuthorizationScope,
 ) -> ModeDecision {
+    if matches!(rule, ToolScopeRule::RuntimeTask) {
+        return ModeDecision::Allow;
+    }
     let privileged = descriptor.capabilities.iter().any(|capability| {
         matches!(
             capability,
@@ -687,6 +743,13 @@ fn validate_rule(descriptor: &ToolDescriptor, rule: &ToolScopeRule) -> Result<()
                 ));
             }
         }
+        ToolScopeRule::RuntimeTask => {
+            if !descriptor.capabilities.is_empty() {
+                return Err(invalid(
+                    "native task controls must declare no external capabilities",
+                ));
+            }
+        }
         ToolScopeRule::Filesystem { path_pointers } => {
             if descriptor.capabilities.is_empty()
                 || descriptor.capabilities.iter().any(|capability| {
@@ -732,6 +795,7 @@ fn derive_scope(
     let mut targets = Vec::new();
     match rule {
         ToolScopeRule::LocalReadOnly => {}
+        ToolScopeRule::RuntimeTask => targets.push("native_tasks".into()),
         ToolScopeRule::Host { service } => targets.push(service.clone()),
         ToolScopeRule::Filesystem { path_pointers } => {
             for pointer in path_pointers {
