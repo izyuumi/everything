@@ -3,7 +3,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use serde::de::Visitor;
-use serde::{Deserialize, Deserializer};
+use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 use thiserror::Error;
 use tokio::sync::Mutex;
@@ -36,7 +36,7 @@ pub(crate) struct SettingsUpdateIntent {
     pub(crate) dimensions: Option<RemoteDimensionSelection>,
 }
 
-#[derive(Clone, PartialEq, Eq, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct SettingsParentReference {
     #[serde(deserialize_with = "canonical_uuid")]
