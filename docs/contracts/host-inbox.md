@@ -23,7 +23,7 @@ Remote admission and application recheck local endpoint revocation, active pinne
 
 `CommandAccepted` IPC is valid after the reservation transaction commits. Client disconnect after that point does not cancel admitted work. Recovery reapplies only idempotent Agent acceptance and enqueue operations; it must not start another native run directly. `AppliedReceipt` maps to actual conversation, task, message, and operation IDs. Original client user message identity remains in the envelope; the existing Agent text acceptance API creates the accepted host message ID and timestamp, which the receipt identifies explicitly.
 
-`mark_applied` and terminal `finish` compare immutable receipts/results on replay. Terminal result digests survive archival. After seven days, archival may remove original input, options, receipt, and result while preserving command identity, origin, acceptance time, and digests. There is no command ID reuse through archival.
+`mark_applied` and terminal `finish` compare immutable receipts/results on replay. Terminal result digests survive archival. After seven days, archival may remove original input, options, receipt, and result while preserving command identity, origin, acceptance time, and digests. It retains those payloads while a matching paired-device command remains pending, so the Host can recover and enqueue its encrypted reply before archival. There is no command ID reuse through archival.
 
 On a new admission's capacity failure, the host compacts eligible terminal payloads and retries that same reservation once under its mutation gate. Exact replay lookup happens first, and the retry retains the original captured effective options and acceptance timestamp. The failed reservation has released its SQLite transaction before compaction begins. This bounded pressure-triggered scan has no background timer. Pending inputs, recent terminal payloads and terminal replies still needed by a pending remote command are preserved. Compaction releases the logical retained-JSON allowance; SQLite can retain freed pages for reuse. It does not delete conversation events, native state or retained command identities; the pending-command and 100,000-identity limits can still reject admission.
 
@@ -33,7 +33,7 @@ Original JSON is at most 256 KiB; effective options and terminal results are eac
 
 `pending_after(cursor, limit)` returns 1–256 records ordered by immutable `(accepted_at, command_id)`. `PendingCursor` supports draining past blocked commands instead of repeatedly selecting the same oldest prefix. One returned page is additionally bounded to 16 MiB. Register a host wake listener before scanning; startup must scan durable pending records. Notifications are hints and are not a substitute for SQLite state.
 
-All APIs are synchronous SQLite operations. Async callers use bounded blocking workers and retain state ownership until those workers finish. Effective options are an opaque validated JSON persistence boundary; the host must decode them into the actual captured scheduler policy before application.
+All APIs are synchronous SQLite operations. Async callers use bounded blocking workers and retain the actual Agent or state lease until those workers finish; this Store-backed repository does not create or retain that lease itself. Effective options are an opaque validated JSON persistence boundary; the host must decode them into the actual captured scheduler policy before application.
 
 ## Observed validation
 

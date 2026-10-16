@@ -1168,8 +1168,10 @@ async fn run_tool_chat(
     } else {
         ProviderResume::OnlyUnstarted
     };
+    let preparation_owner = agent.clone();
     let (registry, authorizer, search, authority, initial, limits, budget) =
         tokio::task::spawn_blocking(move || {
+            let _retained_agent = preparation_owner;
             let workspace = match &active {
                 Some(run) => run.workspace_root.clone(),
                 None => options.workspace.unwrap_or(std::env::current_dir()?),
@@ -1270,7 +1272,7 @@ async fn run_tool_chat(
         })
         .await
         .map_err(|_| CliError::Worker)??;
-    let broker = ToolBroker::start(
+    let broker = ToolBroker::start_with_owner(
         store,
         registry.clone(),
         authorizer,
@@ -1281,6 +1283,7 @@ async fn run_tool_chat(
             execution_timeout: std::time::Duration::from_secs(120),
             cancellation_grace: std::time::Duration::from_secs(5),
         },
+        agent.clone(),
     )
     .await?;
     if broker.is_quarantined() {

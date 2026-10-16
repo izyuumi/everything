@@ -213,16 +213,14 @@ impl InputInbox {
             .pending
             .iter()
             .find(|queued| queued.sequence == event.sequence.get())
-        {
-            if event.conversation_id != queued.command.conversation_id
+            && (event.conversation_id != queued.command.conversation_id
                 || event.causation_id != Some(queued.command.delivery_id)
                 || event.occurred_at != queued.command.accepted_at
-                || event.payload != queued.command.payload()
-            {
-                return Err(AgentError::InvalidData(
-                    "queued task input differs from its durable event",
-                ));
-            }
+                || event.payload != queued.command.payload())
+        {
+            return Err(AgentError::InvalidData(
+                "queued task input differs from its durable event",
+            ));
         }
         Ok(())
     }
@@ -407,9 +405,10 @@ impl Agent {
         let write = self.write_gate(command.conversation_id)?.lock_owned().await;
         let owner = self.clone();
         blocking(move || {
+            let retained_agent = owner;
             let _write = write;
             command.validate()?;
-            if let Some(original) = owner
+            if let Some(original) = retained_agent
                 .store
                 .command_request(&command.delivery_id.to_string())?
             {
@@ -434,7 +433,7 @@ impl Agent {
                     duplicate: true,
                 });
             }
-            let conversation = load_conversation(&owner.store, command.conversation_id)?;
+            let conversation = load_conversation(&retained_agent.store, command.conversation_id)?;
             if conversation.info.pending_command_id != Some(command.active_command_id) {
                 return Err(AgentError::NoPendingTurn);
             }
@@ -442,7 +441,10 @@ impl Agent {
                 if conversation.checkpoint.continuation.is_some() {
                     return Err(AgentError::LegacyContinuation);
                 }
-                let active = owner.execution.lock().map_err(|_| AgentError::Worker)?;
+                let active = retained_agent
+                    .execution
+                    .lock()
+                    .map_err(|_| AgentError::Worker)?;
                 if active
                     .get(&command.conversation_id)
                     .and_then(Weak::upgrade)
@@ -461,7 +463,7 @@ impl Agent {
             {
                 return Err(AgentError::ConfigurationMismatch);
             }
-            let task = owner
+            let task = retained_agent
                 .store
                 .task(&command.task_id.to_string())?
                 .ok_or(AgentError::InvalidData("input task does not exist"))?;
@@ -488,7 +490,7 @@ impl Agent {
                 command.accepted_at,
                 command.payload(),
             )?;
-            owner.store.append_with_state(
+            retained_agent.store.append_with_state(
                 &AppendRequest {
                     conversation_id: command.conversation_id.to_string(),
                     command_id: command.delivery_id.to_string(),

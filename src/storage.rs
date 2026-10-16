@@ -71,6 +71,7 @@ pub type StorageResult<T> = Result<T, StorageError>;
 #[derive(Clone)]
 pub struct Store {
     connection: Arc<Mutex<Connection>>,
+    _database_file: Option<Arc<std::fs::File>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -298,6 +299,16 @@ impl Store {
         Self::from_connection(Connection::open(path)?)
     }
 
+    #[cfg(unix)]
+    pub(crate) fn open_validated(
+        path: impl AsRef<Path>,
+        database_file: std::fs::File,
+    ) -> StorageResult<Self> {
+        let mut store = Self::open(path)?;
+        store._database_file = Some(Arc::new(database_file));
+        Ok(store)
+    }
+
     pub fn open_in_memory() -> StorageResult<Self> {
         Self::from_connection(Connection::open_in_memory()?)
     }
@@ -345,6 +356,7 @@ impl Store {
         transaction.commit()?;
         Ok(Self {
             connection: Arc::new(Mutex::new(connection)),
+            _database_file: None,
         })
     }
 

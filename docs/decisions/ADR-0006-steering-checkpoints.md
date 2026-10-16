@@ -1,6 +1,6 @@
 # ADR-0006: Native steering checkpoints and explicit child waits
 
-Status: accepted for the Agent delivery primitive; scheduler composition follows its reviewed integration.
+Status: accepted for the Agent delivery primitive and Scheduler composition; production Host wiring remains separate work.
 
 ## Context
 
