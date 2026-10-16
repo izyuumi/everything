@@ -1329,10 +1329,11 @@ impl Store {
         })();
         let committed = match result {
             Ok(committed) => committed,
-            Err(cause) => return Err(rollback_access_receipt(transaction, cause)),
+            Err(cause) => return Err(rollback_access_receipt(self, transaction, cause)),
         };
         if let Err(error) = transaction.execute_batch("COMMIT") {
             return Err(rollback_access_receipt(
+                self,
                 transaction,
                 SettingsAccessAdmissionError::Commit(StorageError::from(error)),
             ));
@@ -1344,16 +1345,20 @@ impl Store {
 
 #[cfg(unix)]
 fn rollback_access_receipt(
+    store: &Store,
     mut transaction: rusqlite::Transaction<'_>,
     cause: super::settings_transport::SettingsAccessAdmissionError,
 ) -> super::settings_transport::SettingsAccessAdmissionError {
     transaction.set_drop_behavior(rusqlite::DropBehavior::Ignore);
     match transaction.rollback() {
         Ok(()) => cause,
-        Err(error) => super::settings_transport::SettingsAccessAdmissionError::Rollback {
-            cause: Box::new(cause),
-            rollback: StorageError::from(error),
-        },
+        Err(error) => {
+            store.quarantine_connection();
+            super::settings_transport::SettingsAccessAdmissionError::Rollback {
+                cause: Box::new(cause),
+                rollback: StorageError::from(error),
+            }
+        }
     }
 }
 
