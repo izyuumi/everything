@@ -110,19 +110,7 @@ impl super::SettingsService {
         operation_id: crate::protocol::CommandId,
         cancellation: tokio_util::sync::CancellationToken,
     ) -> Result<super::super::SettingsOperationInspection, SettingsServiceError> {
-        let cleanup = match caller.source {
-            super::super::authority::CallerSource::NativeUi(_) => true,
-            super::super::authority::CallerSource::LocalOwner { .. } => false,
-            super::super::authority::CallerSource::SettingsAgent { .. } => {
-                return Err(SettingsServiceError::OutsideScope);
-            }
-        };
-        self.core.authority.validate(&caller, cleanup)?;
-        if !cleanup {
-            self.core
-                .authority
-                .require_tool(&caller, super::super::contract::SettingsToolName::Get)?;
-        }
+        self.core.check_file_reconciliation_caller(&caller)?;
         let mutation = tokio::select! {
             biased;
             _=cancellation.cancelled()=>return Err(SettingsServiceError::Cancelled),
@@ -130,7 +118,7 @@ impl super::SettingsService {
         };
         self.blocking(move |core| {
             let _mutation = mutation;
-            core.authority.validate(&caller, cleanup)?;
+            core.check_file_reconciliation_caller(&caller)?;
             if cancellation.is_cancelled() {
                 return Err(SettingsServiceError::Cancelled);
             }
@@ -142,14 +130,14 @@ impl super::SettingsService {
                     core.restore_file_admission(operation_id)?;
                 }
                 core.release_file_resources(&record.identity, &write.intent)?;
-                core.authority.validate(&caller, cleanup)?;
+                core.check_file_reconciliation_caller(&caller)?;
                 return Ok(record.inspection());
             }
             core.repository
                 .unresolved_write()?
                 .ok_or(SettingsServiceError::CorruptJournal)?;
             let inspection = core.reconcile_file(&record.identity, &write.intent)?;
-            core.authority.validate(&caller, cleanup)?;
+            core.check_file_reconciliation_caller(&caller)?;
             Ok(inspection)
         })
         .await
@@ -157,6 +145,23 @@ impl super::SettingsService {
 }
 
 impl super::ServiceCore {
+    fn check_file_reconciliation_caller(
+        &self,
+        caller: &super::SettingsCaller,
+    ) -> Result<(), SettingsServiceError> {
+        match caller.source {
+            super::super::authority::CallerSource::LocalOwner { .. } => {
+                self.authority.validate_owner_cleanup(caller)
+            }
+            super::super::authority::CallerSource::NativeUi(_) => {
+                self.authority.validate(caller, true)
+            }
+            super::super::authority::CallerSource::SettingsAgent { .. } => {
+                Err(SettingsServiceError::OutsideScope)
+            }
+        }
+    }
+
     pub(super) fn reconcile_file(
         &self,
         identity: &super::super::operations::OperationIdentity,

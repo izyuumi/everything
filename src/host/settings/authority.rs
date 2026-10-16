@@ -231,6 +231,31 @@ impl Authority {
         })
     }
 
+    pub fn cleanup_owner(
+        self: &Arc<Self>,
+        call: &LocalCall,
+    ) -> Result<SettingsCaller, SettingsServiceError> {
+        self.check_channel(call)?;
+        Ok(SettingsCaller {
+            authority: Arc::clone(self),
+            source: CallerSource::LocalOwner {
+                request_id: call.request.request_id,
+            },
+        })
+    }
+
+    pub fn validate_owner_cleanup(
+        &self,
+        caller: &SettingsCaller,
+    ) -> Result<(), SettingsServiceError> {
+        if !std::ptr::eq(self, Arc::as_ptr(&caller.authority))
+            || !matches!(caller.source, CallerSource::LocalOwner { .. })
+        {
+            return Err(SettingsServiceError::OutsideScope);
+        }
+        Ok(())
+    }
+
     pub fn open(
         self: &Arc<Self>,
         call: &LocalCall,
