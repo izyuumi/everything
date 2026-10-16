@@ -15,13 +15,13 @@ pub(crate) struct ProviderObservation {
     pub invalid: bool,
 }
 
-#[derive(Default)]
+#[derive(Debug, Default)]
 struct Observations {
     entries: [Option<ProviderObservation>; MAX_OBSERVED_ATTEMPTS],
     current: Option<usize>,
 }
 
-#[derive(Default)]
+#[derive(Debug, Default)]
 pub(crate) struct ProviderAccounting {
     state: Mutex<Observations>,
 }
@@ -69,17 +69,49 @@ impl ProviderAccounting {
         let mut state = self.state.lock().map_err(|_| accounting_error())?;
         let index = state.current.ok_or_else(accounting_error)?;
         let entry = state.entries[index].as_mut().ok_or_else(accounting_error)?;
-        if usage.validate().is_err()
+        let invalid = usage.validate().is_err()
             || usage.input_tokens < entry.usage.input_tokens
             || usage.output_tokens < entry.usage.output_tokens
-            || (entry.response_valid && !response_valid)
+            || entry.usage.cached_input_tokens.is_some_and(|previous| {
+                usage
+                    .cached_input_tokens
+                    .is_none_or(|current| current < previous)
+            })
+            || entry.usage.reasoning_tokens.is_some_and(|previous| {
+                usage
+                    .reasoning_tokens
+                    .is_none_or(|current| current < previous)
+            })
+            || (entry.response_valid && !response_valid);
+        entry.usage.input_tokens = entry.usage.input_tokens.max(usage.input_tokens);
+        entry.usage.output_tokens = entry.usage.output_tokens.max(usage.output_tokens);
+        if let Some(cached) = usage.cached_input_tokens
+            && cached <= entry.usage.input_tokens
         {
+            entry.usage.cached_input_tokens =
+                Some(entry.usage.cached_input_tokens.unwrap_or(0).max(cached));
+        }
+        if let Some(reasoning) = usage.reasoning_tokens
+            && reasoning <= entry.usage.output_tokens
+        {
+            entry.usage.reasoning_tokens =
+                Some(entry.usage.reasoning_tokens.unwrap_or(0).max(reasoning));
+        }
+        entry.terminal_observed |= terminal_observed;
+        if invalid || entry.invalid {
             entry.invalid = true;
             return Err(accounting_error());
         }
-        entry.usage = usage.clone();
-        entry.terminal_observed |= terminal_observed;
         entry.response_valid |= response_valid;
+        Ok(())
+    }
+
+    pub(crate) fn invalidate(&self, terminal_observed: bool) -> Result<(), ModelError> {
+        let mut state = self.state.lock().map_err(|_| accounting_error())?;
+        let index = state.current.ok_or_else(accounting_error)?;
+        let entry = state.entries[index].as_mut().ok_or_else(accounting_error)?;
+        entry.terminal_observed |= terminal_observed;
+        entry.invalid = true;
         Ok(())
     }
 

@@ -118,6 +118,53 @@ pub struct CredentialVault {
     native: NativeCredentialStore,
     session: Arc<Mutex<BTreeMap<String, Arc<CredentialSecret>>>>,
     environment: Arc<Vec<EnvironmentCredential>>,
+    model_generation: Arc<Mutex<ModelCredentialGeneration>>,
+}
+
+#[derive(Default)]
+struct ModelCredentialGeneration {
+    generation: u64,
+    in_flight: u64,
+    uncertain: bool,
+}
+
+struct ModelCredentialMutation {
+    generation: Arc<Mutex<ModelCredentialGeneration>>,
+    completed: bool,
+}
+
+impl ModelCredentialMutation {
+    fn complete(self, operation: Result<(), CredentialError>) -> Result<(), CredentialError> {
+        match (operation, self.finish()) {
+            (Err(_), Err(_)) => Err(CredentialError::MutationAndTrackingFailed),
+            (Err(error), Ok(())) | (Ok(()), Err(error)) => Err(error),
+            (Ok(()), Ok(())) => Ok(()),
+        }
+    }
+
+    fn finish(mut self) -> Result<(), CredentialError> {
+        let mut generation = self
+            .generation
+            .lock()
+            .map_err(|_| CredentialError::Unavailable)?;
+        generation.in_flight = generation
+            .in_flight
+            .checked_sub(1)
+            .ok_or(CredentialError::Unavailable)?;
+        self.completed = true;
+        Ok(())
+    }
+}
+
+impl Drop for ModelCredentialMutation {
+    fn drop(&mut self) {
+        if !self.completed
+            && let Ok(mut generation) = self.generation.lock()
+        {
+            generation.uncertain = true;
+            generation.in_flight = generation.in_flight.saturating_sub(1);
+        }
+    }
 }
 
 impl CredentialVault {
@@ -143,7 +190,43 @@ impl CredentialVault {
             native: NativeCredentialStore::new(),
             session: Arc::new(Mutex::new(BTreeMap::new())),
             environment: Arc::new(environment),
+            model_generation: Arc::new(Mutex::new(ModelCredentialGeneration::default())),
         }
+    }
+
+    pub(crate) fn model_generation(&self) -> Result<u64, CredentialError> {
+        let generation = self
+            .model_generation
+            .lock()
+            .map_err(|_| CredentialError::Unavailable)?;
+        if generation.uncertain {
+            return Err(CredentialError::Unavailable);
+        }
+        if generation.in_flight != 0 {
+            return Err(CredentialError::Busy);
+        }
+        Ok(generation.generation)
+    }
+
+    fn begin_model_mutation(&self) -> Result<ModelCredentialMutation, CredentialError> {
+        let mut generation = self
+            .model_generation
+            .lock()
+            .map_err(|_| CredentialError::Unavailable)?;
+        let next = generation
+            .generation
+            .checked_add(1)
+            .ok_or(CredentialError::Unavailable)?;
+        let in_flight = generation
+            .in_flight
+            .checked_add(1)
+            .ok_or(CredentialError::Unavailable)?;
+        generation.generation = next;
+        generation.in_flight = in_flight;
+        Ok(ModelCredentialMutation {
+            generation: Arc::clone(&self.model_generation),
+            completed: false,
+        })
     }
 
     pub async fn bootstrap_mcp_session_from_file(
@@ -224,23 +307,39 @@ impl CredentialVault {
                     self.store_session(format!("model:{}", binding.scope_key()), secret.0, true)
                 }
                 CredentialStorage::Native => {
-                    self.native
-                        .store(
-                            binding.credential_key()?,
-                            CredentialSecret::new(secret.0.expose().to_vec())?,
-                        )
-                        .await
+                    let key = binding.credential_key()?;
+                    let secret = CredentialSecret::new(secret.0.expose().to_vec())?;
+                    let mutation = self.begin_model_mutation()?;
+                    let native = self.native.clone();
+                    tokio::spawn(async move {
+                        let result = native.store(key, secret).await;
+                        mutation.complete(result)
+                    })
+                    .await
+                    .map_err(|_| CredentialError::Worker)?
                 }
             },
             CredentialOperation::Remove { binding } => match binding.storage {
                 CredentialStorage::Session => {
-                    self.session
+                    let mut session = self
+                        .session
                         .lock()
-                        .map_err(|_| CredentialError::Unavailable)?
-                        .remove(&format!("model:{}", binding.scope_key()));
-                    Ok(())
+                        .map_err(|_| CredentialError::Unavailable)?;
+                    let mutation = self.begin_model_mutation()?;
+                    session.remove(&format!("model:{}", binding.scope_key()));
+                    mutation.finish()
                 }
-                CredentialStorage::Native => self.native.delete(binding.credential_key()?).await,
+                CredentialStorage::Native => {
+                    let key = binding.credential_key()?;
+                    let mutation = self.begin_model_mutation()?;
+                    let native = self.native.clone();
+                    tokio::spawn(async move {
+                        let result = native.delete(key).await;
+                        mutation.complete(result)
+                    })
+                    .await
+                    .map_err(|_| CredentialError::Worker)?
+                }
             },
             CredentialOperation::StoreMcp { binding, secret } => match binding.storage {
                 CredentialStorage::Session => {
@@ -287,10 +386,13 @@ impl CredentialVault {
                     CredentialStorage::Session => {
                         self.store_session(format!("model:{}", binding.scope_key()), secret.0, true)
                     }
-                    CredentialStorage::Native => self.native.store_blocking(
-                        binding.credential_key()?,
-                        CredentialSecret::new(secret.0.expose().to_vec())?,
-                    ),
+                    CredentialStorage::Native => {
+                        let key = binding.credential_key()?;
+                        let secret = CredentialSecret::new(secret.0.expose().to_vec())?;
+                        let mutation = self.begin_model_mutation()?;
+                        let result = self.native.store_blocking(key, secret);
+                        mutation.complete(result)
+                    }
                 }
             }
             super::settings::contract::SettingsCredentialBinding::SystemOne {
@@ -341,7 +443,15 @@ impl CredentialVault {
         {
             return Err(CredentialError::Busy);
         }
+        let mutation = if model {
+            Some(self.begin_model_mutation()?)
+        } else {
+            None
+        };
         session.insert(key, secret);
+        if let Some(mutation) = mutation {
+            mutation.finish()?;
+        }
         Ok(())
     }
 
