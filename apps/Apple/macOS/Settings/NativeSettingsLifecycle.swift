@@ -346,6 +346,33 @@ final class NativeSettingsLifecycle {
         return admission
     }
 
+    func prepareAssistantAction(_ intent: NativeSettingsIntent,
+                                receipt: NativeSettingsSession.AssistantDetailsReceipt) throws -> NativeSettingsAdmission {
+        try intent.validate()
+        let invocation: NativeActionInvocation
+        switch (intent, receipt.details.target) {
+        case (.confirmDevice(let value), .device): invocation = value
+        case (.present(let value), .native(let request)):
+            guard case .openSection = request.action else { throw NativeSettingsSessionError.invalidRequest }
+            invocation = value
+        default: throw NativeSettingsSessionError.invalidRequest
+        }
+        guard invocation.operationID == receipt.original.operationID,
+              case .awaitingAction(let reference) = receipt.details.operation.phase,
+              invocation.reference == .action(reference: reference) else { throw NativeSettingsSessionError.invalidRequest }
+        let captured = try receipt.capturePresentation(for: gate)
+        if let original = admissions[invocation.operationID]?.first(where: { $0.intent.execution }) {
+            guard original.intent == intent, original.expiresAt == reference.expiresAt else { throw NativeSettingsSessionError.requestReused }
+            return original
+        }
+        guard drainTask == nil, admissions[invocation.operationID] != nil || admissions.count < 64 else {
+            throw NativeSettingsSessionError.capacity
+        }
+        let admission = NativeSettingsAdmission(intent: intent, expiresAt: reference.expiresAt, owner: gate, initial: .success(captured))
+        admissions[invocation.operationID, default: []].append(admission)
+        return admission
+    }
+
     func prepareAssistantOpen() throws -> NativeSettingsAssistantOpenAdmission {
         guard drainTask == nil, assistantOpens.count + admissions.count < 64,
               let opening else { throw NativeSettingsSessionError.capacity }

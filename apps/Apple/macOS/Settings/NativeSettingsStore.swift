@@ -67,6 +67,7 @@ final class NativeSettingsStore {
         let request: SettingsDeviceRequest
         let capture: CredentialCapture
         let ceremony: NativeDeviceCeremony
+        let assistant: NativeSettingsSession.AssistantDetailsReceipt?
         var details: NativeSettingsSession.Details?
         var confirmation: NativeSettingsAdmission?
         var approval: NativePairingApprovalAdmission?
@@ -80,11 +81,13 @@ final class NativeSettingsStore {
         var cleanupIssue: NativeSettingsSessionError?
         var cleanupKind: DeviceCleanupKind?
 
-        init(handle: DeviceHandle, request: SettingsDeviceRequest, capture: CredentialCapture, ceremony: NativeDeviceCeremony) {
+        init(handle: DeviceHandle, request: SettingsDeviceRequest, capture: CredentialCapture, ceremony: NativeDeviceCeremony,
+             assistant: NativeSettingsSession.AssistantDetailsReceipt? = nil) {
             self.handle = handle
             self.request = request
             self.capture = capture
             self.ceremony = ceremony
+            self.assistant = assistant
         }
     }
 
@@ -1024,6 +1027,59 @@ final class NativeSettingsStore {
         }
     }
 
+    func presentAssistantDevice(_ receipt: NativeSettingsSession.AssistantDetailsReceipt, parent: NSWindow?) throws -> DeviceHandle {
+        let original = receipt.original
+        let owner = try assistantOwner(original.chat, live: true)
+        try requireAssistantMembership(owner, original: original)
+        guard case .device(let request) = receipt.details.target,
+              owner.assistantSends[original.turnID]?.materialized.contains(original.operationID) == true,
+              let operation = owner.operations[original.operationID], operation.target == receipt.details.target,
+              operation.inspection == receipt.details.operation else { throw NativeSettingsSessionError.invalidRequest }
+        if let context = owner.devices[original.operationID] {
+            guard context.assistant?.original === original, context.request == request else { throw NativeSettingsSessionError.requestReused }
+            guard !context.retired else { throw NativeSettingsSessionError.closed }
+            return context.handle
+        }
+        guard canAct, draft?.isDirty == false, credentialPresentation == nil,
+              !credentialLinksNeedRecovery(owner),
+              !owner.operations.contains(where: { $0.key != original.operationID && $0.value.blocksNewChanges }) else {
+            throw NativeSettingsSessionError.operationUncertain
+        }
+        if request.action == .pair {
+            guard identityCount(owner) + 1 <= 64, owner.devices.values.filter({ $0.request.action == .pair }).count < 8 else {
+                throw NativeSettingsSessionError.capacity
+            }
+        }
+        let parent = try NativeDeviceCeremony.requireParent(parent)
+        let bounds = try receipt.presentationBounds()
+        let native = try captureDevice(owner)
+        let capture = CredentialCapture(generation: native.generation, started: native.started,
+            expiresAt: min(native.expiresAt, bounds.expiresAt), deadline: min(native.deadline, bounds.deadline))
+        try validateDevice(capture, owner: owner)
+        let handle = DeviceHandle(id: original.operationID, ownerID: owner.id)
+        let ceremony = NativeDeviceCeremony(store: self, handle: handle, request: request, parent: parent,
+            expiresAt: capture.expiresAt, deadline: capture.deadline)
+        let context = DeviceContext(handle: handle, request: request, capture: capture, ceremony: ceremony, assistant: receipt)
+        context.details = receipt.details
+        owner.devices[handle.id] = context
+        do {
+            try ceremony.present()
+            try ceremony.confirmation(expiresAt: capture.expiresAt, deadline: capture.deadline)
+        } catch {
+            context.retired = true
+            context.issue = sanitize(error)
+            context.cleanupIssue = .operationUncertain
+            context.cleanupKind = .action
+            ceremony.retire()
+            recover(handle.id, reconciliation: false, cancellation: true)
+            publishDevices()
+            throw error
+        }
+        deviceIssue = nil
+        publishDevices()
+        return handle
+    }
+
     func beginDevicePairing(parent: NSWindow?) {
         guard canBeginDevicePairing else { return }
         beginDeviceAction(.pair, parent: parent)
@@ -1050,7 +1106,10 @@ final class NativeSettingsStore {
             try validateDevice(context.capture, owner: owner)
             try ceremony.validate()
             let invocation = NativeActionInvocation(operationID: handle.id, nativeRequestID: UUID(), reference: .action(reference: reference))
-            let admission = try owner.lifecycle.prepare(.confirmDevice(invocation), expiresAt: reference.expiresAt)
+            let admission: NativeSettingsAdmission
+            if let assistant = context.assistant {
+                admission = try owner.lifecycle.prepareAssistantAction(.confirmDevice(invocation), receipt: assistant)
+            } else { admission = try owner.lifecycle.prepare(.confirmDevice(invocation), expiresAt: reference.expiresAt) }
             context.confirmation = admission
             ceremony.confirming()
             owner.operations[handle.id]?.executionPrepared = true
@@ -1115,9 +1174,15 @@ final class NativeSettingsStore {
             let choice = try ceremony.takeChoice()
             let admission: NativePairingApprovalAdmission
             do {
-                admission = try NativePairingApprovalAdmission.capture(session: owner.lifecycle.session,
-                    creationOperationID: handle.id, candidate: choice.candidate, label: choice.label,
-                    expectedFingerprint: choice.fingerprint, access: choice.access)
+                if let assistant = context.assistant {
+                    admission = try NativePairingApprovalAdmission.captureAssistant(session: owner.lifecycle.session,
+                        receipt: assistant, candidate: choice.candidate, label: choice.label,
+                        expectedFingerprint: choice.fingerprint, access: choice.access)
+                } else {
+                    admission = try NativePairingApprovalAdmission.capture(session: owner.lifecycle.session,
+                        creationOperationID: handle.id, candidate: choice.candidate, label: choice.label,
+                        expectedFingerprint: choice.fingerprint, access: choice.access)
+                }
             } catch { choice.candidate.discard(); throw error }
             let id = admission.review.operationID
             guard !identityReserved(owner, id: id), owner.effects[id] == nil,
