@@ -135,8 +135,16 @@ enum NativeSettingsWire {
         }
     }
 
-    enum Operation: Sendable {
+    enum Operation: Sendable, CustomStringConvertible, CustomDebugStringConvertible {
         case open
+        case agentOpen
+        case agentOpenStatus(openRequestID: UUID)
+        case agentCloseOpen(openRequestID: UUID)
+        case agentSend(chatID: UUID, turnID: UUID, providerBindingSHA256: String, text: String)
+        case agentPoll(chatID: UUID)
+        case agentClose(chatID: UUID)
+        case agentInspectOperation(chatID: UUID, turnID: UUID, operationID: UUID)
+        case agentActionDetails(chatID: UUID, turnID: UUID, operationID: UUID, reference: NativeActionReference)
         case describe
         case get(SettingsScope)
         case update(SettingsPatch)
@@ -160,9 +168,28 @@ enum NativeSettingsWire {
         case cancel(UUID)
         case close
 
+        var description: String { "NativeSettingsOperation([private])" }
+        var debugDescription: String { description }
+
+        fileprivate var isAssistant: Bool {
+            switch self {
+            case .agentOpen, .agentOpenStatus, .agentCloseOpen, .agentSend, .agentPoll, .agentClose,
+                 .agentInspectOperation, .agentActionDetails: true
+            default: false
+            }
+        }
+
         var kind: String {
             switch self {
             case .open: "open"
+            case .agentOpen: "agent_open"
+            case .agentOpenStatus: "agent_open_status"
+            case .agentCloseOpen: "agent_close_open"
+            case .agentSend: "agent_send"
+            case .agentPoll: "agent_poll"
+            case .agentClose: "agent_close"
+            case .agentInspectOperation: "agent_inspect_operation"
+            case .agentActionDetails: "agent_action_details"
             case .describe: "describe"
             case .get: "get"
             case .update: "update"
@@ -190,6 +217,24 @@ enum NativeSettingsWire {
 
         func validate() throws {
             switch self {
+            case .agentOpen: break
+            case .agentOpenStatus(let id), .agentCloseOpen(let id):
+                try SettingsWire.identifier(id)
+            case .agentSend(let chatID, let turnID, let digest, let text):
+                try SettingsWire.identifier(chatID)
+                try SettingsWire.identifier(turnID)
+                try SettingsWire.digest(digest)
+                guard text.utf8.count <= 8192, !text.contains("\0"),
+                      !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                    throw NativeSettingsWireError.invalidRequest
+                }
+            case .agentPoll(let chatID), .agentClose(let chatID):
+                try SettingsWire.identifier(chatID)
+            case .agentInspectOperation(let chatID, let turnID, let operationID):
+                for id in [chatID, turnID, operationID] { try SettingsWire.identifier(id) }
+            case .agentActionDetails(let chatID, let turnID, let operationID, let reference):
+                for id in [chatID, turnID, operationID] { try SettingsWire.identifier(id) }
+                try reference.validate()
             case .approvePairing(let input): try input.validate()
             case .get(let scope): try scope.validate()
             case .update(let patch): try patch.validate()
@@ -226,6 +271,7 @@ enum NativeSettingsWire {
     }
 
     enum Response: Decodable, Sendable {
+        case assistant(NativeSettingsAssistantWire.Reply)
         case described(SettingRegistry)
         case snapshot(SettingsSnapshot)
         case changes(SettingsChangePage)
@@ -243,6 +289,9 @@ enum NativeSettingsWire {
         init(from decoder: any Decoder) throws {
             let fields = try SettingsWireFields(decoder)
             switch try fields.required(String.self, "kind") {
+            case "assistant":
+                try fields.only(["kind", "reply"])
+                self = .assistant(try fields.required(NativeSettingsAssistantWire.Reply.self, "reply"))
             case "described":
                 try fields.only(["kind", "registry"])
                 self = .described(try fields.required(SettingRegistry.self, "registry"))
@@ -288,8 +337,11 @@ enum NativeSettingsWire {
             }
         }
 
-        func validate(for request: Operation, proof: Proof?) throws {
+        func validate(for request: Operation, proof: Proof?, requestID: UUID? = nil, hostID: UUID? = nil) throws {
             switch (request, self) {
+            case (_, .assistant(let reply)):
+                try reply.validate(for: NativeSettingsWire.assistantExpectation(for: request, proof: proof,
+                                                                              requestID: requestID, hostID: hostID))
             case (.approvePairing(let input), .pairingApproved(let result)):
                 guard result.approval.matches(input) else { throw NativeSettingsWireError.invalidResponse }
                 try Self.validate(result.operation, proof: proof)
@@ -396,20 +448,79 @@ enum NativeSettingsWire {
         } catch { throw NativeSettingsWireError.invalidRequest }
     }
 
-    static func decode(_ data: Data, for request: Operation, proof: Proof?) throws -> Response {
+    static func decode(_ data: Data, for request: Operation, proof: Proof?, requestID: UUID? = nil,
+                       hostID: UUID? = nil) throws -> Response {
         do {
             guard !data.isEmpty, data.count <= 2 * 1024 * 1024 else { throw NativeSettingsWireError.invalidResponse }
-            let response = try JSONDecoder().decode(Response.self, from: data)
-            try response.validate(for: request, proof: proof)
+            let bytes: Data
+            let assistantWrapperBytes: Int?
+            if request.isAssistant {
+                _ = try assistantExpectation(for: request, proof: proof, requestID: requestID, hostID: hostID)
+                guard data.last == 0x0A else { throw NativeSettingsWireError.invalidResponse }
+                let compact = data.dropLast()
+                guard compact.first == 0x7B, compact.last == 0x7D else { throw NativeSettingsWireError.invalidResponse }
+                let (count, overflow) = compact.count.addingReportingOverflow(126)
+                guard !overflow, count <= 200_704, count <= 2 * 1024 * 1024 else {
+                    throw NativeSettingsWireError.invalidResponse
+                }
+                bytes = Data(compact)
+                assistantWrapperBytes = count
+            } else {
+                bytes = data
+                assistantWrapperBytes = nil
+            }
+            let response = try JSONDecoder().decode(Response.self, from: bytes)
+            try response.validate(for: request, proof: proof, requestID: requestID, hostID: hostID)
+            if case .assistant(let reply) = response {
+                guard let assistantWrapperBytes, assistantWrapperBytes <= assistantReplyLimit(reply) else {
+                    throw NativeSettingsWireError.invalidResponse
+                }
+            }
             if case .pairingApproved = response, data.count > 64 * 1024 { throw NativeSettingsWireError.invalidResponse }
             return response
         } catch { throw NativeSettingsWireError.invalidResponse }
     }
 
-    private struct Request: Encodable {
+    private static func assistantExpectation(for request: Operation, proof: Proof?, requestID: UUID?,
+                                             hostID: UUID?) throws -> NativeSettingsAssistantWire.RequestExpectation {
+        guard let proof, let requestID else { throw NativeSettingsWireError.invalidResponse }
+        try request.validate()
+        try SettingsWire.identifier(proof.sessionID)
+        try SettingsWire.identifier(requestID)
+        switch request {
+        case .agentOpen: return .open(openRequestID: requestID)
+        case .agentOpenStatus(let id): return .openStatus(openRequestID: id)
+        case .agentCloseOpen(let id): return .closeOpen(openRequestID: id)
+        case .agentSend(let chatID, let turnID, _, _): return .send(chatID: chatID, turnID: turnID)
+        case .agentPoll(let chatID): return .poll(chatID: chatID)
+        case .agentClose(let chatID): return .close(chatID: chatID)
+        case .agentInspectOperation(let chatID, let turnID, let operationID):
+            guard let hostID else { throw NativeSettingsWireError.invalidResponse }
+            return .inspectOperation(nativeParentID: proof.sessionID, hostID: hostID,
+                                     chatID: chatID, turnID: turnID, operationID: operationID)
+        case .agentActionDetails(let chatID, let turnID, let operationID, let reference):
+            guard let hostID else { throw NativeSettingsWireError.invalidResponse }
+            return .actionDetails(nativeParentID: proof.sessionID, hostID: hostID, chatID: chatID,
+                                  turnID: turnID, operationID: operationID, reference: reference)
+        default: throw NativeSettingsWireError.invalidResponse
+        }
+    }
+
+    private static func assistantReplyLimit(_ reply: NativeSettingsAssistantWire.Reply) -> Int {
+        switch reply {
+        case .status: 200_704
+        case .operation, .actionDetails: 65_536
+        default: 32_768
+        }
+    }
+
+    private struct Request: Encodable, CustomStringConvertible, CustomDebugStringConvertible {
         let requestID: UUID
         let operation: Operation
         let proof: Proof?
+
+        var description: String { "NativeSettingsRequest([private])" }
+        var debugDescription: String { description }
 
         func encode(to encoder: any Encoder) throws {
             var root = encoder.container(keyedBy: SettingsWireKey.self)
@@ -420,6 +531,25 @@ enum NativeSettingsWire {
             try fields.encode(operation.kind, forKey: SettingsWireKey("kind"))
             if case .open = operation {} else { try fields.encode(proof, forKey: SettingsWireKey("proof")) }
             switch operation {
+            case .agentOpen: break
+            case .agentOpenStatus(let id), .agentCloseOpen(let id):
+                try fields.encode(id, forKey: SettingsWireKey("open_request_id"))
+            case .agentSend(let chatID, let turnID, let digest, let text):
+                try fields.encode(chatID, forKey: SettingsWireKey("chat_id"))
+                try fields.encode(turnID, forKey: SettingsWireKey("turn_id"))
+                try fields.encode(digest, forKey: SettingsWireKey("provider_binding_sha256"))
+                try fields.encode(text, forKey: SettingsWireKey("text"))
+            case .agentPoll(let chatID), .agentClose(let chatID):
+                try fields.encode(chatID, forKey: SettingsWireKey("chat_id"))
+            case .agentInspectOperation(let chatID, let turnID, let operationID):
+                try fields.encode(chatID, forKey: SettingsWireKey("chat_id"))
+                try fields.encode(turnID, forKey: SettingsWireKey("turn_id"))
+                try fields.encode(operationID, forKey: SettingsWireKey("operation_id"))
+            case .agentActionDetails(let chatID, let turnID, let operationID, let reference):
+                try fields.encode(chatID, forKey: SettingsWireKey("chat_id"))
+                try fields.encode(turnID, forKey: SettingsWireKey("turn_id"))
+                try fields.encode(operationID, forKey: SettingsWireKey("operation_id"))
+                try fields.encode(reference, forKey: SettingsWireKey("reference"))
             case .approvePairing(let input): try fields.encode(input, forKey: SettingsWireKey("approval"))
             case .get(let scope): try fields.encode(scope, forKey: SettingsWireKey("scope"))
             case .update(let patch): try fields.encode(patch, forKey: SettingsWireKey("patch"))
