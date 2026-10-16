@@ -1463,6 +1463,13 @@ final class NativeSettingsStore {
             if link.issue != nil { failures.append(.operationUncertain) }
         }
         for context in owner.devices.values {
+            if context.cleanupKind == .pairing, let lifecycle = native.pairingLifecycles[context.handle.id] {
+                context.pairingLifecycle = lifecycle
+                switch lifecycle {
+                case .cancelled, .expired, .noLongerPending: context.cleanupIssue = nil
+                case .retained, .cancellationPending, .unavailable: context.cleanupIssue = context.cleanupIssue ?? .operationUncertain
+                }
+            }
             if let cleanupIssue = context.cleanupIssue {
                 if let original = context.issue { failures.append(original) }
                 failures.append(cleanupIssue)
@@ -1470,7 +1477,8 @@ final class NativeSettingsStore {
             }
         }
         return NativeSettingsSession.DrainReport(failures: failures,
-            unresolvedOperationIDs: unresolved.sorted { $0.uuidString < $1.uuidString })
+            unresolvedOperationIDs: unresolved.sorted { $0.uuidString < $1.uuidString },
+            pairingLifecycles: native.pairingLifecycles)
     }
 
     private func unlinkedCredentialIDs(_ owner: Owner) -> [UUID] {
