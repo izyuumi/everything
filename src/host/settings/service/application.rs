@@ -19,6 +19,7 @@ struct ApplicationWork {
     settings: HostSettings,
     composition: Arc<Composition>,
     semantic: Option<SemanticGeneration>,
+    selection_generation: Option<u64>,
 }
 
 enum PreparedApplication {
@@ -186,6 +187,10 @@ impl SettingsService {
                     reason: SettingsUnavailableReason::HostOffline,
                 }
             } else if application == SettingsApplicationState::Applied
+                && !work.application_is_current()?
+            {
+                failed()
+            } else if application == SettingsApplicationState::Applied
                 && work.intent.restart_required
             {
                 SettingsApplicationState::RestartRequired
@@ -281,24 +286,28 @@ impl ServiceCore {
         {
             return Err(SettingsServiceError::CorruptJournal);
         }
+        let mut selection_generation = None;
         if let Some(generation) = capture.selection {
-            if let Err(cause) = composition.configure_selection(
+            match composition.configure_selection(
                 generation,
                 current.selection.clone(),
                 updates::selection_enabled(&current),
             ) {
-                let result = self.repository.record_application(
-                    &record.identity,
-                    &write.intent,
-                    failed(),
-                )?;
-                self.applications
-                    .lock()
-                    .map_err(|_| SettingsServiceError::Poisoned)?
-                    .remove(&operation_id);
-                tracing::warn!(operation_id=%operation_id,"original selector application stopped after generation rejection");
-                drop(cause);
-                return Ok(PreparedApplication::Finished(result));
+                Ok(configuration) => selection_generation = Some(configuration.generation),
+                Err(cause) => {
+                    let result = self.repository.record_application(
+                        &record.identity,
+                        &write.intent,
+                        failed(),
+                    )?;
+                    self.applications
+                        .lock()
+                        .map_err(|_| SettingsServiceError::Poisoned)?
+                        .remove(&operation_id);
+                    tracing::warn!(operation_id=%operation_id,"original selector application stopped after generation rejection");
+                    drop(cause);
+                    return Ok(PreparedApplication::Finished(result));
+                }
             }
         }
         Ok(PreparedApplication::Work(ApplicationWork {
@@ -307,6 +316,7 @@ impl ServiceCore {
             settings: current,
             composition,
             semantic: capture.semantic,
+            selection_generation,
         }))
     }
 }
@@ -314,5 +324,61 @@ impl ServiceCore {
 fn failed() -> SettingsApplicationState {
     SettingsApplicationState::Failed {
         reason: SettingsFailureReason::ApplyFailed,
+    }
+}
+
+impl ApplicationWork {
+    fn application_is_current(&self) -> Result<bool, SettingsServiceError> {
+        if let Some(generation) = &self.semantic {
+            let metadata = self.composition.memory.embedding_metadata()?;
+            if metadata.generation != generation.generation() {
+                return Ok(false);
+            }
+            let Some(application) = metadata.application.as_ref().filter(|application| {
+                application.operation_id == self.identity.binding.request_id
+                    && application.settings_revision == self.intent.after.revision
+                    && application.generation == generation.generation()
+            }) else {
+                return Ok(false);
+            };
+            let matches = match application.phase {
+                EmbeddingApplyPhase::Ready { .. } => {
+                    updates::embeddings_enabled(&self.settings)
+                        && metadata.accepting_semantics
+                        && matches!(
+                            metadata.status,
+                            crate::host::memory::EmbeddingStatus::Enabled { .. }
+                        )
+                }
+                EmbeddingApplyPhase::Disabled => {
+                    !updates::embeddings_enabled(&self.settings)
+                        && !metadata.accepting_semantics
+                        && matches!(
+                            metadata.status,
+                            crate::host::memory::EmbeddingStatus::Disabled
+                        )
+                }
+                _ => false,
+            };
+            if !matches {
+                return Ok(false);
+            }
+        }
+        if let Some(generation) = self.selection_generation {
+            let configuration = self.composition.selection.configuration_status()?;
+            let expected_remote = updates::selection_enabled(&self.settings)
+                && matches!(
+                    self.settings.selection,
+                    crate::host::selection::SelectionSettings::SystemOne { .. }
+                );
+            if configuration.generation != generation
+                || configuration.suspended
+                || configuration.settings != self.settings.selection
+                || configuration.remote_enabled != expected_remote
+            {
+                return Ok(false);
+            }
+        }
+        Ok(true)
     }
 }

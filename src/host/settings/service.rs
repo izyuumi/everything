@@ -41,8 +41,8 @@ use super::authority::{
 use super::contract::{
     SETTINGS_CONTRACT_VERSION, SettingsActionReference, SettingsActionRequest,
     SettingsConfirmationReference, SettingsContractError, SettingsDeviceAction,
-    SettingsDeviceRequest, SettingsOperationResult, SettingsOperationState, SettingsPatch,
-    SettingsRequestBinding, SettingsScope, SettingsToolName, SettingsUnavailableReason,
+    SettingsDeviceRequest, SettingsOperationResult, SettingsOperationState, SettingsRequestBinding,
+    SettingsScope, SettingsToolName, SettingsUnavailableReason,
 };
 use super::operations::{
     NativeRequest, OperationIdentity, OperationRecord, OperationRepository,
@@ -913,9 +913,8 @@ impl SettingsService {
     }
 
     pub(crate) fn stop_intake(&self) -> Result<(), SettingsServiceError> {
-        self.core.authority.close()?;
         self.core.application_stop.cancel();
-        Ok(())
+        self.core.authority.close()
     }
 
     pub(crate) async fn close(&self) -> Result<(), SettingsServiceError> {
