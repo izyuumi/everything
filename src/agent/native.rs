@@ -883,7 +883,16 @@ fn run_deadline(conversation: &Conversation) -> Result<Instant, AgentError> {
         .as_ref()
         .and_then(|native| native.turn.as_ref())
     {
-        Some(turn) => turn.deadline_ms.saturating_sub(UnixMillis::now()?.get()),
+        Some(turn) => {
+            let now = UnixMillis::now()?.get();
+            if now < turn.started_at_ms {
+                0
+            } else {
+                turn.deadline_ms
+                    .saturating_sub(now)
+                    .min(turn.definition.limits.max_duration_ms)
+            }
+        }
         None => 3_600_000,
     };
     Ok(Instant::now() + Duration::from_millis(remaining))
