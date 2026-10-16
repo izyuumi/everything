@@ -1,5 +1,5 @@
 use std::collections::BTreeSet;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
@@ -56,10 +56,14 @@ struct ProfileState {
     turn: Option<SettingsTurnFence>,
     turns: usize,
     attempt: Option<AttemptFloor>,
+    turn_deadline: Option<Instant>,
+    observed_wall: u64,
     outcomes: [Option<OutcomeSlot>; OUTCOME_SLOTS],
 }
 
 pub(crate) struct SettingsProfile {
+    #[cfg(unix)]
+    source_admission: SettingsProviderAdmission,
     main: Store,
     journal: Store,
     reservation: SettingsSessionReservation,
@@ -71,6 +75,9 @@ pub(crate) struct SettingsProfile {
     cancellation: CancellationToken,
     deadline: Instant,
     retired: AtomicBool,
+    broker_intake_closed: AtomicBool,
+    broker_workers: AtomicUsize,
+    broker_changed: tokio::sync::Notify,
     state: Mutex<ProfileState>,
 }
 
@@ -132,6 +139,19 @@ impl SettingsProfile {
         self.journal.clone()
     }
 
+    pub(crate) fn provider_handle(&self) -> Arc<dyn ModelProvider> {
+        Arc::clone(&self.provider)
+    }
+
+    pub(crate) fn broker_is_closed_and_idle(&self) -> bool {
+        self.broker_intake_closed.load(Ordering::Acquire)
+            && self.broker_workers.load(Ordering::Acquire) == 0
+    }
+
+    pub(crate) fn is_retired(&self) -> bool {
+        self.retired.load(Ordering::Acquire)
+    }
+
     pub(crate) fn definitions(&self) -> &[ToolDefinition] {
         &self.definitions
     }
@@ -176,6 +196,9 @@ impl SettingsProfile {
 
     pub(crate) fn begin_turn(&self, command: CommandId) -> Result<SettingsTurnFence, AgentError> {
         self.check_live()?;
+        if self.broker_workers.load(Ordering::Acquire) != 0 {
+            return Err(AgentError::Busy);
+        }
         let mut state = self.state.lock().map_err(|_| AgentError::Worker)?;
         if state.turns >= MAX_SETTINGS_TURNS
             || state
@@ -187,6 +210,7 @@ impl SettingsProfile {
         }
         self.journal.settings_memory_capacity(TRANSITION_HEADROOM)?;
         let started_at = UnixMillis::now()?;
+        let monotonic_start = Instant::now();
         let deadline = UnixMillis::try_from(
             started_at
                 .get()
@@ -214,6 +238,16 @@ impl SettingsProfile {
             usage_complete: false,
         };
         self.main.arm_settings_turn(&fence)?;
+        self.broker_intake_closed.store(false, Ordering::Release);
+        state.turn_deadline = Some(
+            monotonic_start
+                .checked_add(std::time::Duration::from_millis(
+                    deadline.get().saturating_sub(started_at.get()),
+                ))
+                .ok_or(AgentError::ResourceLimit("restricted monotonic deadline"))?
+                .min(self.deadline),
+        );
+        state.observed_wall = started_at.get();
         state.turn = Some(fence.clone());
         state.turns += 1;
         state.attempt = None;
@@ -382,7 +416,8 @@ impl SettingsProfile {
         if conversation != self.conversation_id().to_string() || !self.names.contains(tool) {
             return Err(AgentError::ToolsUnsupported);
         }
-        let state = self.state.lock().map_err(|_| AgentError::Worker)?;
+        let mut state = self.state.lock().map_err(|_| AgentError::Worker)?;
+        check_turn_deadline(&mut state)?;
         if state.turn.as_ref().is_none_or(|turn| {
             turn.task_id.to_string() != task || turn.phase != SettingsFencePhase::Armed
         }) {
@@ -519,16 +554,17 @@ fn reserve_outcome(state: &mut ProfileState, operation: CommandId) -> Result<(),
 
 #[cfg(unix)]
 impl Agent {
-    pub(crate) fn settings_view(
-        &self,
-        journal: Store,
-        reservation: SettingsSessionReservation,
-        binding: crate::host::settings::SettingsAgentBinding,
-        configuration: ConversationConfig,
-        definitions: Vec<ToolDefinition>,
-        provider: Arc<dyn ModelProvider>,
-        accounting: Arc<ProviderAccounting>,
-    ) -> Result<Self, AgentError> {
+    pub(crate) fn settings_view(&self, capture: SettingsViewCapture) -> Result<Self, AgentError> {
+        let SettingsViewCapture {
+            journal,
+            reservation,
+            binding,
+            configuration,
+            definitions,
+            provider,
+            accounting,
+            source_admission,
+        } = capture;
         use crate::host::settings::contract::SettingsToolName;
         if self.settings_profile.is_some()
             || self._foreground.is_none()
@@ -570,6 +606,7 @@ impl Agent {
         encoded_len(&definitions, 64 * 1024)?;
         journal.settings_memory_capacity(TRANSITION_HEADROOM)?;
         let profile = Arc::new(SettingsProfile {
+            source_admission,
             main: self.store.clone(),
             journal: journal.clone(),
             reservation,
@@ -581,10 +618,15 @@ impl Agent {
             cancellation: binding.cancellation,
             deadline: binding.deadline,
             retired: AtomicBool::new(false),
+            broker_intake_closed: AtomicBool::new(true),
+            broker_workers: AtomicUsize::new(0),
+            broker_changed: tokio::sync::Notify::new(),
             state: Mutex::new(ProfileState {
                 turn: None,
                 turns: 0,
                 attempt: None,
+                turn_deadline: None,
+                observed_wall: 0,
                 outcomes: [None; OUTCOME_SLOTS],
             }),
         });
@@ -607,4 +649,120 @@ impl std::fmt::Debug for SettingsToolCapability {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter.write_str("SettingsToolCapability([sealed])")
     }
+}
+
+pub(crate) struct SettingsBrokerWork {
+    profile: Arc<SettingsProfile>,
+}
+
+impl SettingsProfile {
+    pub(crate) fn broker_work(self: &Arc<Self>) -> Result<SettingsBrokerWork, AgentError> {
+        self.check_live()?;
+        let mut state = self.state.lock().map_err(|_| AgentError::Worker)?;
+        check_turn_deadline(&mut state)?;
+        if self.broker_intake_closed.load(Ordering::Acquire) {
+            return Err(AgentError::Cancelled);
+        }
+        self.broker_workers
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |count| {
+                count.checked_add(1).filter(|next| *next <= 8)
+            })
+            .map_err(|_| AgentError::Busy)?;
+        Ok(SettingsBrokerWork {
+            profile: Arc::clone(self),
+        })
+    }
+
+    pub(crate) async fn close_broker_and_wait(&self) -> Result<(), AgentError> {
+        {
+            let _state = self.state.lock().map_err(|_| AgentError::Worker)?;
+            self.broker_intake_closed.store(true, Ordering::Release);
+        }
+        loop {
+            let changed = self.broker_changed.notified();
+            tokio::pin!(changed);
+            changed.as_mut().enable();
+            if self.broker_workers.load(Ordering::Acquire) == 0 {
+                return Ok(());
+            }
+            changed.await;
+        }
+    }
+}
+
+impl Drop for SettingsBrokerWork {
+    fn drop(&mut self) {
+        if self
+            .profile
+            .broker_workers
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |count| {
+                count.checked_sub(1)
+            })
+            .is_err()
+        {
+            self.profile.retire();
+        }
+        self.profile.broker_changed.notify_waiters();
+    }
+}
+
+#[cfg(unix)]
+pub(crate) struct SettingsProviderAdmission {
+    pub factory: crate::host::providers::HostProviderFactory,
+    pub binding: crate::host::providers::SettingsProviderBinding,
+    pub mutation: Arc<tokio::sync::Mutex<()>>,
+}
+
+#[cfg(unix)]
+pub(crate) struct SettingsViewCapture {
+    pub journal: Store,
+    pub reservation: SettingsSessionReservation,
+    pub binding: crate::host::settings::SettingsAgentBinding,
+    pub configuration: ConversationConfig,
+    pub definitions: Vec<ToolDefinition>,
+    pub provider: Arc<dyn ModelProvider>,
+    pub accounting: Arc<ProviderAccounting>,
+    pub source_admission: SettingsProviderAdmission,
+}
+
+#[cfg(unix)]
+impl SettingsProfile {
+    pub(crate) async fn admit_source(
+        &self,
+        cancellation: CancellationToken,
+    ) -> Result<tokio::sync::OwnedMutexGuard<()>, AgentError> {
+        self.check_live()?;
+        let admission = tokio::select! {
+            biased;
+            _ = cancellation.cancelled() => return Err(AgentError::Cancelled),
+            guard = Arc::clone(&self.source_admission.mutation).lock_owned() => guard,
+        };
+        self.check_live()?;
+        if !self
+            .source_admission
+            .factory
+            .settings_binding_matches(&self.source_admission.binding, cancellation)
+            .await
+            .map_err(|_| AgentError::ConfigurationMismatch)?
+        {
+            self.retire();
+            return Err(AgentError::ConfigurationMismatch);
+        }
+        Ok(admission)
+    }
+}
+
+fn check_turn_deadline(state: &mut ProfileState) -> Result<(), AgentError> {
+    let turn = state.turn.as_ref().ok_or(AgentError::NoPendingTurn)?;
+    let now = UnixMillis::now()?.get();
+    if now < state.observed_wall.max(turn.last_observed_wall.get())
+        || now >= turn.deadline.get()
+        || state
+            .turn_deadline
+            .is_none_or(|deadline| Instant::now() >= deadline)
+    {
+        return Err(AgentError::Cancelled);
+    }
+    state.observed_wall = state.observed_wall.max(now);
+    Ok(())
 }

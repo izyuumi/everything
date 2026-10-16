@@ -615,6 +615,15 @@ impl Agent {
                         agent.save_native(&mut conversation, checkpoint, Vec::new(), Arc::clone(&admission)).await?;
                         yield TurnEvent::Paused { reason }; break;
                     }
+                    #[cfg(unix)]
+                    let source_admission = if let Some(profile) = &agent.settings_profile {
+                        Some(tokio::select! {
+                            biased;
+                            _ = child.cancelled() => Err(AgentError::Cancelled),
+                            _ = tokio::time::sleep_until(stream_deadline) => Err(AgentError::ResourceLimit("restricted source admission deadline")),
+                            admitted = profile.admit_source(child.clone()) => admitted,
+                        }?)
+                    } else { None };
                     let attempt_id = CommandId::new();
                     let mut checkpoint = conversation.checkpoint.clone();
                     let state = checkpoint.native.as_mut().ok_or(AgentError::NativeSetupRequired)?;
@@ -640,6 +649,8 @@ impl Agent {
                         if agent.settings_profile.is_some() { Err(AgentError::Cancelled)?; }
                         continue;
                     }
+                    #[cfg(unix)]
+                    drop(source_admission);
                     yield TurnEvent::ContextBuilt { usage: built.usage.clone(), citations: built.citations.clone(), omitted_memory: built.omitted_memory.clone(), continuation: built.continuation.clone() };
                     yield TurnEvent::ModelAttemptStarted { attempt_id };
                     Prepared::Context { built: Box::new(built), request }
@@ -661,23 +672,29 @@ impl Agent {
                     yield TurnEvent::Paused { reason: PauseReason::DurationLimit }; break;
                 }
                 let (request, prepared) = prepared.into_parts();
-                let mut events = tokio::select! {
+                let stream_result = tokio::select! {
                     biased;
                     _ = child.cancelled() => Err(AgentError::Cancelled),
                     _ = tokio::time::sleep_until(deadline) => { child.cancel(); Err(AgentError::ResourceLimit("turn duration")) },
                     result = provider.stream(request, child.clone()) => result.map_err(AgentError::from),
-                }?;
+                };
+                if stream_result.is_err() { agent.observe_settings_provider().await?; }
+                let mut events = stream_result?;
                 let mut displayed = 0_usize;
                 let response = loop {
-                    let event = tokio::select! {
+                    let event_result = tokio::select! {
                         biased;
                         _ = child.cancelled() => Err(AgentError::Cancelled),
                         _ = tokio::time::sleep_until(deadline) => { child.cancel(); Err(AgentError::ResourceLimit("turn duration")) },
                         event = events.next() => event.ok_or(AgentError::InvalidData("provider stream ended without completed response")).and_then(|event| event.map_err(AgentError::from)),
-                    }?;
-                    match event {
+                    };
+                    if event_result.is_err() { agent.observe_settings_provider().await?; }
+                    match event_result? {
                         ModelEvent::TextDelta { index, delta } => {
-                            displayed = displayed.checked_add(delta.len()).filter(|size| *size <= MAX_CHAT_TEXT_BYTES).ok_or(AgentError::ResourceLimit("assistant text"))?;
+                            let text_limit = if agent.settings_profile.is_some() { crate::agent::settings::MAX_TEXT } else { MAX_CHAT_TEXT_BYTES };
+                            let proposed = displayed.checked_add(delta.len()).filter(|size| *size <= text_limit);
+                            if proposed.is_none() { agent.observe_settings_provider().await?; }
+                            displayed = proposed.ok_or(AgentError::ResourceLimit("assistant text"))?;
                             yield TurnEvent::ProvisionalText { index, delta };
                         }
                         ModelEvent::Completed { response } => {
@@ -2161,6 +2178,7 @@ impl Agent {
                     || setup.limits.max_calls_per_round > 4
                     || setup.limits.max_parallel_calls != 1
                     || setup.limits.max_selected_tools != 7
+                    || setup.budget.max_context_tokens > 16 * 1024
                     || setup.budget.max_request_bytes > 1024 * 1024
                     || setup.budget.max_compaction_bytes > 8 * 1024
                     || setup.limits.max_duration_ms > 120_000

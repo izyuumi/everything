@@ -376,6 +376,9 @@ impl ToolBroker {
         authority: ExecutionAuthority,
         profile: Arc<SettingsProfile>,
     ) -> Result<TaskToolBroker, BrokerError> {
+        if authority.mode() != ExecutionMode::SettingsRestricted {
+            return Err(restricted_error());
+        }
         profile
             .check_tool(
                 authority.conversation_id(),
@@ -426,6 +429,49 @@ impl ToolBroker {
         blocking(None, move || {
             let _inner = inner;
             inspect_cleanup(&profile.journal(), 0)
+        })
+        .await
+    }
+
+    pub(crate) async fn release_settings_profile(
+        &self,
+        profile: Arc<SettingsProfile>,
+    ) -> Result<(), BrokerError> {
+        let inner = Arc::clone(&self.inner);
+        blocking(None, move || {
+            if !profile.shares_main(&inner.store)
+                || !profile.is_retired()
+                || !profile.broker_is_closed_and_idle()
+            {
+                return Err(restricted_error());
+            }
+            let report = inspect_cleanup(&profile.journal(), 0)?;
+            if report.running_count != 0 || report.unresolved_count != 0 {
+                return Err(BrokerError::RecoveryBusy);
+            }
+            if let Some(fence) = profile.fence().map_err(|_| restricted_error())? {
+                let original = inner.store.settings_turn(fence.command_id)?;
+                if original.as_ref() != Some(&fence)
+                    || !matches!(
+                        fence.phase,
+                        crate::storage::settings_agent::SettingsFencePhase::Settled
+                            | crate::storage::settings_agent::SettingsFencePhase::StoppedUncertain
+                    )
+                {
+                    return Err(restricted_error());
+                }
+            }
+            let mut profiles = inner
+                .settings_journals
+                .lock()
+                .map_err(|_| restricted_error())?;
+            if let Some(existing) = profiles.get(&profile.session_id()) {
+                if !Arc::ptr_eq(existing, &profile) {
+                    return Err(restricted_error());
+                }
+                profiles.remove(&profile.session_id());
+            }
+            Ok(())
         })
         .await
     }
@@ -610,11 +656,17 @@ impl ToolBroker {
         let inner = Arc::clone(&self.inner);
         let cancellation = cancellation.child_token();
         let _cancel_on_drop = cancellation.clone().drop_guard();
+        let work = profile
+            .as_ref()
+            .map(|profile| profile.broker_work().map_err(|_| restricted_error()))
+            .transpose()?;
         let supervised = tokio::spawn(async move {
-            let _admission = admission;
-            inner
+            let retained = (admission, work);
+            let result = inner
                 .run(authority, invocation, cancellation, owner, profile)
-                .await
+                .await;
+            drop(retained);
+            result
         });
         supervised.await.map_err(|error| {
             self.inner.quarantined.store(true, Ordering::Release);
@@ -1536,10 +1588,7 @@ fn inspect_all(inner: &BrokerInner) -> Result<RecoveryReport, BrokerError> {
                         provider_complete: fence.provider_complete,
                         usage_complete: fence.usage_complete,
                         mutation_ids: fence.mutation_ids.clone(),
-                        original_fence_sha256: format!(
-                            "{:x}",
-                            Sha256::digest(serde_json::to_vec(fence)?)
-                        ),
+                        original_fence_sha256: fence.sha256()?,
                     });
             }
         }
