@@ -40,7 +40,7 @@ Ready requires the actual completed BuildReport and compatible active vector gen
 
 `embedding_changes()` returns one shared Notify hint. Consumers register and enable notification before reading authoritative metadata and wait only when that snapshot still requires it. Hints do not form a durable event queue; the facade owns operation history. No status read starts work.
 
-Permanent shutdown closes the gate, cancels its current generation, refuses new application and waits for the active owned step, actual Consolidator idle, backend detachment and off-Tokio helper shutdown before publishing Stopped. Metadata poisoning closes admission and remains an explicit failure; cleanup recovers poisoned state only to retain/join actual work and release its resources. Reversible off never calls permanent service shutdown.
+Permanent shutdown closes the gate, cancels its current generation, refuses new application and waits for the active owned step, actual Consolidator idle, backend detachment and off-Tokio helper shutdown before publishing Stopped. Metadata poisoning closes admission and remains an explicit failure; cleanup recovers poisoned state only to retain/join actual work and release its resources. Backend shutdown still takes and stops the actual helper if serialized backend detachment fails. A combined structured error preserves both failures when detachment and stop fail; any such result sets the quiescence failure latch and cannot publish successful shutdown. Reversible off never calls permanent service shutdown.
 
 ## Integration and validation boundary
 

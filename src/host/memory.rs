@@ -35,6 +35,12 @@ pub enum MemoryError {
     Cancelled,
     #[error("host memory worker failed")]
     Worker,
+    #[error("semantic backend detachment and shutdown both failed")]
+    BackendCleanup {
+        detachment: ConsolidationError,
+        #[source]
+        shutdown: Box<MemoryError>,
+    },
     #[error(transparent)]
     Service(#[from] ServiceError),
     #[error(transparent)]
@@ -1356,7 +1362,10 @@ async fn dispose_built(built: BuiltEmbeddings) -> Result<(), MemoryError> {
 
 #[cfg(feature = "local-embeddings")]
 async fn shutdown_backend(core: &MemoryCore) -> Result<(), MemoryError> {
-    let hybrid = core.consolidator.detach_all_semantics().await?;
+    let (hybrid, detachment) = match core.consolidator.detach_all_semantics().await {
+        Ok(hybrid) => (hybrid, None),
+        Err(error) => (None, Some(error)),
+    };
     let process = match core.embeddings.lock() {
         Ok(mut state) => state.process.take(),
         Err(poisoned) => {
@@ -1364,7 +1373,19 @@ async fn shutdown_backend(core: &MemoryCore) -> Result<(), MemoryError> {
             poisoned.into_inner().process.take()
         }
     };
-    stop_backend(hybrid, process, core._agent.clone()).await
+    let shutdown = stop_backend(hybrid, process, core._agent.clone()).await;
+    if detachment.is_some() || shutdown.is_err() {
+        core.quiescence_failed.store(true, Ordering::Release);
+    }
+    match (detachment, shutdown) {
+        (None, Ok(())) => Ok(()),
+        (Some(error), Ok(())) => Err(error.into()),
+        (None, Err(error)) => Err(error),
+        (Some(detachment), Err(shutdown)) => Err(MemoryError::BackendCleanup {
+            detachment,
+            shutdown: Box::new(shutdown),
+        }),
+    }
 }
 
 struct PreparedMemory {
