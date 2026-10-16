@@ -2,6 +2,13 @@ name: Validate
 on:
   push:
   pull_request:
+  workflow_dispatch:
+    inputs:
+      retain_runtime_artifact:
+        description: Retain the default Linux CLI for separate manual verification
+        required: false
+        default: false
+        type: boolean
 permissions:
   contents: read
 jobs:
@@ -22,6 +29,15 @@ jobs:
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
       - run: cargo build --workspace --release --locked
+      - name: Retain default Linux CLI
+        if: ${{ matrix.os == 'ubuntu-latest' && github.event_name == 'workflow_dispatch' && inputs.retain_runtime_artifact }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: everything-linux-default-${{ github.sha }}
+          path: target/release/everything
+          retention-days: 3
+          if-no-files-found: error
+          compression-level: 6
       - run: cargo build --workspace --release --all-features --locked
   msrv:
     runs-on: ubuntu-latest
