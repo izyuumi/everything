@@ -9,9 +9,9 @@ struct ThisMacSettingsView: View {
         Form {
             Section("Preferences on this Mac") {
                 if store.isOpening { ProgressView("Opening local preferences…") }
-                Toggle("Completion notifications", isOn: Binding(get: { store.draft?.completion ?? false }, set: store.setCompletion))
+                Toggle("Completion notifications", isOn: Binding(get: { store.draft?.completion ?? false }, set: { value in store.setCompletion(value) }))
                     .disabled(!store.canEdit)
-                Toggle("Attention notifications", isOn: Binding(get: { store.draft?.attention ?? false }, set: store.setAttention))
+                Toggle("Attention notifications", isOn: Binding(get: { store.draft?.attention ?? false }, set: { value in store.setAttention(value) }))
                     .disabled(!store.canEdit)
                 Text("These preferences are saved on this Mac independently of the Host connection. OS permission is shown separately below.")
                     .font(.caption)
