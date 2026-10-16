@@ -27,7 +27,7 @@ use super::contract::{
     AgentMutability, SETTINGS_CONTRACT_VERSION, SettingsActionReference, SettingsActionRequest,
     SettingsConfirmationReference, SettingsContractError, SettingsDeviceRequest,
     SettingsOperationResult, SettingsOperationState, SettingsPatch, SettingsRequestBinding,
-    SettingsScope, SettingsUnavailableReason,
+    SettingsScope, SettingsToolName, SettingsUnavailableReason,
 };
 use super::operations::{
     NativeRequest, OperationIdentity, OperationRepository, SettingsOperationInspection,
