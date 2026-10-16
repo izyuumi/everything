@@ -475,35 +475,10 @@ impl HostInner {
                 self.credentials.apply(operation).await?;
                 Ok(OwnerOperationResult::Applied)
             }
-            OwnerOperation::ReplaceSettings {
-                expected_revision,
-                settings,
-            } => {
-                let _mutation = self.mutation.lock().await;
-                self.ensure_accepting()?;
-                let old = self.blocking(|host| Ok(host.settings.snapshot()?)).await?;
-                let active = self.composition.status(&settings).await?;
-                let restart_required = old.relay_origin != settings.relay_origin
-                    || old.worker != settings.worker
-                    || active.restart_required.memory
-                    || active.restart_required.mcp
-                    || active.restart_required.selection;
-                let result = self
-                    .blocking(move |host| {
-                        Ok(OwnerOperationResult::Settings {
-                            settings: Box::new(
-                                host.settings.replace(*settings, expected_revision)?,
-                            ),
-                            restart_required,
-                        })
-                    })
-                    .await?;
-                if let (Some(coordinator), OwnerOperationResult::Settings { settings, .. }) =
-                    (self.worker.get(), &result)
-                {
-                    coordinator.settings_changed(settings.worker.as_ref());
-                }
-                Ok(result)
+            OwnerOperation::ReplaceSettings { .. } | OwnerOperation::ReconcileSettings { .. } => {
+                Err(HostError::Invalid(
+                    "settings replacement requires authenticated owner ingress",
+                ))
             }
             OwnerOperation::BeginPairing { lifetime_ms } => {
                 let _mutation = self.mutation.lock().await;

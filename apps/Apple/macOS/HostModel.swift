@@ -322,9 +322,14 @@ final class HostModel {
         pendingAction = request
         pendingActionLabel = label
         defer { acting = false }
+        let original = connection
         do {
-            let result = try await client.request(request, connection: connection)
-            if expectedKind == "command" {
+            let result = try await client.request(request, connection: original)
+            guard original == connection, !closing, !Task.isCancelled else { return }
+            var settled = true
+            if expectedKind == "settings" {
+                settled = try adoptSettingsReceipt(result, request: request)
+            } else if expectedKind == "command" {
                 guard result["command_id"].string == request.id.string,
                       result["conversation_id"] == request.body["command"]["conversation_id"],
                       let phase = result["phase"].string, ["completed", "rejected"].contains(phase) else { throw OwnerClientError.invalidResponse }
@@ -333,15 +338,92 @@ final class HostModel {
                 guard result["kind"].string == expectedKind else { throw OwnerClientError.invalidResponse }
                 message = label + " applied."
             }
-            if expectedKind == "settings" {
-                guard let expected = request.body["operation"]["expected_revision"].unsigned,
-                      result["settings"]["revision"].unsigned == expected + 1 else { throw OwnerClientError.invalidResponse }
-                try adoptSettings(result["settings"])
-                if result["restart_required"].bool == true { message = "Settings saved. Restart the host to apply relay changes." }
-            }
-            pendingAction = nil
+            if settled { pendingAction = nil }
             await refresh()
         } catch { message = error.localizedDescription }
+    }
+
+    private func adoptSettingsReceipt(_ result: JSONValue, request: OwnerRequest) throws -> Bool {
+        guard request.body["operation"]["kind"].string == "replace_settings",
+              let expected = request.body["operation"]["expected_revision"].unsigned,
+              expected > 0, expected < UInt64(Int64.max) else { throw OwnerClientError.invalidResponse }
+        if result["kind"].string == "settings" {
+            guard result["settings"]["revision"].unsigned == expected + 1 else { throw OwnerClientError.invalidResponse }
+            try adoptSettings(result["settings"])
+            message = result["restart_required"].bool == true
+                ? "Settings saved. Restart the host to apply configuration changes."
+                : "Settings saved."
+            return true
+        }
+        let operation = result["operation"]
+        let binding = operation["binding"]
+        guard result["kind"].string == "settings_receipt",
+              binding["request_id"].string == request.id.string,
+              binding["client_session_id"].string == request.id.string,
+              binding["expected_revision"].unsigned == expected,
+              binding["scope"]["kind"].string == "host",
+              let hostID = binding["scope"]["host_id"].string,
+              operation["origin"]["kind"].string == "local_owner",
+              operation["origin"]["request_id"].string == request.id.string,
+              let restartRequired = result["restart_required"].bool else { throw OwnerClientError.invalidResponse }
+        _ = try OwnerID(hostID)
+        let phase = operation["phase"]
+        if phase["phase"].string == "applying" {
+            guard phase["expected_revision"].unsigned == expected,
+                  phase["revision"].unsigned == expected + 1,
+                  result["settings"] == .null, !restartRequired else { throw OwnerClientError.invalidResponse }
+            message = "Settings are still being reconciled. The original request remains pending."
+            return false
+        }
+        let outcome = phase["result"]
+        guard phase["phase"].string == "finished",
+              outcome["contract_version"].unsigned == 1,
+              outcome["request_id"].string == request.id.string,
+              outcome["scope"] == binding["scope"],
+              let state = outcome["state"]["kind"].string else { throw OwnerClientError.invalidResponse }
+        switch state {
+        case "applied", "pending_application", "restart_required":
+            let write = operation["write"]
+            guard write["resolution"].string == "applied",
+                  write["expected_revision"].unsigned == expected,
+                  write["revision"].unsigned == expected + 1,
+                  outcome["state"]["revision"].unsigned == expected + 1,
+                  write["restart_required"].bool == restartRequired else { throw OwnerClientError.invalidResponse }
+            if result["settings"] != .null {
+                guard result["settings"]["revision"].unsigned == expected + 1 else { throw OwnerClientError.invalidResponse }
+                try adoptSettings(result["settings"])
+            }
+            if state == "pending_application" {
+                switch operation["application"]["state"].string {
+                case nil: message = "Settings saved. Application is pending."
+                case "applied": message = "Settings saved and applied."
+                case "restart_required": message = "Settings saved. Restart the host to apply configuration changes."
+                case "failed": message = "Settings saved. Application failed; inspect current state."
+                case "unavailable": message = "Settings saved. The requested feature is unavailable."
+                default: throw OwnerClientError.invalidResponse
+                }
+            } else {
+                message = restartRequired
+                    ? "Settings saved. Restart the host to apply configuration changes."
+                    : "Settings saved."
+            }
+            return true
+        case "unknown":
+            guard result["settings"] == .null, !restartRequired else { throw OwnerClientError.invalidResponse }
+            message = "The settings outcome is uncertain. Inspect or reconcile the original request before another edit."
+            return false
+        case "host_action_required", "conflict", "unavailable", "failed", "cancelled":
+            guard result["settings"] == .null, !restartRequired else { throw OwnerClientError.invalidResponse }
+            message = switch state {
+            case "host_action_required": "This change requires native confirmation."
+            case "conflict": "Settings changed elsewhere. Reload before editing."
+            case "unavailable": "The settings operation is unavailable."
+            case "cancelled": "The settings operation was cancelled."
+            default: "The settings operation failed. Reload current state."
+            }
+            return true
+        default: throw OwnerClientError.invalidResponse
+        }
     }
 
     func repeatPending() async {

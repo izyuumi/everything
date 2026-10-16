@@ -923,6 +923,51 @@ impl HostInner {
             LocalRequestPayload::Query { query } => Ok(LocalResponsePayload::QueryResult {
                 result: self.query(query.clone(), call.cancellation.clone()).await?,
             }),
+            LocalRequestPayload::OwnerOperation {
+                operation: crate::ipc::OwnerOperation::ReconcileSettings { operation_id },
+            } => {
+                let caller = self.settings_service.local_owner_caller(call)?;
+                let operation = self
+                    .settings_service
+                    .reconcile_write(caller, *operation_id, call.cancellation.clone())
+                    .await?;
+                Ok(LocalResponsePayload::OwnerOperationResult {
+                    result: crate::ipc::OwnerOperationResult::SettingsReconciled {
+                        operation: Box::new(operation),
+                    },
+                })
+            }
+            LocalRequestPayload::OwnerOperation {
+                operation:
+                    crate::ipc::OwnerOperation::ReplaceSettings {
+                        expected_revision,
+                        settings,
+                    },
+            } => {
+                self.ensure_accepting()?;
+                let caller = self.settings_service.local_owner_caller(call)?;
+                let receipt = self
+                    .settings_service
+                    .replace_as_owner(
+                        caller,
+                        *expected_revision,
+                        settings.as_ref().clone(),
+                        call.cancellation.clone(),
+                    )
+                    .await?;
+                if let (Some(coordinator), Some(settings)) =
+                    (self.worker.get(), receipt.settings.as_ref())
+                {
+                    coordinator.settings_changed(settings.worker.as_ref());
+                }
+                Ok(LocalResponsePayload::OwnerOperationResult {
+                    result: crate::ipc::OwnerOperationResult::SettingsReceipt {
+                        operation: Box::new(receipt.operation),
+                        settings: receipt.settings,
+                        restart_required: receipt.restart_required,
+                    },
+                })
+            }
             LocalRequestPayload::OwnerOperation { operation } => {
                 Ok(LocalResponsePayload::OwnerOperationResult {
                     result: self
@@ -1134,7 +1179,9 @@ pub(super) fn public_failure(error: &HostError) -> LocalFailure {
             "settings admission is closed, expired or cancelled",
         ),
         HostError::SettingsService(
-            SettingsServiceError::OutcomeUnknown { .. } | SettingsServiceError::Worker,
+            SettingsServiceError::OutcomeUnknown { .. }
+            | SettingsServiceError::Worker
+            | SettingsServiceError::WriteBlocked { .. },
         ) => (
             LocalFailureCode::Unavailable,
             "settings outcome is uncertain; inspect the original operation",
