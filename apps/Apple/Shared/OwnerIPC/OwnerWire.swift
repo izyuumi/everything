@@ -63,8 +63,8 @@ struct OwnerRequest: Sendable {
             switch body["operation"]["kind"].string {
             case "worker_coordinator", "revoke_worker_peer", "schedule", "acknowledge_scheduled_unknown",
                  "prepare_selection", "approve_selection", "discard_selection", "memory_enqueue", "memory_cancel",
-                 "memory_retry", "apply_memory_plan", "rebuild_embeddings", "discard_unapplied", "replace_settings",
-                 "approve_pairing", "revoke_device", "wake_task", "retry_provider", "resume_interrupted",
+                 "memory_retry", "apply_memory_plan", "rebuild_embeddings", "discard_unapplied", "replace_settings", "reconcile_settings",
+                 "revoke_device", "wake_task", "retry_provider", "resume_interrupted",
                  "acknowledge_cleanup", "reconcile_drained": return
             default: throw OwnerPrivateTransportError.requiresPrivatePipe
             }

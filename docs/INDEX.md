@@ -4,7 +4,7 @@ Read [AGENTS.md](../AGENTS.md), then [implementation status](status/implementati
 
 For embedding control integration, read [live memory application](architecture/memory-live-application.md).
 
-For Settings implementation, read the [typed contract](contracts/settings.md), [service and journal](contracts/settings-service.md), [startup and application driver](contracts/host-settings-startup.md), [owner receipts](contracts/settings-owner-routes.md), [private native routes](contracts/native-settings-routes.md), [Apple metadata](contracts/apple-settings-wire.md), [credential effects](contracts/native-credential-actions.md), [device effects](contracts/device-settings.md), [This Mac controls](contracts/this-mac-settings.md), [native client foundations](architecture/native-settings-actions.md) and [actual validation](development/settings-validation.md).
+For Settings implementation, read the [typed contract](contracts/settings.md), [service and journal](contracts/settings-service.md), [startup and application driver](contracts/host-settings-startup.md), [owner receipts](contracts/settings-owner-routes.md), [private native routes](contracts/native-settings-routes.md), [Apple metadata](contracts/apple-settings-wire.md), [native macOS Session](contracts/apple-native-settings-session.md), [owner credential metadata](contracts/apple-owner-settings-metadata.md), [credential effects](contracts/native-credential-actions.md), [device effects](contracts/device-settings.md), [This Mac controls](contracts/this-mac-settings.md), [native client foundations](architecture/native-settings-actions.md) and [actual validation](development/settings-validation.md).
 
 ## Architecture
 
@@ -18,7 +18,7 @@ Worker contracts: [Endpoint and capabilities](contracts/worker.md) · [Staging](
 
 ## Development
 
-[Setup](development/setup.md) · [CLI](development/cli.md) · [Scheduling CLI](development/scheduling-cli.md) · [Headless host](development/host.md) · [System One setup](development/system-one.md) · [macOS client](development/macos-client.md) · [iOS client](development/ios-client.md) · [Schedule status](development/schedule-status.md) · [Conventions](development/conventions.md) · [Workflows](development/workflows.md) · [Repository maintenance](development/repository-maintenance.md) · [Backlog synchronization](development/backlog-sync.md) · [Validation](development/validation.md) · [Embedding benchmark](development/embedding-benchmark.md) · [Scheduler](development/scheduler.md) · [Worker CLI](development/worker-coordinator-cli.md) · [Worker validation](development/worker.md) · [Worker files](development/worker-files.md)
+[Setup](development/setup.md) · [CLI](development/cli.md) · [Scheduling CLI](development/scheduling-cli.md) · [Scheduling acceptance](development/scheduling-acceptance.md) · [Headless host](development/host.md) · [System One setup](development/system-one.md) · [macOS client](development/macos-client.md) · [iOS client](development/ios-client.md) · [Schedule status](development/schedule-status.md) · [Conventions](development/conventions.md) · [Workflows](development/workflows.md) · [Repository maintenance](development/repository-maintenance.md) · [Backlog synchronization](development/backlog-sync.md) · [Validation](development/validation.md) · [Embedding benchmark](development/embedding-benchmark.md) · [Scheduler](development/scheduler.md) · [Worker CLI](development/worker-coordinator-cli.md) · [Worker validation](development/worker.md) · [Worker files](development/worker-files.md)
 
 ## Decisions
 
