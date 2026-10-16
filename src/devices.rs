@@ -1,6 +1,8 @@
 mod routing;
 mod session;
 mod settings;
+#[cfg(unix)]
+mod settings_bind_reply;
 mod settings_connection;
 #[cfg(unix)]
 mod settings_ingress;
@@ -17,6 +19,8 @@ pub(crate) use settings_connection::{
     SettingsHostIdentity,
 };
 
+#[cfg(unix)]
+pub(crate) use settings_bind_reply::{SettingsBindReplyContractError, SettingsBindReplyPacket};
 #[cfg(unix)]
 pub(crate) use settings_ingress::work::ReplyBuildPermit;
 #[cfg(unix)]
