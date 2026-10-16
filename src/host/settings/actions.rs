@@ -203,6 +203,7 @@ pub(super) struct ClaimState {
 
 impl ActionClaim {
     pub fn check_effect(&self, state: &ClaimState) -> Result<(), SettingsServiceError> {
+        validate_current(&self.authority, &self.settings, &self.identity)?;
         if state.closed
             || self.cancellation.is_cancelled()
             || Instant::now() >= self.deadline
@@ -213,7 +214,7 @@ impl ActionClaim {
         if state.host_effect_started {
             return Err(SettingsServiceError::Conflict);
         }
-        validate_current(&self.authority, &self.settings, &self.identity)
+        Ok(())
     }
 
     pub fn close(&self) -> Result<(), SettingsServiceError> {
@@ -299,11 +300,10 @@ pub(super) fn validate_current(
     settings: &SettingsRepository,
     identity: &OperationIdentity,
 ) -> Result<(), SettingsServiceError> {
-    authority.check_origin(&identity.origin)?;
     if let Some(expected) = identity.binding.expected_revision
         && settings.snapshot()?.revision != expected
     {
         return Err(SettingsServiceError::Conflict);
     }
-    Ok(())
+    authority.check_origin(&identity.origin)
 }

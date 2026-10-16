@@ -9,7 +9,7 @@ use uuid::Uuid;
 
 use crate::agent::Agent;
 use crate::devices::{DeviceEndpoint, EndpointRole};
-use crate::protocol::{CommandId, DeviceId, ProtocolError, UnixMillis};
+use crate::protocol::{CommandId, ProtocolError, UnixMillis};
 use crate::storage::StorageError;
 use crate::transport::local::LocalCall;
 
