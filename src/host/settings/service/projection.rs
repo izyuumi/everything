@@ -116,6 +116,15 @@ fn memory_entries(settings: &HostSettings, metadata: &EmbeddingMetadata) -> Vec<
             crate::host::memory::EmbeddingApplyPhase::Pending { .. }
         )
     });
+    let terminal_failure = metadata.application.as_ref().is_some_and(|application| {
+        matches!(
+            application.phase,
+            crate::host::memory::EmbeddingApplyPhase::Unavailable { .. }
+                | crate::host::memory::EmbeddingApplyPhase::Failed { .. }
+                | crate::host::memory::EmbeddingApplyPhase::Stopped
+                | crate::host::memory::EmbeddingApplyPhase::Superseded
+        )
+    });
     let mut enabled = preference(
         SettingKey::EmbeddingsEnabled,
         SettingValue::Boolean {
@@ -126,12 +135,12 @@ fn memory_entries(settings: &HostSettings, metadata: &EmbeddingMetadata) -> Vec<
         },
         pending || desired_enabled != current_enabled,
     );
-    if unavailable && desired_enabled && !pending {
+    if terminal_failure || unavailable && !pending {
         enabled.state = SettingState::Unavailable;
         enabled.unavailable_reason = Some(SettingsUnavailableReason::EmbeddingBoundaryUnavailable);
     }
     let dimension = match metadata.profile.as_ref() {
-        Some(profile) if current_enabled => {
+        Some(profile) if current_enabled && !terminal_failure => {
             let selected = profile.dimensions() as u32;
             let value = if updates::embedding_dimensions(settings).is_none()
                 && settings.memory.embeddings.backend_default_dimensions()

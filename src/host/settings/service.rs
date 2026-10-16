@@ -1,3 +1,4 @@
+mod application;
 mod changes;
 mod credentials;
 mod devices;
@@ -167,6 +168,7 @@ struct ServiceCore {
     active_write: Mutex<Option<Arc<ActiveSettingsWrite>>>,
     composition: Mutex<Option<Arc<crate::host::composition::Composition>>>,
     applications: Mutex<BTreeMap<CommandId, writes::ApplicationCapture>>,
+    application_stop: CancellationToken,
     agent: Agent,
 }
 
@@ -198,6 +200,7 @@ impl SettingsService {
                 active_write: Mutex::new(None),
                 composition: Mutex::new(None),
                 applications: Mutex::new(BTreeMap::new()),
+                application_stop: CancellationToken::new(),
                 agent,
             }),
         };
@@ -930,7 +933,9 @@ impl SettingsService {
     }
 
     pub(crate) fn stop_intake(&self) -> Result<(), SettingsServiceError> {
-        self.core.authority.close()
+        self.core.authority.close()?;
+        self.core.application_stop.cancel();
+        Ok(())
     }
 
     pub(crate) async fn close(&self) -> Result<(), SettingsServiceError> {
