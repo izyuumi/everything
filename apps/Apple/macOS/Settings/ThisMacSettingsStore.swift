@@ -139,8 +139,15 @@ final class ThisMacSettingsStore {
         return appearanceDraft.isModified && appearanceDraft.baseline.revision != latestKnownRevision
     }
 
-    var isSnapshotStale: Bool { snapshotReadFailed || !isForeground }
-    var isAppearanceSnapshotStale: Bool { appearanceReadFailed || !applicationActive }
+    var isSnapshotStale: Bool {
+        guard let snapshot else { return true }
+        return snapshotReadFailed || !isForeground || snapshot.revision < latestKnownRevision
+    }
+
+    var isAppearanceSnapshotStale: Bool {
+        guard let appearanceSnapshot else { return true }
+        return appearanceReadFailed || !applicationActive || appearanceSnapshot.revision < latestKnownRevision
+    }
 
     var canEdit: Bool {
         isForeground && snapshot != nil && !hasUnresolvedPreferenceWrite
