@@ -243,21 +243,16 @@ impl Scheduler {
             return Ok(report);
         }
         let (reply, result) = oneshot::channel();
-        if self
-            .inner
-            .sender
-            .send(Control::Shutdown(reply))
-            .await
-            .is_err()
-        {
-            return self
-                .inner
-                .drained
-                .borrow()
-                .clone()
-                .ok_or(SchedulerError::Stopped);
-        }
-        match tokio::time::timeout(self.inner.shutdown_grace, result).await {
+        let deadline = tokio::time::Instant::now() + self.inner.shutdown_grace;
+        let shutdown = async {
+            self.inner
+                .sender
+                .send(Control::Shutdown(reply))
+                .await
+                .map_err(|_| SchedulerError::Stopped)?;
+            result.await.map_err(|_| SchedulerError::Stopped)
+        };
+        match tokio::time::timeout_at(deadline, shutdown).await {
             Ok(Ok(report)) => Ok(report),
             Ok(Err(_)) => self
                 .inner
