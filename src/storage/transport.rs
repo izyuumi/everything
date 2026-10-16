@@ -415,8 +415,11 @@ impl Store {
             .query_row("SELECT count(*) FROM transport_inbox", [], |row| row.get(0))
             .map_err(StorageError::from)?;
         if markers >= 100_000 {
-            return Err(SettingsCommandAdmissionError::ReplayCapacity(
-                StorageError::TransportCapacity("durable receiver inbox"),
+            return Err(rollback_command_receipt(
+                transaction,
+                SettingsCommandAdmissionError::ReplayCapacity(StorageError::TransportCapacity(
+                    "durable receiver inbox",
+                )),
             ));
         }
         let qualified =
@@ -455,14 +458,23 @@ impl Store {
                 let original =
                     match insert_original_in(&transaction, qualified.original_admission()) {
                         Err(error @ StorageError::TransportCapacity(_)) => {
-                            return Err(SettingsCommandAdmissionError::OriginalCapacity(error));
+                            return Err(rollback_command_receipt(
+                                transaction,
+                                SettingsCommandAdmissionError::OriginalCapacity(error),
+                            ));
                         }
                         result => result?,
                     };
                 (original, false)
             }
         };
-        let reply = super::settings_transport::reserve_command_reply_in(&transaction, identity)?;
+        let reply =
+            match super::settings_transport::reserve_command_reply_in(&transaction, identity) {
+                Err(error @ SettingsCommandAdmissionError::ReplyCapacity(_)) => {
+                    return Err(rollback_command_receipt(transaction, error));
+                }
+                result => result?,
+            };
         transaction.execute("INSERT INTO transport_inbox(message_id,sender,recipient,envelope_digest,payload,received_at,expires_at,state,command_id,detail) VALUES(?1,?2,?3,?4,NULL,?5,?6,'processed',NULL,NULL)",params![receipt.message_id,receipt.sender,receipt.recipient,receipt.envelope_digest,receipt.received_at,receipt.expires_at]).map_err(StorageError::from)?;
         check_receipt_receiver(&transaction, &receipt, admission.source.pinned_identity())?;
         if let Err(error) = admission
