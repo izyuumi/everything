@@ -2,20 +2,27 @@ use std::fmt;
 use std::sync::Arc;
 use std::time::Instant;
 
-use rusqlite::{Transaction, TransactionBehavior};
+use rusqlite::{Connection, Row, Transaction, TransactionBehavior, types::ValueRef};
+use tokio::sync::OwnedMutexGuard;
 
 use crate::devices::{
-    AuthenticatedSettingsCommandSource, BindRejection, CommandRejection, HostSettingsTransport,
-    OwnedCommittedSettingsBind, SettingsHostIdentity,
+    AuthenticatedSettingsCommandSource, BindRejection, CommandRejection,
+    CommittedSettingsCommandSource, HostSettingsTransport, OwnedCommittedSettingsBind,
+    OwnedHistoricalSettingsCommand, SettingsHostIdentity,
 };
 use crate::protocol::UnixMillis;
 use crate::storage::settings_originals::{
-    RemoteAcceptedIdentity, RemoteOriginalAdmission, RemotePublicCommand,
+    RemoteAcceptedIdentity, RemoteDimensionSelection, RemoteOriginalAdmission,
+    RemoteOriginalIdentity, RemoteOriginalLink, RemoteOriginalRecord, RemotePublicCommand,
+    read_original_on,
 };
-use crate::storage::{Store, settings_grant_head_on};
+use crate::storage::{Store, StoredSettingsCommandReply, settings_grant_head_on};
 
-use super::super::contract::SettingKey;
+use super::super::actions::SettingsActionTarget;
+use super::super::authority::SettingsOperationOrigin;
+use super::super::contract::{SettingKey, SettingValue, SettingsScope};
 use super::super::grants::{SettingsGrantOwner, SettingsGrantState};
+use super::super::operations::{OperationRecord, SettingsOperationPhase};
 use super::{ServiceCore, SettingsService, SettingsServiceError};
 
 pub(crate) use super::super::authority::PairedSettingsParent;
@@ -889,4 +896,423 @@ impl<'request> PairedWriteAdmission<'request> {
         self.core.authority.check_paired_update(self.caller)?;
         Ok(original)
     }
+}
+
+pub(crate) enum OriginalReplySource<'request> {
+    Fresh(CommittedSettingsCommandSource<'request>),
+    Historical(&'request OwnedHistoricalSettingsCommand),
+}
+
+pub(crate) struct QualifiedOriginalReply<'scope> {
+    authority: &'scope SettingsReceiptAuthority,
+    source: OriginalReplySource<'scope>,
+    mutation: &'scope OwnedMutexGuard<()>,
+    invocation: Arc<()>,
+    original: RemoteOriginalRecord,
+    operation: Option<OperationRecord>,
+    observed_wall: UnixMillis,
+    observed_monotonic: Instant,
+}
+
+struct OriginalReplyObservation {
+    original: RemoteOriginalRecord,
+    operation: Option<OperationRecord>,
+    wall: UnixMillis,
+    monotonic: Instant,
+}
+
+impl fmt::Debug for OriginalReplySource<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("OriginalReplySource([owned association])")
+    }
+}
+
+impl fmt::Debug for QualifiedOriginalReply<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("QualifiedOriginalReply([current read only])")
+    }
+}
+
+impl OriginalReplySource<'_> {
+    fn authenticated(&self) -> &AuthenticatedSettingsCommandSource {
+        match self {
+            Self::Fresh(source) => source.authority_source(),
+            Self::Historical(request) => request.authority_source(),
+        }
+    }
+
+    fn receipt_authority(&self) -> &SettingsReceiptAuthority {
+        match self {
+            Self::Fresh(source) => source.receipt_authority(),
+            Self::Historical(request) => request.receipt_authority(),
+        }
+    }
+
+    fn original(&self) -> &RemoteOriginalRecord {
+        match self {
+            Self::Fresh(source) => source.original(),
+            Self::Historical(request) => request.original(),
+        }
+    }
+
+    fn reply_reservation(&self) -> &StoredSettingsCommandReply {
+        match self {
+            Self::Fresh(source) => source.reply_reservation(),
+            Self::Historical(request) => request.reply_reservation(),
+        }
+    }
+
+    fn original_deadline(&self) -> Instant {
+        match self {
+            Self::Fresh(source) => source.original_deadline(),
+            Self::Historical(request) => request.original_deadline(),
+        }
+    }
+
+    fn receipt_floor(&self) -> (UnixMillis, Instant) {
+        match self {
+            Self::Fresh(source) => source.receipt_floor(),
+            Self::Historical(request) => request.receipt_floor(),
+        }
+    }
+}
+
+impl SettingsReceiptAuthority {
+    pub(crate) fn qualify_original_reply_on<'scope>(
+        &'scope self,
+        store: &Store,
+        transaction: &Transaction<'_>,
+        mutation: &'scope OwnedMutexGuard<()>,
+        source: OriginalReplySource<'scope>,
+    ) -> Result<QualifiedOriginalReply<'scope>, SettingsServiceError> {
+        let observed = self.observe_original_reply_on(store, transaction, mutation, &source)?;
+        let invocation = Arc::clone(source.authenticated().invocation_identity());
+        Ok(QualifiedOriginalReply {
+            authority: self,
+            source,
+            mutation,
+            invocation,
+            original: observed.original,
+            operation: observed.operation,
+            observed_wall: observed.wall,
+            observed_monotonic: observed.monotonic,
+        })
+    }
+
+    pub(crate) fn recheck_original_reply_on(
+        &self,
+        store: &Store,
+        transaction: &Transaction<'_>,
+        qualified: &QualifiedOriginalReply<'_>,
+    ) -> Result<(), SettingsServiceError> {
+        if !std::ptr::eq(self, qualified.authority)
+            || !Arc::ptr_eq(
+                &qualified.invocation,
+                qualified.source.authenticated().invocation_identity(),
+            )
+        {
+            return Err(SettingsServiceError::OutsideScope);
+        }
+        let observed = self.observe_original_reply_on(
+            store,
+            transaction,
+            qualified.mutation,
+            &qualified.source,
+        )?;
+        let same_operation = match (&qualified.operation, &observed.operation) {
+            (None, None) => true,
+            (Some(previous), Some(current)) => {
+                previous.identity == current.identity
+                    && previous.inspection() == current.inspection()
+            }
+            _ => false,
+        };
+        if observed.original != qualified.original
+            || !same_operation
+            || observed.wall < qualified.observed_wall
+            || observed.monotonic < qualified.observed_monotonic
+        {
+            return Err(SettingsServiceError::OutsideScope);
+        }
+        Ok(())
+    }
+
+    fn observe_original_reply_on(
+        &self,
+        store: &Store,
+        connection: &Connection,
+        mutation: &OwnedMutexGuard<()>,
+        subject: &OriginalReplySource<'_>,
+    ) -> Result<OriginalReplyObservation, SettingsServiceError> {
+        if self.core.application_stop.is_cancelled() {
+            return Err(SettingsServiceError::Stopped);
+        }
+        let source = subject.authenticated();
+        if !std::ptr::eq(self, subject.receipt_authority())
+            || !Arc::ptr_eq(OwnedMutexGuard::mutex(mutation), &self.core.mutation)
+            || !source.matches_context(&self.core.agent, &self.core.endpoint, &self.core.mutation)
+            || !self.core.agent.store().shares_connection(store)
+            || !Arc::ptr_eq(source.connection().host_identity(), &self.host)
+        {
+            return Err(SettingsServiceError::OutsideScope);
+        }
+        let snapshot = subject.original();
+        let RemoteOriginalIdentity::Accepted(identity) = &snapshot.identity else {
+            return Err(SettingsServiceError::OutsideScope);
+        };
+        let floor = subject.receipt_floor();
+        let deadline = floor
+            .1
+            .checked_add(std::time::Duration::from_millis(
+                identity
+                    .expires_at
+                    .get()
+                    .checked_sub(floor.0.get())
+                    .ok_or(SettingsServiceError::Expired)?,
+            ))
+            .ok_or(SettingsServiceError::Expired)?;
+        if deadline != subject.original_deadline() || snapshot.key != snapshot.identity.key() {
+            return Err(SettingsServiceError::OutsideScope);
+        }
+        let (owner, first_wall, first_monotonic) = self.core.authority.observe_paired_reply(
+            &self.host,
+            source,
+            floor,
+            deadline,
+            &self.core.application_stop,
+        )?;
+        let intent = source.intent();
+        let expected = RemoteAcceptedIdentity {
+            version: 1,
+            host_id: owner.host_id,
+            owner_principal_id: owner.principal_id,
+            peer_keys: source.verified_peer_keys().clone(),
+            request_id: intent.request_id,
+            remote_parent_id: intent.parent.parent_id,
+            grant_id: intent.parent.generation.grant_id,
+            grant_revision: intent.parent.generation.grant_revision,
+            host_epoch: intent.parent.generation.host_epoch,
+            connection_epoch: intent.parent.generation.connection_epoch,
+            admitted_at: identity.admitted_at,
+            issued_at: intent.issued_at,
+            expires_at: intent.expires_at,
+            command: RemotePublicCommand::Update {
+                expected_settings_revision: intent.update.expected_settings_revision,
+                enabled: intent.update.enabled,
+                dimensions: intent.update.dimensions.clone(),
+            },
+        };
+        if *identity != expected || first_wall < identity.admitted_at {
+            return Err(SettingsServiceError::OutsideScope);
+        }
+        let head =
+            settings_grant_head_on(connection, owner, source.verified_peer_keys().device_id)?
+                .ok_or(SettingsServiceError::OutsideScope)?;
+        let SettingsGrantState::Active { readable_keys, .. } = &head.grant.change.target.state
+        else {
+            return Err(SettingsServiceError::OutsideScope);
+        };
+        if head.host_revoked
+            || head.peer_revoked
+            || head.grant.change.peer_keys != *source.verified_peer_keys()
+            || head.grant.revision != identity.grant_revision
+            || head.grant.change.target.grant_id != identity.grant_id
+            || first_wall < head.grant.change.target.issued_at
+            || identity.expires_at > head.grant.change.target.expires_at
+            || (intent.update.enabled.is_some()
+                && !readable_keys.contains(&SettingKey::EmbeddingsEnabled))
+            || (intent.update.dimensions.is_some()
+                && !readable_keys.contains(&SettingKey::EmbeddingsDimensions))
+        {
+            return Err(SettingsServiceError::OutsideScope);
+        }
+        let original =
+            read_original_on(connection, snapshot.key)?.ok_or(SettingsServiceError::NotFound)?;
+        if original.identity != snapshot.identity
+            || snapshot
+                .link
+                .as_ref()
+                .is_some_and(|link| original.link.as_ref() != Some(link))
+            || snapshot
+                .close
+                .as_ref()
+                .is_some_and(|close| original.close.as_ref() != Some(close))
+            || snapshot
+                .terminal
+                .is_some_and(|terminal| original.terminal != Some(terminal))
+        {
+            return Err(SettingsServiceError::CorruptJournal);
+        }
+        let operation = match &original.link {
+            None => None,
+            Some(RemoteOriginalLink::Operation { operation_id }) => {
+                if *operation_id != identity.request_id {
+                    return Err(SettingsServiceError::CorruptJournal);
+                }
+                let operation = super::super::operations::read(connection, *operation_id)?
+                    .ok_or(SettingsServiceError::CorruptJournal)?;
+                check_original_reply_operation(identity, &operation)?;
+                if operation.write().is_some_and(|write| {
+                    write
+                        .intent
+                        .changed_keys
+                        .iter()
+                        .any(|key| !readable_keys.contains(key))
+                }) {
+                    return Err(SettingsServiceError::OutsideScope);
+                }
+                Some(operation)
+            }
+            Some(_) => return Err(SettingsServiceError::CorruptJournal),
+        };
+        check_original_reply_reservation(connection, subject, first_wall)?;
+        let (checked_owner, wall, monotonic) = self.core.authority.observe_paired_reply(
+            &self.host,
+            source,
+            floor,
+            deadline,
+            &self.core.application_stop,
+        )?;
+        if checked_owner != owner
+            || wall < first_wall
+            || monotonic < first_monotonic
+            || wall >= head.grant.change.target.expires_at
+            || wall >= subject.reply_reservation().expires_at
+            || self.core.application_stop.is_cancelled()
+            || !source.connection().is_live()
+            || !source.matches_context(&self.core.agent, &self.core.endpoint, &self.core.mutation)
+        {
+            return Err(SettingsServiceError::OutsideScope);
+        }
+        Ok(OriginalReplyObservation {
+            original,
+            operation,
+            wall,
+            monotonic,
+        })
+    }
+}
+
+fn check_original_reply_operation(
+    original: &RemoteAcceptedIdentity,
+    operation: &OperationRecord,
+) -> Result<(), SettingsServiceError> {
+    let identity = &operation.identity;
+    let RemotePublicCommand::Update {
+        expected_settings_revision,
+        enabled,
+        dimensions,
+    } = &original.command
+    else {
+        return Err(SettingsServiceError::OutsideScope);
+    };
+    let SettingsActionTarget::Patch(patch) = &identity.target else {
+        return Err(SettingsServiceError::CorruptJournal);
+    };
+    let expected_origin = SettingsOperationOrigin::PairedSettings {
+        actor_device_id: original.peer_keys.device_id,
+        remote_parent_id: original.remote_parent_id,
+        grant_id: original.grant_id,
+        grant_revision: original.grant_revision,
+        host_epoch: original.host_epoch,
+        connection_epoch: original.connection_epoch,
+    };
+    if identity.version != 2
+        || identity.origin != expected_origin
+        || identity.binding.request_id != original.request_id
+        || identity.binding.principal_id != *original.peer_keys.device_id.as_uuid()
+        || identity.binding.client_session_id != original.remote_parent_id
+        || identity.binding.scope
+            != (SettingsScope::Host {
+                host_id: original.host_id,
+            })
+        || identity.binding.expected_revision != Some(*expected_settings_revision)
+        || identity.binding.issued_at != original.issued_at
+        || identity.binding.expires_at != original.expires_at
+        || patch.expected_revision != *expected_settings_revision
+        || patch.confirmation.is_some()
+        || patch.changes.len() != usize::from(enabled.is_some()) + usize::from(dimensions.is_some())
+        || !patch
+            .changes
+            .iter()
+            .all(|change| match (&change.key, &change.value) {
+                (SettingKey::EmbeddingsEnabled, SettingValue::Boolean { value }) => {
+                    enabled == &Some(*value)
+                }
+                (SettingKey::EmbeddingsDimensions, SettingValue::Dimensions { value }) => {
+                    match dimensions {
+                        Some(RemoteDimensionSelection::BackendDefault) => value.is_none(),
+                        Some(RemoteDimensionSelection::Selected { dimensions }) => {
+                            *value == Some(*dimensions)
+                        }
+                        None => false,
+                    }
+                }
+                _ => false,
+            })
+        || !matches!(
+            operation.phase(),
+            SettingsOperationPhase::Applying { .. } | SettingsOperationPhase::Finished { .. }
+        )
+    {
+        return Err(SettingsServiceError::CorruptJournal);
+    }
+    Ok(())
+}
+
+fn check_original_reply_reservation(
+    connection: &Connection,
+    subject: &OriginalReplySource<'_>,
+    now: UnixMillis,
+) -> Result<(), SettingsServiceError> {
+    let reply = subject.reply_reservation();
+    let source = subject.authenticated();
+    let floor = subject.receipt_floor();
+    if reply.reservation_id.is_nil()
+        || reply.local_device_id != source.intent().host_id
+        || reply.peer_device_id != source.verified_peer_keys().device_id
+        || reply.provenance.len() > 2048
+        || reply.created_at < floor.0
+        || reply.created_at > now
+        || reply.created_at >= reply.expires_at
+        || reply.expires_at != source.intent().expires_at
+        || now >= reply.expires_at
+        || matches!(subject, OriginalReplySource::Fresh(_))
+            && !matches!(&subject.original().identity, RemoteOriginalIdentity::Accepted(identity) if reply.created_at == identity.admitted_at)
+    {
+        return Err(SettingsServiceError::OutsideScope);
+    }
+    let mut statement = connection.prepare("SELECT reservation_id,local_device_id,peer_device_id,provenance,family,reserved_bytes,created_at,expires_at FROM settings_transport_reply_reservations WHERE reservation_id=?1")?;
+    let mut rows = statement.query([reply.reservation_id.to_string()])?;
+    let row = rows.next()?.ok_or(SettingsServiceError::NotFound)?;
+    let created_at =
+        i64::try_from(reply.created_at.get()).map_err(|_| SettingsServiceError::CorruptJournal)?;
+    let expires_at =
+        i64::try_from(reply.expires_at.get()).map_err(|_| SettingsServiceError::CorruptJournal)?;
+    if original_reply_text(row, 0, 36)? != reply.reservation_id.to_string()
+        || original_reply_text(row, 1, 36)? != reply.local_device_id.to_string()
+        || original_reply_text(row, 2, 36)? != reply.peer_device_id.to_string()
+        || original_reply_text(row, 3, 2048)? != reply.provenance
+        || original_reply_text(row, 4, 10)? != "inspection"
+        || row.get::<_, i64>(5)? != 90_112
+        || row.get::<_, i64>(6)? != created_at
+        || row.get::<_, i64>(7)? != expires_at
+    {
+        return Err(SettingsServiceError::CorruptJournal);
+    }
+    Ok(())
+}
+
+fn original_reply_text<'row>(
+    row: &'row Row<'_>,
+    column: usize,
+    maximum: usize,
+) -> Result<&'row str, SettingsServiceError> {
+    let ValueRef::Text(bytes) = row.get_ref(column)? else {
+        return Err(SettingsServiceError::CorruptJournal);
+    };
+    if bytes.len() > maximum {
+        return Err(SettingsServiceError::CorruptJournal);
+    }
+    std::str::from_utf8(bytes).map_err(|_| SettingsServiceError::CorruptJournal)
 }

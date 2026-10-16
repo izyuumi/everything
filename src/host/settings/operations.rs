@@ -1058,7 +1058,7 @@ impl OperationRepository {
     }
 }
 
-fn read(
+pub(super) fn read(
     connection: &rusqlite::Connection,
     request_id: CommandId,
 ) -> Result<Option<OperationRecord>, SettingsServiceError> {

@@ -579,3 +579,79 @@ impl Authority {
         Ok((wall, monotonic))
     }
 }
+
+impl Authority {
+    pub(in crate::host::settings) fn observe_paired_reply(
+        &self,
+        host: &Arc<SettingsHostIdentity>,
+        source: &AuthenticatedSettingsCommandSource,
+        floor: (UnixMillis, Instant),
+        deadline: Instant,
+        stop: &CancellationToken,
+    ) -> Result<(SettingsGrantOwner, UnixMillis, Instant), SettingsServiceError> {
+        let mut sessions = self
+            .sessions
+            .lock()
+            .map_err(|_| SettingsServiceError::Poisoned)?;
+        if sessions.closed || stop.is_cancelled() {
+            return Err(SettingsServiceError::Stopped);
+        }
+        let wall = UnixMillis::now()?;
+        let monotonic = Instant::now();
+        let connection = source.connection();
+        let intent = source.intent();
+        if sessions
+            .paired
+            .host
+            .as_ref()
+            .is_none_or(|registered| !Arc::ptr_eq(registered, host))
+            || !Arc::ptr_eq(connection.host_identity(), host)
+            || host.host_id() != self.host_id
+            || intent.host_id != self.host_id
+            || intent.parent.generation.host_epoch != host.host_epoch()
+            || intent.parent.generation.connection_epoch != connection.connection_epoch()
+            || !host.is_live()
+            || !connection.is_live()
+        {
+            return Err(SettingsServiceError::OutsideScope);
+        }
+        let entry = sessions
+            .paired
+            .entries
+            .values_mut()
+            .find(|entry| entry.record.id == intent.parent.parent_id)
+            .ok_or(SettingsServiceError::OutsideScope)?;
+        let record = &entry.record;
+        if record.intent.host_id != intent.host_id
+            || record.intent.generation != intent.parent.generation
+            || record.peer != *source.verified_peer_keys()
+            || !Arc::ptr_eq(&record.connection, connection)
+            || record.cancellation.is_cancelled()
+            || intent.expires_at > record.lifetime.expires_at
+            || wall < entry.observed_wall
+            || monotonic < entry.observed_monotonic
+            || wall < floor.0
+            || monotonic < floor.1
+            || wall < intent.issued_at
+        {
+            return Err(SettingsServiceError::OutsideScope);
+        }
+        if wall >= intent.expires_at
+            || monotonic >= deadline
+            || wall >= record.lifetime.expires_at
+            || monotonic >= record.lifetime.deadline
+        {
+            return Err(SettingsServiceError::Expired);
+        }
+        entry.observed_wall = wall;
+        entry.observed_monotonic = monotonic;
+        Ok((
+            SettingsGrantOwner {
+                host_id: self.host_id,
+                principal_id: self.owner_principal,
+            },
+            wall,
+            monotonic,
+        ))
+    }
+}

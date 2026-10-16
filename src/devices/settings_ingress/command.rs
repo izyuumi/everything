@@ -275,6 +275,15 @@ impl OwnedHistoricalSettingsCommand {
     pub(crate) fn reply_reservation(&self) -> &StoredSettingsCommandReply {
         &self.reply
     }
+
+    pub(crate) fn original_deadline(&self) -> Instant {
+        self.verified.deadline
+    }
+
+    pub(crate) fn receipt_floor(&self) -> (UnixMillis, Instant) {
+        let clock = self.verified.source.envelope.clock;
+        (clock.wall, clock.monotonic)
+    }
 }
 
 impl From<BindRejection> for CommandRejection {
