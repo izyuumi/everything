@@ -14,7 +14,7 @@ The Apple workflow now selects both actual existing schemes for unsigned SDK bui
 
 `EverythingIOSApp` owns one observable, main-actor `AppModel`. SwiftUI views display immutable service snapshots and dispatch actions. `ReplicaService`, `ReplicaStore`, `RelayConnection`, `DeviceIdentity` and `NotificationService` isolate mutable service state in actors. No model provider, agent loop, tool executor, scheduler or external model gateway runs on the phone.
 
-The service starts a connection only after the user chooses Connect. It reconnects while the scene remains active and joins its owned socket workers when stopping. A shared stopping task prevents a new connection from racing shutdown. Scene suspension or termination interrupts synchronization. There is no APNS registration, background push entitlement or claimed background execution. The generic local notification reflects activity this running client has actually received.
+The service starts a connection only after the user chooses Connect. It reconnects while the scene remains active and joins its owned socket workers when stopping. A shared stopping task prevents a new connection from racing shutdown. Scene suspension or termination interrupts synchronization. There is no APNS registration, background push entitlement or claimed background execution. This iPhone preferences remain local and independent of the Host connection. Completion/attention notification delivery is currently unavailable; the former cursor-based generic activity producer is removed.
 
 A foreground start waits for the existing owned stop task instead of failing while shutdown is in progress. Stop completion is identified before clearing connection resources, so a delayed second waiter cannot clear a newer runner. Each stop request invalidates pending starts before joining; a later Disconnect, scene suspension or local Disable prevents an earlier waiting start from reconnecting. Cancellation of a waiting start leaves the shared shutdown task owned until its workers join. This correction has source inspection and available syntax validation only; its scene transitions have not been executed on an Apple runtime. The successful SDK build and analysis of the earlier published client do not verify this correction.
 
@@ -78,7 +78,7 @@ Task controls derive from replicated native lifecycle events. The projection acc
 
 A host-signed revocation packet permanently disables local submission, clears pending outbound traffic and closes the connection. Local Disable has the same sticky local effect and preserves received history; host and relay operators must still revoke their own grants/enrollment. The app cannot promise receipt of a revocation while offline. Actual host authorization is checked again for each remote command.
 
-Conversation content is marked privacy-sensitive and an opaque inactive-scene overlay hides it from normal app switcher snapshots. This is not a screenshot-prevention guarantee. Local notifications have a generic Everything title/body, random identifiers, no conversation/device/message/tool/pairing metadata and a thirty-second throttle. Notification permission is explicit. No payloads, private keys or raw errors are logged.
+Conversation content is marked privacy-sensitive and an opaque inactive-scene overlay hides it from normal app switcher snapshots. This is not a screenshot-prevention guarantee. The existing single privacy notification delegate is retained. Permission is requested only through a fresh foreground local-settings gesture with original revision and lifetime checks; saving a notification preference does not authorize or prove delivery. No notification producer is enabled by this local-controls increment. No payloads, private keys or raw errors are logged.
 
 ## Validation and remaining blockers
 
@@ -100,3 +100,11 @@ xcodebuild -project apps/Apple/Everything.xcodeproj -scheme EverythingIOS -desti
 ```
 
 Then use disposable host/relay state and an explicitly enrolled phone for the manual pairing, authenticated ciphertext exchange, restart/offline/replay, scope-limited command, denial/expiry/revocation and privacy checks. Do not use real user conversations or assert production readiness without that validation and the deferred security/automated review.
+
+## Local appearance and notification preferences
+
+The Settings tab now links to a standalone This iPhone Form backed by the existing strict DevicePreferenceStore. The app creates one local owner from the actual checked Replica identity, retains it across reconnect and suspension, and never substitutes a new identity after storage failure. Unpaired/offline use is available after that protected identity opens. Appearance applies only from genuine saved state at the app root; notification choices and observed OS authorization remain separate.
+
+Explicit tab/navigation/cover and scene/platform events invalidate queued permission gestures before asynchronous work. The original Replica scene start/stop path remains unchanged. A separate resign-active latch prevents a stale scene callback from reopening eligibility. One coalesced local drain retains actual SQLite/OS callbacks; iOS termination supplies no guaranteed drain. See [the local-controls contract](../contracts/apple-local-device-controls.md) for identity, original save inspection, shared revision, visibility and validation limits.
+
+The two local source leaves are registered only in EverythingIOS. Source grammar and independent review do not establish supported SDK, device, permission-dialog, storage/replay or appearance behavior. Fresh integrated build/analyze and later device observations remain separate. The legacy direct permission shortcut and generic cursor-activity producer are removed; saved completion/attention choices do not yet connect to a real category event/dedup producer. Remote Host Settings and restricted chat remain dependent on #116/#117.

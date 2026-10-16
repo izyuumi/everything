@@ -10,7 +10,7 @@ struct RootView: View {
     @State private var sheet: ClientSheet?
 
     var body: some View {
-        TabView {
+        TabView(selection: Binding(get: { model.selectedTab }, set: { model.localTabChanged($0) })) {
             NavigationStack {
                 Group {
                     if let state = model.state {
@@ -22,8 +22,8 @@ struct RootView: View {
                             } description: {
                                 Text("Pair with your host, then add a conversation ID that the host explicitly authorized.")
                             } actions: {
-                                Button("Pair device") { sheet = .pairing }
-                                Button("Add conversation") { sheet = .conversation }
+                                Button("Pair device") { showSheet(.pairing) }
+                                Button("Add conversation") { showSheet(.conversation) }
                             }
                         } else {
                             ChatView(model: model)
@@ -36,28 +36,59 @@ struct RootView: View {
                 .toolbar {
                     ToolbarItem(placement: .topBarTrailing) {
                         Menu {
-                            Button("Add conversation", systemImage: "plus.bubble") { sheet = .conversation }
-                            Button("Pair device", systemImage: "qrcode") { sheet = .pairing }
+                            Button("Add conversation", systemImage: "plus.bubble") { showSheet(.conversation) }
+                            Button("Pair device", systemImage: "qrcode") { showSheet(.pairing) }
                         } label: { Image(systemName: "plus") }
                         .accessibilityLabel("Conversation and pairing actions")
                     }
                 }
             }
             .tabItem { Label("Chat", systemImage: "bubble.left.and.bubble.right") }
+            .tag(ClientTab.chat)
             NavigationStack { ApprovalsView(model: model) }
                 .tabItem { Label("Approvals", systemImage: "checkmark.shield") }
-            NavigationStack { SettingsView(model: model, pair: { sheet = .pairing }) }
-                .tabItem { Label("Settings", systemImage: "gearshape") }
+                .tag(ClientTab.approvals)
+            NavigationStack(path: Binding(get: { model.settingsPath }, set: { model.localSettingsPathChanged($0) })) {
+                SettingsView(model: model, pair: { showSheet(.pairing) })
+                    .navigationDestination(for: ClientSettingsDestination.self) { destination in
+                        switch destination {
+                        case .thisDevice:
+                            if let owner = model.localSettings {
+                                ThisDeviceSettingsView(store: owner, onPresentationChange: { covered in
+                                    model.localCoverChanged(.localConfirmation, presented: covered)
+                                })
+                                .onAppear { model.localDestinationChanged(presented: true) }
+                                .onDisappear { model.localDestinationChanged(presented: false) }
+                            } else {
+                                ContentUnavailableView("Local preferences unavailable", systemImage: "lock", description: Text(model.localSettingsIssue ?? "Unlock this iPhone and reopen Everything to access its existing protected identity."))
+                            }
+                        }
+                    }
+            }
+            .tabItem { Label("Settings", systemImage: "gearshape") }
+            .tag(ClientTab.settings)
         }
-        .sheet(item: $sheet) { item in
+        .sheet(item: Binding(get: { sheet }, set: { value in
+            if value != nil { model.localCoverChanged(.rootSheet, presented: true) }
+            sheet = value
+        }), onDismiss: {
+            if sheet == nil { model.localCoverChanged(.rootSheet, presented: false) }
+        }) { item in
             switch item {
             case .pairing: NavigationStack { PairingView(model: model) }
             case .conversation: NavigationStack { AddConversationView(model: model) }
             }
         }
-        .alert("Operation unavailable", isPresented: Binding(get: { model.error != nil }, set: { if !$0 { model.error = nil } })) {
-            Button("OK", role: .cancel) { model.error = nil }
+        .onDisappear { model.localDestinationChanged(presented: false) }
+        .alert("Operation unavailable", isPresented: Binding(get: { model.error != nil }, set: { if !$0 { model.dismissError() } })) {
+            Button("OK", role: .cancel) { model.dismissError() }
         } message: { Text(model.error ?? "") }
+    }
+
+    private func showSheet(_ value: ClientSheet) {
+        guard sheet == nil else { return }
+        model.localCoverChanged(.rootSheet, presented: true)
+        sheet = value
     }
 }
 
