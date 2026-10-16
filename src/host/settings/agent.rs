@@ -881,6 +881,7 @@ async fn cleanup_turn(
     assistant_text: String,
 ) -> JoinedTurn {
     let provider_idle = session.profile.accounting.close_and_wait().await;
+    let local_preparation_failed = session.profile.accounting.local_preparation_failed();
     let observed = session.agent.observe_settings_provider().await;
     let broker_idle = session.profile.close_broker_and_wait().await;
     let invocations = core.tools.finish_turn(session.id).await;
@@ -968,6 +969,7 @@ async fn cleanup_turn(
     };
     let mutation_links_known = matches!(receipt_observation, Ok(true));
     let finalization_safe = classified_stop
+        && matches!(local_preparation_failed, Ok(false))
         && persisted
         && provider_observation.is_ok()
         && workers_joined
