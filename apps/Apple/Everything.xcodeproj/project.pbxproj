@@ -82,6 +82,8 @@
                 "452443D1E59DD273C5A2A0E9",
                 "C9D6D47BC3E2F66D3C0F8322",
                 "2CBC28A687F581018E52F2FE",
+                "4EFC3B1B64D7B87D25B1B9B2",
+                "0CD7411C80928D1614229C05",
             );
             "path" = "Shared/Settings";
             "sourceTree" = "<group>";
@@ -273,6 +275,8 @@
                 "F268C94F1107E41A24BC4E7C",
                 "830E4251423ED3AE66572933",
                 "94A9A108AA5077C575700CD1",
+                "34B5F3E30B70621F0D0E8C21",
+                "804F3C7E8AB10187632547F7",
             );
             "runOnlyForDeploymentPostprocessing" = "0";
         };
@@ -633,6 +637,8 @@
                 "C89ED0CC74EE3AF87D4A7D7F",
                 "99A19055582DE7DB5A06C02F",
                 "5B08F2911E7EE03422FFB427",
+                "B5F617E76B6E6D17675ACA18",
+                "EF0F9908666D96BAD7A63664",
             );
             "runOnlyForDeploymentPostprocessing" = "0";
         };
@@ -853,6 +859,34 @@
         "21C767B34FBE81EE061A7317" = {
             "isa" = "PBXBuildFile";
             "fileRef" = "3B38C43243463B34043D02F5";
+        };
+        "4EFC3B1B64D7B87D25B1B9B2" = {
+            "isa" = "PBXFileReference";
+            "lastKnownFileType" = "sourcecode.swift";
+            "path" = "SettingsWire.swift";
+            "sourceTree" = "<group>";
+        };
+        "34B5F3E30B70621F0D0E8C21" = {
+            "isa" = "PBXBuildFile";
+            "fileRef" = "4EFC3B1B64D7B87D25B1B9B2";
+        };
+        "B5F617E76B6E6D17675ACA18" = {
+            "isa" = "PBXBuildFile";
+            "fileRef" = "4EFC3B1B64D7B87D25B1B9B2";
+        };
+        "0CD7411C80928D1614229C05" = {
+            "isa" = "PBXFileReference";
+            "lastKnownFileType" = "sourcecode.swift";
+            "path" = "SettingsOperationWire.swift";
+            "sourceTree" = "<group>";
+        };
+        "804F3C7E8AB10187632547F7" = {
+            "isa" = "PBXBuildFile";
+            "fileRef" = "0CD7411C80928D1614229C05";
+        };
+        "EF0F9908666D96BAD7A63664" = {
+            "isa" = "PBXBuildFile";
+            "fileRef" = "0CD7411C80928D1614229C05";
         };
     };
     "rootObject" = "244210E48437B6556980A702";
