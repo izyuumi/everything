@@ -4,7 +4,7 @@ Assessment date: 2026-10-15. The initial main branch contained only LICENSE and 
 
 ## Current integration
 
-Foundation issues #1–#11, relay #13, Tool Broker #14, context #16, and embedding contracts #31 are merged through PRs #33–#57 after Linux/macOS CI. The CLI supports durable text conversations and explicit recovery of pending turns. Background service #18 has a validated library awaiting CLI integration. Durable wiki maintenance #26 is merged in PR #59. Local embedding #12 is merged in PR #49. Offline discovery #17, built-in tools #15 and device synchronization #22 are merged. Configurable selection #20, the native tool loop #23 and MCP #19 retain focused integration workstreams.
+Foundation issues #1–#11, relay #13, Tool Broker #14, context #16, and embedding contracts #31 are merged through PRs #33–#57 after Linux/macOS CI. The CLI supports durable text conversations and explicit recovery of pending turns. Background service #18 has a validated library awaiting CLI integration. Durable wiki maintenance #26 is merged in PR #59. Local embedding #12 is merged in PR #49. Offline discovery #17, built-in tools #15 and device synchronization #22 are merged. MCP #19 and private model-phase checkpoints are merged in PRs #63 and #64. Configurable selection #20, the native tool loop #23 and schedule persistence #50 retain focused integration workstreams.
 
 No live remote model requests have been made. EmbeddingGemma 2 produced finite normalized vectors and relevant-document rankings locally at all four dimensions; its native backend is merged, and Linux/macOS measurements have been inspected. Disposable manual checks covered storage rollback/dedup/restart, wiki CRUD/consolidation/provenance/prepared-write recovery, crypto/replay/sync, permission restrictions, broker approval/replay/quarantine, context budgets and native local embedding cancellation. These observations are not automated coverage or a security audit.
 
@@ -32,11 +32,11 @@ Rust 1.99.0 is installed. Apple SDKs and Mac hardware are unavailable locally; G
 | [#16](https://github.com/izyuumi/everything/issues/16) | Implement context builder and compaction | #2, #3, #4, #6 | Merged (#46) |
 | [#17](https://github.com/izyuumi/everything/issues/17) | Implement offline permission-aware tool discovery | #5, #11, #16 | Merged (#61); offline discovery |
 | [#18](https://github.com/izyuumi/everything/issues/18) | Implement native macOS background host service | #1, #2, #3 | Library merged (#48); CLI integration pending |
-| [#19](https://github.com/izyuumi/everything/issues/19) | Implement MCP client tool adapter | #5, #14, #17 | Implemented in PR #63; native server walkthrough passed; current Linux/macOS and minimum-version validation is recorded on the PR; automated assertions remain deferred to #32 |
+| [#19](https://github.com/izyuumi/everything/issues/19) | Implement MCP client tool adapter | #5, #14, #17 | Merged (#63); native server walkthrough and current Linux/macOS production plus Rust 1.88 validation recorded on the PR; automated assertions deferred to #32 |
 | [#20](https://github.com/izyuumi/everything/issues/20) | Implement configurable System One classification | #5, #11, #16, #17 | Implemented in PR #66; prior disposable offline/native-unavailable/refused-loopback checks passed; current-main CI pending; live classification and native persistence unverified; automated assertions deferred to #32 |
 | [#21](https://github.com/izyuumi/everything/issues/21) | Implement sqlite-vec hybrid retrieval and index switching | #6, #12, #31 | Backlog |
 | [#22](https://github.com/izyuumi/everything/issues/22) | Implement device pairing and client sync | #2, #3, #7, #13 | Merged (#60); qualified native relay roundtrip/restart/revocation observations and reviewed concurrent-revocation correction; automated assertions deferred to #32 |
-| [#23](https://github.com/izyuumi/everything/issues/23) | Implement multi-tool agent loop | #8, #9, #10, #14 | In progress; private model-attempt checkpoint prerequisite |
+| [#23](https://github.com/izyuumi/everything/issues/23) | Implement multi-tool agent loop | #8, #9, #10, #14 | Private checkpoint prerequisite merged (#64); native-loop integration and lifecycle review in progress |
 | [#24](https://github.com/izyuumi/everything/issues/24) | Implement task scheduler and concurrent subagents | #3, #14, #23 | Backlog |
 | [#25](https://github.com/izyuumi/everything/issues/25) | Implement steering and autonomous continuation | #23, #24 | Backlog |
 | [#26](https://github.com/izyuumi/everything/issues/26) | Implement wiki consolidation and lint jobs | #6, #16 | Merged (#59); actual configured Wiki admission and managed metadata visibility corrected; qualified manual checks and production CI passed; automated assertions deferred to #32 |
@@ -45,7 +45,7 @@ Rust 1.99.0 is installed. Apple SDKs and Mac hardware are unavailable locally; G
 | [#29](https://github.com/izyuumi/everything/issues/29) | Implement optional scoped cloud worker delegation | #24, #25 | Backlog |
 | [#30](https://github.com/izyuumi/everything/issues/30) | META: Dependency roadmap for parallel agent implementation | None | Backlog |
 | [#31](https://github.com/izyuumi/everything/issues/31) | Define generic embedding contract and index fingerprints | #1, #6 | Merged (#42) |
-| [#50](https://github.com/izyuumi/everything/issues/50) | Persist scheduled jobs and immutable run history | #2, #3, #10; migration order after #22/private checkpoints | In progress |
+| [#50](https://github.com/izyuumi/everything/issues/50) | Persist scheduled jobs and immutable run history | #2, #3, #10; migration order after #22/private checkpoints | Implemented in PR #67; current-main integration validation in progress; occurrence/replay observations qualified and automated assertions deferred to #32 |
 | [#51](https://github.com/izyuumi/everything/issues/51) | Calculate timezone-aware occurrences and dispatch due work | #24, #50 | Backlog |
 | [#52](https://github.com/izyuumi/everything/issues/52) | Enforce isolated scheduled execution and run policies | #24, #25, #50, #51 | Backlog |
 | [#53](https://github.com/izyuumi/everything/issues/53) | Add schedule CLI and native tool controls | #5, #11, #50, #51, #52 | Backlog |
