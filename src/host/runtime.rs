@@ -82,6 +82,8 @@ pub enum HostError {
     #[error(transparent)]
     McpSessionBootstrap(#[from] super::credentials::McpSessionBootstrapError),
     #[error(transparent)]
+    WorkerProtocol(#[from] crate::worker::WorkerError),
+    #[error(transparent)]
     Json(#[from] serde_json::Error),
     #[error(transparent)]
     Io(#[from] std::io::Error),
@@ -95,6 +97,12 @@ pub enum HostError {
         "host is draining; only inspection and explicit tool cleanup controls remain available"
     )]
     Draining,
+    #[error(
+        "worker initialization has no native reservation; expired approval cannot be reconstructed"
+    )]
+    WorkerUnadmitted,
+    #[error("worker initialization recovery awaits the configured coordinator")]
+    WorkerRecoveryUnavailable,
     #[error("host worker failed")]
     Worker,
 }
@@ -134,7 +142,7 @@ pub(super) struct HostInner {
     pub(super) broker: ToolBroker,
     pub(super) composition: Arc<super::composition::Composition>,
     pub(super) changed: Notify,
-    pub(super) mutation: Mutex<()>,
+    pub(super) mutation: Arc<Mutex<()>>,
     pub(super) relay_origin: Option<crate::relay_protocol::RelayOrigin>,
     pub(super) relay_status: watch::Receiver<crate::devices::RelaySessionStatus>,
     pub(super) relay_updates: watch::Sender<crate::devices::RelaySessionStatus>,
@@ -145,6 +153,7 @@ pub(super) struct HostInner {
     pub(super) draining: AtomicBool,
     pub(super) workers_drained: AtomicBool,
     pub(super) recovery: Mutex<()>,
+    pub(super) worker: std::sync::OnceLock<Arc<super::worker::service::WorkerCoordinator>>,
 }
 
 enum HostWorker {
@@ -152,6 +161,7 @@ enum HostWorker {
     Dispatcher(Result<(), HostError>),
     Publication(Result<(), HostError>),
     Relay(Result<(), DeviceError>),
+    Coordinator(Result<(), crate::worker::WorkerError>),
 }
 
 impl HostService {
@@ -177,6 +187,7 @@ impl HostService {
             task_tools,
             schedule_tools,
             effective,
+            worker_endpoint,
             _preparation_lease,
         ) = tokio::task::spawn_blocking(move || {
             let preparation_lease = Arc::clone(&prepared_lease);
@@ -190,6 +201,19 @@ impl HostService {
             let settings = SettingsRepository::open(Arc::clone(&prepared_lease))?;
             let effective = settings.snapshot()?;
             let agent = Agent::from_leased_store(store, prepared_lease);
+            let worker_endpoint = effective
+                .worker
+                .as_ref()
+                .map(|configuration| {
+                    let identity = crate::worker::load_or_create_worker_identity(&agent)?;
+                    crate::worker::WorkerEndpoint::open(
+                        agent.clone(),
+                        identity,
+                        crate::worker::WorkerRole::Coordinator,
+                        configuration.relay_origin.clone(),
+                    )
+                })
+                .transpose()?;
             let mut registry = ToolRegistry::new();
             let mut scopes =
                 BuiltinTools::new(BuiltinConfig::default())?.register_into(&mut registry)?;
@@ -206,6 +230,7 @@ impl HostService {
                 task_tools,
                 schedule_tools,
                 effective,
+                worker_endpoint,
                 preparation_lease,
             ))
         })
@@ -278,6 +303,7 @@ impl HostService {
             Duration::from_secs(300),
         )?;
         let relay_origin = effective.relay_origin.clone();
+        let worker_settings = effective.worker.clone();
         let composition = Arc::new(super::composition::Composition::new(
             memory,
             mcp,
@@ -372,7 +398,7 @@ impl HostService {
             broker,
             composition,
             changed: Notify::new(),
-            mutation: Mutex::new(()),
+            mutation: Arc::new(Mutex::new(())),
             relay_origin,
             relay_status,
             relay_updates,
@@ -383,7 +409,19 @@ impl HostService {
             draining: AtomicBool::new(false),
             workers_drained: AtomicBool::new(false),
             recovery: Mutex::new(()),
+            worker: std::sync::OnceLock::new(),
         });
+        if let (Some(endpoint), Some(effective)) = (worker_endpoint, worker_settings) {
+            let coordinator = super::worker::service::WorkerCoordinator::new(
+                Arc::downgrade(&inner),
+                endpoint,
+                effective,
+            );
+            inner
+                .worker
+                .set(coordinator)
+                .map_err(|_| HostError::Worker)?;
+        }
         Ok(Self {
             inner,
             server,
@@ -430,6 +468,12 @@ impl HostService {
                 )
             });
         }
+        if let Some(coordinator) = inner.worker.get().cloned() {
+            let coordinator_stop = work_stop.clone();
+            workers.spawn(async move {
+                HostWorker::Coordinator(coordinator.run(coordinator_stop).await)
+            });
+        }
         let publisher = inner.clone();
         let publisher_stop = work_stop.clone();
         let (initialized, initial_pass) = tokio::sync::oneshot::channel();
@@ -465,6 +509,9 @@ impl HostService {
                     Err(_) => Err(HostError::Worker),
                 },
                 joined = workers.join_next() => match joined {
+                    Some(Ok(HostWorker::Coordinator(outcome))) => {
+                        if outcome.is_err() { tracing::warn!("optional worker coordinator stopped; inspect its actual status"); }
+                    }
                     Some(Ok(HostWorker::Relay(outcome))) => {
                         if outcome.is_err() {
                             inner.relay_updates.send_replace(crate::devices::RelaySessionStatus::Failed { reason: "relay operation requires operator action" });
@@ -492,7 +539,10 @@ impl HostService {
                     biased;
                     _ = cancellation.cancelled() => break Ok(()),
                     joined = workers.join_next() => match joined {
-                        Some(Ok(HostWorker::Relay(outcome))) => {
+                        Some(Ok(HostWorker::Coordinator(outcome))) => {
+                        if outcome.is_err() { tracing::warn!("optional worker coordinator stopped; inspect its actual status"); }
+                    }
+                    Some(Ok(HostWorker::Relay(outcome))) => {
                             if outcome.is_err() {
                                 inner.relay_updates.send_replace(crate::devices::RelaySessionStatus::Failed { reason: "relay operation requires operator action" });
                                 tracing::warn!("optional relay stopped; local host remains available");
@@ -517,6 +567,9 @@ impl HostService {
             inner.draining.store(true, Ordering::Release);
             inner.composition.close();
             inner.schedule_controls.close();
+            if let Some(coordinator) = inner.worker.get() {
+                coordinator.close();
+            }
         }
         inner.receipt_changed();
         work_stop.cancel();
@@ -535,6 +588,17 @@ impl HostService {
         let mut service_work_stopped = false;
         let scheduler_owner = inner.clone();
         let mut shutdown = Some(tokio::spawn(async move {
+            if let Some(coordinator) = scheduler_owner.worker.get() {
+                loop {
+                    match coordinator.shutdown().await {
+                        Ok(()) => break,
+                        Err(_) => tracing::error!(
+                            "worker coordinator retains admitted work; scheduler and state ownership retained"
+                        ),
+                    }
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                }
+            }
             loop {
                 match scheduler_owner.schedule_controls.shutdown().await {
                     Ok(()) => break,
@@ -664,6 +728,7 @@ impl HostService {
                 joined = workers.join_next(), if !workers.is_empty() => {
                     let failure = match joined {
                         Some(Ok(HostWorker::Local(outcome) | HostWorker::Dispatcher(outcome) | HostWorker::Publication(outcome))) => outcome.err(),
+                        Some(Ok(HostWorker::Coordinator(outcome))) => { if outcome.is_err() { tracing::warn!("optional worker coordinator ended during host drain"); } None },
                         Some(Ok(HostWorker::Relay(outcome))) => { if outcome.is_err() { tracing::warn!("optional relay stopped during host drain"); } None },
                         _ => Some(HostError::Worker),
                     };
@@ -710,6 +775,11 @@ impl HostService {
                 ) => {
                     if result.is_ok() {
                         result = outcome;
+                    }
+                }
+                Ok(HostWorker::Coordinator(outcome)) => {
+                    if outcome.is_err() {
+                        tracing::warn!("optional worker coordinator ended during host shutdown");
                     }
                 }
                 Ok(HostWorker::Relay(outcome)) => {
@@ -922,6 +992,33 @@ pub(super) fn public_failure(error: &HostError) -> LocalFailure {
         HostError::ScheduleControl(ControlError::OutcomeUnknown(_)) => (
             LocalFailureCode::Internal,
             "schedule mutation outcome is unknown; inspect the original job or occurrence before an explicit retry",
+        ),
+        HostError::WorkerUnadmitted => (
+            LocalFailureCode::InvalidRequest,
+            "worker initialization was retained without native admission; expired approval cannot be reconstructed",
+        ),
+        HostError::WorkerRecoveryUnavailable => (
+            LocalFailureCode::Unavailable,
+            "worker initialization recovery awaits its configured coordinator",
+        ),
+        HostError::WorkerProtocol(
+            crate::worker::WorkerError::UntrustedPeer | crate::worker::WorkerError::WrongRole,
+        ) => (
+            LocalFailureCode::PermissionDenied,
+            "worker purpose identity is not authorized",
+        ),
+        HostError::WorkerProtocol(crate::worker::WorkerError::Capacity(_)) => (
+            LocalFailureCode::Busy,
+            "worker coordinator capacity is exhausted",
+        ),
+        HostError::WorkerProtocol(
+            crate::worker::WorkerError::Expired
+            | crate::worker::WorkerError::ApprovalRequired
+            | crate::worker::WorkerError::Invalid(_)
+            | crate::worker::WorkerError::Conflict(_),
+        ) => (
+            LocalFailureCode::InvalidRequest,
+            "worker request expired or conflicts with its exact retained scope; inspect the original disclosure and identifiers",
         ),
         HostError::Draining => (
             LocalFailureCode::Unavailable,

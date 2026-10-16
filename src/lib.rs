@@ -18,5 +18,7 @@ pub mod service;
 pub mod storage;
 pub mod tools;
 pub mod transport;
+#[cfg(unix)]
+pub mod worker;
 
 pub mod credentials;

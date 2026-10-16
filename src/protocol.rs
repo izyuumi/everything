@@ -1,3 +1,6 @@
+mod remote;
+pub use remote::{RemoteResultSource, RemoteTaskOutcome, RemoteTaskReport, RemoteTaskUsage};
+
 use std::collections::HashSet;
 use std::fmt;
 use std::io::{self, Write};
@@ -41,6 +44,8 @@ pub enum ProtocolError {
     InvalidTaskFailure,
     #[error("invalid permission inspection")]
     InvalidPermissionInspection,
+    #[error("invalid remote result: {0}")]
+    InvalidRemoteResult(&'static str),
     #[error("invalid scheduled notification: {0}")]
     InvalidScheduledNotification(&'static str),
     #[error("invalid sync request: {0}")]
@@ -527,6 +532,9 @@ pub enum ConversationEvent {
         task_id: TaskId,
         command_id: CommandId,
         children: Vec<TaskId>,
+    },
+    RemoteTaskFinished {
+        report: Box<RemoteTaskReport>,
     },
     ScheduledRunFinished {
         notification: ScheduledRunNotification,

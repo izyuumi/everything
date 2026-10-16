@@ -43,6 +43,8 @@ pub enum SchedulerError {
     Invalid(&'static str),
     #[error("task identity or immutable execution policy conflicts: {0}")]
     Conflict(TaskId),
+    #[error("no native remote reservation matches delegation {0}")]
+    RemoteBindingNotFound(uuid::Uuid),
     #[error("task not found: {0}")]
     NotFound(TaskId),
     #[error("task is owned by another runtime path: {0}")]
@@ -253,17 +255,28 @@ pub struct TaskSubmission {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "reason", rename_all = "snake_case")]
 pub enum WaitingReason {
+    Remote {
+        phase: super::remote::RemoteTaskPhase,
+    },
     Approval,
-    ProviderUncertain { attempt_id: CommandId },
+    ProviderUncertain {
+        attempt_id: CommandId,
+    },
     InFlight,
-    Children { wait_id: CommandId },
-    ChildOutcomeUnknown { child_task_id: TaskId },
+    Children {
+        wait_id: CommandId,
+    },
+    ChildOutcomeUnknown {
+        child_task_id: TaskId,
+    },
     Reconciliation,
     Interrupted,
     Limit,
     ProviderUnavailable,
     Stopped,
-    NativePaused { status: LoopStatus },
+    NativePaused {
+        status: LoopStatus,
+    },
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -284,6 +297,8 @@ pub(super) struct Definition {
     pub initial: TaskRecord,
     pub configuration: ConversationConfig,
     pub execution: ExecutionPolicy,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remote: Option<super::remote::RemoteDefinition>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -365,6 +380,8 @@ pub(super) struct TaskCheckpoint {
     pub provider_retirement: Option<ProviderRetirement>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub terminal_evidence: Option<super::evidence::TerminalTaskEvidence>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remote: Option<super::remote::RemoteCheckpoint>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]

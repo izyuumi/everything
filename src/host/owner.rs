@@ -34,6 +34,12 @@ impl HostInner {
         cancellation: tokio_util::sync::CancellationToken,
     ) -> Result<OwnerQueryResult, HostError> {
         match query {
+            OwnerQuery::WorkerCoordinator { query } => Ok(OwnerQueryResult::WorkerCoordinator {
+                result: Box::new(self.worker_query(query).await?),
+            }),
+            OwnerQuery::Worker { .. } => Err(HostError::Invalid(
+                "executor inspection requires a dedicated worker process",
+            )),
             OwnerQuery::Schedule { query } => Ok(OwnerQueryResult::Schedule {
                 result: self
                     .schedule_controls
@@ -275,10 +281,21 @@ impl HostInner {
             OwnerOperation::AcknowledgeCleanup { .. }
                 | OwnerOperation::ReconcileDrained
                 | OwnerOperation::AcknowledgeScheduledUnknown { .. }
-        ) {
+        ) && !matches!(&operation, OwnerOperation::WorkerCoordinator { operation }
+            if matches!(operation.as_ref(), super::worker::WorkerCoordinatorOperation::Cancel { .. }
+                | super::worker::WorkerCoordinatorOperation::RevokePeer { .. }
+                | super::worker::WorkerCoordinatorOperation::Discard { .. }))
+        {
             self.ensure_accepting()?;
         }
         match operation {
+            OwnerOperation::WorkerCoordinator { operation } => {
+                self.worker_operation(*operation, request_id, cancellation)
+                    .await
+            }
+            OwnerOperation::RevokeWorkerPeer { .. } => Err(HostError::Invalid(
+                "executor peer revocation requires a dedicated worker process",
+            )),
             OwnerOperation::Schedule { mutation } => {
                 let _mutation = self.mutation.lock().await;
                 self.ensure_accepting()?;
@@ -464,16 +481,26 @@ impl HostInner {
                 let old = self.blocking(|host| Ok(host.settings.snapshot()?)).await?;
                 let active = self.composition.status(&settings).await?;
                 let restart_required = old.relay_origin != settings.relay_origin
+                    || old.worker != settings.worker
                     || active.restart_required.memory
                     || active.restart_required.mcp
                     || active.restart_required.selection;
-                self.blocking(move |host| {
-                    Ok(OwnerOperationResult::Settings {
-                        settings: Box::new(host.settings.replace(*settings, expected_revision)?),
-                        restart_required,
+                let result = self
+                    .blocking(move |host| {
+                        Ok(OwnerOperationResult::Settings {
+                            settings: Box::new(
+                                host.settings.replace(*settings, expected_revision)?,
+                            ),
+                            restart_required,
+                        })
                     })
-                })
-                .await
+                    .await?;
+                if let (Some(coordinator), OwnerOperationResult::Settings { settings, .. }) =
+                    (self.worker.get(), &result)
+                {
+                    coordinator.settings_changed(settings.worker.as_ref());
+                }
+                Ok(result)
             }
             OwnerOperation::BeginPairing { lifetime_ms } => {
                 let _mutation = self.mutation.lock().await;
