@@ -2,6 +2,8 @@
 
 Issue [#21](https://github.com/izyuumi/everything/issues/21) implements `memory::search` and the feature-gated `memory::vector`. Existing `Wiki::search` remains lexical FTS5. Markdown is authoritative; semantic storage is a separate disposable SQLite file. The service ships only the real local EmbeddingGemma 2 backend, injected through the generic `Embedder` contract. No model gateway, inference daemon, model download, alternative embedder, or additional memory writer is introduced.
 
+Production semantic acceptance remains blocked by [#72](https://github.com/izyuumi/everything/issues/72). Earlier native vector and retrieval observations establish functional behavior for their recorded builds; they do not prove production local-only execution. The ordinary Host's enforced embedding-only isolation is being implemented separately and is not included in this leaf. Embeddings remain default-off, and disabled or unavailable semantics retain genuine FTS. Issue #21 remains open until the production boundary is validated and integrated.
+
 ## Ownership and configuration
 
 `HybridSearch` owns one `VectorIndex` and an `Arc<dyn Embedder>` with a stable validated profile. Creating a model, opening a vector file, and attaching the service are explicit host operations under the default-off `local-embeddings` feature. A disabled configuration never constructs these objects. Public search/build calls are synchronous and must run on bounded blocking admission in an async host. Native inference retains the existing backend's bounded nonpreemptible sections.

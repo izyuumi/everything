@@ -1,5 +1,7 @@
 # Hybrid retrieval contract
 
+Production use of this semantic path remains gated by [#72](https://github.com/izyuumi/everything/issues/72). Historical native vectors and retrieval observations are not evidence of enforced production locality. The Host's strict embedding-only isolation correction is separate and pending integration; this module does not create that boundary or authorize in-process Host inference. Default-off construction and genuine lexical fallback remain available. Issue #21 stays open until the production boundary is validated and integrated.
+
 `memory::search::lexical_search(index, query, limit, cancellation)` returns actual FTS results without opening a vector database or invoking inference. `SearchResponse` has ranked `RetrievalHit` values and `RetrievalSummary { mode, fallback, diagnostic }`. Each hit retains chunk ID, title, heading, excerpt and one-based inclusive provenance, plus separate optional BM25 score, vector distance and RRF fusion score. FTS-only scores contribute one rank term to fusion. The original `Wiki::search` API and its BM25 semantics are unchanged.
 
 `RetrievalMode` is `lexical` or `hybrid`. Fallback reasons are `disabled`, `missing_generation`, `incompatible_profile`, `stale_source`, and `semantic_failure`. Diagnostics are bounded local descriptions, not model answers. Cancellation is an error. Lexical/source failures are not converted to an empty successful response.

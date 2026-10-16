@@ -1,5 +1,6 @@
 import argparse
 import datetime
+import fcntl
 import hashlib
 import json
 import os
@@ -51,6 +52,12 @@ def main():
     common = Path(command(["git", "rev-parse", "--path-format=absolute", "--git-common-dir"]).strip())
     directory = common / "everything-orchestration"
     directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+    with (directory / "sync.lock").open("a") as lock:
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        synchronize(arguments, directory)
+
+
+def synchronize(arguments, directory):
     path = directory / "checkpoint.json"
     previous = json.loads(path.read_text()) if path.exists() else {}
     repository = "repos/izyuumi/everything"
@@ -93,6 +100,15 @@ def main():
                 original = previous.get("coordination", {}).get("assignments", {}).get(number, {})
                 assignment.setdefault("assigned_requirement_digest", original.get("assigned_requirement_digest", snapshots[number]["requirement_digest"]))
                 assignment.setdefault("assigned_comment_digest", original.get("assigned_comment_digest", digest(snapshots[number]["comments"])))
+                for field, assigned_digest, current_digest, value in [
+                    ("assigned_requirements", "assigned_requirement_digest", snapshots[number]["requirement_digest"], {key: snapshots[number][key] for key in ["title", "body"]}),
+                    ("assigned_comments", "assigned_comment_digest", digest(snapshots[number]["comments"]), snapshots[number]["comments"]),
+                ]:
+                    if field not in assignment:
+                        if assignment[assigned_digest] == current_digest:
+                            assignment[field] = value
+                        elif field in original:
+                            assignment[field] = original[field]
     pending = {str(change["number"]): change for change in previous.get("pending_changes", previous.get("changes", []))}
     for number in arguments.acknowledge:
         pending.pop(str(number), None)
