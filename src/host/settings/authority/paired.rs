@@ -748,6 +748,15 @@ struct AccessQuery {
     observed_monotonic: Instant,
 }
 
+pub(in crate::host::settings) struct AccessQueryObservation {
+    pub(in crate::host::settings) owner: SettingsGrantOwner,
+    pub(in crate::host::settings) query: Arc<()>,
+    pub(in crate::host::settings) floor: (UnixMillis, Instant),
+    pub(in crate::host::settings) deadline: Instant,
+    pub(in crate::host::settings) wall: UnixMillis,
+    pub(in crate::host::settings) monotonic: Instant,
+}
+
 impl Authority {
     pub(in crate::host::settings) fn register_access_query(
         &self,
@@ -818,7 +827,7 @@ impl Authority {
         host: &Arc<SettingsHostIdentity>,
         source: &AuthenticatedSettingsAccessSource,
         stop: &CancellationToken,
-    ) -> Result<(SettingsGrantOwner, Arc<()>, UnixMillis, Instant), SettingsServiceError> {
+    ) -> Result<AccessQueryObservation, SettingsServiceError> {
         let mut sessions = self
             .sessions
             .lock()
@@ -862,15 +871,17 @@ impl Authority {
         }
         query.observed_wall = wall;
         query.observed_monotonic = monotonic;
-        Ok((
-            SettingsGrantOwner {
+        Ok(AccessQueryObservation {
+            owner: SettingsGrantOwner {
                 host_id: self.host_id,
                 principal_id: self.owner_principal,
             },
-            Arc::clone(&query.identity),
+            query: Arc::clone(&query.identity),
+            floor: query.floor,
+            deadline: query.deadline,
             wall,
             monotonic,
-        ))
+        })
     }
 }
 
