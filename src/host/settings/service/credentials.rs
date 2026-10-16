@@ -11,7 +11,7 @@ use crate::selector::system_one::SelectionConfig;
 
 use super::{ServiceCore, SettingsService, SettingsServiceError};
 use crate::host::settings::actions::{
-    NativeActionAdmissionResult, NativeActionInvocation, NativeHostEffectAdmission,
+    ActionClaim, NativeActionAdmissionResult, NativeActionInvocation, NativeHostEffectAdmission,
     SettingsActionTarget, validate_current,
 };
 use crate::host::settings::authority::{CallerSource, SettingsCaller};
@@ -24,6 +24,24 @@ use crate::host::settings::operations::{
 
 impl SettingsService {
     pub(crate) async fn submit_native_credential(
+        &self,
+        caller: SettingsCaller,
+        invocation: NativeActionInvocation,
+        secret: SecretTransfer,
+        vault: CredentialVault,
+        cancellation: CancellationToken,
+    ) -> Result<SettingsOperationInspection, SettingsServiceError> {
+        let service = self.clone();
+        tokio::spawn(async move {
+            service
+                .submit_native_credential_owned(caller, invocation, secret, vault, cancellation)
+                .await
+        })
+        .await
+        .map_err(|_| SettingsServiceError::Worker)?
+    }
+
+    async fn submit_native_credential_owned(
         &self,
         caller: SettingsCaller,
         invocation: NativeActionInvocation,
@@ -81,7 +99,15 @@ impl SettingsService {
             NativeActionAdmissionResult::Existing(operation) => return Ok(operation),
             NativeActionAdmissionResult::Admitted(admission) => admission,
         };
-        let effect = self.start_host_effect(admission, cancellation).await?;
+        let claim = Arc::clone(&admission.claim);
+        let effect = match self.start_host_effect(admission, cancellation).await {
+            Ok(effect) => effect,
+            Err(cause) => {
+                return self
+                    .blocking(move |core| core.finish_credential_attempt(&claim, Err(cause)))
+                    .await;
+            }
+        };
         self.blocking(move |core| {
             let retained = (vault, secret, effect);
             core.store_native_credential(&retained.2, &retained.0, retained.1)
@@ -177,12 +203,19 @@ impl ServiceCore {
                 ),
                 None,
             )
-        })()
-        .map_err(|error| self.failed_claim_bookkeeping(&effect.claim, error));
+        })();
+        self.finish_credential_attempt(&effect.claim, outcome)
+    }
+
+    fn finish_credential_attempt(
+        &self,
+        claim: &Arc<ActionClaim>,
+        outcome: Result<SettingsOperationInspection, SettingsServiceError>,
+    ) -> Result<SettingsOperationInspection, SettingsServiceError> {
+        let outcome = outcome.map_err(|error| self.failed_claim_bookkeeping(claim, error));
         let cleanup = (|| {
-            effect.claim.close()?;
-            effect
-                .claim
+            claim.close()?;
+            claim
                 .session
                 .lock()
                 .map_err(|_| SettingsServiceError::Poisoned)?
@@ -192,19 +225,19 @@ impl ServiceCore {
                 .lock()
                 .map_err(|_| SettingsServiceError::Poisoned)?;
             if claims
-                .get(&effect.operation_id())
-                .is_some_and(|claim| Arc::ptr_eq(claim, &effect.claim))
+                .get(&claim.identity.binding.request_id)
+                .is_some_and(|current| Arc::ptr_eq(current, claim))
             {
-                claims.remove(&effect.operation_id());
+                claims.remove(&claim.identity.binding.request_id);
             }
             Ok(())
         })();
         match (outcome, cleanup) {
             (Ok(operation), Ok(())) => Ok(operation),
             (Err(error), Ok(())) => Err(error),
-            (Ok(_), Err(error)) => Err(self.failed_claim_bookkeeping(&effect.claim, error)),
+            (Ok(_), Err(error)) => Err(self.failed_claim_bookkeeping(claim, error)),
             (Err(cause), Err(repair)) => Err(SettingsServiceError::OutcomeUnknown {
-                request_id: effect.operation_id(),
+                request_id: claim.identity.binding.request_id,
                 cause: Box::new(cause),
                 repair_error: Some(Box::new(repair)),
             }),
