@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 
 actor NativeSettingsSession {
@@ -16,6 +17,46 @@ actor NativeSettingsSession {
         let operation: SettingsOperationInspection
         let lifecycle: NativeSettingsWire.PairingLifecycle
         let invitationAvailable: Bool
+    }
+
+    struct PairingApprovalStatus: Sendable {
+        let operation: SettingsOperationInspection
+        let approval: NativeSettingsWire.PairingApprovalMetadata
+        let hostPin: NativeSettingsWire.PairingPin
+        let acceptanceAvailable: Bool
+    }
+
+    struct PairingAcceptancePresentation: Sendable, CustomStringConvertible, CustomDebugStringConvertible {
+        let operationID: UUID
+        let pairingID: UUID
+        let expiresAt: UInt64
+        private let value: Data
+        private let admission: NativePairingApprovalAdmission
+        private let gate: NativeSettingsGate
+        private let deadline: ContinuousClock.Instant
+
+        var description: String { "NativePairingAcceptancePresentation([private])" }
+        var debugDescription: String { description }
+
+        fileprivate init(operationID: UUID, pairingID: UUID, expiresAt: UInt64, value: Data,
+                         admission: NativePairingApprovalAdmission, gate: NativeSettingsGate, deadline: ContinuousClock.Instant) {
+            self.operationID = operationID
+            self.pairingID = pairingID
+            self.expiresAt = expiresAt
+            self.value = value
+            self.admission = admission
+            self.gate = gate
+            self.deadline = deadline
+        }
+
+        @MainActor
+        func transferData() throws -> Data {
+            try admission.validatePresentation(gate)
+            guard try NativeSettingsGate.wallTime() < expiresAt, ContinuousClock.now < deadline else {
+                throw NativeSettingsSessionError.expired
+            }
+            return value
+        }
     }
 
     enum Outcome: Sendable {
@@ -76,6 +117,20 @@ actor NativeSettingsSession {
         let deadline: ContinuousClock.Instant
     }
 
+    private struct PairingApprovalRecord: CustomStringConvertible, CustomDebugStringConvertible {
+        let admission: NativePairingApprovalAdmission
+        let sessionID: UUID
+        let deadline: ContinuousClock.Instant
+        var invitation: PairingInvitation?
+        var task: Task<Result<PairingApprovalStatus, NativeSettingsSessionError>, Never>?
+        var presentation: Task<Result<PairingApprovalStatus, NativeSettingsSessionError>, Never>?
+        var metadata: NativeSettingsWire.PairingApprovalMetadata?
+        var status: PairingApprovalStatus?
+
+        var description: String { "NativePairingApprovalRecord([private])" }
+        var debugDescription: String { description }
+    }
+
     private enum Presented: Sendable {
         case notStarted
         case observed(NativeActionObservation)
@@ -99,6 +154,8 @@ actor NativeSettingsSession {
     private var records: [UUID: Record] = [:]
     private var calls: [UUID: Task<Result<NativeSettingsWire.Response, NativeSettingsSessionError>, Never>] = [:]
     private var invitations: [UUID: RetainedInvitation] = [:]
+    private var pairingApprovals: [UUID: PairingApprovalRecord] = [:]
+    private var retainedOperationCount: Int { records.count + pairingApprovals.count }
 
     init(client: OwnerIPCClient, connection: OwnerConnection, connectionKey: UUID, gate: NativeSettingsGate) {
         self.client = client
@@ -158,14 +215,15 @@ actor NativeSettingsSession {
 
     func details(operationID: UUID, reference: NativeActionReference) async throws -> Details {
         try requireLive()
-        guard records[operationID] != nil || records.count < 64 else { throw NativeSettingsSessionError.capacity }
+        guard pairingApprovals[operationID] == nil else { throw NativeSettingsSessionError.requestReused }
+        guard records[operationID] != nil || retainedOperationCount < 64 else { throw NativeSettingsSessionError.capacity }
         guard case .details(let operation, let target) = try await rpc(.details(operationID, reference)) else {
             throw NativeSettingsSessionError.invalidResponse
         }
         if let original = records[operationID] {
             guard original.target == target else { throw NativeSettingsSessionError.requestReused }
         } else {
-            guard records.count < 64 else { throw NativeSettingsSessionError.capacity }
+            guard retainedOperationCount < 64 else { throw NativeSettingsSessionError.capacity }
             records[operationID] = Record(target: target, initialIntent: nil)
         }
         try accept(operation, id: operationID)
@@ -263,6 +321,188 @@ actor NativeSettingsSession {
         return try await task.value.get()
     }
 
+    nonisolated fileprivate func capturePairingActivity(expiresAt: UInt64) throws -> (NativeSettingsGate, NativeSettingsGate.Capture) {
+        (gate, try gate.capture(expiresAt: expiresAt))
+    }
+
+    func approvePairing(_ admission: NativePairingApprovalAdmission) async throws -> PairingApprovalStatus {
+        try admission.validateOwner(gate)
+        let id = admission.review.operationID
+        if let original = pairingApprovals[id] {
+            guard original.admission === admission, let task = original.task else { throw NativeSettingsSessionError.requestReused }
+            return try await task.value.get()
+        }
+        if Task.isCancelled { admission.cancel() }
+        try admission.validate(gate)
+        try requireLive()
+        try pruneInvitations()
+        let review = admission.review
+        guard retainedOperationCount < 64, pairingApprovals.count < 8 else { throw NativeSettingsSessionError.capacity }
+        guard !pairingApprovals.values.contains(where: { $0.admission.review.creationOperationID == review.creationOperationID }) else {
+            throw NativeSettingsSessionError.requestReused
+        }
+        guard records[id] == nil, let creation = records[review.creationOperationID],
+              case .device(let request) = creation.target, request.action == .pair,
+              !creation.invitationRetired, let identity = creation.invitationIdentity,
+              let invitation = invitations[review.creationOperationID], let information, let proof,
+              identity.pairingID == review.request.pairingID, identity.expiresAt == review.request.expiresAt,
+              review.request.hostID == information.hostID, request.scope == .host(hostID: information.hostID),
+              ContinuousClock.now < identity.deadline else { throw NativeSettingsSessionError.invalidRequest }
+        let original = try PairingInvitation(Data(invitation.value.displayText().utf8), now: NativeSettingsGate.wallTime())
+        guard original.id == identity.pairingID, original.expires == identity.expiresAt,
+              original.inviter.deviceID == information.hostID, original.inviter.fingerprint == identity.fingerprint else {
+            throw NativeSettingsSessionError.invalidResponse
+        }
+        pairingApprovals[id] = PairingApprovalRecord(admission: admission, sessionID: proof.sessionID,
+                                                    deadline: identity.deadline, invitation: original)
+        let task = Task { await self.finishPairingApproval(admission) }
+        pairingApprovals[id]?.task = task
+        return try await task.value.get()
+    }
+
+    func pairingApproval(_ admission: NativePairingApprovalAdmission) async throws -> PairingApprovalStatus {
+        try requireApproval(admission)
+        if let task = pairingApprovals[admission.review.operationID]?.task { _ = await task.value }
+        try requireApproval(admission)
+        return try await readPairingApproval(admission)
+    }
+
+    func showPairingAcceptance(_ admission: NativePairingApprovalAdmission,
+                               presenter: @escaping @MainActor @Sendable (PairingAcceptancePresentation) async throws -> Void) async throws -> PairingApprovalStatus {
+        try requireApproval(admission)
+        if let original = pairingApprovals[admission.review.operationID]?.presentation { return try await original.value.get() }
+        if Task.isCancelled { admission.cancel() }
+        try checkPairingDelivery(admission)
+        let task = Task { await self.finishPairingAcceptance(admission, presenter: presenter) }
+        pairingApprovals[admission.review.operationID]?.presentation = task
+        return try await task.value.get()
+    }
+
+    private func requireApproval(_ admission: NativePairingApprovalAdmission) throws {
+        try admission.validateOwner(gate)
+        guard !finalizingDrain, !closeAcknowledged, proof != nil,
+              pairingApprovals[admission.review.operationID]?.admission === admission else { throw NativeSettingsSessionError.closed }
+    }
+
+    private func checkPairingDelivery(_ admission: NativePairingApprovalAdmission) throws {
+        do {
+            try admission.validate(gate)
+            try requireLive()
+        } catch {
+            retirePairingDelivery(admission)
+            throw error
+        }
+        guard let original = pairingApprovals[admission.review.operationID], original.admission === admission,
+              original.invitation != nil, original.sessionID == proof?.sessionID,
+              let creation = records[admission.review.creationOperationID], let identity = creation.invitationIdentity,
+              identity.pairingID == admission.review.request.pairingID,
+              identity.expiresAt == admission.review.request.expiresAt,
+              try NativeSettingsGate.wallTime() < identity.expiresAt,
+              ContinuousClock.now < identity.deadline, ContinuousClock.now < original.deadline else {
+            retirePairingDelivery(admission)
+            throw NativeSettingsSessionError.expired
+        }
+    }
+
+    private func retirePairingDelivery(_ admission: NativePairingApprovalAdmission) {
+        admission.cancel()
+        if pairingApprovals[admission.review.operationID]?.admission === admission {
+            pairingApprovals[admission.review.operationID]?.invitation = nil
+        }
+    }
+
+    private func finishPairingApproval(_ admission: NativePairingApprovalAdmission) async -> Result<PairingApprovalStatus, NativeSettingsSessionError> {
+        defer { admission.retirePayload() }
+        do {
+            try await admission.validatePresentation(gate)
+            try checkPairingDelivery(admission)
+            let input = try admission.originalInput()
+            guard let original = pairingApprovals[admission.review.operationID], let sessionDeadline = deadline else {
+                throw NativeSettingsSessionError.closed
+            }
+            guard case .pairingApproved(let result) = try await rpc(.approvePairing(input), requestID: admission.rpcID,
+                                                                   pairingAdmission: admission, pairingDeadline: min(original.deadline, sessionDeadline)) else {
+                throw NativeSettingsSessionError.invalidResponse
+            }
+            return .success(try acceptPairingApproval(result, admission: admission))
+        } catch { return .failure(sanitize(error)) }
+    }
+
+    private func acceptPairingApproval(_ result: NativeSettingsWire.PairingApprovalResult, admission: NativePairingApprovalAdmission) throws -> PairingApprovalStatus {
+        let id = admission.review.operationID
+        let review = admission.review
+        let metadata = result.approval
+        guard let original = pairingApprovals[id], original.admission === admission,
+              result.operation.binding.clientSessionID == original.sessionID,
+              result.operation.binding.expiresAt <= review.request.expiresAt,
+              metadata.requestID == id, metadata.nativeRequestID == review.nativeRequestID,
+              metadata.creationOperationID == review.creationOperationID, metadata.pairingID == review.request.pairingID,
+              metadata.scope == .host(hostID: review.request.hostID), metadata.responder == review.request.responder,
+              metadata.expiresAt == review.request.expiresAt, metadata.label == review.label,
+              metadata.expectedFingerprint == review.expectedFingerprint, metadata.access == review.access,
+              original.metadata == nil || original.metadata == metadata,
+              original.status == nil || original.status?.operation.binding == result.operation.binding else {
+            throw NativeSettingsSessionError.invalidResponse
+        }
+        if let previous = original.status, case .finished = previous.operation.phase,
+           previous.operation.phase != result.operation.phase { throw NativeSettingsSessionError.invalidResponse }
+        var available = false
+        if result.acceptance != nil {
+            do { try checkPairingDelivery(admission); available = true }
+            catch { available = false }
+        }
+        let status = PairingApprovalStatus(operation: result.operation, approval: metadata, hostPin: result.hostPin, acceptanceAvailable: available)
+        pairingApprovals[id]?.metadata = metadata
+        pairingApprovals[id]?.status = status
+        if case .finished(let outcome) = result.operation.phase {
+            if case .completed = outcome.state {
+                if result.acceptance == nil { retirePairingDelivery(admission) }
+            } else { retirePairingDelivery(admission) }
+        }
+        if case .committed(_, _, _, .some) = result.hostPin { retirePairingDelivery(admission) }
+        return status
+    }
+
+    private func readPairingApproval(_ admission: NativePairingApprovalAdmission) async throws -> PairingApprovalStatus {
+        guard case .pairingApproved(let result) = try await rpc(.pairingApproval(admission.review.operationID)) else {
+            throw NativeSettingsSessionError.invalidResponse
+        }
+        return try acceptPairingApproval(result, admission: admission)
+    }
+
+    private func finishPairingAcceptance(_ admission: NativePairingApprovalAdmission,
+                                         presenter: @escaping @MainActor @Sendable (PairingAcceptancePresentation) async throws -> Void) async -> Result<PairingApprovalStatus, NativeSettingsSessionError> {
+        do {
+            if let task = pairingApprovals[admission.review.operationID]?.task { _ = await task.value }
+            try await admission.validatePresentation(gate)
+            try checkPairingDelivery(admission)
+            guard case .pairingApproved(let result) = try await rpc(.pairingApproval(admission.review.operationID)),
+                  let acceptance = result.acceptance, let original = pairingApprovals[admission.review.operationID],
+                  let invitation = original.invitation else {
+                throw NativeSettingsSessionError.operationUncertain
+            }
+            let status = try acceptPairingApproval(result, admission: admission)
+            let bytes = try acceptance.transferData()
+            let host = try invitation.finish(bytes, responder: admission.review.request.responder, now: NativeSettingsGate.wallTime())
+            guard host == invitation.inviter else { throw NativeSettingsSessionError.invalidResponse }
+            try checkPairingDelivery(admission)
+            guard let sessionDeadline = deadline else { throw NativeSettingsSessionError.closed }
+            let presentation = PairingAcceptancePresentation(operationID: admission.review.operationID, pairingID: acceptance.pairingID,
+                                                           expiresAt: acceptance.expiresAt, value: bytes, admission: admission,
+                                                           gate: gate, deadline: min(original.deadline, sessionDeadline))
+            try await Self.invokePairingAcceptance(admission, gate: gate, presentation: presentation, presenter: presenter)
+            return .success(status)
+        } catch { return .failure(sanitize(error)) }
+    }
+
+    @MainActor
+    private static func invokePairingAcceptance(_ admission: NativePairingApprovalAdmission, gate: NativeSettingsGate,
+                                                presentation: PairingAcceptancePresentation,
+                                                presenter: @MainActor @Sendable (PairingAcceptancePresentation) async throws -> Void) async throws {
+        try admission.validatePresentation(gate)
+        try await presenter(presentation)
+    }
+
     func inspect(operationID: UUID) async throws -> SettingsOperationInspection {
         try requireOriginal(operationID)
         return try await inspectOriginal(operationID, operation: .inspect(operationID))
@@ -336,6 +576,7 @@ actor NativeSettingsSession {
 
     private func initial(_ admission: NativeSettingsAdmission, target: SettingsActionTarget, operation: NativeSettingsWire.Operation) async throws -> Outcome {
         let id = target.requestID
+        guard pairingApprovals[id] == nil else { throw NativeSettingsSessionError.requestReused }
         if let record = records[id] {
             guard record.target == target, record.initialIntent == admission.intent, let task = record.initialTask else {
                 throw NativeSettingsSessionError.requestReused
@@ -344,7 +585,7 @@ actor NativeSettingsSession {
         }
         try admission.validate(for: gate)
         try requireLive()
-        guard records.count < 64 else { throw NativeSettingsSessionError.capacity }
+        guard retainedOperationCount < 64 else { throw NativeSettingsSessionError.capacity }
         records[id] = Record(target: target, initialIntent: admission.intent)
         let task = Task { await self.finishInitial(admission, operation: operation, id: id) }
         records[id]?.initialTask = task
@@ -495,7 +736,9 @@ actor NativeSettingsSession {
         guard !finalizingDrain, !closeAcknowledged, proof != nil, records[id] != nil else { throw NativeSettingsSessionError.closed }
     }
 
-    private func rpc(_ operation: NativeSettingsWire.Operation, requestID: UUID = UUID()) async throws -> NativeSettingsWire.Response {
+    private func rpc(_ operation: NativeSettingsWire.Operation, requestID: UUID = UUID(),
+                     pairingAdmission: NativePairingApprovalAdmission? = nil,
+                     pairingDeadline: ContinuousClock.Instant? = nil) async throws -> NativeSettingsWire.Response {
         guard calls.count < 4, !closeAcknowledged else { throw NativeSettingsSessionError.capacity }
         let originalProof = proof
         let bytes: Data
@@ -504,8 +747,15 @@ actor NativeSettingsSession {
         let identifier = UUID()
         let client = client
         let connection = connection
+        let gate = gate
         let task = Task<Result<NativeSettingsWire.Response, NativeSettingsSessionError>, Never> {
             do {
+                if let pairingAdmission {
+                    try await pairingAdmission.validatePresentation(gate)
+                    guard let pairingDeadline, ContinuousClock.now < pairingDeadline else {
+                        throw NativeSettingsSessionError.expired
+                    }
+                }
                 let response = try await client.requestSensitive(bytes, connection: connection)
                 do { return .success(try NativeSettingsWire.decode(response, for: operation, proof: originalProof)) }
                 catch { return .failure(.invalidResponse) }
@@ -609,6 +859,11 @@ actor NativeSettingsSession {
     }
 
     private func pairingOriginal(_ id: UUID, cancel: Bool) async throws -> PairingStatus {
+        if cancel {
+            for record in Array(pairingApprovals.values) where record.admission.review.creationOperationID == id {
+                retirePairingDelivery(record.admission)
+            }
+        }
         guard case .pairing(let creation) = try await rpc(cancel ? .cancelPairing(id) : .pairing(id)) else {
             throw NativeSettingsSessionError.invalidResponse
         }
@@ -618,6 +873,12 @@ actor NativeSettingsSession {
     private func finishDrain() async -> DrainReport {
         var failures: [NativeSettingsSessionError] = []
         if let openingTask, case .failure(let error) = await openingTask.value { failures.append(error) }
+        let approvals = Array(pairingApprovals.values)
+        for record in approvals {
+            retirePairingDelivery(record.admission)
+            if let task = record.task, case .failure(let error) = await task.value { failures.append(error) }
+            if let presentation = record.presentation, case .failure(let error) = await presentation.value { failures.append(error) }
+        }
         let owned = Array(records.values)
         for record in owned {
             if let task = record.initialTask, case .failure(let error) = await task.value { failures.append(error) }
@@ -652,6 +913,10 @@ actor NativeSettingsSession {
                     }
                 } catch { failures.append(sanitize(error)) }
             }
+            for record in approvals {
+                do { _ = try await readPairingApproval(record.admission) }
+                catch { failures.append(sanitize(error)) }
+            }
             do {
                 guard case .closed = try await rpc(.close, requestID: closeRequestID) else { throw NativeSettingsSessionError.invalidResponse }
                 closeAcknowledged = true
@@ -668,10 +933,127 @@ actor NativeSettingsSession {
             default: return true
             }
         }
-        return DrainReport(failures: failures, unresolvedOperationIDs: unresolved)
+        let approvalUnresolved = pairingApprovals.compactMap { id, record -> UUID? in
+            guard let status = record.status, case .finished(let result) = status.operation.phase, result.state != .unknown else { return id }
+            return nil
+        }
+        return DrainReport(failures: failures, unresolvedOperationIDs: (unresolved + approvalUnresolved).sorted { $0.uuidString < $1.uuidString })
     }
 
     private func sanitize(_ error: any Error) -> NativeSettingsSessionError {
         error as? NativeSettingsSessionError ?? .operationUncertain
     }
+}
+
+final class NativePairingCandidate: @unchecked Sendable, CustomStringConvertible, CustomDebugStringConvertible {
+    struct Review: Equatable, Sendable {
+        let pairingID: UUID
+        let hostID: UUID
+        let responder: DevicePublicKeys
+        let expiresAt: UInt64
+    }
+
+    let review: Review
+    private let lock = NSLock()
+    private var request: NativeSettingsWire.SignedPairingRequest?
+
+    var description: String { "NativePairingCandidate([private])" }
+    var debugDescription: String { description }
+
+    init(privateRequest data: Data) throws {
+        let value = try NativeSettingsWire.SignedPairingRequest.parse(data)
+        review = Review(pairingID: value.pairingID, hostID: value.inviter, responder: value.responder, expiresAt: value.expiresAt)
+        request = value
+    }
+
+    func discard() { lock.withLock { request = nil } }
+
+    fileprivate func take() throws -> NativeSettingsWire.SignedPairingRequest {
+        try lock.withLock {
+            guard let value = request else { throw NativeSettingsSessionError.requestReused }
+            request = nil
+            return value
+        }
+    }
+}
+
+final class NativePairingApprovalAdmission: @unchecked Sendable, CustomStringConvertible, CustomDebugStringConvertible {
+    struct Review: Equatable, Sendable {
+        let operationID: UUID
+        let nativeRequestID: UUID
+        let creationOperationID: UUID
+        let request: NativePairingCandidate.Review
+        let label: String
+        let expectedFingerprint: String
+        let access: NativeSettingsWire.PairingAccess
+    }
+
+    let review: Review
+    fileprivate let rpcID = UUID()
+    private let owner: NativeSettingsGate
+    private let activity: NativeSettingsGate.Capture
+    private let lock = NSLock()
+    private var cancelled = false
+    private var payload: NativeSettingsWire.PairingApprovalInput?
+
+    var description: String { "NativePairingApprovalAdmission([private])" }
+    var debugDescription: String { description }
+
+    private init(input: NativeSettingsWire.PairingApprovalInput, owner: NativeSettingsGate, activity: NativeSettingsGate.Capture) {
+        review = Review(operationID: input.operationID, nativeRequestID: input.nativeRequestID,
+                        creationOperationID: input.creationOperationID,
+                        request: NativePairingCandidate.Review(pairingID: input.request.pairingID, hostID: input.request.inviter,
+                                                             responder: input.request.responder, expiresAt: input.request.expiresAt),
+                        label: input.label, expectedFingerprint: input.expectedFingerprint, access: input.access)
+        self.owner = owner
+        self.activity = activity
+        payload = input
+    }
+
+    @MainActor
+    static func capture(session: NativeSettingsSession, creationOperationID: UUID, candidate: NativePairingCandidate,
+                        label: String, expectedFingerprint: String, access: NativeSettingsWire.PairingAccess) throws -> NativePairingApprovalAdmission {
+        guard NSApplication.shared.isActive else { throw NativeSettingsSessionError.inactive }
+        try SettingsWire.identifier(creationOperationID)
+        try SettingsWire.text(label, maximum: 256)
+        try access.validate()
+        guard expectedFingerprint == candidate.review.responder.fingerprint else { throw NativeSettingsSessionError.invalidRequest }
+        let (gate, activity) = try session.capturePairingActivity(expiresAt: candidate.review.expiresAt)
+        let input = NativeSettingsWire.PairingApprovalInput(operationID: UUID(), nativeRequestID: UUID(), creationOperationID: creationOperationID,
+                                                          request: try candidate.take(), label: label, expectedFingerprint: expectedFingerprint, access: access)
+        try input.validate()
+        return NativePairingApprovalAdmission(input: input, owner: gate, activity: activity)
+    }
+
+    func cancel() {
+        lock.withLock {
+            cancelled = true
+            payload = nil
+        }
+    }
+
+    fileprivate func validateOwner(_ gate: NativeSettingsGate) throws {
+        guard owner === gate else { throw NativeSettingsSessionError.invalidRequest }
+    }
+
+    fileprivate func validate(_ gate: NativeSettingsGate) throws {
+        try validateOwner(gate)
+        guard !lock.withLock({ cancelled }) else { throw NativeSettingsSessionError.inactive }
+        try gate.validate(activity)
+    }
+
+    @MainActor
+    fileprivate func validatePresentation(_ gate: NativeSettingsGate) throws {
+        guard NSApplication.shared.isActive else { throw NativeSettingsSessionError.inactive }
+        try validate(gate)
+    }
+
+    fileprivate func originalInput() throws -> NativeSettingsWire.PairingApprovalInput {
+        try lock.withLock {
+            guard !cancelled, let payload else { throw NativeSettingsSessionError.inactive }
+            return payload
+        }
+    }
+
+    fileprivate func retirePayload() { lock.withLock { payload = nil } }
 }
