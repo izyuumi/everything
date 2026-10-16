@@ -17,6 +17,8 @@ struct SettingsView: View {
                 .tabItem { Label("Memory", systemImage: "brain") }
             NativeSettingsControls(store: model.nativeSettings, section: .toolSelection, connectionEdited: model.connectionEdited)
                 .tabItem { Label("Tool Selection", systemImage: "wrench.and.screwdriver") }
+            NativeDevicesControls(store: model.nativeSettings, connectionEdited: model.connectionEdited)
+                .tabItem { Label("Devices", systemImage: "desktopcomputer.and.iphone") }
             NativeHostSettingsPane(store: model.nativeSettings, connectionEdited: model.connectionEdited)
                 .tabItem { Label("Host settings", systemImage: "slider.horizontal.3") }
             Group {
