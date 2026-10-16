@@ -1,4 +1,5 @@
 mod changes;
+mod credentials;
 mod devices;
 mod persistence;
 mod updates;

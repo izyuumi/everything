@@ -72,6 +72,11 @@ pub enum NativeSettingsOperation {
         proof: NativeSessionProof,
         invocation: NativeActionInvocation,
     },
+    SubmitCredential {
+        proof: NativeSessionProof,
+        invocation: NativeActionInvocation,
+        secret: crate::host::credentials::SecretTransfer,
+    },
     Inspect {
         proof: NativeSessionProof,
         operation_id: CommandId,
@@ -259,6 +264,7 @@ impl NativeSettingsResult {
             }
             (
                 NativeSettingsOperation::Admit { invocation, .. }
+                | NativeSettingsOperation::SubmitCredential { invocation, .. }
                 | NativeSettingsOperation::Finalize { invocation, .. },
                 Self::Inspected { operation },
             ) if operation.binding.request_id == invocation.operation_id => {
@@ -389,6 +395,24 @@ impl HostInner {
             NativeSettingsOperation::Open => Ok(NativeSettingsResult::Opened {
                 session: service.open_native_session(call)?,
             }),
+            NativeSettingsOperation::SubmitCredential {
+                proof,
+                invocation,
+                secret,
+            } => {
+                let caller = service.native_cleanup_caller(call, &proof)?;
+                Ok(NativeSettingsResult::Inspected {
+                    operation: service
+                        .submit_native_credential(
+                            caller,
+                            invocation,
+                            secret,
+                            self.credentials.clone(),
+                            call.cancellation.clone(),
+                        )
+                        .await?,
+                })
+            }
             NativeSettingsOperation::RequestAction { proof, request } => {
                 let caller = service.native_caller(call, &proof)?;
                 Ok(NativeSettingsResult::Prepared {
