@@ -188,6 +188,108 @@ final class NativeSettingsAdmission: @unchecked Sendable {
     }
 }
 
+final class NativeSettingsAssistantOpenAdmission: @unchecked Sendable, CustomStringConvertible, CustomDebugStringConvertible {
+    let requestID = UUID()
+    let capture: NativeSettingsGate.Capture
+    private let owner: NativeSettingsGate
+
+    var description: String { "NativeSettingsAssistantOpenAdmission([private])" }
+    var debugDescription: String { description }
+
+    fileprivate init(owner: NativeSettingsGate, capture: NativeSettingsGate.Capture) {
+        self.owner = owner
+        self.capture = capture
+    }
+
+    func validateOwner(_ gate: NativeSettingsGate) throws {
+        guard owner === gate else { throw NativeSettingsSessionError.invalidRequest }
+    }
+
+    @MainActor
+    func validatePresentation(_ gate: NativeSettingsGate) throws {
+        try validateOwner(gate)
+        guard NSApplication.shared.isActive else { throw NativeSettingsSessionError.inactive }
+        try gate.validate(capture)
+    }
+}
+
+final class NativeSettingsAssistantConsent: @unchecked Sendable, CustomStringConvertible, CustomDebugStringConvertible {
+    private let chat: NativeSettingsSession.AssistantHandle
+    private let owner: NativeSettingsGate
+    private let capture: NativeSettingsGate.Capture
+
+    var description: String { "NativeSettingsAssistantConsent([private])" }
+    var debugDescription: String { description }
+
+    fileprivate init(chat: NativeSettingsSession.AssistantHandle, owner: NativeSettingsGate, capture: NativeSettingsGate.Capture) {
+        self.chat = chat
+        self.owner = owner
+        self.capture = capture
+    }
+
+    func validate(_ chat: NativeSettingsSession.AssistantHandle, gate: NativeSettingsGate) throws {
+        guard self.chat === chat, owner === gate else { throw NativeSettingsSessionError.invalidRequest }
+        try gate.validate(capture)
+    }
+}
+
+final class NativeSettingsAssistantSendAdmission: @unchecked Sendable, CustomStringConvertible, CustomDebugStringConvertible {
+    let requestID = UUID()
+    let turnID = UUID()
+    let chat: NativeSettingsSession.AssistantHandle
+    let capture: NativeSettingsGate.Capture
+    private let consent: NativeSettingsAssistantConsent
+    private let owner: NativeSettingsGate
+    private let lock = NSLock()
+    private var payload: String?
+    private var cancelled = false
+
+    var description: String { "NativeSettingsAssistantSendAdmission([private])" }
+    var debugDescription: String { description }
+
+    fileprivate init(chat: NativeSettingsSession.AssistantHandle, consent: NativeSettingsAssistantConsent,
+                     owner: NativeSettingsGate, capture: NativeSettingsGate.Capture, text: String) {
+        self.chat = chat
+        self.consent = consent
+        self.owner = owner
+        self.capture = capture
+        payload = text
+    }
+
+    func validateOwner(_ gate: NativeSettingsGate) throws {
+        guard owner === gate else { throw NativeSettingsSessionError.invalidRequest }
+        try chat.validateOwner(gate)
+    }
+
+    @MainActor
+    func validatePresentation(_ gate: NativeSettingsGate) throws {
+        try validateOwner(gate)
+        try chat.validateLifetime()
+        guard NSApplication.shared.isActive else { throw NativeSettingsSessionError.inactive }
+        try consent.validate(chat, gate: gate)
+        try gate.validate(capture)
+        guard !lock.withLock({ cancelled }) else { throw NativeSettingsSessionError.inactive }
+    }
+
+    func takeText(_ gate: NativeSettingsGate) throws -> String {
+        try validateOwner(gate)
+        try consent.validate(chat, gate: gate)
+        try gate.validate(capture)
+        return try lock.withLock {
+            guard !cancelled, let value = payload else { throw NativeSettingsSessionError.inactive }
+            payload = nil
+            return value
+        }
+    }
+
+    func cancel() {
+        lock.withLock {
+            cancelled = true
+            payload = nil
+        }
+    }
+}
+
 @MainActor
 final class NativeSettingsLifecycle {
     let session: NativeSettingsSession
@@ -196,6 +298,8 @@ final class NativeSettingsLifecycle {
     private var opening: NativeSettingsAdmission?
     private var admissions: [UUID: [NativeSettingsAdmission]] = [:]
     private var drainTask: Task<NativeSettingsSession.DrainReport, Never>?
+    private var assistantOpens: [UUID: NativeSettingsAssistantOpenAdmission] = [:]
+    private var assistantSends: [UUID: NativeSettingsAssistantSendAdmission] = [:]
 
     init(client: OwnerIPCClient, connection: OwnerConnection, connectionKey: UUID) throws {
         do {
@@ -208,10 +312,15 @@ final class NativeSettingsLifecycle {
         session = NativeSettingsSession(client: client, connection: connection, connectionKey: connectionKey, gate: gate)
     }
 
-    func setSurfaceVisible(_ visible: Bool) { gate.update(visible: visible) }
+    func setSurfaceVisible(_ visible: Bool) {
+        gate.update(visible: visible)
+        if !visible { for admission in assistantSends.values { admission.cancel() } }
+    }
 
     func setApplicationActive(_ active: Bool) {
-        gate.update(active: active && NSApplication.shared.isActive)
+        let effective = active && NSApplication.shared.isActive
+        gate.update(active: effective)
+        if !effective { for admission in assistantSends.values { admission.cancel() } }
     }
 
     func prepareOpen() throws -> NativeSettingsAdmission {
@@ -237,11 +346,56 @@ final class NativeSettingsLifecycle {
         return admission
     }
 
+    func prepareAssistantOpen() throws -> NativeSettingsAssistantOpenAdmission {
+        guard drainTask == nil, assistantOpens.count + admissions.count < 64,
+              let opening else { throw NativeSettingsSessionError.capacity }
+        guard NSApplication.shared.isActive else { throw NativeSettingsSessionError.inactive }
+        let admission = NativeSettingsAssistantOpenAdmission(owner: gate, capture: try gate.capture(expiresAt: opening.expiresAt))
+        guard assistantOpens[admission.requestID] == nil, admissions[admission.requestID] == nil else {
+            throw NativeSettingsSessionError.requestReused
+        }
+        assistantOpens[admission.requestID] = admission
+        return admission
+    }
+
+    func acceptAssistantDisclosure(_ chat: NativeSettingsSession.AssistantHandle) throws -> NativeSettingsAssistantConsent {
+        guard drainTask == nil, assistantOpens[chat.openRequestID] != nil else { throw NativeSettingsSessionError.closed }
+        try chat.validateOwner(gate)
+        guard NSApplication.shared.isActive else { throw NativeSettingsSessionError.inactive }
+        try chat.validateLifetime()
+        return NativeSettingsAssistantConsent(chat: chat, owner: gate, capture: try gate.capture(expiresAt: chat.opened.expiresAt))
+    }
+
+    func prepareAssistantSend(_ chat: NativeSettingsSession.AssistantHandle,
+                              consent: NativeSettingsAssistantConsent, text: String) throws -> NativeSettingsAssistantSendAdmission {
+        guard drainTask == nil, assistantOpens[chat.openRequestID] != nil,
+              assistantSends.count < 64 else { throw NativeSettingsSessionError.capacity }
+        try chat.validateOwner(gate)
+        try chat.validateLifetime()
+        guard NSApplication.shared.isActive else { throw NativeSettingsSessionError.inactive }
+        try consent.validate(chat, gate: gate)
+        guard text.utf8.count <= 8192, !text.contains("\0"),
+              !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { throw NativeSettingsSessionError.invalidRequest }
+        let admission = NativeSettingsAssistantSendAdmission(chat: chat, consent: consent, owner: gate,
+            capture: try gate.capture(expiresAt: chat.opened.expiresAt), text: text)
+        guard assistantSends[admission.turnID] == nil, assistantOpens[admission.turnID] == nil,
+              admissions[admission.turnID] == nil else { throw NativeSettingsSessionError.requestReused }
+        assistantSends[admission.turnID] = admission
+        return admission
+    }
+
+    func retireAssistant(_ original: NativeSettingsAssistantOpenAdmission) {
+        guard assistantOpens[original.requestID] === original else { return }
+        for admission in assistantSends.values where admission.chat.openRequestID == original.requestID { admission.cancel() }
+    }
+
     func invalidate() {
         gate.invalidate()
         guard drainTask == nil else { return }
+        for admission in assistantSends.values { admission.cancel() }
         let session = session
-        drainTask = Task { await session.drain() }
+        let originals = Array(assistantOpens.values)
+        drainTask = Task { await session.drain(assistantOpens: originals) }
     }
 
     func drain() async -> NativeSettingsSession.DrainReport {
