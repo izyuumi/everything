@@ -991,7 +991,11 @@ impl MemoryService {
             let mut worker = worker;
             let result = apply_embedding_step(&core, &generation, &request).await;
             if let Err(error) = result {
-                let phase = if core.closing.load(Ordering::Acquire) {
+                let phase = if core.quiescence_failed.load(Ordering::Acquire) {
+                    EmbeddingApplyPhase::Failed {
+                        diagnostic: MemoryDiagnostic::QuiescenceFailed,
+                    }
+                } else if core.closing.load(Ordering::Acquire) {
                     EmbeddingApplyPhase::Stopped
                 } else if core
                     .consolidator
