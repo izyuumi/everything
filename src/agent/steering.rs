@@ -513,6 +513,7 @@ impl Agent {
 }
 
 pub(super) fn merge_controls(
+    store: &Store,
     captured: &Conversation,
     current: &Conversation,
     proposed: &mut Checkpoint,
@@ -535,28 +536,77 @@ pub(super) fn merge_controls(
             .starts_with(&captured.checkpoint.inputs.pending)
     {
         return Err(AgentError::InvalidData(
-            "concurrent conversation mutation was not task-input acceptance",
+            "concurrent conversation mutation changed native state or messages",
         ));
     }
     let extra = &current.checkpoint.inputs.pending[captured.checkpoint.inputs.pending.len()..];
+    let count = current
+        .info
+        .last_sequence
+        .checked_sub(captured.info.last_sequence)
+        .filter(|count| *count <= super::control_events::MAX_CONCURRENT_EVENTS)
+        .ok_or(AgentError::ResourceLimit("concurrent control events"))?;
+    if current.info.checkpoint_revision
+        != captured
+            .info
+            .checkpoint_revision
+            .checked_add(count)
+            .ok_or(AgentError::ResourceLimit("checkpoint revision"))?
+    {
+        return Err(AgentError::InvalidData(
+            "concurrent control revision changed",
+        ));
+    }
+    let mut reconstructed = captured.checkpoint.clone();
     let mut head = captured.info.last_sequence;
-    for queued in extra {
-        head = next_sequence(head)?;
-        if queued.sequence != head {
+    let mut revision = captured.info.checkpoint_revision;
+    let mut input = 0;
+    let mut page_size = 64;
+    while head < current.info.last_sequence {
+        let rows = loop {
+            match store.events(&captured.info.id.to_string(), head, page_size) {
+                Err(StorageError::ReadBudgetExceeded) if page_size > 1 => page_size /= 2,
+                result => break result?,
+            }
+        };
+        let mut progressed = false;
+        for row in rows
+            .into_iter()
+            .take_while(|row| row.sequence <= current.info.last_sequence)
+        {
+            let event = decode_event(&row, captured.info.id)?;
+            if event.sequence.get() != next_sequence(head)? {
+                return Err(AgentError::InvalidData(
+                    "concurrent control journal has a gap",
+                ));
+            }
+            if let Some(queued) = extra
+                .get(input)
+                .filter(|queued| queued.sequence == event.sequence.get())
+            {
+                current.checkpoint.inputs.validate_event(&event)?;
+                reconstructed.inputs.pending.push(queued.clone());
+                input += 1;
+            } else {
+                super::control_events::validate_metadata_event(store, &event)?;
+            }
+            super::control_events::verify_append_state(store, &event, revision, &reconstructed)?;
+            head = event.sequence.get();
+            revision += 1;
+            progressed = true;
+        }
+        if !progressed {
             return Err(AgentError::InvalidData(
-                "concurrent mutation was not a queued task input",
+                "concurrent control journal is incomplete",
             ));
         }
     }
-    if head != current.info.last_sequence
-        || current.info.checkpoint_revision
-            != captured
-                .info
-                .checkpoint_revision
-                .saturating_add(extra.len() as u64)
+    if reconstructed.inputs != current.checkpoint.inputs
+        || input != extra.len()
+        || current.info.checkpoint_revision != revision
     {
         return Err(AgentError::InvalidData(
-            "concurrent task input journal changed",
+            "concurrent control journal changed",
         ));
     }
     proposed.inputs.pending.extend_from_slice(extra);

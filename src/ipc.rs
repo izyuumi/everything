@@ -101,6 +101,7 @@ pub enum OwnerQuery {
         lookup: ApprovalLookup,
     },
     Settings,
+    Publication,
     Identity,
     Runtime,
     ToolRecovery,
@@ -288,6 +289,9 @@ impl ConversationWait {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum OwnerQueryResult {
+    Publication {
+        status: crate::host::publication::PublicationStatus,
+    },
     Conversations {
         conversations: Vec<ConversationSummary>,
     },
@@ -442,6 +446,7 @@ impl OwnerQueryResult {
                     }
             }),
             (OwnerQuery::Settings, Self::Settings { .. }) => true,
+            (OwnerQuery::Publication, Self::Publication { .. }) => true,
             (OwnerQuery::Transport, Self::Transport { .. }) => true,
             (OwnerQuery::Runtime, Self::Runtime { .. }) => true,
             (

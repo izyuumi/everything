@@ -119,6 +119,9 @@ pub(super) struct HostInner {
     pub(super) relay_status: watch::Receiver<crate::devices::RelaySessionStatus>,
     pub(super) relay_updates: watch::Sender<crate::devices::RelaySessionStatus>,
     pub(super) receipts: watch::Sender<u64>,
+    pub(super) metadata_changed: watch::Sender<u64>,
+    pub(super) publication: watch::Receiver<super::publication::PublicationStatus>,
+    pub(super) publication_updates: watch::Sender<super::publication::PublicationStatus>,
     pub(super) draining: AtomicBool,
     pub(super) workers_drained: AtomicBool,
     pub(super) recovery: Mutex<()>,
@@ -127,6 +130,7 @@ pub(super) struct HostInner {
 enum HostWorker {
     Local(Result<(), HostError>),
     Dispatcher(Result<(), HostError>),
+    Publication(Result<(), HostError>),
     Relay(Result<(), DeviceError>),
 }
 
@@ -227,6 +231,8 @@ impl HostService {
         let (relay_updates, relay_status) =
             watch::channel(crate::devices::RelaySessionStatus::Stopped);
         let (receipts, _) = watch::channel(0);
+        let (metadata_changed, _) = watch::channel(0);
+        let (publication_updates, publication) = watch::channel(Default::default());
         let inner = Arc::new(HostInner {
             inbox: HostInbox::new(agent.store()),
             agent,
@@ -243,6 +249,9 @@ impl HostService {
             relay_status,
             relay_updates,
             receipts,
+            metadata_changed,
+            publication,
+            publication_updates,
             draining: AtomicBool::new(false),
             workers_drained: AtomicBool::new(false),
             recovery: Mutex::new(()),
@@ -291,11 +300,55 @@ impl HostService {
                 )
             });
         }
+        let publisher = inner.clone();
+        let publisher_stop = work_stop.clone();
+        let (initialized, initial_pass) = tokio::sync::oneshot::channel();
+        workers.spawn(async move {
+            let outcome = publisher
+                .clone()
+                .publish_metadata(
+                    publisher_stop,
+                    publisher.publication_updates.clone(),
+                    initialized,
+                )
+                .await;
+            if outcome.is_err() {
+                publisher.publication_updates.send_modify(|status| {
+                    status.stopped = true;
+                    status.last_error = Some("metadata publication worker failed".into());
+                });
+            }
+            HostWorker::Publication(outcome)
+        });
         let mut handlers = JoinSet::new();
-        let activation = if cancellation.is_cancelled() {
-            Ok(())
-        } else {
-            inner.scheduler.activate().await.map_err(HostError::from)
+        tokio::pin!(initial_pass);
+        let activation = loop {
+            tokio::select! {
+                biased;
+                _ = cancellation.cancelled() => break Ok(()),
+                ready = &mut initial_pass => break match ready {
+                    Ok(()) => inner.scheduler.activate().await.map_err(HostError::from),
+                    Err(_) => Err(HostError::Worker),
+                },
+                joined = workers.join_next() => match joined {
+                    Some(Ok(HostWorker::Relay(outcome))) => {
+                        if outcome.is_err() {
+                            inner.relay_updates.send_replace(crate::devices::RelaySessionStatus::Failed { reason: "relay operation requires operator action" });
+                            tracing::warn!("optional relay stopped during initial metadata reconciliation");
+                        }
+                    }
+                    Some(Ok(HostWorker::Local(outcome) | HostWorker::Dispatcher(outcome) | HostWorker::Publication(outcome))) => break outcome.and(Err(HostError::Worker)),
+                    _ => break Err(HostError::Worker),
+                },
+                joined = handlers.join_next(), if !handlers.is_empty() => {
+                    if !matches!(joined, Some(Ok(()))) { break Err(HostError::Worker); }
+                },
+                call = calls.recv(), if handlers.len() < 32 => {
+                    let Some(call) = call else { break Err(HostError::Worker); };
+                    let host = inner.clone();
+                    handlers.spawn(async move { host.handle(call).await; });
+                }
+            }
         };
         let mut result = if let Err(error) = activation {
             Err(error)
@@ -311,7 +364,7 @@ impl HostService {
                                 tracing::warn!("optional relay stopped; local host remains available");
                             }
                         }
-                        Some(Ok(HostWorker::Local(outcome) | HostWorker::Dispatcher(outcome))) => break outcome.and(Err(HostError::Worker)),
+                        Some(Ok(HostWorker::Local(outcome) | HostWorker::Dispatcher(outcome) | HostWorker::Publication(outcome))) => break outcome.and(Err(HostError::Worker)),
                         _ => break Err(HostError::Worker),
                     },
                     joined = handlers.join_next(), if !handlers.is_empty() => {
@@ -379,6 +432,7 @@ impl HostService {
                     .blocking(|host| global_running(&host.agent.store()))
                     .await;
                 if matches!((&report,&running), (Ok(report),Ok(false)) if report.running_count == 0 && report.unresolved_count == 0 && report.requirements.is_empty())
+                    && inner.publication.borrow().stopped
                 {
                     break;
                 }
@@ -402,13 +456,13 @@ impl HostService {
                 joined = async { shutdown.as_mut().ok_or(HostError::Worker)?.await.map_err(|_| HostError::Worker)? }, if shutdown.is_some() => {
                     shutdown.take();
                     match joined {
-                        Ok(_) => inner.workers_drained.store(true, Ordering::Release),
+                        Ok(_) => { inner.workers_drained.store(true, Ordering::Release); inner.receipt_changed(); },
                         Err(error) => { if result.is_ok() { result = Err(error); } tracing::error!("scheduler drain failed; state ownership retained"); }
                     }
                 }
                 joined = workers.join_next(), if !workers.is_empty() => {
                     let failure = match joined {
-                        Some(Ok(HostWorker::Local(outcome) | HostWorker::Dispatcher(outcome))) => outcome.err(),
+                        Some(Ok(HostWorker::Local(outcome) | HostWorker::Dispatcher(outcome) | HostWorker::Publication(outcome))) => outcome.err(),
                         Some(Ok(HostWorker::Relay(outcome))) => { if outcome.is_err() { tracing::warn!("optional relay stopped during host drain"); } None },
                         _ => Some(HostError::Worker),
                     };
@@ -448,7 +502,11 @@ impl HostService {
         }
         while let Some(joined) = workers.join_next().await {
             match joined {
-                Ok(HostWorker::Local(outcome) | HostWorker::Dispatcher(outcome)) => {
+                Ok(
+                    HostWorker::Local(outcome)
+                    | HostWorker::Dispatcher(outcome)
+                    | HostWorker::Publication(outcome),
+                ) => {
                     if result.is_ok() {
                         result = outcome;
                     }
@@ -581,6 +639,7 @@ impl HostInner {
             }
             LocalRequestPayload::Wait { request } => {
                 let mut changed = self.scheduler.subscribe();
+                let mut metadata = self.metadata_changed.subscribe();
                 let conversation = self.agent.conversation(request.conversation_id).await?;
                 if request.after_sequence > conversation.info.last_sequence {
                     return Err(HostError::Invalid("wait cursor exceeds the host head"));
@@ -590,7 +649,12 @@ impl HostInner {
                 } else {
                     tokio::select! {
                         _ = call.cancellation.cancelled() => return Err(LocalError::Cancelled.into()),
-                        result = tokio::time::timeout(Duration::from_millis(request.timeout_ms), changed.changed()) => {
+                        result = tokio::time::timeout(Duration::from_millis(request.timeout_ms), async {
+                            tokio::select! {
+                                result = changed.changed() => result,
+                                result = metadata.changed() => result,
+                            }
+                        }) => {
                             match result {
                                 Ok(Ok(())) => false,
                                 Ok(Err(_)) => return Err(HostError::Worker),

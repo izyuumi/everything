@@ -1142,7 +1142,7 @@ impl Agent {
             let _admission = admission;
             let current = load_conversation(&retained_agent.store, captured.info.id)?;
             let mut proposed = captured.checkpoint.clone();
-            steering::merge_controls(&captured, &current, &mut proposed)?;
+            steering::merge_controls(&retained_agent.store, &captured, &current, &mut proposed)?;
             Ok(current)
         })
         .await?;
@@ -1216,7 +1216,7 @@ impl Agent {
             let _admission = admission;
             let _write = write;
             let mut current = load_conversation(&retained_agent.store, captured.info.id)?;
-            steering::merge_controls(&captured, &current, &mut checkpoint)?;
+            steering::merge_controls(&retained_agent.store, &captured, &current, &mut checkpoint)?;
             let proposed_status = checkpoint.native.as_ref().map(NativeCheckpoint::status);
             if checkpoint.inputs.has_pending()
                 && matches!(proposed_status, Some(LoopStatus::ProviderInFlight { .. }))

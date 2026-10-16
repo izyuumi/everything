@@ -1,7 +1,9 @@
+mod control_events;
 mod foreground;
 mod native;
 mod steering;
 
+pub use control_events::{PermissionPublicationReceipt, TaskPublicationReceipt};
 pub use native::{
     LoopLimits, LoopStatus, NativeRunInfo, PauseReason, ProviderResume, ToolRunSetup,
 };
