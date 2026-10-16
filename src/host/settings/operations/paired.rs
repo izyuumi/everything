@@ -10,6 +10,63 @@ use crate::host::settings::contract::{
 };
 use crate::host::settings::service::SettingsServiceError;
 
+pub(in crate::host::settings) struct PairedReplyHistoryAnchor {
+    sequence: u64,
+}
+
+impl PairedReplyHistoryAnchor {
+    pub(in crate::host::settings) fn capture_on(
+        connection: &rusqlite::Connection,
+        expected: &super::OperationRecord,
+    ) -> Result<Self, SettingsServiceError> {
+        if expected.identity.version != 2
+            || !matches!(
+                expected.identity.origin,
+                SettingsOperationOrigin::PairedSettings { .. }
+            )
+        {
+            return Err(SettingsServiceError::CorruptJournal);
+        }
+        let request_id = expected.identity.binding.request_id;
+        let current =
+            super::read(connection, request_id)?.ok_or(SettingsServiceError::CorruptJournal)?;
+        let inspection = expected.inspection();
+        if current.identity != expected.identity || current.inspection() != inspection {
+            return Err(SettingsServiceError::CorruptJournal);
+        }
+        let mut statement = connection.prepare(
+            "SELECT sequence,record,occurred_at FROM settings_operation_updates WHERE request_id=?1 ORDER BY sequence DESC LIMIT 1",
+        )?;
+        let mut rows = statement.query([request_id.to_string()])?;
+        let row = rows.next()?.ok_or(SettingsServiceError::CorruptJournal)?;
+        let sequence = u64::try_from(row.get::<_, i64>(0)?)
+            .map_err(|_| SettingsServiceError::CorruptJournal)?;
+        if sequence == 0 {
+            return Err(SettingsServiceError::CorruptJournal);
+        }
+        let update: UpdateRecord = super::decode(
+            super::bounded_text(row, 1, super::MAX_UPDATE_BYTES)?,
+            super::MAX_UPDATE_BYTES,
+        )?;
+        let occurred_at = row.get::<_, i64>(2)?;
+        drop(rows);
+        drop(statement);
+        super::validate_update(&current.identity, &update)?;
+        super::validate_native_link(connection, &current.identity, &update)?;
+        if update.updated_at.get() as i64 != occurred_at
+            || (super::OperationRecord {
+                identity: current.identity,
+                update,
+            })
+            .inspection()
+                != inspection
+        {
+            return Err(SettingsServiceError::CorruptJournal);
+        }
+        Ok(Self { sequence })
+    }
+}
+
 pub(super) fn is_origin(origin: &SettingsOperationOrigin) -> bool {
     matches!(
         origin,
