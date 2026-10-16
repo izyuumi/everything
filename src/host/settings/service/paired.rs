@@ -1,6 +1,9 @@
 mod access;
 
-pub(crate) use access::{QualifiedSettingsAccess, SettingsAccessQualificationError};
+pub(crate) use access::{
+    QualifiedSettingsAccess, SettingsAccessQualificationError, SettingsAccessReceiptPlan,
+    SettingsAccessReplyFamily, SettingsAccessReservationSpec,
+};
 
 mod replies;
 
