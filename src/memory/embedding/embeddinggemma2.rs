@@ -23,6 +23,7 @@ use super::{
 
 pub const SOURCE_MODEL_REVISION: &str = "914f7f89142e33e77833254d9c9b90c3cef7303b";
 pub const ONNX_MODEL_REVISION: &str = "daa72c51243991dfcaf9f9137d2c573d8f7790c0";
+pub const DEFAULT_DIMENSIONS: usize = 768;
 pub const SUPPORTED_DIMENSIONS: [usize; 4] = [128, 256, 512, 768];
 
 const ARTIFACTS: [Artifact; 4] = [
@@ -353,7 +354,7 @@ impl EmbeddingGemma2 {
             EmbeddingMetric::Cosine,
         )?;
         Ok(Self {
-            profile: EmbeddingProfile::new(spec, 768)?,
+            profile: EmbeddingProfile::new(spec, DEFAULT_DIMENSIONS)?,
             inner: Arc::new(ModelState {
                 session: Mutex::new(session),
                 tokenizer,
