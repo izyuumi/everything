@@ -147,15 +147,26 @@ final class NativeSettingsStore {
         let requestID: UUID
         fileprivate let ownerID: UUID
         fileprivate let admission: NativeSettingsAssistantOpenAdmission
+        fileprivate weak var source: NativeSettingsStore?
+        fileprivate var parentRetired = false
+        fileprivate var openState: NativeSettingsAssistantWire.OpenState?
+        fileprivate var parentReport: NativeSettingsSession.DrainReport?
 
         nonisolated var description: String { "NativeSettingsAssistantOpenAction([private])" }
         nonisolated var debugDescription: String { description }
 
-        fileprivate init(ownerID: UUID, admission: NativeSettingsAssistantOpenAdmission) {
+        fileprivate init(source: NativeSettingsStore, ownerID: UUID, admission: NativeSettingsAssistantOpenAdmission) {
+            self.source = source
             self.ownerID = ownerID
             self.admission = admission
             requestID = admission.requestID
         }
+    }
+
+    struct AssistantCleanupObservation: Sendable {
+        let parentRetired: Bool
+        let openState: NativeSettingsAssistantWire.OpenState?
+        let parentReport: NativeSettingsSession.DrainReport?
     }
 
     @MainActor
@@ -426,13 +437,25 @@ final class NativeSettingsStore {
         if owner.work == nil { refresh() }
     }
 
+    func isCurrentAssistantOwner(_ action: AssistantOpenAction) -> Bool {
+        guard action.source === self, let owner = owners[action.ownerID],
+              owner.assistantOpens[action.requestID] === action else { return false }
+        return isCurrent(owner) && owner.retirement == nil
+    }
+
+    func assistantCleanup(_ action: AssistantOpenAction) throws -> AssistantCleanupObservation {
+        guard action.source === self else { throw NativeSettingsSessionError.invalidRequest }
+        return AssistantCleanupObservation(parentRetired: action.parentRetired, openState: action.openState,
+                                           parentReport: action.parentReport)
+    }
+
     func prepareAssistantOpen() throws -> AssistantOpenAction {
         guard !isClosed, let owner = current, isCurrent(owner), isForeground,
               owner.information != nil, owner.retirement == nil else { throw NativeSettingsSessionError.inactive }
         guard identityCount(owner) < 64, owner.effects.count < 4 else { throw NativeSettingsSessionError.capacity }
         let admission = try owner.lifecycle.prepareAssistantOpen()
         let conflict = identityReserved(owner, id: admission.requestID)
-        let action = AssistantOpenAction(ownerID: owner.id, admission: admission)
+        let action = AssistantOpenAction(source: self, ownerID: owner.id, admission: admission)
         owner.assistantOpens[action.requestID] = action
         guard !conflict else { throw NativeSettingsSessionError.requestReused }
         return action
@@ -471,7 +494,7 @@ final class NativeSettingsStore {
                 owner.assistantChats[chat.opened.chatID] = chat
             } else {
                 switch result {
-                case .unavailable: owner.retiredAssistantOpens.insert(action.requestID)
+                case .unavailable: self.observeAssistantOpen(owner, action: action, state: .unavailable)
                 case .state(let state): self.observeAssistantOpen(owner, action: action, state: state)
                 case .opened: break
                 }
@@ -595,6 +618,7 @@ final class NativeSettingsStore {
     }
 
     private func observeAssistantOpen(_ owner: Owner, action: AssistantOpenAction, state: NativeSettingsAssistantWire.OpenState) {
+        action.openState = state
         switch state {
         case .closing, .closed, .unavailable, .unknown: owner.retiredAssistantOpens.insert(action.requestID)
         case .ready, .notAccepted: break
@@ -1383,6 +1407,7 @@ final class NativeSettingsStore {
         guard let owner = current else { return }
         retireCredentialPresentations()
         retireDeviceCeremonies()
+        for original in owner.assistantOpens.values { original.parentRetired = true }
         owner.lifecycle.invalidate()
         owner.observer?.cancel()
         currentID = nil
@@ -1796,10 +1821,16 @@ final class NativeSettingsStore {
                 unresolved.insert(context.handle.id)
             }
         }
-        return NativeSettingsSession.DrainReport(failures: failures,
+        let report = NativeSettingsSession.DrainReport(failures: failures,
             unresolvedOperationIDs: unresolved.sorted { $0.uuidString < $1.uuidString },
             pairingLifecycles: native.pairingLifecycles,
-            unresolvedAssistantOpenRequestIDs: native.unresolvedAssistantOpenRequestIDs)
+            unresolvedAssistantOpenRequestIDs: native.unresolvedAssistantOpenRequestIDs,
+            assistantOpenStates: native.assistantOpenStates)
+        for original in owner.assistantOpens.values {
+            original.parentReport = report
+            if let state = native.assistantOpenStates[original.requestID] { original.openState = state }
+        }
+        return report
     }
 
     private func unlinkedCredentialIDs(_ owner: Owner) -> [UUID] {

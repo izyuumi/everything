@@ -227,14 +227,17 @@ actor NativeSettingsSession {
         let unresolvedOperationIDs: [UUID]
         let pairingLifecycles: [UUID: NativeSettingsWire.PairingLifecycle]
         let unresolvedAssistantOpenRequestIDs: [UUID]
+        let assistantOpenStates: [UUID: NativeSettingsAssistantWire.OpenState]
 
         init(failures: [NativeSettingsSessionError], unresolvedOperationIDs: [UUID],
              pairingLifecycles: [UUID: NativeSettingsWire.PairingLifecycle] = [:],
-             unresolvedAssistantOpenRequestIDs: [UUID] = []) {
+             unresolvedAssistantOpenRequestIDs: [UUID] = [],
+             assistantOpenStates: [UUID: NativeSettingsAssistantWire.OpenState] = [:]) {
             self.failures = failures
             self.unresolvedOperationIDs = unresolvedOperationIDs
             self.pairingLifecycles = pairingLifecycles
             self.unresolvedAssistantOpenRequestIDs = unresolvedAssistantOpenRequestIDs
+            self.assistantOpenStates = assistantOpenStates
         }
     }
 
@@ -1519,7 +1522,8 @@ actor NativeSettingsSession {
         let unresolvedIDs = Set(unresolved + approvalUnresolved).union(pairingUnresolved)
         return DrainReport(failures: failures, unresolvedOperationIDs: unresolvedIDs.sorted { $0.uuidString < $1.uuidString },
                            pairingLifecycles: pairingLifecycles,
-                           unresolvedAssistantOpenRequestIDs: unresolvedAssistantOpens.sorted { $0.uuidString < $1.uuidString })
+                           unresolvedAssistantOpenRequestIDs: unresolvedAssistantOpens.sorted { $0.uuidString < $1.uuidString },
+                           assistantOpenStates: assistantOpens.compactMapValues(\.state))
     }
 
     private func sanitize(_ error: any Error) -> NativeSettingsSessionError {
