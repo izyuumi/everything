@@ -7,6 +7,11 @@ on:
         required: false
         default: false
         type: boolean
+      inspect_cli_startup:
+        description: Run public help and version on the default Linux CLI
+        required: false
+        default: false
+        type: boolean
 permissions:
   contents: read
 concurrency:
@@ -41,6 +46,17 @@ jobs:
           retention-days: 3
           if-no-files-found: error
           compression-level: 6
+      - name: Inspect default Linux CLI startup
+        if: ${{ github.event_name == 'workflow_dispatch' && matrix.os == 'ubuntu-latest' && inputs.inspect_cli_startup }}
+        timeout-minutes: 2
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          cli_startup_root="$(mktemp -d "${RUNNER_TEMP}/everything-cli-startup.XXXXXX")"
+          mkdir -p "${cli_startup_root}/home" "${cli_startup_root}/tmp"
+          HOME="${cli_startup_root}/home" TMPDIR="${cli_startup_root}/tmp" target/release/everything --help
+          HOME="${cli_startup_root}/home" TMPDIR="${cli_startup_root}/tmp" target/release/everything --version
       - run: cargo build --workspace --release --all-features --locked
   msrv:
     name: Rust 1.88 MSRV
