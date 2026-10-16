@@ -55,7 +55,7 @@ croner = "=4.0.1"
 
 [features]
 default = []
-local-embeddings = ["dep:ort", "dep:tokenizers"]
+local-embeddings = ["dep:ort", "dep:tokenizers", "dep:sqlite-vec"]
 
 [dependencies.ort]
 version = "=2.0.0-rc.10"
@@ -79,3 +79,7 @@ keyring = { version = "=3.6.3", default-features = false, features = ["apple-nat
 
 [target.'cfg(target_os = "linux")'.dependencies]
 keyring = { version = "=3.6.3", default-features = false, features = ["sync-secret-service", "crypto-rust", "vendored"] }
+
+[dependencies.sqlite-vec]
+version = "=0.1.9"
+optional = true
