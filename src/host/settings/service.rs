@@ -8,7 +8,8 @@ use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use crate::agent::Agent;
-use crate::devices::{DeviceEndpoint, EndpointRole};
+use crate::devices::{DeviceEndpoint, DeviceError, EndpointRole};
+use crate::host::credentials::SecretTransfer;
 use crate::protocol::{CommandId, ProtocolError, UnixMillis};
 use crate::storage::StorageError;
 use crate::transport::local::LocalCall;
@@ -17,7 +18,8 @@ use super::SettingsRepository;
 use super::actions::{
     ActionClaim, ClaimState, NativeActionAdmission, NativeActionAdmissionResult,
     NativeActionDetails, NativeActionInvocation, NativeActionObservation, NativeActionReference,
-    NativeHostEffectAdmission, SettingsActionTarget,
+    NativeHostEffectAdmission, NativePairingCreation, NativePairingLifecycle, PendingPairingLease,
+    PendingPairingState, SettingsActionTarget,
 };
 use super::authority::{
     Authority, CallerSource, NativeSessionOpened, NativeSessionProof, SettingsAgentSession,
@@ -25,13 +27,13 @@ use super::authority::{
 };
 use super::contract::{
     AgentMutability, SETTINGS_CONTRACT_VERSION, SettingsActionReference, SettingsActionRequest,
-    SettingsConfirmationReference, SettingsContractError, SettingsDeviceRequest,
-    SettingsOperationResult, SettingsOperationState, SettingsPatch, SettingsRequestBinding,
-    SettingsScope, SettingsToolName, SettingsUnavailableReason,
+    SettingsConfirmationReference, SettingsContractError, SettingsDeviceAction,
+    SettingsDeviceRequest, SettingsOperationResult, SettingsOperationState, SettingsPatch,
+    SettingsRequestBinding, SettingsScope, SettingsToolName, SettingsUnavailableReason,
 };
 use super::operations::{
-    NativeRequest, OperationIdentity, OperationRepository, SettingsOperationInspection,
-    SettingsOperationPhase, request_digest,
+    NativeRequest, OperationIdentity, OperationRecord, OperationRepository,
+    PairingCreationMetadata, SettingsOperationInspection, SettingsOperationPhase, request_digest,
 };
 
 #[derive(Debug, Error)]
@@ -80,6 +82,10 @@ pub enum SettingsServiceError {
     Sqlite(#[from] rusqlite::Error),
     #[error(transparent)]
     Settings(#[from] super::SettingsError),
+    #[error(transparent)]
+    Device(#[from] DeviceError),
+    #[error(transparent)]
+    Credential(#[from] crate::credentials::CredentialError),
 }
 
 #[derive(Clone)]
@@ -94,6 +100,7 @@ struct ServiceCore {
     mutation: Arc<AsyncMutex<()>>,
     claims: Mutex<BTreeMap<CommandId, Arc<ActionClaim>>>,
     pending: Mutex<BTreeMap<CommandId, Instant>>,
+    pairings: Mutex<BTreeMap<CommandId, Arc<PendingPairingLease>>>,
     agent: Agent,
 }
 
@@ -120,6 +127,7 @@ impl SettingsService {
                 mutation,
                 claims: Mutex::new(BTreeMap::new()),
                 pending: Mutex::new(BTreeMap::new()),
+                pairings: Mutex::new(BTreeMap::new()),
                 agent,
             }),
         };
@@ -227,6 +235,27 @@ impl SettingsService {
             .require_tool(&caller, SettingsToolName::RequestAction)?;
         self.prepare(caller, SettingsActionTarget::Native(request), cancellation)
             .await
+    }
+
+    pub(crate) async fn inspect_native_operation(
+        &self,
+        caller: SettingsCaller,
+        request_id: CommandId,
+    ) -> Result<SettingsOperationInspection, SettingsServiceError> {
+        self.core.authority.validate(&caller, true)?;
+        let CallerSource::NativeUi(session_id) = caller.source else {
+            return Err(SettingsServiceError::OutsideScope);
+        };
+        self.blocking(move |core| {
+            core.authority.validate(&caller, true)?;
+            let record = core.repository.get(request_id)?;
+            core.check_principal(&caller, &record.identity)?;
+            if record.identity.binding.client_session_id != session_id {
+                return Err(SettingsServiceError::OutsideScope);
+            }
+            Ok(record.inspection())
+        })
+        .await
     }
 
     pub(crate) async fn prepare_device_action(
@@ -474,6 +503,7 @@ impl SettingsService {
                 state: Mutex::new(ClaimState {
                     closed: false,
                     host_effect_started: false,
+                    pairing: None,
                 }),
                 repository: core.repository.clone(),
                 authority: Arc::clone(&core.authority),
@@ -593,6 +623,63 @@ impl SettingsService {
         .await
     }
 
+    pub(crate) async fn create_pairing(
+        &self,
+        effect: NativeHostEffectAdmission,
+        endpoint: DeviceEndpoint,
+    ) -> Result<NativePairingCreation, SettingsServiceError> {
+        if !Arc::ptr_eq(&self.core.authority, &effect.claim.authority) {
+            return Err(SettingsServiceError::OutsideScope);
+        }
+        self.blocking(move |core| {
+            let retained_effect = effect;
+            core.create_pairing(&retained_effect, endpoint)
+        })
+        .await
+    }
+
+    pub(crate) async fn native_pairing(
+        &self,
+        caller: SettingsCaller,
+        request_id: CommandId,
+    ) -> Result<NativePairingCreation, SettingsServiceError> {
+        self.core.authority.validate(&caller, true)?;
+        self.blocking(move |core| {
+            core.authority.validate(&caller, true)?;
+            let record = core.repository.get(request_id)?;
+            core.check_pairing_caller(&caller, &record.identity)?;
+            core.pairing_result(&caller, &record)
+        })
+        .await
+    }
+
+    pub(crate) async fn cancel_native_pairing(
+        &self,
+        caller: SettingsCaller,
+        request_id: CommandId,
+    ) -> Result<NativePairingCreation, SettingsServiceError> {
+        self.core.authority.validate(&caller, true)?;
+        self.blocking(move |core| {
+            core.authority.validate(&caller, true)?;
+            let record = core.repository.get(request_id)?;
+            core.check_pairing_caller(&caller, &record.identity)?;
+            let pairing = core.pairing(request_id)?;
+            let lifecycle = match &pairing {
+                Some(pairing) => pairing.cancel()?,
+                None => NativePairingLifecycle::Unavailable,
+            };
+            if let Some(pairing) = &pairing {
+                core.release_pairing(pairing)?;
+            }
+            Ok(NativePairingCreation {
+                operation: record.inspection(),
+                lifecycle,
+                invitation: None,
+            })
+        })
+        .await
+    }
+
     pub(crate) async fn cancel_native_action(
         &self,
         caller: SettingsCaller,
@@ -619,6 +706,16 @@ impl SettingsService {
                         .cloned()
                         .ok_or(SettingsServiceError::NotFound)?;
                     claim.close()?;
+                    let pairing = claim
+                        .state
+                        .lock()
+                        .map_err(|_| SettingsServiceError::Poisoned)?
+                        .pairing
+                        .clone();
+                    if let Some(pairing) = pairing {
+                        pairing.cancel()?;
+                        core.release_pairing(&pairing)?;
+                    }
                     Ok(record.inspection())
                 }
                 SettingsOperationPhase::Finished { .. } => Ok(record.inspection()),
@@ -672,13 +769,23 @@ impl SettingsService {
                         .remove(&record.identity.binding.request_id);
                 }
             }
+            for pairing in core.retained_pairings()? {
+                if pairing.session_id == session_id {
+                    pairing.cancel()?;
+                    core.release_pairing(&pairing)?;
+                }
+            }
             Ok(())
         })
         .await
     }
 
+    pub(crate) fn stop_intake(&self) -> Result<(), SettingsServiceError> {
+        self.core.authority.close()
+    }
+
     pub(crate) async fn close(&self) -> Result<(), SettingsServiceError> {
-        self.core.authority.close()?;
+        self.stop_intake()?;
         self.blocking(|core| {
             let claims = core
                 .claims
@@ -689,6 +796,10 @@ impl SettingsService {
                 .collect::<Vec<_>>();
             for claim in claims {
                 claim.close()?;
+            }
+            for pairing in core.retained_pairings()? {
+                pairing.cancel()?;
+                core.release_pairing(&pairing)?;
             }
             Ok(())
         })
@@ -722,6 +833,318 @@ impl SettingsService {
 }
 
 impl ServiceCore {
+    fn create_pairing(
+        &self,
+        effect: &NativeHostEffectAdmission,
+        endpoint: DeviceEndpoint,
+    ) -> Result<NativePairingCreation, SettingsServiceError> {
+        if !matches!(
+            effect.target(),
+            SettingsActionTarget::Device(SettingsDeviceRequest {
+                action: SettingsDeviceAction::Pair,
+                ..
+            })
+        ) || endpoint.role() != &EndpointRole::Host
+            || endpoint.public_keys().device_id != self.authority.host_id
+        {
+            return Err(SettingsServiceError::OutsideScope);
+        }
+        self.check_endpoint(endpoint.public_keys())?;
+        for pairing in self.retained_pairings()? {
+            if Instant::now() >= pairing.deadline
+                || UnixMillis::now()?.get() >= pairing.expires_at.get()
+            {
+                pairing.cancel()?;
+            }
+            self.release_pairing(&pairing)?;
+        }
+        {
+            let pairings = self
+                .pairings
+                .lock()
+                .map_err(|_| SettingsServiceError::Poisoned)?;
+            if pairings.contains_key(&effect.operation_id()) {
+                return Err(SettingsServiceError::Conflict);
+            }
+            if pairings.len() >= 8 {
+                return Err(SettingsServiceError::Capacity);
+            }
+        }
+        let session = effect
+            .claim
+            .session
+            .lock()
+            .map_err(|_| SettingsServiceError::Poisoned)?
+            .as_ref()
+            .ok_or(SettingsServiceError::OutsideScope)?
+            .retain();
+        let (now, lifetime) = {
+            let state = effect
+                .claim
+                .state
+                .lock()
+                .map_err(|_| SettingsServiceError::Poisoned)?;
+            super::actions::validate_current(
+                &self.authority,
+                &self.settings,
+                &effect.claim.identity,
+            )?;
+            let current = UnixMillis::now()?;
+            if state.closed
+                || !state.host_effect_started
+                || effect.claim.cancellation.is_cancelled()
+                || current.get() >= effect.claim.identity.binding.expires_at.get()
+            {
+                return Err(SettingsServiceError::Expired);
+            }
+            let monotonic = effect
+                .claim
+                .deadline
+                .checked_duration_since(Instant::now())
+                .ok_or(SettingsServiceError::Expired)?;
+            let monotonic =
+                u64::try_from(monotonic.as_millis()).map_err(|_| SettingsServiceError::Expired)?;
+            let remaining = effect.claim.identity.binding.expires_at.get() - current.get();
+            let lifetime = monotonic.min(remaining);
+            if lifetime == 0 {
+                return Err(SettingsServiceError::Expired);
+            }
+            (current, lifetime)
+        };
+        let mut display = endpoint.begin_pairing(now, lifetime)?;
+        let pairing_id = display.pairing_id;
+        let created = (|| {
+            let pairing = Arc::new(PendingPairingLease {
+                operation_id: effect.operation_id(),
+                session_id: effect.claim.native.session_id,
+                pairing_id,
+                expires_at: UnixMillis::try_from(display.expires_at_ms)?,
+                deadline: effect.claim.deadline,
+                fingerprint: display.fingerprint,
+                endpoint: endpoint.clone(),
+                state: Mutex::new(PendingPairingState {
+                    lifecycle: NativePairingLifecycle::Retained,
+                    invitation: Some(SecretTransfer::new(std::mem::take(
+                        &mut *display.invitation_json,
+                    ))?),
+                }),
+                _session: session,
+                _agent: self.agent.clone(),
+            });
+            let closed = {
+                let mut state = effect
+                    .claim
+                    .state
+                    .lock()
+                    .map_err(|_| SettingsServiceError::Poisoned)?;
+                if state.pairing.is_some() {
+                    return Err(SettingsServiceError::Conflict);
+                }
+                state.pairing = Some(Arc::clone(&pairing));
+                state.closed || effect.claim.cancellation.is_cancelled()
+            };
+            {
+                let mut pairings = self
+                    .pairings
+                    .lock()
+                    .map_err(|_| SettingsServiceError::Poisoned)?;
+                match pairings.entry(effect.operation_id()) {
+                    std::collections::btree_map::Entry::Vacant(entry) => {
+                        entry.insert(Arc::clone(&pairing));
+                    }
+                    std::collections::btree_map::Entry::Occupied(_) => {
+                        return Err(SettingsServiceError::Conflict);
+                    }
+                }
+            }
+            let inspection = self.repository.finish_pairing(
+                &effect.claim.identity,
+                effect.claim.native.native_request_id,
+                PairingCreationMetadata {
+                    pairing_id,
+                    expires_at: pairing.expires_at,
+                },
+            )?;
+            effect.claim.close()?;
+            effect
+                .claim
+                .session
+                .lock()
+                .map_err(|_| SettingsServiceError::Poisoned)?
+                .take();
+            self.claims
+                .lock()
+                .map_err(|_| SettingsServiceError::Poisoned)?
+                .remove(&effect.operation_id());
+            let source_live = match self.authority.check_origin(&effect.claim.identity.origin) {
+                Ok(()) => true,
+                Err(
+                    SettingsServiceError::Expired
+                    | SettingsServiceError::OutsideScope
+                    | SettingsServiceError::Stopped,
+                ) => false,
+                Err(error) => return Err(error),
+            };
+            if closed
+                || !source_live
+                || Instant::now() >= pairing.deadline
+                || UnixMillis::now()?.get() >= pairing.expires_at.get()
+            {
+                let lifecycle = pairing.cancel()?;
+                self.release_pairing(&pairing)?;
+                return Ok(NativePairingCreation {
+                    operation: inspection,
+                    lifecycle,
+                    invitation: None,
+                });
+            }
+            Ok(NativePairingCreation {
+                operation: inspection,
+                lifecycle: pairing.lifecycle()?,
+                invitation: Some(pairing.invitation()?),
+            })
+        })();
+        match created {
+            Ok(result) => Ok(result),
+            Err(cause) => {
+                let repair = match self.pairing(effect.operation_id()) {
+                    Ok(Some(pairing)) => pairing.cancel().map(|_| ()),
+                    Ok(None) => UnixMillis::now()
+                        .map_err(SettingsServiceError::from)
+                        .and_then(|now| {
+                            endpoint
+                                .cancel_pairing(pairing_id, now)
+                                .map(|_| ())
+                                .map_err(SettingsServiceError::from)
+                        }),
+                    Err(error) => Err(error),
+                };
+                Err(SettingsServiceError::OutcomeUnknown {
+                    request_id: effect.operation_id(),
+                    cause: Box::new(cause),
+                    repair_error: repair.err().map(Box::new),
+                })
+            }
+        }
+    }
+
+    fn retained_pairings(&self) -> Result<Vec<Arc<PendingPairingLease>>, SettingsServiceError> {
+        Ok(self
+            .pairings
+            .lock()
+            .map_err(|_| SettingsServiceError::Poisoned)?
+            .values()
+            .cloned()
+            .collect())
+    }
+
+    fn pairing(
+        &self,
+        request_id: CommandId,
+    ) -> Result<Option<Arc<PendingPairingLease>>, SettingsServiceError> {
+        Ok(self
+            .pairings
+            .lock()
+            .map_err(|_| SettingsServiceError::Poisoned)?
+            .get(&request_id)
+            .cloned())
+    }
+
+    fn release_pairing(
+        &self,
+        pairing: &Arc<PendingPairingLease>,
+    ) -> Result<(), SettingsServiceError> {
+        if matches!(
+            pairing.lifecycle()?,
+            NativePairingLifecycle::Retained | NativePairingLifecycle::CancellationPending
+        ) {
+            return Ok(());
+        }
+        let mut pairings = self
+            .pairings
+            .lock()
+            .map_err(|_| SettingsServiceError::Poisoned)?;
+        if pairings
+            .get(&pairing.operation_id)
+            .is_some_and(|current| Arc::ptr_eq(current, pairing))
+        {
+            pairings.remove(&pairing.operation_id);
+        }
+        Ok(())
+    }
+
+    fn check_pairing_caller(
+        &self,
+        caller: &SettingsCaller,
+        identity: &OperationIdentity,
+    ) -> Result<(), SettingsServiceError> {
+        self.check_principal(caller, identity)?;
+        if !matches!(caller.source,CallerSource::NativeUi(id) if id==identity.binding.client_session_id)
+            || !matches!(
+                identity.target,
+                SettingsActionTarget::Device(SettingsDeviceRequest {
+                    action: SettingsDeviceAction::Pair,
+                    ..
+                })
+            )
+        {
+            return Err(SettingsServiceError::OutsideScope);
+        }
+        Ok(())
+    }
+
+    fn pairing_result(
+        &self,
+        caller: &SettingsCaller,
+        record: &OperationRecord,
+    ) -> Result<NativePairingCreation, SettingsServiceError> {
+        let metadata = record.pairing().ok_or(SettingsServiceError::NotFound)?;
+        let Some(pairing) = self.pairing(record.identity.binding.request_id)? else {
+            return Ok(NativePairingCreation {
+                operation: record.inspection(),
+                lifecycle: NativePairingLifecycle::Unavailable,
+                invitation: None,
+            });
+        };
+        if metadata.pairing_id != pairing.pairing_id
+            || metadata.expires_at != pairing.expires_at
+            || pairing.session_id != record.identity.binding.client_session_id
+        {
+            return Err(SettingsServiceError::CorruptJournal);
+        }
+        let fresh = match self.authority.validate(caller, false) {
+            Ok(()) => true,
+            Err(
+                SettingsServiceError::Expired
+                | SettingsServiceError::OutsideScope
+                | SettingsServiceError::Stopped,
+            ) => false,
+            Err(error) => return Err(error),
+        };
+        if !fresh
+            || Instant::now() >= pairing.deadline
+            || UnixMillis::now()?.get() >= pairing.expires_at.get()
+        {
+            let lifecycle = pairing.cancel()?;
+            self.release_pairing(&pairing)?;
+            return Ok(NativePairingCreation {
+                operation: record.inspection(),
+                lifecycle,
+                invitation: None,
+            });
+        }
+        let lifecycle = pairing.lifecycle()?;
+        Ok(NativePairingCreation {
+            operation: record.inspection(),
+            lifecycle,
+            invitation: if lifecycle == NativePairingLifecycle::Retained {
+                Some(pairing.invitation()?)
+            } else {
+                None
+            },
+        })
+    }
+
     fn failed_claim_bookkeeping(
         &self,
         claim: &ActionClaim,

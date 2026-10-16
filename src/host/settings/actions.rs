@@ -7,7 +7,9 @@ use tokio::sync::OwnedMutexGuard;
 use tokio_util::sync::CancellationToken;
 
 use crate::agent::Agent;
-use crate::protocol::{CommandId, UnixMillis};
+use crate::devices::{DeviceEndpoint, PairingCancellation};
+use crate::host::credentials::SecretTransfer;
+use crate::protocol::{CommandId, MessageId, UnixMillis};
 
 use super::SettingsRepository;
 use super::authority::{Authority, SessionAdmission};
@@ -199,6 +201,7 @@ pub(super) struct ActionClaim {
 pub(super) struct ClaimState {
     pub closed: bool,
     pub host_effect_started: bool,
+    pub pairing: Option<Arc<PendingPairingLease>>,
 }
 
 impl ActionClaim {
@@ -292,6 +295,125 @@ impl ActionClaim {
             .take();
         drop(retained_session);
         Ok(inspection)
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NativePairingLifecycle {
+    Retained,
+    CancellationPending,
+    Cancelled,
+    Expired,
+    NoLongerPending,
+    Unavailable,
+}
+
+#[derive(Debug, Serialize)]
+pub struct NativePairingCreation {
+    pub operation: SettingsOperationInspection,
+    pub lifecycle: NativePairingLifecycle,
+    pub invitation: Option<NativePairingInvitation>,
+}
+
+#[derive(Clone, Serialize)]
+pub struct NativePairingInvitation {
+    pub operation_id: CommandId,
+    pub pairing_id: MessageId,
+    pub expires_at: UnixMillis,
+    pub fingerprint: String,
+    pub invitation: SecretTransfer,
+}
+
+impl fmt::Debug for NativePairingInvitation {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("NativePairingInvitation([redacted])")
+    }
+}
+
+pub(super) struct PendingPairingLease {
+    pub operation_id: CommandId,
+    pub session_id: uuid::Uuid,
+    pub pairing_id: MessageId,
+    pub expires_at: UnixMillis,
+    pub deadline: Instant,
+    pub fingerprint: String,
+    pub endpoint: DeviceEndpoint,
+    pub state: Mutex<PendingPairingState>,
+    pub _session: SessionAdmission,
+    pub _agent: Agent,
+}
+
+pub(super) struct PendingPairingState {
+    pub lifecycle: NativePairingLifecycle,
+    pub invitation: Option<SecretTransfer>,
+}
+
+impl PendingPairingLease {
+    pub fn cancel(&self) -> Result<NativePairingLifecycle, SettingsServiceError> {
+        {
+            let mut state = self
+                .state
+                .lock()
+                .map_err(|_| SettingsServiceError::Poisoned)?;
+            match state.lifecycle {
+                NativePairingLifecycle::Retained | NativePairingLifecycle::CancellationPending => {
+                    state.lifecycle = NativePairingLifecycle::CancellationPending
+                }
+                other => return Ok(other),
+            }
+        }
+        let outcome = self
+            .endpoint
+            .cancel_pairing(self.pairing_id, UnixMillis::now()?)?;
+        let lifecycle = match outcome {
+            PairingCancellation::Cancelled => NativePairingLifecycle::Cancelled,
+            PairingCancellation::Expired => NativePairingLifecycle::Expired,
+            PairingCancellation::NotPending => NativePairingLifecycle::NoLongerPending,
+        };
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| SettingsServiceError::Poisoned)?;
+        if state.lifecycle == NativePairingLifecycle::CancellationPending {
+            state.lifecycle = lifecycle;
+        }
+        state.invitation = None;
+        Ok(state.lifecycle)
+    }
+
+    pub fn lifecycle(&self) -> Result<NativePairingLifecycle, SettingsServiceError> {
+        Ok(self
+            .state
+            .lock()
+            .map_err(|_| SettingsServiceError::Poisoned)?
+            .lifecycle)
+    }
+
+    pub fn invitation(&self) -> Result<NativePairingInvitation, SettingsServiceError> {
+        let state = self
+            .state
+            .lock()
+            .map_err(|_| SettingsServiceError::Poisoned)?;
+        if self._session.cancellation.is_cancelled()
+            || Instant::now() >= self.deadline
+            || UnixMillis::now()?.get() >= self.expires_at.get()
+        {
+            return Err(SettingsServiceError::Expired);
+        }
+        if state.lifecycle != NativePairingLifecycle::Retained {
+            return Err(SettingsServiceError::OutsideScope);
+        }
+        Ok(NativePairingInvitation {
+            operation_id: self.operation_id,
+            pairing_id: self.pairing_id,
+            expires_at: self.expires_at,
+            fingerprint: self.fingerprint.clone(),
+            invitation: state
+                .invitation
+                .clone()
+                .ok_or(SettingsServiceError::NotFound)?,
+        })
     }
 }
 
