@@ -1,5 +1,7 @@
 mod paired;
 
+pub(super) use paired::PairedReplyHistoryAnchor;
+
 use rusqlite::{Transaction, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};

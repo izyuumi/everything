@@ -1,3 +1,7 @@
+mod comparison;
+
+pub(crate) use comparison::SettingsReplyComparison;
+
 use std::fmt;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
