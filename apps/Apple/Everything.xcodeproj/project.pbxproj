@@ -4,6 +4,46 @@
     };
     "objectVersion" = "56";
     "objects" = {
+        "D2CE169C5FD56BC9C3B1E381" = {
+            "isa" = "PBXFileReference";
+            "lastKnownFileType" = "sourcecode.swift";
+            "path" = "NativeDevicesControls.swift";
+            "sourceTree" = "<group>";
+        };
+        "7E2A7CA90A2C4616966F3D9F" = {
+            "isa" = "PBXBuildFile";
+            "fileRef" = "D2CE169C5FD56BC9C3B1E381";
+        };
+        "7CAE8192CC0D5C163E79798B" = {
+            "isa" = "PBXFileReference";
+            "lastKnownFileType" = "sourcecode.swift";
+            "path" = "NativeDeviceCeremony.swift";
+            "sourceTree" = "<group>";
+        };
+        "675B6E03408CDAA4029469CB" = {
+            "isa" = "PBXBuildFile";
+            "fileRef" = "7CAE8192CC0D5C163E79798B";
+        };
+        "65D18DFF3D6AF9F3DBFCF85E" = {
+            "isa" = "PBXFileReference";
+            "lastKnownFileType" = "sourcecode.swift";
+            "path" = "NativeDeviceCeremonyView.swift";
+            "sourceTree" = "<group>";
+        };
+        "06F53160CAEBDFE3BD3E0FB7" = {
+            "isa" = "PBXBuildFile";
+            "fileRef" = "65D18DFF3D6AF9F3DBFCF85E";
+        };
+        "19B43C83CF20CE08EC92E9BB" = {
+            "isa" = "PBXFileReference";
+            "lastKnownFileType" = "sourcecode.swift";
+            "path" = "NativeSettingsAssistantWire.swift";
+            "sourceTree" = "<group>";
+        };
+        "F9AADB8D6356703E3CC8152E" = {
+            "isa" = "PBXBuildFile";
+            "fileRef" = "19B43C83CF20CE08EC92E9BB";
+        };
         "A64AF72E31D5E9D03F451318" = {
             "isa" = "PBXFileReference";
             "lastKnownFileType" = "sourcecode.swift";
@@ -324,6 +364,10 @@
                 "CA5BAA9EA21332F2292E9231",
                 "67760B4C40D0E024DE5E3660",
                 "0A337230134DAA8722D393C4",
+                "19B43C83CF20CE08EC92E9BB",
+                "D2CE169C5FD56BC9C3B1E381",
+                "7CAE8192CC0D5C163E79798B",
+                "65D18DFF3D6AF9F3DBFCF85E",
             );
             "path" = "Settings";
             "sourceTree" = "<group>";
@@ -454,6 +498,10 @@
                 "23879FBD469F2CB181AA5704",
                 "7050C019B8826A6B562E6C8B",
                 "CCCB026149B99186971190C7",
+                "F9AADB8D6356703E3CC8152E",
+                "7E2A7CA90A2C4616966F3D9F",
+                "675B6E03408CDAA4029469CB",
+                "06F53160CAEBDFE3BD3E0FB7",
             );
             "runOnlyForDeploymentPostprocessing" = "0";
         };
