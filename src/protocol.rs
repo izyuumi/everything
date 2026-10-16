@@ -391,6 +391,7 @@ pub enum ExecutionMode {
     ReadOnly,
     TrustedWorkspace,
     FullHost,
+    SettingsRestricted,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

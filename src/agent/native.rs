@@ -7,6 +7,7 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use tokio::time::Instant;
 
+use super::settings::NativeAttemptFloor;
 use super::*;
 use crate::context::{
     BuiltContext, CompactionRecord, ContextBudget, ContextBuilder, ContextInput,
@@ -389,6 +390,7 @@ impl Agent {
         if cancellation.is_cancelled() {
             return Err(AgentError::Cancelled);
         }
+        self.check_settings_setup(conversation_id, command_id, Some(&setup), None)?;
         let admission = self.admit(conversation_id)?;
         let conversation = self.conversation(conversation_id).await?;
         if cancellation.is_cancelled() {
@@ -511,6 +513,7 @@ impl Agent {
         if cancellation.is_cancelled() {
             return Err(AgentError::Cancelled);
         }
+        self.check_settings_setup(conversation_id, command_id, setup.as_ref(), Some(&provider))?;
         let admission = self.admit(conversation_id)?;
         let mut conversation = self.conversation(conversation_id).await?;
         let pending = conversation
@@ -624,7 +627,19 @@ impl Agent {
                     turn.reserved_output_tokens = Some(reserved_output_tokens);
                     turn.charged_tokens = turn.charged_tokens.checked_add(reservation(&built)).ok_or(AgentError::ResourceLimit("token accounting"))?;
                     turn.status = LoopStatus::ProviderInFlight { attempt_id };
-                    if !agent.save_native(&mut conversation, checkpoint, Vec::new(), Arc::clone(&admission)).await? { continue; }
+                    if agent.settings_profile.is_some() {
+                        let floor = NativeAttemptFloor { attempt_id, model_attempts: turn.attempts, tool_calls: turn.tool_calls,
+                            charged_tokens: turn.charged_tokens, reserved_output_tokens, reported_input_tokens: turn.reported_input_tokens,
+                            reported_output_tokens: turn.reported_output_tokens, reservation: reservation(&built), deadline_ms: turn.deadline_ms,
+                            observed_wall_ms: turn.last_observed_wall_ms };
+                        settings_preflight(&checkpoint)?;
+                        let owner = agent.clone();
+                        blocking(move || { let owner = owner; owner.settings_profile.as_ref().ok_or(AgentError::ConfigurationMismatch)?.before_attempt(floor) }).await?;
+                    }
+                    if !agent.save_native(&mut conversation, checkpoint, Vec::new(), Arc::clone(&admission)).await? {
+                        if agent.settings_profile.is_some() { Err(AgentError::Cancelled)?; }
+                        continue;
+                    }
                     yield TurnEvent::ContextBuilt { usage: built.usage.clone(), citations: built.citations.clone(), omitted_memory: built.omitted_memory.clone(), continuation: built.continuation.clone() };
                     yield TurnEvent::ModelAttemptStarted { attempt_id };
                     Prepared::Context { built: Box::new(built), request }
@@ -665,7 +680,11 @@ impl Agent {
                             displayed = displayed.checked_add(delta.len()).filter(|size| *size <= MAX_CHAT_TEXT_BYTES).ok_or(AgentError::ResourceLimit("assistant text"))?;
                             yield TurnEvent::ProvisionalText { index, delta };
                         }
-                        ModelEvent::Completed { response } => break response,
+                        ModelEvent::Completed { response } => {
+                            agent.observe_settings_provider().await?;
+                            break response;
+                        }
+                        ModelEvent::Usage { .. } => { agent.observe_settings_provider().await?; }
                         ModelEvent::ToolCallStarted { .. } | ModelEvent::ToolCallArgumentsDelta { .. } if setup.is_none() => Err(AgentError::ToolsUnsupported)?,
                         ModelEvent::ContentBlockCompleted { block, .. } if setup.is_none() && !matches!(block, ContentBlock::Text(_)) => Err(AgentError::ToolsUnsupported)?,
                         _ => {}
@@ -785,7 +804,11 @@ fn prepare_definition(
         .filter(|native| native.turn.is_some())
     {
         for saved in &native.context.tools {
-            if !definition_matches(&setup.registry, saved)? || !authority.permits_tool(&saved.name)
+            if !definition_matches(
+                &setup.registry,
+                saved,
+                setup.broker.settings_profile().is_some(),
+            )? || !authority.permits_tool(&saved.name)
             {
                 return Err(AgentError::ConfigurationMismatch);
             }
@@ -795,7 +818,11 @@ fn prepare_definition(
     for tool in &setup.selected_tools {
         tool.validate()?;
         if !names.insert(tool.name.clone())
-            || !definition_matches(&setup.registry, tool)?
+            || !definition_matches(
+                &setup.registry,
+                tool,
+                setup.broker.settings_profile().is_some(),
+            )?
             || !authority.permits_tool(&tool.name)
         {
             return Err(AgentError::ConfigurationMismatch);
@@ -812,13 +839,21 @@ fn prepare_definition(
             .ok_or(AgentError::InvalidData("workspace is not UTF-8"))?
             .to_owned(),
         mode: authority.mode(),
-        allowed_tools: setup
-            .registry
-            .discover()
-            .into_iter()
-            .filter(|descriptor| authority.permits_tool(&descriptor.name))
-            .map(|descriptor| descriptor.name)
-            .collect(),
+        allowed_tools: if setup.broker.settings_profile().is_some() {
+            setup
+                .selected_tools
+                .iter()
+                .map(|tool| tool.name.clone())
+                .collect()
+        } else {
+            setup
+                .registry
+                .discover()
+                .into_iter()
+                .filter(|descriptor| authority.permits_tool(&descriptor.name))
+                .map(|descriptor| descriptor.name)
+                .collect()
+        },
         task: setup.task.clone(),
         budget: setup.budget.clone(),
         memory,
@@ -933,10 +968,14 @@ fn turn_mut(checkpoint: &mut Checkpoint) -> Result<&mut NativeTurn, AgentError> 
 fn registered_definition(
     registry: &ToolRegistry,
     name: &str,
+    restricted: bool,
 ) -> Result<model::ToolDefinition, AgentError> {
-    let descriptor = registry
-        .descriptor(name)
-        .map_err(|_| AgentError::InvalidData("selected tool is not registered"))?;
+    let descriptor = if restricted {
+        registry.settings_descriptor(name)
+    } else {
+        registry.descriptor(name)
+    }
+    .map_err(|_| AgentError::InvalidData("selected tool is not registered"))?;
     let definition = model::ToolDefinition {
         name: descriptor.name.clone(),
         description: descriptor.description.clone(),
@@ -965,7 +1004,11 @@ fn build_context(
         })
         .collect::<Result<Vec<_>, AgentError>>()?;
     for tool in &state.context.tools {
-        if !definition_matches(&setup.registry, tool)? {
+        if !definition_matches(
+            &setup.registry,
+            tool,
+            setup.broker.settings_profile().is_some(),
+        )? {
             return Err(AgentError::ConfigurationMismatch);
         }
     }
@@ -1290,12 +1333,66 @@ impl Agent {
                 }
                 rows.push(row);
             }
+            if let (Some(profile), Some(turn)) = (
+                &retained_agent.settings_profile,
+                checkpoint
+                    .native
+                    .as_ref()
+                    .and_then(|native| native.turn.as_ref()),
+            ) {
+                profile.native_counters(
+                    turn.command_id,
+                    turn.tool_calls,
+                    turn.charged_tokens,
+                    output_reservation(turn)?,
+                    turn.reported_input_tokens,
+                    turn.reported_output_tokens,
+                )?;
+            }
             let update = ConversationStateUpdate {
                 expected_revision,
                 payload: checkpoint_payload(&checkpoint)?,
             };
-            let journal_command = CommandId::new().to_string();
-            let revision = if rows.is_empty() {
+            let append = AppendRequest {
+                conversation_id: current.info.id.to_string(),
+                command_id: CommandId::new().to_string(),
+                expected_sequence: current.info.last_sequence,
+                events: rows,
+            };
+            if let Some(profile) = &retained_agent.settings_profile {
+                let checkpoint_bytes = encoded_len(&checkpoint, settings::MAX_CHECKPOINT)?;
+                let future = checkpoint
+                    .native
+                    .as_ref()
+                    .and_then(|native| native.turn.as_ref())
+                    .and_then(|turn| turn.round.as_ref())
+                    .map_or(0, |round| {
+                        round
+                            .calls
+                            .iter()
+                            .filter(|call| {
+                                matches!(call.phase, CallPhase::Pending | CallPhase::Dispatched)
+                            })
+                            .count()
+                            * 66
+                            * 1024
+                    });
+                if checkpoint_bytes
+                    .checked_add(future)
+                    .is_none_or(|bytes| bytes > settings::MAX_CHECKPOINT)
+                {
+                    return Err(AgentError::ResourceLimit("restricted future checkpoint"));
+                }
+                for row in &append.events {
+                    encoded_len(&row.payload, settings::MAX_EVENT)?;
+                }
+                let append_bytes = encoded_len(&append, settings::MAX_APPEND)?;
+                profile.journal().settings_memory_capacity(
+                    checkpoint_bytes + future + 2 * append_bytes + 4 * settings::MAX_BROKER_RECORD,
+                )?;
+            }
+            let journal_command = append.command_id.clone();
+            let revision = if append.events.is_empty() {
                 retained_agent
                     .store
                     .checkpoint_conversation_state(
@@ -1306,15 +1403,7 @@ impl Agent {
                     )?
                     .revision
             } else {
-                retained_agent.store.append_with_state(
-                    &AppendRequest {
-                        conversation_id: current.info.id.to_string(),
-                        command_id: journal_command,
-                        expected_sequence: current.info.last_sequence,
-                        events: rows,
-                    },
-                    &update,
-                )?;
+                retained_agent.store.append_with_state(&append, &update)?;
                 expected_revision
                     .checked_add(1)
                     .ok_or(AgentError::ResourceLimit("checkpoint revision"))?
@@ -1348,10 +1437,12 @@ impl Agent {
         let registry = Arc::clone(&setup.registry);
         let owner = self.clone();
         let mapping_admission = Arc::clone(&admission);
+        let restricted = self.settings_profile.clone();
         let (captured, checkpoint, payloads, events) = blocking(move || {
             let _owner = owner; let _mapping_admission = mapping_admission;
             let captured = conversation;
             response.validate()?;
+            if let Some(profile) = &restricted { profile.validate_response(&response)?; }
             if response.continuation.as_ref().is_some_and(|value| value.provider() != captured.config.provider.id()) {
                 return Err(AgentError::ConfigurationMismatch);
             }
@@ -1389,7 +1480,7 @@ impl Agent {
                         if !provider_ids.insert(call.id.clone()) { return Err(AgentError::InvalidData("provider reused a tool call identifier")); }
                         let converted = ToolCall { id: ToolCallId::new(), provider_call_id: Some(call.id), name: call.name, arguments: call.arguments };
                         let validation = if selected.contains(converted.name.as_str()) {
-                            registry.validate(&converted.name, &converted.arguments).map_err(|_| "invalid_arguments")
+                            if restricted.is_some() { registry.validate_settings(&converted.name, &converted.arguments) } else { registry.validate(&converted.name, &converted.arguments) }.map_err(|_| "invalid_arguments")
                         } else { Err("tool_not_advertised") };
                         let phase = match validation {
                             Ok(()) => CallPhase::Pending,
@@ -1424,6 +1515,7 @@ impl Agent {
                     LoopStatus::Paused { reason: PauseReason::TokenLimit }
                 } else { LoopStatus::ExecutingTools };
             }
+            if restricted.is_some() { encoded_len(&summary, 4096)?; }
             checkpoint.last_turn = Some(summary);
             checkpoint.continuation = response.continuation;
             Ok((captured, checkpoint, payloads, events))
@@ -2001,7 +2093,7 @@ fn expand_discovery(
                 .ok_or(AgentError::InvalidData("discovered tool has no definition"))?,
         )
         .map_err(|_| AgentError::InvalidData("discovered tool definition is invalid"))?;
-        if !definition_matches(registry, &definition)?
+        if !definition_matches(registry, &definition, false)?
             || !turn.definition.allowed_tools.contains(&definition.name)
         {
             return Err(AgentError::ConfigurationMismatch);
@@ -2029,8 +2121,9 @@ fn expand_discovery(
 fn definition_matches(
     registry: &ToolRegistry,
     definition: &model::ToolDefinition,
+    restricted: bool,
 ) -> Result<bool, AgentError> {
-    let actual = registered_definition(registry, &definition.name)?;
+    let actual = registered_definition(registry, &definition.name, restricted)?;
     Ok(actual.name == definition.name
         && actual.input_schema == definition.input_schema
         && (actual.description == definition.description
@@ -2039,4 +2132,89 @@ fn definition_matches(
                     "Execution requires explicit host approval for the exact operation. {}",
                     actual.description
                 )))
+}
+
+impl Agent {
+    fn check_settings_setup(
+        &self,
+        conversation_id: ConversationId,
+        command_id: CommandId,
+        setup: Option<&ToolRunSetup>,
+        provider: Option<&Arc<dyn ModelProvider>>,
+    ) -> Result<(), AgentError> {
+        match (
+            &self.settings_profile,
+            setup.and_then(|setup| setup.broker.settings_profile()),
+        ) {
+            (None, None) => Ok(()),
+            (Some(profile), Some(scoped)) if Arc::ptr_eq(profile, scoped) => {
+                profile.check_turn(conversation_id, command_id)?;
+                if let Some(provider) = provider {
+                    profile.check_provider(provider)?;
+                }
+                let setup = setup.ok_or(AgentError::NativeSetupRequired)?;
+                if !setup.memory.is_empty()
+                    || setup.selected_tools != profile.definitions()
+                    || setup.provider_resume != ProviderResume::OnlyUnstarted
+                    || setup.limits.max_model_attempts > 4
+                    || setup.limits.max_tool_calls > 8
+                    || setup.limits.max_calls_per_round > 4
+                    || setup.limits.max_parallel_calls != 1
+                    || setup.limits.max_selected_tools != 7
+                    || setup.budget.max_request_bytes > 1024 * 1024
+                    || setup.budget.max_compaction_bytes > 8 * 1024
+                    || setup.limits.max_duration_ms > 120_000
+                    || !profile.journal().shares_connection(&self.store)
+                {
+                    return Err(AgentError::ConfigurationMismatch);
+                }
+                Ok(())
+            }
+            _ => Err(AgentError::ConfigurationMismatch),
+        }
+    }
+
+    pub(crate) async fn observe_settings_provider(&self) -> Result<(), AgentError> {
+        if self.settings_profile.is_none() {
+            return Ok(());
+        }
+        let owner = self.clone();
+        blocking(move || {
+            let owner = owner;
+            let profile = owner
+                .settings_profile
+                .as_ref()
+                .ok_or(AgentError::ConfigurationMismatch)?;
+            let _observation = profile.observe_provider()?;
+            Ok(())
+        })
+        .await
+    }
+}
+
+fn settings_preflight(checkpoint: &Checkpoint) -> Result<(), AgentError> {
+    let mut skeleton = checkpoint.clone();
+    skeleton.continuation = None;
+    skeleton.last_turn = None;
+    let native = skeleton
+        .native
+        .as_mut()
+        .ok_or(AgentError::NativeSetupRequired)?;
+    native.context.binding = None;
+    let turn = native.turn.as_mut().ok_or(AgentError::NoPendingTurn)?;
+    turn.round = None;
+    let fixed = encoded_len(&skeleton, settings::MAX_CHECKPOINT)?;
+    let continuation = settings::MAX_CONTINUATION + 33;
+    let binding = continuation + 323;
+    let round = 74 + 4 * (18 + 625 + settings::MAX_ARGUMENTS + 124 + 65_538) + 3;
+    let complete_future_delta = continuation + binding + round - 12 + 4096 + 4096;
+    if fixed
+        .checked_add(complete_future_delta)
+        .is_none_or(|bytes| bytes > settings::MAX_CHECKPOINT)
+    {
+        return Err(AgentError::ResourceLimit(
+            "restricted complete future checkpoint",
+        ));
+    }
+    Ok(())
 }

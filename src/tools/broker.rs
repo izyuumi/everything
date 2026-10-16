@@ -1,8 +1,13 @@
+use std::collections::BTreeMap;
 use std::io::{self, Write};
 use std::panic::AssertUnwindSafe;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+
+use crate::agent::settings::{MAX_BROKER_RECORD, SettingsOutcome, SettingsProfile};
+use crate::protocol::{CommandId, TaskId};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use uuid::Uuid;
 
 use futures_util::FutureExt;
 use serde::{Deserialize, Serialize};
@@ -198,12 +203,31 @@ pub struct CleanupRequirement {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct RecoveryReport {
+    #[serde(default)]
+    pub settings_requirements: Vec<SettingsRecoveryRequirement>,
+    #[serde(default)]
+    pub settings_unresolved_count: usize,
     pub recovered_operations: usize,
     pub running_count: usize,
     pub unresolved_count: usize,
     pub requirements: Vec<CleanupRequirement>,
     pub restart_required: bool,
     pub quarantined: bool,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SettingsRecoveryRequirement {
+    pub session_id: Uuid,
+    pub command_id: CommandId,
+    pub task_id: TaskId,
+    pub model_attempts: u32,
+    pub tool_calls: u32,
+    pub charged_tokens: u64,
+    pub reserved_output_tokens: u64,
+    pub provider_complete: bool,
+    pub usage_complete: bool,
+    pub mutation_ids: Vec<CommandId>,
+    pub original_fence_sha256: String,
 }
 
 #[derive(Clone)]
@@ -215,6 +239,7 @@ pub struct ToolBroker {
 pub struct TaskToolBroker {
     broker: ToolBroker,
     authority: ExecutionAuthority,
+    settings_profile: Option<Arc<SettingsProfile>>,
 }
 
 struct BrokerInner {
@@ -228,6 +253,7 @@ struct BrokerInner {
     quarantined: AtomicBool,
     restart_required: AtomicBool,
     recovered_operations: usize,
+    settings_journals: Mutex<BTreeMap<Uuid, Arc<SettingsProfile>>>,
     _retained_owner: Option<RetainedToolOwner>,
 }
 
@@ -314,7 +340,9 @@ impl ToolBroker {
         let recovery_store = store.clone();
         let (recovered_operations, recovery_report) = blocking(owner.clone(), move || {
             let recovered = recovery_store.mark_running_tool_calls_unknown(&recovery, now()?)?;
-            Ok((recovered, inspect_cleanup(&recovery_store, recovered)?))
+            let mut report = inspect_cleanup(&recovery_store, recovered)?;
+            report.quarantined |= recovery_store.has_unsettled_settings_turns()?;
+            Ok((recovered, report))
         })
         .await?;
         Ok(Self {
@@ -329,6 +357,7 @@ impl ToolBroker {
                 quarantined: AtomicBool::new(recovery_report.quarantined),
                 restart_required: AtomicBool::new(false),
                 recovered_operations,
+                settings_journals: Mutex::new(BTreeMap::new()),
                 _retained_owner: owner,
             }),
         })
@@ -338,7 +367,67 @@ impl ToolBroker {
         TaskToolBroker {
             broker: self.clone(),
             authority,
+            settings_profile: None,
         }
+    }
+
+    pub(crate) fn scoped_settings(
+        &self,
+        authority: ExecutionAuthority,
+        profile: Arc<SettingsProfile>,
+    ) -> Result<TaskToolBroker, BrokerError> {
+        profile
+            .check_tool(
+                authority.conversation_id(),
+                authority.task_id(),
+                profile
+                    .definitions()
+                    .first()
+                    .ok_or_else(|| {
+                        BrokerError::InvalidInvocation("missing restricted definitions".into())
+                    })?
+                    .name
+                    .as_str(),
+            )
+            .map_err(|_| restricted_error())?;
+        if !profile.shares_main(&self.inner.store) {
+            return Err(restricted_error());
+        }
+        let mut journals = self
+            .inner
+            .settings_journals
+            .lock()
+            .map_err(|_| restricted_error())?;
+        if !journals.contains_key(&profile.session_id()) && journals.len() >= 2 {
+            return Err(BrokerError::Busy);
+        }
+        if let Some(existing) = journals.get(&profile.session_id()) {
+            if !Arc::ptr_eq(existing, &profile) {
+                return Err(restricted_error());
+            }
+        }
+        journals.insert(profile.session_id(), Arc::clone(&profile));
+        Ok(TaskToolBroker {
+            broker: self.clone(),
+            authority,
+            settings_profile: Some(profile),
+        })
+    }
+
+    pub(crate) fn quarantine_settings(&self) {
+        self.inner.quarantined.store(true, Ordering::Release);
+    }
+
+    pub(crate) async fn settings_report(
+        &self,
+        profile: Arc<SettingsProfile>,
+    ) -> Result<RecoveryReport, BrokerError> {
+        let inner = Arc::clone(&self.inner);
+        blocking(None, move || {
+            let _inner = inner;
+            inspect_cleanup(&profile.journal(), 0)
+        })
+        .await
     }
 
     pub fn recovered_operations(&self) -> usize {
@@ -351,10 +440,7 @@ impl ToolBroker {
 
     pub async fn recovery_report(&self) -> Result<RecoveryReport, BrokerError> {
         let inner = Arc::clone(&self.inner);
-        let mut report = blocking(None, move || {
-            inspect_cleanup(&inner.store, inner.recovered_operations)
-        })
-        .await?;
+        let mut report = blocking(None, move || inspect_all(&inner)).await?;
         report.restart_required = self.inner.restart_required.load(Ordering::Acquire);
         report.quarantined |= self.is_quarantined() || report.restart_required;
         Ok(report)
@@ -392,14 +478,17 @@ impl ToolBroker {
                 inner: Arc::clone(&inner),
                 armed: true,
             };
-            let recovered = inner
-                .store
-                .mark_running_tool_calls_unknown(&recovery, now()?)?;
+            let mut recovered = 0usize;
+            for journal in inner.journals()? {
+                recovered = recovered
+                    .checked_add(journal.mark_running_tool_calls_unknown(&recovery, now()?)?)
+                    .ok_or_else(restricted_error)?;
+            }
             if recovered > 0 {
                 inner.restart_required.store(true, Ordering::Release);
                 inner.quarantined.store(true, Ordering::Release);
             }
-            let mut report = inspect_cleanup(&inner.store, inner.recovered_operations)?;
+            let mut report = inspect_all(&inner)?;
             if report.running_count != 0 {
                 return Err(BrokerError::RecoveryBusy);
             }
@@ -449,7 +538,8 @@ impl ToolBroker {
         let note = note.to_owned();
         blocking(None, move || {
             let _gate = gate;
-            let status = inner.store.tool_cleanup_status(&operation_id)?;
+            let store = inner.journal_for_operation(&operation_id)?;
+            let status = store.tool_cleanup_status(&operation_id)?;
             if status.original_result_digest != expected_result_digest {
                 return Err(BrokerError::CleanupAttestationConflict { operation_id });
             }
@@ -464,7 +554,7 @@ impl ToolBroker {
                     existing
                 }
                 None => {
-                    let call = inner.store.tool_call(&operation_id)?.ok_or_else(|| {
+                    let call = store.tool_call(&operation_id)?.ok_or_else(|| {
                         BrokerError::CorruptJournal {
                             operation_id: operation_id.clone(),
                         }
@@ -478,8 +568,8 @@ impl ToolBroker {
                     }
                 }
             };
-            inner.store.attest_tool_cleanup(&attestation)?;
-            let mut report = inspect_cleanup(&inner.store, inner.recovered_operations)?;
+            store.attest_tool_cleanup(&attestation)?;
+            let mut report = inspect_all(&inner)?;
             report.restart_required = inner.restart_required.load(Ordering::Acquire);
             report.quarantined |= report.restart_required;
             inner
@@ -496,7 +586,7 @@ impl ToolBroker {
         invocation: ToolInvocation,
         cancellation: CancellationToken,
     ) -> Result<BrokerOutcome, BrokerError> {
-        self.execute_retained(authority, invocation, cancellation, None)
+        self.execute_retained(authority, invocation, cancellation, None, None)
             .await
     }
 
@@ -506,6 +596,7 @@ impl ToolBroker {
         invocation: ToolInvocation,
         cancellation: CancellationToken,
         owner: Option<RetainedToolOwner>,
+        profile: Option<Arc<SettingsProfile>>,
     ) -> Result<BrokerOutcome, BrokerError> {
         if self.is_quarantined() {
             return Err(BrokerError::Quarantined);
@@ -521,7 +612,9 @@ impl ToolBroker {
         let _cancel_on_drop = cancellation.clone().drop_guard();
         let supervised = tokio::spawn(async move {
             let _admission = admission;
-            inner.run(authority, invocation, cancellation, owner).await
+            inner
+                .run(authority, invocation, cancellation, owner, profile)
+                .await
         });
         supervised.await.map_err(|error| {
             self.inner.quarantined.store(true, Ordering::Release);
@@ -537,6 +630,10 @@ impl ToolBroker {
 }
 
 impl TaskToolBroker {
+    pub(crate) fn settings_profile(&self) -> Option<&Arc<SettingsProfile>> {
+        self.settings_profile.as_ref()
+    }
+
     pub fn authority(&self) -> &ExecutionAuthority {
         &self.authority
     }
@@ -547,7 +644,13 @@ impl TaskToolBroker {
         cancellation: CancellationToken,
     ) -> Result<BrokerOutcome, BrokerError> {
         self.broker
-            .execute(&self.authority, invocation, cancellation)
+            .execute_retained(
+                &self.authority,
+                invocation,
+                cancellation,
+                None,
+                self.settings_profile.clone(),
+            )
             .await
     }
 
@@ -558,7 +661,13 @@ impl TaskToolBroker {
         owner: RetainedToolOwner,
     ) -> Result<BrokerOutcome, BrokerError> {
         self.broker
-            .execute_retained(&self.authority, invocation, cancellation, Some(owner))
+            .execute_retained(
+                &self.authority,
+                invocation,
+                cancellation,
+                Some(owner),
+                self.settings_profile.clone(),
+            )
             .await
     }
 }
@@ -570,23 +679,61 @@ impl BrokerInner {
         invocation: ToolInvocation,
         cancellation: CancellationToken,
         owner: Option<RetainedToolOwner>,
+        profile: Option<Arc<SettingsProfile>>,
     ) -> Result<BrokerOutcome, BrokerError> {
+        let journal = profile
+            .as_ref()
+            .map_or_else(|| self.store.clone(), |profile| profile.journal());
+        let prepare_journal = journal.clone();
+        let prepare_profile = profile.clone();
         let deadline = Instant::now() + self.limits.queue_timeout;
         let inner = Arc::clone(&self);
         let prepare_authority = authority.clone();
         let prepare_invocation = invocation.clone();
-        let (call, decision, concurrency) = blocking(owner.clone(), move || {
-            inner
-                .registry
-                .validate(&prepare_invocation.tool_name, &prepare_invocation.arguments)?;
-            let descriptor = inner.registry.descriptor(&prepare_invocation.tool_name)?;
-            let decision = inner.authorizer.authorize(
-                &prepare_authority,
-                &prepare_invocation.operation_id,
-                &prepare_invocation.tool_name,
-                &prepare_invocation.arguments,
-                now()?,
-            )?;
+        let (call, decision, concurrency, capability) = blocking(owner.clone(), move || {
+            let capability = if let Some(profile) = &prepare_profile {
+                inner.registry.validate_settings(
+                    &prepare_invocation.tool_name,
+                    &prepare_invocation.arguments,
+                )?;
+                if serde_json::to_vec(&prepare_invocation.arguments)?.len()
+                    > crate::agent::settings::MAX_ARGUMENTS
+                {
+                    return Err(restricted_error());
+                }
+                Some(
+                    profile
+                        .tool_capability(
+                            &prepare_invocation.operation_id,
+                            prepare_authority.task_id(),
+                            &prepare_invocation.tool_name,
+                        )
+                        .map_err(|_| restricted_error())?,
+                )
+            } else {
+                inner
+                    .registry
+                    .validate(&prepare_invocation.tool_name, &prepare_invocation.arguments)?;
+                None
+            };
+            let descriptor = if prepare_profile.is_some() {
+                inner
+                    .registry
+                    .settings_descriptor(&prepare_invocation.tool_name)?
+            } else {
+                inner.registry.descriptor(&prepare_invocation.tool_name)?
+            };
+            let decision = if prepare_profile.is_some() {
+                AuthorizationDecision::Allow { grant_id: None }
+            } else {
+                inner.authorizer.authorize(
+                    &prepare_authority,
+                    &prepare_invocation.operation_id,
+                    &prepare_invocation.tool_name,
+                    &prepare_invocation.arguments,
+                    now()?,
+                )?
+            };
             let workspace_root = prepare_authority
                 .workspace_root()
                 .to_str()
@@ -602,6 +749,10 @@ impl BrokerInner {
                 execution_timeout: inner.limits.execution_timeout,
                 cancellation_grace: inner.limits.cancellation_grace,
             })?;
+            if prepare_profile.is_some() && serde_json::to_vec(&request)?.len() > MAX_BROKER_RECORD
+            {
+                return Err(restricted_error());
+            }
             let timestamp = now()?;
             let row = ToolCallRow {
                 id: prepare_invocation.operation_id,
@@ -615,9 +766,10 @@ impl BrokerInner {
                 updated_at: timestamp,
             };
             Ok((
-                inner.store.reserve_tool_call(&row)?.call,
+                prepare_journal.reserve_tool_call(&row)?.call,
                 decision,
                 descriptor.concurrency,
+                capability,
             ))
         })
         .await?;
@@ -632,19 +784,20 @@ impl BrokerInner {
                         reason: Interruption::CancellationRequested,
                     },
                     owner.clone(),
+                    &journal,
                 )
                 .await;
         }
         if let Some(outcome) = self
-            .enforce_decision(&call, decision, owner.clone())
+            .enforce_decision(&call, decision, owner.clone(), &journal)
             .await?
         {
             return Ok(outcome);
         }
         let admission = tokio::select! {
             biased;
-            _ = cancellation.cancelled() => return self.finish_pending(&call, OperationResult::Cancelled { reason: Interruption::CancellationRequested }, owner.clone()).await,
-            _ = tokio::time::sleep_until(deadline) => return self.finish_pending(&call, OperationResult::Cancelled { reason: Interruption::QueueDeadline }, owner.clone()).await,
+            _ = cancellation.cancelled() => return self.finish_pending(&call, OperationResult::Cancelled { reason: Interruption::CancellationRequested }, owner.clone(), &journal).await,
+            _ = tokio::time::sleep_until(deadline) => return self.finish_pending(&call, OperationResult::Cancelled { reason: Interruption::QueueDeadline }, owner.clone(), &journal).await,
             permit = Arc::clone(&self.execution).acquire_owned() => permit.map_err(|error| BrokerError::Worker(error.to_string()))?,
         };
         let gate = async {
@@ -659,33 +812,49 @@ impl BrokerInner {
         };
         let _gate = tokio::select! {
             biased;
-            _ = cancellation.cancelled() => return self.finish_pending(&call, OperationResult::Cancelled { reason: Interruption::CancellationRequested }, owner.clone()).await,
-            _ = tokio::time::sleep_until(deadline) => return self.finish_pending(&call, OperationResult::Cancelled { reason: Interruption::QueueDeadline }, owner.clone()).await,
+            _ = cancellation.cancelled() => return self.finish_pending(&call, OperationResult::Cancelled { reason: Interruption::CancellationRequested }, owner.clone(), &journal).await,
+            _ = tokio::time::sleep_until(deadline) => return self.finish_pending(&call, OperationResult::Cancelled { reason: Interruption::QueueDeadline }, owner.clone(), &journal).await,
             gate = gate => gate,
         };
         let _admission = admission;
         if self.quarantined.load(Ordering::Acquire) {
             return Err(BrokerError::Quarantined);
         }
-        let context = ToolExecutionContext::new(
+        let mut context = ToolExecutionContext::new(
             &invocation.operation_id,
             authority.task_id(),
             authority.workspace_root().to_path_buf(),
             cancellation.clone(),
         )?
         .with_retained_owner(owner.clone());
+        if let Some(capability) = capability {
+            context = context.with_settings_capability(capability);
+        }
         let arguments = invocation_arguments(&call)?;
         let inner = Arc::clone(&self);
         let claim_call = call.clone();
         let claim_cancellation = cancellation.clone();
+        let claim_journal = journal.clone();
+        let claim_profile = profile.clone();
         let claim = blocking(owner.clone(), move || {
-            let decision = inner.authorizer.authorize(
-                &authority,
-                &invocation.operation_id,
-                &invocation.tool_name,
-                &invocation.arguments,
-                now()?,
-            )?;
+            let decision = if let Some(profile) = &claim_profile {
+                profile
+                    .check_tool(
+                        authority.conversation_id(),
+                        authority.task_id(),
+                        &invocation.tool_name,
+                    )
+                    .map_err(|_| restricted_error())?;
+                AuthorizationDecision::Allow { grant_id: None }
+            } else {
+                inner.authorizer.authorize(
+                    &authority,
+                    &invocation.operation_id,
+                    &invocation.tool_name,
+                    &invocation.arguments,
+                    now()?,
+                )?
+            };
             if !matches!(decision, AuthorizationDecision::Allow { .. }) {
                 return Ok(ExecutionClaim::NotAllowed(decision));
             }
@@ -700,7 +869,7 @@ impl BrokerInner {
             if inner.quarantined.load(Ordering::Acquire) {
                 return Err(BrokerError::Quarantined);
             }
-            match inner.store.transition_tool_call(
+            match claim_journal.transition_tool_call(
                 &claim_call.id,
                 ToolCallState::Pending,
                 ToolCallState::Running,
@@ -715,16 +884,23 @@ impl BrokerInner {
         .await?;
         match claim {
             ExecutionClaim::Acquired => {}
-            ExecutionClaim::Competing => return self.refresh(&call.id, owner.clone()).await,
+            ExecutionClaim::Competing => {
+                return self.refresh(&call.id, owner.clone(), &journal).await;
+            }
             ExecutionClaim::NotAllowed(decision) => {
                 return self
-                    .enforce_decision(&call, decision, owner.clone())
+                    .enforce_decision(&call, decision, owner.clone(), &journal)
                     .await?
                     .ok_or_else(|| BrokerError::Worker("invalid execution claim".into()));
             }
             ExecutionClaim::Cancelled(reason) => {
                 return self
-                    .finish_pending(&call, OperationResult::Cancelled { reason }, owner.clone())
+                    .finish_pending(
+                        &call,
+                        OperationResult::Cancelled { reason },
+                        owner.clone(),
+                        &journal,
+                    )
                     .await;
             }
         }
@@ -808,6 +984,16 @@ impl BrokerInner {
         };
         drop(execution);
         let mut record = record(result, interruption);
+        if profile.is_some()
+            && serde_json::to_vec(&record).map_or(true, |bytes| bytes.len() > MAX_BROKER_RECORD)
+        {
+            record = record_with_unknown(
+                UnknownReason::ResultNotPersistable,
+                true,
+                None,
+                interruption,
+            );
+        }
         let encoded = match encode_record(&record) {
             Ok(encoded) => encoded,
             Err(error) => {
@@ -825,7 +1011,7 @@ impl BrokerInner {
                 })?
             }
         };
-        let store = self.store.clone();
+        let store = journal.clone();
         let operation_id = call.id.clone();
         let next = record.result.state();
         let timestamp = now()
@@ -866,7 +1052,7 @@ impl BrokerInner {
                 Some(diagnostic(&error)),
                 interruption,
             );
-            let store = self.store.clone();
+            let store = journal.clone();
             let operation_id = call.id.clone();
             let encoded = encode_record(&unknown).map_err(|error| BrokerError::OutcomeUnknown {
                 operation_id: call.id.clone(),
@@ -915,6 +1101,17 @@ impl BrokerInner {
         ) {
             self.restart_required.store(true, Ordering::Release);
         }
+        if let Some(profile) = &profile {
+            let id: CommandId = call.id.parse().map_err(|_| restricted_error())?;
+            let outcome = if matches!(record.result, OperationResult::Unknown { .. }) {
+                SettingsOutcome::Unknown
+            } else {
+                SettingsOutcome::Completed
+            };
+            profile
+                .record_outcome(id, outcome)
+                .map_err(|_| restricted_error())?;
+        }
         lease.armed = false;
         completed(call.id, record, false)
     }
@@ -924,6 +1121,7 @@ impl BrokerInner {
         call: &ToolCallRow,
         decision: AuthorizationDecision,
         owner: Option<RetainedToolOwner>,
+        journal: &Store,
     ) -> Result<Option<BrokerOutcome>, BrokerError> {
         match decision {
             AuthorizationDecision::Allow { .. } => Ok(None),
@@ -932,7 +1130,7 @@ impl BrokerInner {
                 approval,
             })),
             AuthorizationDecision::Deny { reason } => Ok(Some(
-                self.finish_pending(call, OperationResult::Denied { reason }, owner)
+                self.finish_pending(call, OperationResult::Denied { reason }, owner, journal)
                     .await?,
             )),
         }
@@ -943,10 +1141,11 @@ impl BrokerInner {
         call: &ToolCallRow,
         result: OperationResult,
         owner: Option<RetainedToolOwner>,
+        journal: &Store,
     ) -> Result<BrokerOutcome, BrokerError> {
         let record = record(result, None);
         let encoded = encode_record(&record)?;
-        let store = self.store.clone();
+        let store = journal.clone();
         let operation_id = call.id.clone();
         let next = record.result.state();
         let timestamp = now()?.max(call.updated_at);
@@ -967,7 +1166,7 @@ impl BrokerInner {
         if changed {
             completed(call.id.clone(), record, false)
         } else {
-            self.refresh(&call.id, owner).await
+            self.refresh(&call.id, owner, journal).await
         }
     }
 
@@ -975,8 +1174,9 @@ impl BrokerInner {
         &self,
         operation_id: &str,
         owner: Option<RetainedToolOwner>,
+        journal: &Store,
     ) -> Result<BrokerOutcome, BrokerError> {
-        let store = self.store.clone();
+        let store = journal.clone();
         let operation_id = operation_id.to_owned();
         let call = blocking(owner, move || {
             store
@@ -1049,6 +1249,8 @@ fn inspect_cleanup(
         }
     }
     Ok(RecoveryReport {
+        settings_requirements: Vec::new(),
+        settings_unresolved_count: 0,
         recovered_operations,
         running_count: usize::try_from(
             store
@@ -1236,4 +1438,111 @@ fn validate_limits(limits: &BrokerLimits) -> Result<(), BrokerError> {
         ));
     }
     Ok(())
+}
+
+fn restricted_error() -> BrokerError {
+    BrokerError::InvalidInvocation(
+        "restricted execution capability or capacity does not match".into(),
+    )
+}
+
+impl BrokerInner {
+    fn journals(&self) -> Result<Vec<Store>, BrokerError> {
+        let profiles = self
+            .settings_journals
+            .lock()
+            .map_err(|_| restricted_error())?;
+        let mut journals = Vec::with_capacity(profiles.len() + 1);
+        journals.push(self.store.clone());
+        journals.extend(profiles.values().map(|profile| profile.journal()));
+        Ok(journals)
+    }
+
+    fn journal_for_operation(&self, operation: &str) -> Result<Store, BrokerError> {
+        let mut found = None;
+        for journal in self.journals()? {
+            if journal.tool_call(operation)?.is_some() {
+                if found.is_some() {
+                    return Err(restricted_error());
+                }
+                found = Some(journal);
+            }
+        }
+        found.ok_or_else(|| BrokerError::CorruptJournal {
+            operation_id: operation.into(),
+        })
+    }
+}
+
+fn inspect_all(inner: &BrokerInner) -> Result<RecoveryReport, BrokerError> {
+    let mut report = inspect_cleanup(&inner.store, inner.recovered_operations)?;
+    let profiles: Vec<_> = inner
+        .settings_journals
+        .lock()
+        .map_err(|_| restricted_error())?
+        .values()
+        .cloned()
+        .collect();
+    for profile in &profiles {
+        let private = inspect_cleanup(&profile.journal(), 0)?;
+        report.running_count = report
+            .running_count
+            .checked_add(private.running_count)
+            .ok_or_else(restricted_error)?;
+        report.unresolved_count = report
+            .unresolved_count
+            .checked_add(private.unresolved_count)
+            .ok_or_else(restricted_error)?;
+        report.quarantined |= private.quarantined;
+        for requirement in private.requirements {
+            if report.requirements.len() < MAX_RECOVERY_REPORT {
+                report.requirements.push(requirement);
+            }
+        }
+    }
+    let mut after = None;
+    loop {
+        let page = inner.store.unsettled_settings_turns(after, 64)?;
+        if page.is_empty() {
+            break;
+        }
+        for fence in &page {
+            after = Some(fence.command_id);
+            let active = profiles.iter().any(|profile| {
+                profile.session_id() == fence.session_id
+                    && profile.check_live().is_ok()
+                    && profile.fence().ok().flatten().as_ref() == Some(fence)
+                    && fence.phase == crate::storage::settings_agent::SettingsFencePhase::Armed
+            });
+            if active {
+                continue;
+            }
+            report.settings_unresolved_count = report
+                .settings_unresolved_count
+                .checked_add(1)
+                .ok_or_else(restricted_error)?;
+            report.quarantined = true;
+            if report.settings_requirements.len() < MAX_RECOVERY_REPORT {
+                report
+                    .settings_requirements
+                    .push(SettingsRecoveryRequirement {
+                        session_id: fence.session_id,
+                        command_id: fence.command_id,
+                        task_id: fence.task_id,
+                        model_attempts: fence.model_attempts,
+                        tool_calls: fence.tool_calls,
+                        charged_tokens: fence.charged_tokens,
+                        reserved_output_tokens: fence.reserved_output_tokens,
+                        provider_complete: fence.provider_complete,
+                        usage_complete: fence.usage_complete,
+                        mutation_ids: fence.mutation_ids.clone(),
+                        original_fence_sha256: format!(
+                            "{:x}",
+                            Sha256::digest(serde_json::to_vec(fence)?)
+                        ),
+                    });
+            }
+        }
+    }
+    Ok(report)
 }
