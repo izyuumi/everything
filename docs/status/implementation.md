@@ -10,6 +10,12 @@ No live remote model requests have been made. EmbeddingGemma 2 produced finite n
 
 Rust 1.99.0 is installed. Apple SDKs and Mac hardware are unavailable locally; GitHub macOS CI supplies Rust builds and native embedding measurements. Swift interoperability and live model behavior remain unverified. Normal GitHub merge enforcement and passing CI are required.
 
+## Hybrid integration checkpoint, 2026-10-16
+
+The #21 leaf is prepared against actual main `b53df85538f3c6b48225c0ebd3a4b75631046efb`, preserving its configured Wiki write admission, managed metadata visibility, device-revocation ordering and schema-five private checkpoint implementation. Its original source and native observations were reviewed; this combined integration branch has source/format inspection and awaits exact-head CI. No new inference was run for this preparation. See [hybrid retrieval](../architecture/hybrid.md) for the generation, cancellation, resource and historical observation limits.
+
+Production semantic acceptance remains blocked by [#72](https://github.com/izyuumi/everything/issues/72). Historical vectors and hybrid retrieval do not prove production local-only execution. The Host's strict embedding-only isolation is being implemented separately and is not included here. Default-off and genuine FTS fallback remain available. Issue #21 stays open until that boundary is validated and integrated; automated assertions remain deferred to [#32](https://github.com/izyuumi/everything/issues/32).
+
 ## Dependency graph and ownership
 
 | Issue | Objective | Prerequisites | State |
@@ -34,7 +40,7 @@ Rust 1.99.0 is installed. Apple SDKs and Mac hardware are unavailable locally; G
 | [#18](https://github.com/izyuumi/everything/issues/18) | Implement native macOS background host service | #1, #2, #3 | Library merged (#48); CLI integration pending |
 | [#19](https://github.com/izyuumi/everything/issues/19) | Implement MCP client tool adapter | #5, #14, #17 | Merged (#63); native server walkthrough and current Linux/macOS production plus Rust 1.88 validation recorded on the PR; automated assertions deferred to #32 |
 | [#20](https://github.com/izyuumi/everything/issues/20) | Implement configurable System One classification | #5, #11, #16, #17 | Implemented in PR #66; prior disposable offline/native-unavailable/refused-loopback checks passed; current-main CI pending; live classification and native persistence unverified; automated assertions deferred to #32 |
-| [#21](https://github.com/izyuumi/everything/issues/21) | Implement sqlite-vec hybrid retrieval and index switching | #6, #12, #31 | Backlog |
+| [#21](https://github.com/izyuumi/everything/issues/21) | Implement sqlite-vec hybrid retrieval and index switching | #6, #12, #26, #31; production locality gated by #72 | Current-main source union prepared; exact-head CI pending; historical numerical observations are qualified; remains open for #72 |
 | [#22](https://github.com/izyuumi/everything/issues/22) | Implement device pairing and client sync | #2, #3, #7, #13 | Merged (#60); qualified native relay roundtrip/restart/revocation observations and reviewed concurrent-revocation correction; automated assertions deferred to #32 |
 | [#23](https://github.com/izyuumi/everything/issues/23) | Implement multi-tool agent loop | #8, #9, #10, #14 | Private checkpoint prerequisite merged (#64); native-loop integration and lifecycle review in progress |
 | [#24](https://github.com/izyuumi/everything/issues/24) | Implement task scheduler and concurrent subagents | #3, #14, #23 | Backlog |
@@ -45,6 +51,7 @@ Rust 1.99.0 is installed. Apple SDKs and Mac hardware are unavailable locally; G
 | [#29](https://github.com/izyuumi/everything/issues/29) | Implement optional scoped cloud worker delegation | #24, #25 | Backlog |
 | [#30](https://github.com/izyuumi/everything/issues/30) | META: Dependency roadmap for parallel agent implementation | None | Backlog |
 | [#31](https://github.com/izyuumi/everything/issues/31) | Define generic embedding contract and index fingerprints | #1, #6 | Merged (#42) |
+| [#72](https://github.com/izyuumi/everything/issues/72) | Prevent outbound telemetry from local embeddings | #12, #21, #68 | Strict production embedding-only boundary in progress separately; no production-locality acceptance claimed here |
 | [#50](https://github.com/izyuumi/everything/issues/50) | Persist scheduled jobs and immutable run history | #2, #3, #10; migration order after #22/private checkpoints | Implemented in PR #67; current-main integration validation in progress; occurrence/replay observations qualified and automated assertions deferred to #32 |
 | [#51](https://github.com/izyuumi/everything/issues/51) | Calculate timezone-aware occurrences and dispatch due work | #24, #50 | Backlog |
 | [#52](https://github.com/izyuumi/everything/issues/52) | Enforce isolated scheduled execution and run policies | #24, #25, #50, #51 | Backlog |

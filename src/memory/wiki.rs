@@ -145,6 +145,10 @@ impl Wiki {
         Ok(wiki)
     }
 
+    pub(crate) fn index(&self) -> &WikiIndex {
+        &self.index
+    }
+
     pub fn root(&self) -> &Path {
         &self.root
     }
@@ -256,6 +260,14 @@ impl Wiki {
     }
 
     pub fn synchronize(&mut self) -> Result<SyncReport, WikiError> {
+        let profile = format!(
+            "pulldown-cmark-0.13.4.heading-chunks-v1;page={};chunk={};pages={};parts={}",
+            self.limits.max_page_bytes,
+            self.limits.max_chunk_bytes,
+            self.limits.max_pages,
+            self.limits.max_chunks_per_page
+        );
+        self.index.ensure_chunking_profile(&profile)?;
         let paths = self.page_paths()?;
         let mut report = SyncReport::default();
         for path in &paths {
