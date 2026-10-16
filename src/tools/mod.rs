@@ -1,4 +1,5 @@
 pub mod broker;
+pub mod builtin;
 pub mod mcp;
 mod registry;
 
