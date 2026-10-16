@@ -168,6 +168,45 @@
             "isa" = "PBXBuildFile";
             "fileRef" = "BC02965820324DAB9751A7EE";
         };
+        "F430089591C42075ADE22232" = {
+            "isa" = "PBXFileReference";
+            "lastKnownFileType" = "sourcecode.swift";
+            "path" = "ThisMacSettingsStore.swift";
+            "sourceTree" = "<group>";
+        };
+        "591A604006CE8195569E248C" = {
+            "isa" = "PBXBuildFile";
+            "fileRef" = "F430089591C42075ADE22232";
+        };
+        "37134351D2F3D62F4831660F" = {
+            "isa" = "PBXFileReference";
+            "lastKnownFileType" = "sourcecode.swift";
+            "path" = "ThisMacSettingsView.swift";
+            "sourceTree" = "<group>";
+        };
+        "20AD11FFA7D0D6C765377EFE" = {
+            "isa" = "PBXBuildFile";
+            "fileRef" = "37134351D2F3D62F4831660F";
+        };
+        "A5AD50E22FE1DE3F601544F0" = {
+            "isa" = "PBXFileReference";
+            "lastKnownFileType" = "sourcecode.swift";
+            "path" = "SettingsWindowObserver.swift";
+            "sourceTree" = "<group>";
+        };
+        "EE9D48D9F566DE9C426317B5" = {
+            "isa" = "PBXBuildFile";
+            "fileRef" = "A5AD50E22FE1DE3F601544F0";
+        };
+        "EE990A23EDFE368C266222DC" = {
+            "isa" = "PBXGroup";
+            "children" = (
+                "F430089591C42075ADE22232",
+                "37134351D2F3D62F4831660F",
+            );
+            "path" = "Settings";
+            "sourceTree" = "<group>";
+        };
         "0112514560F5BC5CF1ECEF39" = {
             "isa" = "PBXGroup";
             "children" = (
@@ -179,6 +218,8 @@
                 "E4DEA7C2A88FA1DC5F002B17",
                 "0C033674B3E2048D89A933D7",
                 "BC02965820324DAB9751A7EE",
+                "A5AD50E22FE1DE3F601544F0",
+                "EE990A23EDFE368C266222DC",
             );
             "path" = "macOS";
             "sourceTree" = "<group>";
@@ -277,6 +318,9 @@
                 "94A9A108AA5077C575700CD1",
                 "34B5F3E30B70621F0D0E8C21",
                 "804F3C7E8AB10187632547F7",
+                "591A604006CE8195569E248C",
+                "20AD11FFA7D0D6C765377EFE",
+                "EE9D48D9F566DE9C426317B5",
             );
             "runOnlyForDeploymentPostprocessing" = "0";
         };

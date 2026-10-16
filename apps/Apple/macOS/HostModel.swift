@@ -53,6 +53,10 @@ final class HostModel {
     var pendingActionLabel = ""
     @ObservationIgnored private let client = OwnerIPCClient()
     @ObservationIgnored private let defaults = UserDefaults.standard
+    @ObservationIgnored let settingsSurfaceID = UUID()
+    let thisMacSettings: ThisMacSettingsStore?
+    @ObservationIgnored private var surfaceDrain: Task<Void, Never>?
+    @ObservationIgnored private var surfaceDrainRequested = false
 
     init() {
         let executable = UserDefaults.standard.string(forKey: "hostExecutable") ?? ""
@@ -60,6 +64,9 @@ final class HostModel {
         self.executable = executable
         stateDirectory = directory
         activeConnection = OwnerConnection(executable: executable, stateDirectory: directory)
+        thisMacSettings = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first.map {
+            ThisMacSettingsStore(directory: $0.appendingPathComponent("Everything", isDirectory: true).appendingPathComponent("DevicePreferences", isDirectory: true))
+        }
     }
 
     var connection: OwnerConnection { activeConnection }
@@ -511,8 +518,35 @@ final class HostModel {
         } catch { message = error.localizedDescription }
     }
 
+    func settingsWindowChanged(visible: Bool, active: Bool) {
+        guard !closing else { thisMacSettings?.setSurfaceVisible(false); return }
+        if !visible { thisMacSettings?.setSurfaceVisible(false) }
+        thisMacSettings?.setApplicationActive(active)
+        if visible {
+            thisMacSettings?.setSurfaceVisible(true)
+            thisMacSettings?.open()
+        }
+    }
+
+    func settingsWindowClosed() {
+        thisMacSettings?.setSurfaceVisible(false)
+        guard !closing, let store = thisMacSettings else { return }
+        surfaceDrainRequested = true
+        guard surfaceDrain == nil else { return }
+        surfaceDrain = Task { [self, store] in
+            while surfaceDrainRequested {
+                surfaceDrainRequested = false
+                await store.drainSurface()
+            }
+            surfaceDrain = nil
+        }
+    }
+
     func shutdownClient() async {
         closing = true
+        thisMacSettings?.invalidate()
+        if let surfaceDrain { await surfaceDrain.value }
+        if let store = thisMacSettings { await store.drain() }
         await client.shutdown()
     }
 }

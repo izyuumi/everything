@@ -1,10 +1,12 @@
 # Native macOS menu bar client
 
-The optional `EverythingMac` application uses SwiftUI `MenuBarExtra` and the native Settings scene on macOS 14 or newer. The macOS target contains eleven Swift sources in the shared Apple project. It contains no agent loop, database connection or provider adapter. The Rust host remains authoritative and owns task execution independently of this application.
+The optional `EverythingMac` application uses SwiftUI `MenuBarExtra` and the native Settings scene on macOS 14 or newer. The macOS target uses the shared Apple project. It contains no agent loop or provider adapter. Only the local device-preference actor opens its own SQLite database; the app never opens the Host database. The Rust host remains authoritative and owns task execution independently of this application.
 
 ## Responsibilities
 
-- `EverythingMacApp` owns the observable application model and menu bar scene. Its termination delegate cancels and joins application-owned CLI requests before allowing normal app termination.
+The [This Mac consumer](../contracts/this-mac-settings.md) adds conventional notification preferences and separate observed OS status without Host or model availability. `SettingsWindowObserver` binds real window/app events to the one app-owned store. Draft revisions, original write receipts and owned callbacks remain distinct from Host settings and notification delivery.
+
+- `EverythingMacApp` owns the observable application model and menu bar scene. Its termination delegate first drains owned local preference/notification work, then joins application-owned CLI requests before allowing normal app termination.
 - `HostModel` maintains presentation state, coalesced read refreshes, exact mutation identities and revision-checked settings snapshots. Connection edits remain drafts until Connect is selected. Tasks and approvals retain the connection that returned them, preventing stale callbacks from targeting another host.
 - `TasksView` inspects actual task metadata and offers cancellation and ordinary wake. A wake does not grant uncertain provider retry or tool cleanup authority. Legacy foreground ownership remains explicit.
 - `PermissionsView` reads bounded pending summaries for a selected conversation, loads exact scope and arguments separately, and rechecks that immutable request before submitting an operation decision. It uses the exact operation UUID and conversation, including spawned tasks; it does not derive task identity from a command UUID.

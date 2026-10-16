@@ -10,11 +10,13 @@ xcodebuild -project apps/Apple/Everything.xcodeproj -scheme EverythingMac -confi
 
 The project deliberately uses no Swift package manifest, third-party app framework or test target. Development signing is disabled by those commands; distribution signing is not configured.
 
-Open Everything, choose Settings, select the physical trusted Rust CLI executable and the existing private state directory, then Connect. The CLI's default state directory is `~/.everything`; the owner socket's complete physical path must fit 100 UTF-8 bytes. The app stores only these connection preferences in UserDefaults. It does not store credentials or open the host database.
+Open Everything, choose Settings, select the physical trusted Rust CLI executable and the existing private state directory, then Connect. The CLI's default state directory is `~/.everything`; the owner socket's complete physical path must fit 100 UTF-8 bytes. The app stores only these connection preferences in UserDefaults. Revisioned This Mac preferences use their own SQLite store in `~/Library/Application Support/Everything/DevicePreferences`. It does not store credentials or open the Host database.
 
 The menu shows host connection/draining state, recent tasks and per-conversation pending permissions. Inspect full scope and arguments before allowing an operation. Settings edit future-task defaults with revision comparison. Existing tasks retain their captured authority. Provider retry, cleanup attestation, credentials, pairing and advanced configuration remain available through the existing owner CLI rather than implicit UI grants.
 
-Install/start/stop/login controls use the actual per-user launchd service. Installation is explicit. Quitting the menu bar app only cancels and joins its own CLI children; the host keeps running. Stopping the service is a separate confirmed action and does not stop a foreground `serve` process.
+The Notifications tab works independently of the Host connection. Edit completion/attention preferences and Save; a revision conflict keeps the draft until explicit Reload. Inspect an unresolved original save instead of resubmitting it. Saved preference values and observed macOS authorization are separate. Request permission contextually in the foreground; denial shows supported System Settings instructions. Closing Settings blocks unpresented actions while accepted writes/callbacks retain their original identity. These controls do not schedule notification delivery. See the [consumer contract](../contracts/this-mac-settings.md).
+
+Install/start/stop/login controls use the actual per-user launchd service. Installation is explicit. Quitting the menu bar app drains its own local work and CLI children; the host keeps running. Stopping the service is a separate confirmed action and does not stop a foreground `serve` process.
 
 If an action fails after possible delivery, refresh authoritative state before choosing a new action. Repeat exact action preserves the original command/request identity and payload. The in-memory reminder is lost if the app is forcibly terminated; reopening performs reads and does not automatically resend mutations.
 

@@ -348,6 +348,11 @@ impl OperationIdentity {
         if self.version != 1 {
             return Err(SettingsServiceError::CorruptJournal);
         }
+        if matches!(self.target, SettingsActionTarget::PairingApproval(_))
+            && !matches!(self.origin, SettingsOperationOrigin::NativeUi { .. })
+        {
+            return Err(SettingsServiceError::CorruptJournal);
+        }
         self.binding.validate()?;
         match &self.origin {
             SettingsOperationOrigin::LocalOwner { request_id }
@@ -410,6 +415,22 @@ impl OperationRepository {
     pub fn get(&self, request_id: CommandId) -> Result<OperationRecord, SettingsServiceError> {
         let connection = self.store.connection()?;
         read(&connection, request_id)?.ok_or(SettingsServiceError::NotFound)
+    }
+
+    pub fn original_native_request(
+        &self,
+        operation_id: CommandId,
+    ) -> Result<Option<NativeRequest>, SettingsServiceError> {
+        let connection = self.store.connection()?;
+        let record = read(&connection, operation_id)?.ok_or(SettingsServiceError::NotFound)?;
+        let request = native_request(&connection, operation_id, operation_id)?;
+        if request.as_ref().is_some_and(|request| {
+            request.operation_id != operation_id
+                || request.session_id != record.identity.binding.client_session_id
+        }) {
+            return Err(SettingsServiceError::CorruptJournal);
+        }
+        Ok(request)
     }
 
     pub fn prepare(
@@ -1103,6 +1124,28 @@ fn validate_native_link(
     identity: &OperationIdentity,
     record: &UpdateRecord,
 ) -> Result<(), SettingsServiceError> {
+    if let SettingsActionTarget::PairingApproval(approval) = &identity.target {
+        let native = native_request(connection, approval.native_request_id, approval.request_id)?;
+        if native.as_ref().is_some_and(|native| {
+            native.operation_id != approval.request_id
+                || native.native_request_id != approval.native_request_id
+                || native.session_id != identity.binding.client_session_id
+        }) || (native.is_none()
+            && matches!(
+                record.phase,
+                SettingsOperationPhase::InFlight { .. }
+                    | SettingsOperationPhase::Finished {
+                        result: SettingsOperationResult {
+                            state: SettingsOperationState::Completed { .. }
+                                | SettingsOperationState::Unknown,
+                            ..
+                        }
+                    }
+            ))
+        {
+            return Err(SettingsServiceError::CorruptJournal);
+        }
+    }
     let native_request_id = match record.phase {
         SettingsOperationPhase::InFlight { native_request_id } => Some(native_request_id),
         _ => record
@@ -1407,7 +1450,7 @@ fn bounded_text<'row>(
 }
 
 pub(super) fn request_digest(value: &impl Serialize) -> Result<String, SettingsServiceError> {
-    let bytes = encode(value, MAX_IDENTITY_BYTES)?;
+    let bytes = zeroize::Zeroizing::new(encode(value, MAX_IDENTITY_BYTES)?);
     let mut digest = Sha256::new();
     digest.update(b"everything.settings.request.v1\0");
     digest.update(bytes.as_bytes());
