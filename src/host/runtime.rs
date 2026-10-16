@@ -735,10 +735,10 @@ impl HostInner {
         let response = result.unwrap_or_else(|error| LocalResponsePayload::Rejected {
             error: public_failure(&error),
         });
-        if let Err(error) = call.respond(response) {
-            if !matches!(error, LocalError::Disconnected) {
-                tracing::warn!("owner reply could not be delivered");
-            }
+        if let Err(error) = call.respond(response)
+            && !matches!(error, LocalError::Disconnected)
+        {
+            tracing::warn!("owner reply could not be delivered");
         }
     }
 

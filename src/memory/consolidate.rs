@@ -392,10 +392,9 @@ impl Consolidator {
             .lock()
             .map_err(|_| ConsolidationError::CorruptJournal)?
             .as_ref()
+            && active == &id
         {
-            if active == &id {
-                cancellation.cancel();
-            }
+            cancellation.cancel();
         }
         self.blocking(move |state| {
             let job = state.job(&id)?;

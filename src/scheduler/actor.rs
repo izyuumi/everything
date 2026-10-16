@@ -1667,16 +1667,15 @@ impl Actor {
                 .retry_once
                 .remove(&id)
                 .filter(|target| target.matches(&conversation, &task));
-            if let Some(reason) = native_waiting(&conversation, &task) {
-                if !pending_input_can_run(&conversation, &task)
-                    && resume.is_none()
-                    && !matches!(reason, WaitingReason::Approval | WaitingReason::InFlight)
-                {
-                    progress = true;
-                    task.checkpoint.waiting = Some(reason);
-                    save_waiting(&self.store(), &mut task)?;
-                    continue;
-                }
+            if let Some(reason) = native_waiting(&conversation, &task)
+                && !pending_input_can_run(&conversation, &task)
+                && resume.is_none()
+                && !matches!(reason, WaitingReason::Approval | WaitingReason::InFlight)
+            {
+                progress = true;
+                task.checkpoint.waiting = Some(reason);
+                save_waiting(&self.store(), &mut task)?;
+                continue;
             }
             progress = true;
             task.checkpoint.waiting = None;
