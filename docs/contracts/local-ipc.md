@@ -18,6 +18,10 @@ The endpoint supports at most 32 concurrent connection tasks and has a 32-call b
 | --- | --- |
 | `status` | Return actual endpoint PID, endpoint initialization timestamp, and application version |
 | `submit_command` | A typed `CommandEnvelope`; command ID must equal request ID and remote-device attribution must be absent |
+| `owner_command` | The explicitly narrower same-user CLI text or initialization identity, with its original command ID |
+| `query` | Bounded typed owner metadata query |
+| `owner_operation` | Ephemeral owner settings, credential, pairing, device, or exact task-control operation |
+| `wait` | One bounded conversation/scheduler change wait of at most 30 seconds |
 | `synchronize` | A validated `SyncRequest` with exactly one conversation cursor |
 
 Submitted commands serialize to at most 256 KiB, leaving room for a bounded durable event and synchronized delivery. A host may enforce tighter semantic limits. Local authentication does not bypass command authorization, role checks, task-state checks, permission policy, command deduplication, or atomic persistence.
@@ -33,6 +37,9 @@ The single-conversation sync request avoids an unbounded aggregate response. `ma
 | `status` | `HostStatus { process_id, started_at, version }`; endpoint availability only |
 | `command_accepted` | `command_id`, host `accepted_at`, and `duplicate`; durable acceptance only |
 | `synchronized` | One `SyncBatch` matching the requested cursor and event cap |
+| `query_result` | Typed result matching the owner query, without provider continuations or credential values |
+| `owner_operation_result` | Typed operation result; requested pairing material is ephemeral and debug-redacted |
+| `conversation_changed` | Matching conversation ID, durable event cursor, and timeout indicator; a scheduler hint may leave the event cursor unchanged |
 | `rejected` | `LocalFailure { code, message }`; bounded sanitized message |
 
 Failure codes are `invalid_request`, `permission_denied`, `unavailable`, `busy`, `timeout`, and `internal`. Rejection messages are at most 1024 bytes and reject NUL. A missing inbox consumer or dropped oneshot reply yields `unavailable`. Processing timeout can leave a command durably accepted; the response says its outcome may already be durable. Retry the original command ID and exact contents to resolve ambiguity. A transport error or dropped client never proves that a command did not execute.
@@ -52,3 +59,7 @@ The call token bounds reply work when a connection or server stops. It is not th
 ## Validation limits
 
 Linux formatting, compilation, strict Clippy, and release build passed. A disposable real socket run observed status exchange, singleton rejection, absent-processor rejection, oversized-frame isolation, pre-cancelled client rejection, socket cleanup after cancellation, stale endpoint recovery, and rejection of a symlink socket and public state directory. Follow-up manual inspection also verified oversized-path rejection without filesystem creation and cleanup/rebind after abandoning a queued binding worker. Same-user peer credentials were exercised by both ends; rejection of a different UID was not runtime-verified. The complete accepted-command transaction, event-store synchronization, daemon CLI integration, macOS credential semantics, and launchd restart behavior require their owning integration and platform verification. Automated checks are deliberately deferred to [#32](https://github.com/izyuumi/everything/issues/32); no tests, mock services, or fixtures are introduced here.
+
+## Owner and durable admission extensions
+
+The [owner IPC contract](owner-ipc.md) defines the added same-user query, operation, and wait types. [Host inbox admission](host-inbox.md) defines full original JSON identity, first effective policy snapshots, terminal digest retention, and recovery pagination. Framing captures raw command JSON before typed decoding, but captures no whole credential-bearing request for journaling. Encoding and input frame buffers zeroize on release. The application handler and CLI proxy remain in progress; DTO availability alone does not mean these operations are served by the application.

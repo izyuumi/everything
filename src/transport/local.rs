@@ -5,12 +5,14 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use thiserror::Error;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::{Semaphore, mpsc, oneshot};
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
+use zeroize::Zeroizing;
 
 use crate::protocol::{
     CommandEnvelope, CommandId, SchemaVersion, SyncBatch, SyncRequest, UnixMillis,
@@ -85,14 +87,31 @@ pub struct LocalRequest {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum LocalRequestPayload {
     Status,
-    SubmitCommand { command: CommandEnvelope },
-    Synchronize { request: SyncRequest },
+    SubmitCommand {
+        command: CommandEnvelope,
+    },
+    OwnerCommand {
+        command: crate::ipc::OwnerCommand,
+    },
+    Query {
+        query: crate::ipc::OwnerQuery,
+    },
+    OwnerOperation {
+        operation: crate::ipc::OwnerOperation,
+    },
+    Wait {
+        request: crate::ipc::ConversationWait,
+    },
+    Synchronize {
+        request: SyncRequest,
+    },
 }
 
 impl LocalRequest {
     pub fn new(payload: LocalRequestPayload) -> Result<Self, LocalError> {
         let request_id = match &payload {
             LocalRequestPayload::SubmitCommand { command } => command.command_id,
+            LocalRequestPayload::OwnerCommand { command } => command.command_id(),
             _ => CommandId::new(),
         };
         let request = Self {
@@ -107,10 +126,27 @@ impl LocalRequest {
     pub fn validate(&self) -> Result<(), LocalError> {
         match &self.payload {
             LocalRequestPayload::Status => {}
+            LocalRequestPayload::Query { query } => {
+                query.validate().map_err(LocalError::Protocol)?;
+            }
+            LocalRequestPayload::OwnerOperation { operation } => {
+                operation.validate().map_err(LocalError::Protocol)?;
+            }
+            LocalRequestPayload::Wait { request } => {
+                request.validate().map_err(LocalError::Protocol)?;
+            }
             LocalRequestPayload::SubmitCommand { command } => {
                 if command.command_id != self.request_id || command.issuing_device_id.is_some() {
                     return Err(LocalError::Protocol(
                         "local command requires its own request ID and no remote device attribution",
+                    ));
+                }
+                encode(command, MAX_LOCAL_COMMAND_BYTES)?;
+            }
+            LocalRequestPayload::OwnerCommand { command } => {
+                if command.command_id() != self.request_id {
+                    return Err(LocalError::Protocol(
+                        "owner command requires its original request ID",
                     ));
                 }
                 encode(command, MAX_LOCAL_COMMAND_BYTES)?;
@@ -169,6 +205,17 @@ pub enum LocalResponsePayload {
     Synchronized {
         batch: SyncBatch,
     },
+    QueryResult {
+        result: crate::ipc::OwnerQueryResult,
+    },
+    OwnerOperationResult {
+        result: crate::ipc::OwnerOperationResult,
+    },
+    ConversationChanged {
+        conversation_id: crate::protocol::ConversationId,
+        through_sequence: u64,
+        timed_out: bool,
+    },
     Rejected {
         error: LocalFailure,
     },
@@ -205,6 +252,29 @@ impl LocalResponse {
                 LocalResponsePayload::CommandAccepted { command_id, .. },
             ) if *command_id == command.command_id => {}
             (
+                LocalRequestPayload::OwnerCommand { command },
+                LocalResponsePayload::CommandAccepted { command_id, .. },
+            ) if *command_id == command.command_id() => {}
+            (
+                LocalRequestPayload::Query { query },
+                LocalResponsePayload::QueryResult { result },
+            ) => result.validate_for(query).map_err(LocalError::Protocol)?,
+            (
+                LocalRequestPayload::OwnerOperation { operation },
+                LocalResponsePayload::OwnerOperationResult { result },
+            ) => result
+                .validate_for(operation)
+                .map_err(LocalError::Protocol)?,
+            (
+                LocalRequestPayload::Wait { request },
+                LocalResponsePayload::ConversationChanged {
+                    conversation_id,
+                    through_sequence,
+                    ..
+                },
+            ) if *conversation_id == request.conversation_id
+                && *through_sequence >= request.after_sequence => {}
+            (
                 LocalRequestPayload::Synchronize { request },
                 LocalResponsePayload::Synchronized { batch },
             ) => {
@@ -226,6 +296,7 @@ impl LocalResponse {
 pub struct LocalCall {
     pub peer_uid: u32,
     pub request: LocalRequest,
+    pub original_command: Option<Value>,
     pub cancellation: CancellationToken,
     reply: oneshot::Sender<LocalResponsePayload>,
 }
@@ -526,11 +597,25 @@ async fn handle_connection(
     cancellation: CancellationToken,
 ) -> Result<(), LocalError> {
     authenticate(&stream, uid)?;
-    let request: LocalRequest = tokio::select! {
+    let original: Value = tokio::select! {
         biased;
         _ = cancellation.cancelled() => return Err(LocalError::Cancelled),
         request = tokio::time::timeout(options.frame_timeout, read_frame(&mut stream)) => request.map_err(|_| LocalError::Timeout)??,
     };
+    let original_command = if matches!(
+        original.pointer("/payload/kind").and_then(Value::as_str),
+        Some("submit_command" | "owner_command")
+    ) {
+        let command = original
+            .pointer("/payload/command")
+            .ok_or(LocalError::Protocol("command payload is missing"))?;
+        encode(command, MAX_LOCAL_COMMAND_BYTES)?;
+        Some(command.clone())
+    } else {
+        None
+    };
+    let request: LocalRequest = serde_json::from_value(original)
+        .map_err(|_| LocalError::Protocol("invalid JSON frame or schema"))?;
     request.validate()?;
     let payload = if matches!(request.payload, LocalRequestPayload::Status) {
         LocalResponsePayload::Status { status }
@@ -541,6 +626,7 @@ async fn handle_connection(
         let call = LocalCall {
             peer_uid: uid,
             request: request.clone(),
+            original_command,
             cancellation: call_cancellation,
             reply,
         };
@@ -628,9 +714,9 @@ fn socket_path(directory: &Path) -> Result<PathBuf, LocalError> {
     Ok(path)
 }
 
-fn encode(value: &impl Serialize, maximum: usize) -> Result<Vec<u8>, LocalError> {
+fn encode(value: &impl Serialize, maximum: usize) -> Result<Zeroizing<Vec<u8>>, LocalError> {
     let mut writer = FrameWriter {
-        bytes: Vec::new(),
+        bytes: Zeroizing::new(Vec::new()),
         maximum,
     };
     serde_json::to_writer(&mut writer, value)
@@ -639,7 +725,7 @@ fn encode(value: &impl Serialize, maximum: usize) -> Result<Vec<u8>, LocalError>
 }
 
 struct FrameWriter {
-    bytes: Vec<u8>,
+    bytes: Zeroizing<Vec<u8>>,
     maximum: usize,
 }
 
@@ -663,7 +749,7 @@ async fn read_frame<T: serde::de::DeserializeOwned>(
     if length == 0 || length > MAX_LOCAL_FRAME_BYTES {
         return Err(LocalError::Protocol("frame length is out of bounds"));
     }
-    let mut bytes = vec![0u8; length];
+    let mut bytes = Zeroizing::new(vec![0u8; length]);
     stream.read_exact(&mut bytes).await?;
     serde_json::from_slice(&bytes).map_err(|_| LocalError::Protocol("invalid JSON frame or schema"))
 }
