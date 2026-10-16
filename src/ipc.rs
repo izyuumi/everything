@@ -714,16 +714,15 @@ impl OwnerOperationResult {
         operation: &OwnerOperation,
         request_id: CommandId,
     ) -> Result<(), &'static str> {
-        if let Self::SettingsReceipt { operation, .. } = self {
-            if operation.binding.request_id != request_id
+        if let Self::SettingsReceipt { operation, .. } = self
+            && (operation.binding.request_id != request_id
                 || !matches!(
                     operation.origin,
                     crate::host::settings::SettingsOperationOrigin::LocalOwner { request_id: original }
                         if original == request_id
-                )
-            {
-                return Err("settings receipt does not match its original owner request");
-            }
+                ))
+        {
+            return Err("settings receipt does not match its original owner request");
         }
         if let (
             OwnerOperation::WorkerCoordinator { operation },

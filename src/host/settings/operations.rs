@@ -1366,8 +1366,8 @@ fn validate_update(
     {
         return Err(SettingsServiceError::CorruptJournal);
     }
-    if let Some(pairing) = &update.pairing {
-        if !matches!(
+    if let Some(pairing) = &update.pairing
+        && (!matches!(
             identity.target,
             SettingsActionTarget::Device(super::contract::SettingsDeviceRequest {
                 action: super::contract::SettingsDeviceAction::Pair,
@@ -1383,10 +1383,9 @@ fn validate_update(
             }
         ) || update.observation.is_some()
             || pairing.expires_at.get() <= identity.binding.issued_at.get()
-            || pairing.expires_at.get() > identity.binding.expires_at.get()
-        {
-            return Err(SettingsServiceError::CorruptJournal);
-        }
+            || pairing.expires_at.get() > identity.binding.expires_at.get())
+    {
+        return Err(SettingsServiceError::CorruptJournal);
     }
     encode(update, MAX_UPDATE_BYTES)?;
     Ok(())
