@@ -6,6 +6,7 @@ mod updates;
 
 pub use changes::{SettingsChangeHint, SettingsChangePage, SettingsChangeState};
 pub use devices::NativeDeviceActionResult;
+pub use persistence::OwnerSettingsWriteResult;
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};

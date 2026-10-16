@@ -280,3 +280,53 @@ impl super::ServiceCore {
         })
     }
 }
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OwnerSettingsWriteResult {
+    pub operation: super::super::SettingsOperationInspection,
+    pub settings: Option<Box<HostSettings>>,
+    pub restart_required: bool,
+}
+
+impl super::ServiceCore {
+    pub(super) fn owner_receipt(
+        &self,
+        record: &super::super::operations::OperationRecord,
+    ) -> Result<OwnerSettingsWriteResult, SettingsServiceError> {
+        let super::super::actions::SettingsActionTarget::OwnerReplacement(request) =
+            &record.identity.target
+        else {
+            return Err(SettingsServiceError::OutsideScope);
+        };
+        if !matches!(
+            record.identity.origin,
+            super::super::authority::SettingsOperationOrigin::LocalOwner { .. }
+        ) {
+            return Err(SettingsServiceError::OutsideScope);
+        }
+        let settings = match record.write() {
+            Some(write) if write.resolution == Some(SettingsWriteResolution::Applied) => {
+                match self.settings.observed_snapshot().and_then(|current| {
+                    Ok(if file_fingerprint(&current)? == write.intent.after {
+                        Some(Box::new(current))
+                    } else {
+                        None
+                    })
+                }) {
+                    Ok(current) => current,
+                    Err(_) => {
+                        tracing::warn!(operation_id=%record.identity.binding.request_id,"current settings snapshot unavailable for original retained receipt");
+                        None
+                    }
+                }
+            }
+            _ => None,
+        };
+        Ok(OwnerSettingsWriteResult {
+            operation: record.inspection(),
+            settings,
+            restart_required: request.restart_required,
+        })
+    }
+}
