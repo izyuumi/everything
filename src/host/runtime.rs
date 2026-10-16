@@ -127,6 +127,7 @@ pub struct HostService {
     inner: Arc<HostInner>,
     server: LocalServer,
     calls: mpsc::Receiver<LocalCall>,
+    settings_supervisor: super::settings::agent::SettingsAgentSupervisor,
     _scheduler_binding: SchedulerToolBinding,
     _schedule_binding: ScheduleToolBinding,
 }
@@ -136,6 +137,7 @@ pub(super) struct HostInner {
     pub(super) inbox: HostInbox,
     pub(super) settings: SettingsRepository,
     pub(super) settings_service: SettingsService,
+    pub(super) settings_agents: Arc<super::settings::agent::SettingsAgentRuntime>,
     pub(super) credentials: CredentialVault,
     pub(super) devices: DeviceEndpoint,
     pub(super) registry: Arc<ToolRegistry>,
@@ -156,6 +158,7 @@ pub(super) struct HostInner {
     pub(super) publication_updates: watch::Sender<super::publication::PublicationStatus>,
     pub(super) draining: AtomicBool,
     pub(super) workers_drained: AtomicBool,
+    pub(super) settings_work_drained: AtomicBool,
     pub(super) recovery: Mutex<()>,
     pub(super) worker: std::sync::OnceLock<Arc<super::worker::service::WorkerCoordinator>>,
 }
@@ -165,6 +168,7 @@ enum HostWorker {
     Dispatcher(Result<(), HostError>),
     Publication(Result<(), HostError>),
     Settings(Result<(), HostError>),
+    SettingsAgent(Result<(), HostError>),
     Relay(Result<(), DeviceError>),
     Coordinator(Result<(), crate::worker::WorkerError>),
 }
@@ -274,7 +278,10 @@ impl HostService {
             CancellationToken::new(),
         )?;
         let (registry, mcp_scopes) = mcp.register(registry).await?;
+        let settings_tools =
+            super::settings::agent_tools::SettingsTools::new(settings_service.clone());
         scopes.extend(mcp_scopes);
+        let settings_registration = Arc::clone(&settings_tools);
         let registry_resources = (agent.store(), agent.clone());
         let (registry, authorizer, discovery, _registry_owner) =
             tokio::task::spawn_blocking(move || {
@@ -289,6 +296,7 @@ impl HostService {
                 let search = Arc::new(SearchTools::new(selector.clone()));
                 registry.register(search.clone())?;
                 scopes.insert(SEARCH_TOOLS_NAME.into(), ToolScopeRule::LocalReadOnly);
+                settings_registration.register(&mut registry)?;
                 let registry = Arc::new(registry);
                 let authorizer = Arc::new(Authorizer::new(
                     registry_resources.0,
@@ -356,6 +364,18 @@ impl HostService {
             agent.clone(),
         )
         .await?;
+        let (settings_agents, settings_supervisor) =
+            super::settings::agent::SettingsAgentRuntime::new(
+                super::settings::agent::SettingsAgentComponents {
+                    service: settings_service.clone(),
+                    tools: settings_tools,
+                    registry: Arc::clone(&registry),
+                    broker: broker.clone(),
+                    providers: providers.as_ref().clone(),
+                    mutation: Arc::clone(&mutation),
+                    agent: agent.clone(),
+                },
+            );
         let (server, calls) = LocalServer::bind_with_lease(lease, LocalOptions::default()).await?;
         let scheduler = Scheduler::start_with_preparation(
             SchedulerServices {
@@ -418,6 +438,7 @@ impl HostService {
             agent,
             settings,
             settings_service,
+            settings_agents,
             credentials,
             devices,
             registry,
@@ -438,6 +459,7 @@ impl HostService {
             publication_updates,
             draining: AtomicBool::new(false),
             workers_drained: AtomicBool::new(false),
+            settings_work_drained: AtomicBool::new(false),
             recovery: Mutex::new(()),
             worker: std::sync::OnceLock::new(),
         });
@@ -456,6 +478,7 @@ impl HostService {
             inner,
             server,
             calls,
+            settings_supervisor,
             _scheduler_binding: scheduler_binding,
             _schedule_binding: schedule_binding,
         })
@@ -472,12 +495,24 @@ impl HostService {
             inner,
             server,
             mut calls,
+            settings_supervisor,
             _scheduler_binding,
             _schedule_binding,
         } = self;
         let work_stop = cancellation.child_token();
         let local_stop = CancellationToken::new();
         let mut workers = JoinSet::new();
+        let settings_agent_owner = Arc::clone(&inner);
+        let settings_agent_work_stop = work_stop.clone();
+        let settings_agent_owner_stop = local_stop.clone();
+        workers.spawn(async move {
+            let owner = settings_agent_owner;
+            let outcome = settings_supervisor
+                .run(settings_agent_work_stop, settings_agent_owner_stop)
+                .await;
+            drop(owner);
+            HostWorker::SettingsAgent(outcome)
+        });
         let local_token = local_stop.clone();
         workers.spawn(async move {
             HostWorker::Local(server.run(local_token).await.map_err(HostError::from))
@@ -553,7 +588,7 @@ impl HostService {
                             tracing::warn!("optional relay stopped during initial metadata reconciliation");
                         }
                     }
-                    Some(Ok(HostWorker::Local(outcome) | HostWorker::Dispatcher(outcome) | HostWorker::Publication(outcome) | HostWorker::Settings(outcome))) => break outcome.and(Err(HostError::Worker)),
+                    Some(Ok(HostWorker::Local(outcome) | HostWorker::Dispatcher(outcome) | HostWorker::Publication(outcome) | HostWorker::Settings(outcome) | HostWorker::SettingsAgent(outcome))) => break outcome.and(Err(HostError::Worker)),
                     _ => break Err(HostError::Worker),
                 },
                 joined = handlers.join_next(), if !handlers.is_empty() => {
@@ -583,7 +618,7 @@ impl HostService {
                                 tracing::warn!("optional relay stopped; local host remains available");
                             }
                         }
-                        Some(Ok(HostWorker::Local(outcome) | HostWorker::Dispatcher(outcome) | HostWorker::Publication(outcome) | HostWorker::Settings(outcome))) => break outcome.and(Err(HostError::Worker)),
+                        Some(Ok(HostWorker::Local(outcome) | HostWorker::Dispatcher(outcome) | HostWorker::Publication(outcome) | HostWorker::Settings(outcome) | HostWorker::SettingsAgent(outcome))) => break outcome.and(Err(HostError::Worker)),
                         _ => break Err(HostError::Worker),
                     },
                     joined = handlers.join_next(), if !handlers.is_empty() => {
@@ -684,6 +719,7 @@ impl HostService {
         let mut composition_stopped = false;
         loop {
             if inner.workers_drained.load(Ordering::Acquire)
+                && inner.settings_agents.is_quiescent()
                 && !quiescence_proved
                 && quiescence.is_none()
             {
@@ -713,7 +749,7 @@ impl HostService {
                 let running = inner
                     .blocking(|host| global_running(&host.agent.store()))
                     .await;
-                if matches!((&report,&running), (Ok(report),Ok(false)) if report.running_count == 0 && report.unresolved_count == 0 && report.requirements.is_empty())
+                if matches!((&report,&running), (Ok(report),Ok(false)) if report.running_count == 0 && report.unresolved_count == 0 && report.settings_unresolved_count == 0 && report.requirements.is_empty() && inner.settings_agents.is_quiescent())
                 {
                     if composition_stopped
                         && service_work_stopped
@@ -746,7 +782,7 @@ impl HostService {
                 joined = async { service_work.as_mut().ok_or(HostError::Worker)?.await.map_err(|_| HostError::Worker) }, if service_work.is_some() => {
                     service_work.take();
                     match joined {
-                        Ok(()) => service_work_stopped = true,
+                        Ok(()) => { service_work_stopped = true; inner.settings_work_drained.store(true, Ordering::Release); inner.receipt_changed(); },
                         Err(error) => { if result.is_ok() { result = Err(error); } }
                     }
                 }
@@ -776,7 +812,7 @@ impl HostService {
                 }
                 joined = workers.join_next(), if !workers.is_empty() => {
                     let failure = match joined {
-                        Some(Ok(HostWorker::Local(outcome) | HostWorker::Dispatcher(outcome) | HostWorker::Publication(outcome) | HostWorker::Settings(outcome))) => outcome.err(),
+                        Some(Ok(HostWorker::Local(outcome) | HostWorker::Dispatcher(outcome) | HostWorker::Publication(outcome) | HostWorker::Settings(outcome) | HostWorker::SettingsAgent(outcome))) => outcome.err(),
                         Some(Ok(HostWorker::Coordinator(outcome))) => { if outcome.is_err() { tracing::warn!("optional worker coordinator ended during host drain"); } None },
                         Some(Ok(HostWorker::Relay(outcome))) => { if outcome.is_err() { tracing::warn!("optional relay stopped during host drain"); } None },
                         _ => Some(HostError::Worker),
@@ -793,6 +829,7 @@ impl HostService {
                     } else { calls_open = false; }
                 }
                 _ = cleanup_changed.changed() => {},
+                _ = inner.settings_agents.changed() => {},
             }
         }
         local_stop.cancel();
@@ -821,7 +858,8 @@ impl HostService {
                     HostWorker::Local(outcome)
                     | HostWorker::Dispatcher(outcome)
                     | HostWorker::Publication(outcome)
-                    | HostWorker::Settings(outcome),
+                    | HostWorker::Settings(outcome)
+                    | HostWorker::SettingsAgent(outcome),
                 ) => {
                     if result.is_ok() {
                         result = outcome;
@@ -923,6 +961,56 @@ impl HostInner {
             LocalRequestPayload::Query { query } => Ok(LocalResponsePayload::QueryResult {
                 result: self.query(query.clone(), call.cancellation.clone()).await?,
             }),
+            LocalRequestPayload::OwnerOperation {
+                operation:
+                    crate::ipc::OwnerOperation::AcknowledgeSettingsUncertainty {
+                        command_id,
+                        exact_fence_sha256,
+                        lost_ram_uncertainty_accepted,
+                    },
+            } => {
+                if !*lost_ram_uncertainty_accepted {
+                    return Err(HostError::Invalid(
+                        "lost-RAM uncertainty must be explicitly accepted",
+                    ));
+                }
+                let caller = self.settings_service.local_owner_cleanup_caller(call)?;
+                let principal = self.settings_service.settings_cleanup_principal(&caller)?;
+                let _recovery = self.recovery.lock().await;
+                let _mutation = self.mutation.lock().await;
+                if !self.draining.load(Ordering::Acquire)
+                    || !self.workers_drained.load(Ordering::Acquire)
+                    || !self.settings_work_drained.load(Ordering::Acquire)
+                    || !self.settings_agents.is_quiescent()
+                    || self.agent.state_directory().is_none()
+                {
+                    return Err(HostError::Invalid(
+                        "Settings uncertainty cleanup requires the leased Host and actual native, Broker and service drains",
+                    ));
+                }
+                let command_id = *command_id;
+                self.settings_service
+                    .inspect_settings_cleanup(caller, command_id, exact_fence_sha256.clone())
+                    .await?;
+                let acknowledgement = self
+                    .broker
+                    .acknowledge_settings_cleanup(command_id, exact_fence_sha256.clone(), principal)
+                    .await?;
+                self.receipt_changed();
+                Ok(LocalResponsePayload::OwnerOperationResult {
+                    result: crate::ipc::OwnerOperationResult::SettingsUncertaintyAcknowledged {
+                        acknowledgement:
+                            super::settings::agent::SettingsUncertaintyAcknowledgement {
+                                command_id: acknowledgement.command_id,
+                                exact_fence_sha256: acknowledgement.exact_fence_sha256,
+                                owner_principal_id: acknowledgement.owner_principal_id,
+                                attested_at: acknowledgement.attested_at,
+                                lost_ram_uncertainty_accepted: acknowledgement
+                                    .lost_ram_uncertainty_accepted,
+                            },
+                    },
+                })
+            }
             LocalRequestPayload::OwnerOperation {
                 operation: crate::ipc::OwnerOperation::ReconcileSettings { operation_id },
             } => {

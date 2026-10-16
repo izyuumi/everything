@@ -27,6 +27,9 @@ impl Agent {
         &self,
         command: ScheduledResultCommand,
     ) -> Result<ScheduledResultReceipt, AgentError> {
+        if self.settings_profile.is_some() {
+            return Err(AgentError::ConfigurationMismatch);
+        }
         command.notification.validate()?;
         let write = self.write_gate(command.conversation_id)?.lock_owned().await;
         let owner = self.clone();

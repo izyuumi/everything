@@ -4,6 +4,36 @@
     };
     "objectVersion" = "56";
     "objects" = {
+        "A64AF72E31D5E9D03F451318" = {
+            "isa" = "PBXFileReference";
+            "lastKnownFileType" = "sourcecode.swift";
+            "path" = "NativeSettingsDraft.swift";
+            "sourceTree" = "<group>";
+        };
+        "53488E3C87EE638D27D5E7AC" = {
+            "isa" = "PBXBuildFile";
+            "fileRef" = "A64AF72E31D5E9D03F451318";
+        };
+        "45499036740741814E10D348" = {
+            "isa" = "PBXFileReference";
+            "lastKnownFileType" = "sourcecode.swift";
+            "path" = "NativeSettingsOperation.swift";
+            "sourceTree" = "<group>";
+        };
+        "9A366DE20CFD9B8E254752CF" = {
+            "isa" = "PBXBuildFile";
+            "fileRef" = "45499036740741814E10D348";
+        };
+        "CA5BAA9EA21332F2292E9231" = {
+            "isa" = "PBXFileReference";
+            "lastKnownFileType" = "sourcecode.swift";
+            "path" = "NativeSettingsControls.swift";
+            "sourceTree" = "<group>";
+        };
+        "BFEC0EC93EFD77227B071563" = {
+            "isa" = "PBXBuildFile";
+            "fileRef" = "CA5BAA9EA21332F2292E9231";
+        };
         "8295E3895BA1FB6AE639DC68" = {
             "isa" = "PBXFileReference";
             "lastKnownFileType" = "sourcecode.swift";
@@ -269,6 +299,9 @@
                 "F591F7CEA40D76026672E297",
                 "D0453B8A738C123CFA7F039E",
                 "7EF555A5776C8697BD385639",
+                "A64AF72E31D5E9D03F451318",
+                "45499036740741814E10D348",
+                "CA5BAA9EA21332F2292E9231",
             );
             "path" = "Settings";
             "sourceTree" = "<group>";
@@ -393,6 +426,10 @@
                 "B8E9377A29023B1599E497D5",
                 "0F28AEDEA35966279DE9AE48",
                 "0E0AA4F22CD4599F5D91449E",
+                "53488E3C87EE638D27D5E7AC",
+                "9A366DE20CFD9B8E254752CF",
+                "BFEC0EC93EFD77227B071563",
+                "23879FBD469F2CB181AA5704",
             );
             "runOnlyForDeploymentPostprocessing" = "0";
         };
@@ -652,6 +689,10 @@
             "lastKnownFileType" = "sourcecode.swift";
             "path" = "Pairing.swift";
             "sourceTree" = "<group>";
+        };
+        "23879FBD469F2CB181AA5704" = {
+            "isa" = "PBXBuildFile";
+            "fileRef" = "1016BFB55EA83224B544938D";
         };
         "E69DF34A052D3EDAFC894B8F" = {
             "isa" = "PBXBuildFile";
