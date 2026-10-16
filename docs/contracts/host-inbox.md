@@ -23,7 +23,7 @@ Remote admission and application recheck local endpoint revocation, active pinne
 
 `CommandAccepted` IPC is valid after the reservation transaction commits. Client disconnect after that point does not cancel admitted work. Recovery reapplies only idempotent Agent acceptance and enqueue operations; it must not start another native run directly. `AppliedReceipt` maps to actual conversation, task, message, and operation IDs. Original client user message identity remains in the envelope; the existing Agent text acceptance API creates the accepted host message ID and timestamp, which the receipt identifies explicitly.
 
-`mark_applied` and terminal `finish` compare immutable receipts/results on replay. Terminal result digests survive archival. After seven days, archival may remove original input, options, receipt, and result while preserving command identity, origin, acceptance time, and digests. There is no command ID reuse through archival.
+`mark_applied` and terminal `finish` compare immutable receipts/results on replay. Terminal result digests survive archival. After seven days, archival may remove original input, options, receipt, and result while preserving command identity, origin, acceptance time, and digests. It retains those payloads while a matching paired-device command remains pending, so the Host can recover and enqueue its encrypted reply before archival. There is no command ID reuse through archival.
 
 ## Bounds and recovery enumeration
 
@@ -34,5 +34,7 @@ Original JSON is at most 256 KiB; effective options and terminal results are eac
 All APIs are synchronous SQLite operations. Async callers use bounded blocking workers and retain state ownership until those workers finish. Effective options are an opaque validated JSON persistence boundary; the host must decode them into the actual captured scheduler policy before application.
 
 ## Observed validation
+
+The pending-remote-reply archival guard is extracted from the later Host integration and has source and Rust 1.88 formatting inspection only here. Fresh combined compilation, CI and focused retention/runtime observations remain pending.
 
 A disposable executable used the actual Agent, Store, host inbox, settings repository, and crypto device endpoint. It observed real schema-6-to-7 migration and integrity check, original additive metadata preservation, changed-input conflicts, exact replay retaining the first acceptance/options, immutable applied/completed results, legacy owner adoption versus full-domain namespace rejection, private checkpoint namespace rejection, 301 pending records paginated as 256 then 45 without overlap, persisted restart recovery, and revoked paired-device application rejection. No model request was made. These observations do not verify the unfinished host dispatcher, scheduler composition, or cross-platform service lifecycle. Deferred automated assertions remain in [#32](https://github.com/izyuumi/everything/issues/32).
