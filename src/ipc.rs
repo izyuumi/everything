@@ -92,9 +92,19 @@ pub enum OwnerQuery {
     },
     Approvals {
         conversation_id: ConversationId,
+        #[serde(default = "default_approval_page_limit")]
+        limit: usize,
+        cursor: Option<crate::permissions::ApprovalCursor>,
+    },
+    Approval {
+        conversation_id: ConversationId,
+        lookup: ApprovalLookup,
     },
     Settings,
     Identity,
+    Runtime,
+    ToolRecovery,
+    Transport,
     Devices {
         limit: usize,
     },
@@ -107,18 +117,62 @@ impl OwnerQuery {
     pub fn validate(&self) -> Result<(), &'static str> {
         if matches!(
             self,
-            Self::Conversations { limit } | Self::Tasks { limit, .. } | Self::Devices { limit }
+            Self::Conversations { limit } | Self::Tasks { limit, .. } | Self::Devices { limit } | Self::Approvals { limit, .. }
                 if !(1..=100).contains(limit)
         ) {
             return Err("query limit must be between one and one hundred");
+        }
+        if let Self::Approvals {
+            cursor: Some(cursor),
+            ..
+        } = self
+        {
+            cursor
+                .validate()
+                .map_err(|_| "invalid approval page cursor")?;
+        }
+        if let Self::Approval { lookup, .. } = self {
+            let identifier = match lookup {
+                ApprovalLookup::Approval(identifier) | ApprovalLookup::Operation(identifier) => {
+                    identifier
+                }
+            };
+            if identifier.trim().is_empty()
+                || identifier.len() > 256
+                || identifier.chars().any(char::is_control)
+            {
+                return Err("invalid approval lookup identifier");
+            }
         }
         Ok(())
     }
 }
 
+fn default_approval_page_limit() -> usize {
+    20
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(
+    tag = "by",
+    content = "id",
+    rename_all = "snake_case",
+    deny_unknown_fields
+)]
+pub enum ApprovalLookup {
+    Approval(String),
+    Operation(String),
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum OwnerOperation {
+    DiscardUnapplied {
+        command_id: CommandId,
+        expected_accepted_at: UnixMillis,
+        operator: String,
+        reason: String,
+    },
     ReplaceSettings {
         expected_revision: u64,
         settings: crate::host::settings::HostSettings,
@@ -145,11 +199,53 @@ pub enum OwnerOperation {
         task_id: TaskId,
         expected_attempt: CommandId,
     },
+    ResumeInterrupted {
+        task_id: TaskId,
+        expected_command: CommandId,
+        expected_revision: u64,
+        expected_status: crate::agent::LoopStatus,
+    },
+    AcknowledgeCleanup {
+        operation_id: String,
+        original_result_digest: String,
+        operator: String,
+        note: String,
+    },
+    ReconcileDrained,
 }
 
 impl OwnerOperation {
     pub fn validate(&self) -> Result<(), &'static str> {
         match self {
+            Self::DiscardUnapplied {
+                expected_accepted_at,
+                operator,
+                reason,
+                ..
+            } => crate::host::inbox::UnappliedDiscard::validate_metadata(
+                *expected_accepted_at,
+                operator,
+                reason,
+            )
+            .map_err(|_| "invalid unapplied command discard"),
+            Self::ResumeInterrupted {
+                expected_revision,
+                expected_status,
+                ..
+            } if *expected_revision == 0
+                || *expected_revision > i64::MAX as u64
+                || !matches!(
+                    expected_status,
+                    crate::agent::LoopStatus::Paused {
+                        reason: crate::agent::PauseReason::Cancellation
+                            | crate::agent::PauseReason::InterruptedTool,
+                    }
+                ) =>
+            {
+                Err(
+                    "known interruption resume requires its exact supported phase and checkpoint revision",
+                )
+            }
             Self::BeginPairing { lifetime_ms }
                 if *lifetime_ms == 0 || *lifetime_ms > crate::crypto::MAX_PAIRING_LIFETIME_MS =>
             {
@@ -204,9 +300,17 @@ pub enum OwnerQueryResult {
     },
     Task {
         task: crate::protocol::TaskRecord,
+        execution: TaskExecutionMetadata,
+    },
+    LegacyForeground {
+        task: crate::protocol::TaskRecord,
     },
     Approvals {
-        approvals: Vec<crate::permissions::ApprovalRequest>,
+        approvals: Vec<crate::permissions::ApprovalSummary>,
+        next_cursor: Option<crate::permissions::ApprovalCursor>,
+    },
+    Approval {
+        approval: Option<crate::permissions::ApprovalView>,
     },
     Settings {
         settings: crate::host::settings::HostSettings,
@@ -214,6 +318,17 @@ pub enum OwnerQueryResult {
     Identity {
         keys: crate::crypto::DevicePublicKeys,
         fingerprint: String,
+    },
+    Transport {
+        relay: RelayStatus,
+    },
+    Runtime {
+        state: HostRuntimeState,
+    },
+    ToolRecovery {
+        report: crate::tools::broker::RecoveryReport,
+        running_operations: Vec<String>,
+        more_running: bool,
     },
     Devices {
         devices: Vec<crate::storage::DeviceRow>,
@@ -231,6 +346,7 @@ pub struct ConversationSummary {
     pub model: String,
     pub endpoint: crate::agent::ProviderEndpoint,
     pub last_sequence: u64,
+    pub checkpoint_revision: u64,
     pub message_count: usize,
     pub pending_command_id: Option<CommandId>,
     pub native_status: Option<crate::agent::LoopStatus>,
@@ -245,6 +361,7 @@ impl From<crate::agent::ConversationInfo> for ConversationSummary {
             model: information.model,
             endpoint: information.endpoint,
             last_sequence: information.last_sequence,
+            checkpoint_revision: information.checkpoint_revision,
             message_count: information.message_count,
             pending_command_id: information.pending_command_id,
             native_status: information.native_status,
@@ -274,14 +391,65 @@ impl OwnerQueryResult {
                         .iter()
                         .all(|task| conversation_id.is_none_or(|id| task.conversation_id == id))
             }
-            (OwnerQuery::Task { task_id }, Self::Task { task }) => task.id == *task_id,
-            (OwnerQuery::Approvals { conversation_id }, Self::Approvals { approvals }) => {
-                approvals.len() <= 256
+            (
+                OwnerQuery::Task { task_id },
+                Self::Task { task, .. } | Self::LegacyForeground { task },
+            ) => task.id == *task_id,
+            (
+                OwnerQuery::Approvals {
+                    conversation_id,
+                    limit,
+                    cursor,
+                },
+                Self::Approvals {
+                    approvals,
+                    next_cursor,
+                },
+            ) => {
+                let ordered = approvals.windows(2).all(|pair| {
+                    (pair[0].requested_at, &pair[0].id) < (pair[1].requested_at, &pair[1].id)
+                });
+                let after = cursor.as_ref().is_none_or(|cursor| {
+                    approvals.first().is_none_or(|first| {
+                        (first.requested_at, &first.id) > (cursor.requested_at, &cursor.approval_id)
+                    })
+                });
+                let continuation = next_cursor.as_ref().is_none_or(|cursor| {
+                    approvals.last().is_some_and(|last| {
+                        last.requested_at == cursor.requested_at && last.id == cursor.approval_id
+                    })
+                });
+                approvals.len() <= *limit
+                    && ordered
+                    && after
+                    && continuation
                     && approvals.iter().all(|approval| {
-                        approval.scope.conversation_id == conversation_id.to_string()
+                        approval.conversation_id == conversation_id.to_string()
+                            && approval.status == crate::permissions::ApprovalStatus::Pending
                     })
             }
+            (
+                OwnerQuery::Approval {
+                    conversation_id,
+                    lookup,
+                },
+                Self::Approval { approval },
+            ) => approval.as_ref().is_none_or(|approval| {
+                approval.request.scope.conversation_id == conversation_id.to_string()
+                    && match lookup {
+                        ApprovalLookup::Approval(id) => approval.request.id == *id,
+                        ApprovalLookup::Operation(id) => approval.request.scope.operation_id == *id,
+                    }
+            }),
             (OwnerQuery::Settings, Self::Settings { .. }) => true,
+            (OwnerQuery::Transport, Self::Transport { .. }) => true,
+            (OwnerQuery::Runtime, Self::Runtime { .. }) => true,
+            (
+                OwnerQuery::ToolRecovery,
+                Self::ToolRecovery {
+                    running_operations, ..
+                },
+            ) => running_operations.len() <= 128,
             (OwnerQuery::Identity, Self::Identity { keys, fingerprint }) => {
                 keys.validate().is_ok() && keys.fingerprint() == *fingerprint
             }
@@ -294,8 +462,40 @@ impl OwnerQueryResult {
         if !valid {
             return Err("owner query result does not match its request");
         }
+        if matches!(self, Self::Approvals { .. })
+            && serde_json::to_vec(self)
+                .map_err(|_| "invalid approval metadata response")?
+                .len()
+                > crate::permissions::MAX_APPROVAL_METADATA_BYTES
+        {
+            return Err("approval metadata response exceeds its byte limit");
+        }
         Ok(())
     }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct RelayStatus {
+    pub origin: Option<crate::relay_protocol::RelayOrigin>,
+    pub connection: RelayConnectionState,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct HostRuntimeState {
+    pub draining: bool,
+    pub workers_drained: bool,
+    pub broker_quarantined: bool,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RelayConnectionState {
+    Disabled,
+    Stopped,
+    Connecting,
+    Connected,
+    Retrying,
+    Failed,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -310,11 +510,24 @@ pub struct CommandReceipt {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct TaskExecutionMetadata {
+    pub active_command_id: CommandId,
+    pub queued_messages: usize,
+    pub cancel_requested: bool,
+    pub waiting: Option<crate::scheduler::WaitingReason>,
+    pub diagnostic: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum OwnerOperationResult {
+    Command {
+        receipt: CommandReceipt,
+    },
     Applied,
     Settings {
         settings: crate::host::settings::HostSettings,
+        restart_required: bool,
     },
     PairingInvitation {
         pairing_id: crate::protocol::MessageId,
@@ -325,16 +538,35 @@ pub enum OwnerOperationResult {
     PairingApproved {
         acceptance: crate::crypto::PairingAcceptance,
     },
+    ToolRecovery {
+        report: crate::tools::broker::RecoveryReport,
+    },
 }
 
 impl OwnerOperationResult {
     pub fn validate_for(&self, operation: &OwnerOperation) -> Result<(), &'static str> {
         let valid = match (operation, self) {
             (
+                OwnerOperation::DiscardUnapplied {
+                    command_id,
+                    expected_accepted_at,
+                    ..
+                },
+                Self::Command { receipt },
+            ) => {
+                receipt.command_id == *command_id
+                    && receipt.accepted_at == *expected_accepted_at
+                    && receipt.phase == crate::host::inbox::CommandPhase::Rejected
+            }
+            (
+                OwnerOperation::AcknowledgeCleanup { .. } | OwnerOperation::ReconcileDrained,
+                Self::ToolRecovery { .. },
+            ) => true,
+            (
                 OwnerOperation::ReplaceSettings {
                     expected_revision, ..
                 },
-                Self::Settings { settings },
+                Self::Settings { settings, .. },
             ) => expected_revision.checked_add(1) == Some(settings.revision),
             (OwnerOperation::BeginPairing { .. }, Self::PairingInvitation { fingerprint, .. }) => {
                 fingerprint.len() == 71
@@ -353,6 +585,7 @@ impl OwnerOperationResult {
                 | OwnerOperation::RetryProvider { .. },
                 Self::Applied,
             ) => true,
+            (OwnerOperation::ResumeInterrupted { .. }, Self::Applied) => true,
             _ => false,
         };
         if !valid {

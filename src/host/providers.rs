@@ -24,6 +24,8 @@ pub enum HostProviderError {
     MissingCredential,
     #[error("the saved conversation configuration is invalid")]
     InvalidConfiguration,
+    #[error("host provider settings worker failed")]
+    Worker,
 }
 
 #[derive(Clone)]
@@ -48,7 +50,10 @@ impl HostProviderFactory {
         configuration
             .validate()
             .map_err(|_| HostProviderError::InvalidConfiguration)?;
-        let settings = self.settings.snapshot()?;
+        let repository = self.settings.clone();
+        let settings = tokio::task::spawn_blocking(move || repository.snapshot())
+            .await
+            .map_err(|_| HostProviderError::Worker)??;
         let credential = self
             .credentials
             .resolve(configuration, &settings, cancellation.clone())

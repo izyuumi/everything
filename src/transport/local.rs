@@ -20,7 +20,7 @@ use crate::protocol::{
 use crate::service::state::StateDirectory;
 use crate::service::{ServiceError, StateLease};
 
-pub const MAX_LOCAL_FRAME_BYTES: usize = 1_024 * 1_024;
+pub const MAX_LOCAL_FRAME_BYTES: usize = 2 * 1_024 * 1_024;
 pub const MAX_LOCAL_COMMAND_BYTES: usize = 256 * 1_024;
 pub const MAX_LOCAL_CONNECTIONS: usize = 32;
 pub const LOCAL_COMMAND_CAPACITY: usize = 32;
@@ -102,6 +102,10 @@ pub enum LocalRequestPayload {
     Wait {
         request: crate::ipc::ConversationWait,
     },
+    WaitCommand {
+        command_id: CommandId,
+        timeout_ms: u64,
+    },
     Synchronize {
         request: SyncRequest,
     },
@@ -134,6 +138,13 @@ impl LocalRequest {
             }
             LocalRequestPayload::Wait { request } => {
                 request.validate().map_err(LocalError::Protocol)?;
+            }
+            LocalRequestPayload::WaitCommand { timeout_ms, .. } => {
+                if !(1..=30_000).contains(timeout_ms) {
+                    return Err(LocalError::Protocol(
+                        "command wait must be between one and thirty thousand milliseconds",
+                    ));
+                }
             }
             LocalRequestPayload::SubmitCommand { command } => {
                 if command.command_id != self.request_id || command.issuing_device_id.is_some() {
@@ -216,6 +227,10 @@ pub enum LocalResponsePayload {
         through_sequence: u64,
         timed_out: bool,
     },
+    CommandWaited {
+        receipt: Option<crate::ipc::CommandReceipt>,
+        timed_out: bool,
+    },
     Rejected {
         error: LocalFailure,
     },
@@ -266,6 +281,20 @@ impl LocalResponse {
                 .validate_for(operation)
                 .map_err(LocalError::Protocol)?,
             (
+                LocalRequestPayload::WaitCommand { command_id, .. },
+                LocalResponsePayload::CommandWaited { receipt, timed_out },
+            ) if receipt
+                .as_ref()
+                .is_none_or(|receipt| receipt.command_id == *command_id)
+                && (*timed_out
+                    || receipt.as_ref().is_some_and(|receipt| {
+                        matches!(
+                            receipt.phase,
+                            crate::host::inbox::CommandPhase::Completed
+                                | crate::host::inbox::CommandPhase::Rejected
+                        )
+                    })) => {}
+            (
                 LocalRequestPayload::Wait { request },
                 LocalResponsePayload::ConversationChanged {
                     conversation_id,
@@ -303,6 +332,16 @@ pub struct LocalCall {
 
 impl LocalCall {
     pub fn respond(self, response: LocalResponsePayload) -> Result<(), LocalError> {
+        let response = if encode(&response, MAX_LOCAL_FRAME_BYTES - 1_024).is_ok() {
+            response
+        } else {
+            LocalResponsePayload::Rejected {
+                error: LocalFailure {
+                    code: LocalFailureCode::Busy,
+                    message: "response exceeds its byte limit; request fewer records".into(),
+                },
+            }
+        };
         self.reply
             .send(response)
             .map_err(|_| LocalError::Disconnected)
@@ -318,6 +357,10 @@ pub struct LocalServer {
 }
 
 impl LocalServer {
+    pub(crate) fn validate_state_path(state_directory: &Path) -> Result<(), LocalError> {
+        socket_path(state_directory).map(|_| ())
+    }
+
     pub async fn bind(
         state_directory: impl AsRef<Path>,
         options: LocalOptions,

@@ -213,6 +213,38 @@ pub struct PendingCursor {
     pub command_id: CommandId,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UnappliedDiscard {
+    pub command_id: CommandId,
+    pub expected_accepted_at: UnixMillis,
+    pub request_id: CommandId,
+    pub operator: String,
+    pub reason: String,
+}
+
+impl UnappliedDiscard {
+    pub(crate) fn validate_metadata(
+        expected_accepted_at: UnixMillis,
+        operator: &str,
+        reason: &str,
+    ) -> Result<(), InboxError> {
+        if expected_accepted_at.get() > i64::MAX as u64
+            || operator.trim().is_empty()
+            || operator.len() > 128
+            || operator.chars().any(char::is_control)
+            || reason.trim().is_empty()
+            || reason.len() > 1_024
+            || reason.contains('\0')
+        {
+            return Err(InboxError::Invalid(
+                "discard requires the original acceptance time, a bounded operator and a nonempty bounded reason",
+            ));
+        }
+        Ok(())
+    }
+}
+
 #[derive(Clone)]
 pub struct HostInbox {
     store: Store,
@@ -415,6 +447,91 @@ impl HostInbox {
             return Err(InboxError::Conflict(id));
         }
         transaction.execute("UPDATE host_commands SET phase=?2,terminal_result=?3,result_digest=?4,updated_at=?5 WHERE command_id=?1 AND phase IN ('accepted','applied')",params![id.to_string(),phase.as_str(),encoded,result_digest,now.get() as i64])?;
+        let record = read_record(&transaction, id)?.ok_or(InboxError::Corrupt)?;
+        transaction.commit()?;
+        Ok(record)
+    }
+
+    pub fn discard_unapplied(
+        &self,
+        discard: &UnappliedDiscard,
+        now: UnixMillis,
+    ) -> Result<HostCommandRecord, InboxError> {
+        UnappliedDiscard::validate_metadata(
+            discard.expected_accepted_at,
+            &discard.operator,
+            &discard.reason,
+        )?;
+        let mut connection = self.store.connection()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let id = discard.command_id;
+        let record = read_record(&transaction, id)?
+            .ok_or(InboxError::Invalid("unknown command cannot be discarded"))?;
+        if record.accepted_at != discard.expected_accepted_at {
+            return Err(InboxError::Conflict(id));
+        }
+        let result = serde_json::json!({
+            "code":"discarded_by_owner",
+            "message":"unapplied queued command was discarded by its owner",
+            "discard":discard,
+            "original_request_digest":record.request_digest,
+            "accepted_at":record.accepted_at,
+        });
+        let encoded = bounded_json(&result, MAX_RESULT_BYTES)?;
+        let digest = digest_bytes(b"everything.host-command.result.v1\0", encoded.as_bytes());
+        if let Some(existing) = &record.result_digest {
+            return if record.phase == CommandPhase::Rejected && *existing == digest {
+                Ok(record)
+            } else {
+                Err(InboxError::Conflict(id))
+            };
+        }
+        if record.phase != CommandPhase::Accepted
+            || now < record.updated_at
+            || now.get() > i64::MAX as u64
+        {
+            return Err(InboxError::Conflict(id));
+        }
+        let input = record.input()?.ok_or(InboxError::Corrupt)?;
+        let original = record.original.as_ref().ok_or(InboxError::Corrupt)?;
+        input.validate_original(original)?;
+        compare_identity(
+            &record,
+            &input,
+            &record.origin,
+            &request_digest(&input, original, &record.origin)?,
+        )?;
+        let initialization = match &input {
+            InboxInput::Owner(OwnerCommand::Text { .. }) => false,
+            InboxInput::Owner(OwnerCommand::Initialize { .. }) => true,
+            InboxInput::Domain(command) => match command.payload {
+                Command::SendMessage { .. }
+                | Command::CreateTask {
+                    parent_task_id: None,
+                    ..
+                } => false,
+                Command::CreateConversation { .. } => true,
+                _ => return Err(InboxError::Invalid("control commands cannot be discarded")),
+            },
+        };
+        let possible_effect: bool = transaction.query_row(
+            "SELECT EXISTS(SELECT 1 FROM commands WHERE id=?1)
+                OR EXISTS(SELECT 1 FROM conversation_checkpoint_commands WHERE command_id=?1)
+                OR EXISTS(SELECT 1 FROM tasks WHERE id=?1)
+                OR (?2 AND EXISTS(SELECT 1 FROM conversations WHERE id=?3))",
+            params![
+                id.to_string(),
+                initialization,
+                record.conversation_id.to_string()
+            ],
+            |row| row.get(0),
+        )?;
+        if possible_effect {
+            return Err(InboxError::Invalid(
+                "command may already have applied effects and cannot be discarded",
+            ));
+        }
+        transaction.execute("UPDATE host_commands SET phase='rejected',terminal_result=?2,result_digest=?3,updated_at=?4 WHERE command_id=?1 AND phase='accepted'",params![id.to_string(),encoded,digest,now.get() as i64])?;
         let record = read_record(&transaction, id)?.ok_or(InboxError::Corrupt)?;
         transaction.commit()?;
         Ok(record)
