@@ -4,6 +4,20 @@
     };
     "objectVersion" = "56";
     "objects" = {
+        "E4C41019D3CB4E0092AF4E8D" = {
+            "isa" = "PBXFileReference";
+            "lastKnownFileType" = "sourcecode.swift";
+            "path" = "RemoteSettingsWire.swift";
+            "sourceTree" = "<group>";
+        };
+        "85F4CA6097B742E6A2F3359A" = {
+            "isa" = "PBXBuildFile";
+            "fileRef" = "E4C41019D3CB4E0092AF4E8D";
+        };
+        "9986F4D360284859ABC4C16D" = {
+            "isa" = "PBXBuildFile";
+            "fileRef" = "E4C41019D3CB4E0092AF4E8D";
+        };
         "62E3F5EE2FA342ECB39783FD" = {
             "isa" = "PBXFileReference";
             "lastKnownFileType" = "sourcecode.swift";
@@ -222,6 +236,7 @@
                 "C9D6D47BC3E2F66D3C0F8322",
                 "2CBC28A687F581018E52F2FE",
                 "4EFC3B1B64D7B87D25B1B9B2",
+                "E4C41019D3CB4E0092AF4E8D",
                 "0CD7411C80928D1614229C05",
             );
             "path" = "Shared/Settings";
@@ -559,6 +574,7 @@
                 "830E4251423ED3AE66572933",
                 "94A9A108AA5077C575700CD1",
                 "34B5F3E30B70621F0D0E8C21",
+                "85F4CA6097B742E6A2F3359A",
                 "804F3C7E8AB10187632547F7",
                 "591A604006CE8195569E248C",
                 "20AD11FFA7D0D6C765377EFE",
@@ -945,6 +961,7 @@
                 "99A19055582DE7DB5A06C02F",
                 "5B08F2911E7EE03422FFB427",
                 "B5F617E76B6E6D17675ACA18",
+                "9986F4D360284859ABC4C16D",
                 "EF0F9908666D96BAD7A63664",
                 "EFF70F2CFC5B410610126A70",
                 "1D5659246D722D17C78BBDDB",

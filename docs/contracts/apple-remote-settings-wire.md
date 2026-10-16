@@ -1,6 +1,6 @@
 # Apple AccessStatus and Bind wire data
 
-`Shared/Settings/RemoteSettingsWire.swift` defines pure request encoders and bounded response decoders for the generation-free AccessStatus bootstrap and subsequent Bind. The leaf has no project membership or transport consumer yet. It does not authenticate a response, grant access, create or adopt a parent, send an envelope or expose Host controls. Existing authenticated private Settings routing still refuses these packets before ordinary plaintext persistence.
+`Shared/Settings/RemoteSettingsWire.swift` defines pure request encoders and bounded response decoders for the generation-free AccessStatus bootstrap and subsequent Bind. The leaf is registered in both Apple target source lists; a transport consumer remains absent. It does not authenticate a response, grant access, create or adopt a parent, send an envelope or expose Host controls. Existing authenticated private Settings routing still refuses these packets before ordinary plaintext persistence.
 
 ## Finite request shapes
 
@@ -40,4 +40,4 @@ The actual later consumer must enforce full encrypted envelope bounds49152 for s
 
 ## Validation boundary
 
-Standalone Swift grammar and source/tree/diff/link checks are syntax/static observations only. Actual supported macOS/iOS SDK build/analyze follows Root project registration. Product encoding/decoding, Rust/Swift encrypted interoperability, malformed/replay/expiry/correlation behavior, real device/relay/UI acceptance, private buffer lifetime and security review remain unverified. No new tests, fixtures, dependencies or source comments are introduced. Issues #116/#117 remain open; [#32](https://github.com/izyuumi/everything/issues/32) retains deferred automated authorization, interoperability, replay/expiry, revocation, cancellation and reconnect assertions.
+Standalone Swift grammar and source/tree/diff/link checks are syntax/static observations only. Actual supported macOS/iOS SDK build/analyze for the registered leaf remains pending. Product encoding/decoding, Rust/Swift encrypted interoperability, malformed/replay/expiry/correlation behavior, real device/relay/UI acceptance, private buffer lifetime and security review remain unverified. No new tests, fixtures, dependencies or source comments are introduced. Issues #116/#117 remain open; [#32](https://github.com/izyuumi/everything/issues/32) retains deferred automated authorization, interoperability, replay/expiry, revocation, cancellation and reconnect assertions.
