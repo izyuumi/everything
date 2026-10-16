@@ -735,7 +735,7 @@ impl SettingsReceiveWork {
         &mut self,
         connection: &Arc<SettingsConnectionIdentity>,
         mut handoff: PairedResultHandoff,
-    ) -> Result<PendingSettingsReplyBuild, PairedResultAdmissionFailure> {
+    ) -> Result<PendingSettingsReplyBuild, Box<PairedResultAdmissionFailure>> {
         let request = match handoff.reply_request_mut() {
             Ok(request) => request,
             Err(error) => {
@@ -751,16 +751,16 @@ impl SettingsReceiveWork {
                         PairedResultAdmissionReason::Receive(ReplyBuildAdmissionReason::Bookkeeping)
                     }
                 };
-                return Err(PairedResultAdmissionFailure { reason, handoff });
+                return Err(Box::new(PairedResultAdmissionFailure { reason, handoff }));
             }
         };
         let permit = match self.reserve_reply_build(connection, request) {
             Ok(permit) => permit,
             Err(reason) => {
-                return Err(PairedResultAdmissionFailure {
+                return Err(Box::new(PairedResultAdmissionFailure {
                     reason: PairedResultAdmissionReason::Receive(reason),
                     handoff,
-                });
+                }));
             }
         };
         let slot = Arc::clone(&permit.slot);

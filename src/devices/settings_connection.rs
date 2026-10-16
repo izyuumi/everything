@@ -234,7 +234,7 @@ impl SettingsConnectionOwner<'_> {
     pub(super) fn try_adopt_paired_result(
         &mut self,
         handoff: PairedResultHandoff,
-    ) -> Result<PendingSettingsReplyBuild, PairedResultAdmissionFailure> {
+    ) -> Result<PendingSettingsReplyBuild, Box<PairedResultAdmissionFailure>> {
         self.owner
             .receive
             .try_adopt_paired_result(&self.identity, handoff)
