@@ -46,6 +46,12 @@ pub(super) fn encode(value: &impl Serialize) -> Result<Value, SchedulerError> {
 }
 
 pub(super) fn encode_checkpoint(checkpoint: &TaskCheckpoint) -> Result<Value, SchedulerError> {
+    if let Some(evidence) = &checkpoint.terminal_evidence {
+        evidence.validate_size()?;
+        if !checkpoint.task.status.is_terminal() {
+            return Err(SchedulerError::Invalid("live task has terminal evidence"));
+        }
+    }
     let bytes = serde_json::to_vec(checkpoint)?;
     let remaining = checkpoint
         .child_wait
@@ -74,6 +80,13 @@ pub(super) fn encode_checkpoint(checkpoint: &TaskCheckpoint) -> Result<Value, Sc
     };
     let reserve = delivery_reserve
         .checked_add(status_reserve)
+        .and_then(|reserve| {
+            reserve.checked_add(if checkpoint.task.status.is_terminal() {
+                0
+            } else {
+                super::evidence::MAX_TERMINAL_EVIDENCE_BYTES
+            })
+        })
         .ok_or(SchedulerError::Capacity("task checkpoint bytes"))?;
     if bytes
         .len()
@@ -132,6 +145,12 @@ fn decode(row: TaskRow) -> Result<StoredTask, SchedulerError> {
     let checkpoint: TaskCheckpoint = serde_json::from_value(row.checkpoint)?;
     definition.configuration.validate()?;
     definition.execution.validate()?;
+    if let Some(evidence) = &checkpoint.terminal_evidence {
+        if !checkpoint.task.status.is_terminal() {
+            return Err(SchedulerError::Invalid("live task has terminal evidence"));
+        }
+        evidence.validate(&definition, checkpoint.active_command)?;
+    }
     if let Some(wait) = &checkpoint.child_wait {
         super::inputs::validate_wait(wait)?;
         if wait.active_command_id != checkpoint.active_command {
@@ -302,6 +321,10 @@ pub(super) fn retire_provider_unavailable(
         command_id: next.active_command,
         retired_at: now,
     });
+    next.terminal_evidence = Some(super::evidence::TerminalTaskEvidence::no_attempt(
+        &task.definition,
+        next.active_command,
+    )?);
     let payload = encode_checkpoint(&next)?;
     let mut connection = store.connection()?;
     let transaction =
