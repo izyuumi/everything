@@ -68,6 +68,12 @@ The #73 replacement extracts the reviewed task-state and exact permission-decisi
 
 Rust 1.88 formatting, source/manifest/schema/link inspection and independent source review apply to this focused replacement. Fresh exact-head compilation, required CI, new caller-drop/runtime verification and integration remain pending. The [publication contract](../contracts/control-events.md#focused-replacement-validation) qualifies earlier schema-seven failure-only Host/relay/replica and seeded rejection observations. Successful inference, Apple interoperability, complete transient transition history and security readiness are not claimed. Automated assertions remain deferred to [#32](https://github.com/izyuumi/everything/issues/32).
 
+## Terminal accounting prerequisite checkpoint, 2026-10-16
+
+This prerequisite is based on reviewed #83 `7b67e066d64bf3cb902272a68b6209e8972aef5d` and normally merges frozen #85 `8626d3151aa5b0af1bc72b4b5019a67e1a99c80d`. It adds bounded private terminal evidence to the Scheduler's existing task checkpoint before terminal publication, preserving native preparation/retirement, output reservation, whole-Agent/Store ownership, publication and shutdown guards. An additional 1024-byte reservation covers the evidence field under the unchanged task ceiling; the public TaskSnapshot and schemas remain unchanged.
+
+The actual #86 consumer is not included here and still requires adaptation before its reported mutable-conversation accounting race is resolved in application behavior. The consumer must validate the original immutable binding and use durable evidence; legacy unavailable accounting consumes full conservative allowances with known=false, independently of known effects and typed/journal uncertainty. This source has formatting, bounded serialization analysis and ownership/parity inspection only. Fresh exact-head CI, compilation/static gates and disposable terminal/reentry/restart/caller-drop validation remain pending. Earlier runtime observations do not verify this prerequisite or the future consumer, and automated assertions remain deferred to #32.
+
 ## Dependency graph and ownership
 
 | Issue | Objective | Prerequisites | State |
