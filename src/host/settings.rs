@@ -4,6 +4,7 @@ pub(super) mod agent_tools;
 mod authority;
 pub mod contract;
 mod driver;
+pub(crate) mod grants;
 pub mod native;
 mod operations;
 pub mod service;
