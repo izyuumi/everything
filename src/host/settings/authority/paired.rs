@@ -9,8 +9,9 @@ use uuid::Uuid;
 
 use crate::crypto::DevicePublicKeys;
 use crate::devices::{
-    AuthenticatedSettingsCommandSource, BindingHistoryState, BindingIntent, BindingLifetime,
-    OwnedCommittedSettingsBind, SettingsConnectionIdentity, SettingsHostIdentity,
+    AuthenticatedSettingsAccessSource, AuthenticatedSettingsCommandSource, BindingHistoryState,
+    BindingIntent, BindingLifetime, OwnedCommittedSettingsBind, SettingsAccessStatusIntent,
+    SettingsConnectionIdentity, SettingsHostIdentity,
 };
 use crate::protocol::{DeviceId, UnixMillis};
 use crate::storage::Store;
@@ -21,11 +22,15 @@ use super::Authority;
 
 const MAX_PAIRED_PARENTS: usize = 32;
 const MAX_PEER_CONNECTION_PARENTS: usize = 4;
+const MAX_ACCESS_QUERIES: usize = 512;
+const MAX_PEER_ACCESS_QUERIES: usize = 64;
 
 #[derive(Default)]
 pub(super) struct PairedParents {
     host: Option<Arc<SettingsHostIdentity>>,
     entries: BTreeMap<(Uuid, DeviceId, Uuid), ParentEntry>,
+    access_connection: Option<Arc<SettingsConnectionIdentity>>,
+    access_queries: BTreeMap<(DeviceId, Uuid), AccessQuery>,
 }
 
 struct ParentEntry {
@@ -731,4 +736,166 @@ impl Authority {
             monotonic,
         ))
     }
+}
+
+struct AccessQuery {
+    identity: Arc<()>,
+    intent: SettingsAccessStatusIntent,
+    peer: DevicePublicKeys,
+    floor: (UnixMillis, Instant),
+    deadline: Instant,
+    observed_wall: UnixMillis,
+    observed_monotonic: Instant,
+}
+
+impl Authority {
+    pub(in crate::host::settings) fn register_access_query(
+        &self,
+        host: &Arc<SettingsHostIdentity>,
+        source: &AuthenticatedSettingsAccessSource,
+        stop: &CancellationToken,
+    ) -> Result<(), SettingsServiceError> {
+        let mut sessions = self
+            .sessions
+            .lock()
+            .map_err(|_| SettingsServiceError::Poisoned)?;
+        check_access_host(self, &sessions, host, source, stop)?;
+        let paired = &mut sessions.paired;
+        if let Some(original) = &paired.access_connection {
+            if !Arc::ptr_eq(original, source.connection()) {
+                if original.is_live()
+                    || !Arc::ptr_eq(original.host_identity(), host)
+                    || original.connection_epoch() == source.connection().connection_epoch()
+                {
+                    return Err(SettingsServiceError::Conflict);
+                }
+                paired.access_queries.clear();
+                paired.access_connection = Some(Arc::clone(source.connection()));
+            }
+        } else {
+            if !paired.access_queries.is_empty() {
+                return Err(SettingsServiceError::CorruptJournal);
+            }
+            paired.access_connection = Some(Arc::clone(source.connection()));
+        }
+        let intent = source.intent();
+        let peer = source.verified_peer_keys();
+        let key = (peer.device_id, intent.query_id);
+        if let Some(original) = paired.access_queries.get(&key) {
+            if original.intent != *intent || original.peer != *peer {
+                return Err(SettingsServiceError::Conflict);
+            }
+            return Ok(());
+        }
+        if paired.access_queries.len() >= MAX_ACCESS_QUERIES
+            || paired
+                .access_queries
+                .values()
+                .filter(|query| query.peer == *peer)
+                .count()
+                >= MAX_PEER_ACCESS_QUERIES
+        {
+            return Err(SettingsServiceError::Capacity);
+        }
+        let floor = source.receipt_floor();
+        paired.access_queries.insert(
+            key,
+            AccessQuery {
+                identity: Arc::new(()),
+                intent: intent.clone(),
+                peer: peer.clone(),
+                floor,
+                deadline: source.original_deadline(),
+                observed_wall: floor.0,
+                observed_monotonic: floor.1,
+            },
+        );
+        Ok(())
+    }
+
+    pub(in crate::host::settings) fn observe_access_query(
+        &self,
+        host: &Arc<SettingsHostIdentity>,
+        source: &AuthenticatedSettingsAccessSource,
+        stop: &CancellationToken,
+    ) -> Result<(SettingsGrantOwner, Arc<()>, UnixMillis, Instant), SettingsServiceError> {
+        let mut sessions = self
+            .sessions
+            .lock()
+            .map_err(|_| SettingsServiceError::Poisoned)?;
+        check_access_host(self, &sessions, host, source, stop)?;
+        let wall = UnixMillis::now()?;
+        let monotonic = Instant::now();
+        let paired = &mut sessions.paired;
+        if paired
+            .access_connection
+            .as_ref()
+            .is_none_or(|original| !Arc::ptr_eq(original, source.connection()))
+        {
+            return Err(SettingsServiceError::OutsideScope);
+        }
+        let intent = source.intent();
+        let peer = source.verified_peer_keys();
+        let query = paired
+            .access_queries
+            .get_mut(&(peer.device_id, intent.query_id))
+            .ok_or(SettingsServiceError::NotFound)?;
+        if query.intent != *intent || query.peer != *peer {
+            return Err(SettingsServiceError::Conflict);
+        }
+        let floor = source.receipt_floor();
+        if wall < query.floor.0
+            || monotonic < query.floor.1
+            || wall < floor.0
+            || monotonic < floor.1
+            || wall < query.observed_wall
+            || monotonic < query.observed_monotonic
+            || wall < intent.issued_at
+        {
+            return Err(SettingsServiceError::OutsideScope);
+        }
+        if wall >= intent.expires_at
+            || monotonic >= query.deadline
+            || monotonic >= source.original_deadline()
+        {
+            return Err(SettingsServiceError::Expired);
+        }
+        query.observed_wall = wall;
+        query.observed_monotonic = monotonic;
+        Ok((
+            SettingsGrantOwner {
+                host_id: self.host_id,
+                principal_id: self.owner_principal,
+            },
+            Arc::clone(&query.identity),
+            wall,
+            monotonic,
+        ))
+    }
+}
+
+fn check_access_host(
+    authority: &Authority,
+    sessions: &super::Sessions,
+    host: &Arc<SettingsHostIdentity>,
+    source: &AuthenticatedSettingsAccessSource,
+    stop: &CancellationToken,
+) -> Result<(), SettingsServiceError> {
+    if sessions.closed || stop.is_cancelled() {
+        return Err(SettingsServiceError::Stopped);
+    }
+    if sessions
+        .paired
+        .host
+        .as_ref()
+        .is_none_or(|registered| !Arc::ptr_eq(registered, host))
+        || !Arc::ptr_eq(source.connection().host_identity(), host)
+        || host.host_id() != authority.host_id
+        || source.intent().host_id != authority.host_id
+        || !host.is_live()
+        || !source.connection().is_live()
+    {
+        return Err(SettingsServiceError::OutsideScope);
+    }
+    Ok(())
 }

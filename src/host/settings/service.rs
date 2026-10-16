@@ -19,8 +19,8 @@ pub(super) use paired::PairedWriteAdmission;
 #[cfg(unix)]
 pub(crate) use paired::{
     OriginalReplySource, PairedParentAdmission, PairedSettingsParent, PairedUpdateOutcome,
-    QualifiedBindReply, QualifiedOriginalReply, QualifiedSettingsCommand, SettingsReceiptAuthority,
-    SettingsReplyProjectionError,
+    QualifiedBindReply, QualifiedOriginalReply, QualifiedSettingsAccess, QualifiedSettingsCommand,
+    SettingsAccessQualificationError, SettingsReceiptAuthority, SettingsReplyProjectionError,
 };
 pub use pairing::{
     NativePairingAcceptance, NativePairingAccess, NativePairingApprovalInput,
