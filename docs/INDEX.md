@@ -4,7 +4,7 @@ Read [AGENTS.md](../AGENTS.md), then [implementation status](status/implementati
 
 ## Architecture
 
-[Overview](architecture/overview.md) · [Runtime](architecture/runtime.md) · [Agents](architecture/agents.md) · [Scheduling](architecture/scheduling.md) · [Models](architecture/models.md) · [Tools](architecture/tools.md) · [Built-ins](architecture/builtin-tools.md) · [MCP](architecture/mcp.md) · [Discovery](architecture/selector.md) · [System One](architecture/system-one.md) · [Permissions](architecture/permissions.md) · [Broker](architecture/broker.md) · [Context](architecture/context.md) · [Memory](architecture/memory.md) · [Wiki maintenance](architecture/consolidation.md) · [Hybrid retrieval](architecture/hybrid.md) · [EmbeddingGemma 2](architecture/embeddinggemma2.md) · [Transport](architecture/transport.md) · [Devices](architecture/devices.md) · [Relay](architecture/relay.md) · [Service](architecture/service.md) · [Headless host](architecture/host.md) · [Host settings](architecture/host-settings.md) · [Security](architecture/security.md)
+[Overview](architecture/overview.md) · [Runtime](architecture/runtime.md) · [Agents](architecture/agents.md) · [Scheduling](architecture/scheduling.md) · [Models](architecture/models.md) · [Tools](architecture/tools.md) · [Built-ins](architecture/builtin-tools.md) · [MCP](architecture/mcp.md) · [Discovery](architecture/selector.md) · [System One](architecture/system-one.md) · [Permissions](architecture/permissions.md) · [Broker](architecture/broker.md) · [Context](architecture/context.md) · [Memory](architecture/memory.md) · [Wiki maintenance](architecture/consolidation.md) · [Hybrid retrieval](architecture/hybrid.md) · [EmbeddingGemma 2](architecture/embeddinggemma2.md) · [Transport](architecture/transport.md) · [Devices](architecture/devices.md) · [Relay](architecture/relay.md) · [Service](architecture/service.md) · [Headless host](architecture/host.md) · [Host settings](architecture/host-settings.md) · [macOS client](architecture/macos-client.md) · [Security](architecture/security.md)
 
 ## Contracts
 
@@ -12,7 +12,7 @@ Read [AGENTS.md](../AGENTS.md), then [implementation status](status/implementati
 
 ## Development
 
-[Setup](development/setup.md) · [CLI](development/cli.md) · [Headless host](development/host.md) · [System One setup](development/system-one.md) · [Conventions](development/conventions.md) · [Workflows](development/workflows.md) · [Backlog synchronization](development/backlog-sync.md) · [Validation](development/validation.md) · [Embedding benchmark](development/embedding-benchmark.md) · [Scheduler](development/scheduler.md)
+[Setup](development/setup.md) · [CLI](development/cli.md) · [Headless host](development/host.md) · [System One setup](development/system-one.md) · [macOS client](development/macos-client.md) · [Conventions](development/conventions.md) · [Workflows](development/workflows.md) · [Backlog synchronization](development/backlog-sync.md) · [Validation](development/validation.md) · [Embedding benchmark](development/embedding-benchmark.md) · [Scheduler](development/scheduler.md)
 
 ## Decisions
 
