@@ -459,7 +459,7 @@ fn descriptor(tool: SettingsToolName) -> ToolDescriptor {
             (json!({}), json!([]))
         }
         SettingsToolName::Update => (
-            json!({"expected_revision":{"type":"integer","minimum":1},"changes":{"type":"array","minItems":1,"maxItems":32,"items":{"type":"object","additionalProperties":false,"required":["key","value"],"properties":{"key":{"type":"string","maxLength":128},"value":{"type":"object"}}}}}),
+            json!({"expected_revision":{"type":"integer","minimum":1,"maximum":i64::MAX},"changes":{"type":"array","minItems":1,"maxItems":8,"items":change_schema()}}),
             json!(["expected_revision", "changes"]),
         ),
         SettingsToolName::RequestAction => (
@@ -471,7 +471,7 @@ fn descriptor(tool: SettingsToolName) -> ToolDescriptor {
             json!([]),
         ),
         SettingsToolName::DevicesRevoke => (
-            json!({"device_id":{"type":"string","format":"uuid"},"public_keys":{"type":"object"}}),
+            json!({"device_id":{"type":"string","format":"uuid"},"public_keys":{"type":"object","additionalProperties":false,"required":["device_id","signing_key","encryption_key"],"properties":{"device_id":{"type":"string","format":"uuid"},"signing_key":{"type":"string","minLength":44,"maxLength":44},"encryption_key":{"type":"string","minLength":44,"maxLength":44}}}}),
             json!(["device_id", "public_keys"]),
         ),
     };
@@ -491,6 +491,39 @@ fn descriptor(tool: SettingsToolName) -> ToolDescriptor {
         read_only: matches!(tool, SettingsToolName::List | SettingsToolName::Get | SettingsToolName::DevicesList),
         concurrency: ToolConcurrency::Exclusive,
     }
+}
+
+fn change_schema() -> Value {
+    let model = json!({"type":"object","additionalProperties":false,"required":["provider","endpoint","model"],"properties":{
+        "provider":{"type":"string","enum":["openai","anthropic"]},
+        "endpoint":{"oneOf":[
+            {"type":"object","additionalProperties":false,"required":["kind"],"properties":{"kind":{"const":"official"}}},
+            {"type":"object","additionalProperties":false,"required":["kind","url"],"properties":{"kind":{"const":"loopback"},"url":{"type":"string","maxLength":4096}}}
+        ]},
+        "model":{"type":"string","minLength":1,"maxLength":256}
+    }});
+    let selection = json!({"oneOf":[
+        {"type":"object","additionalProperties":false,"required":["kind"],"properties":{"kind":{"const":"local"}}},
+        {"type":"object","additionalProperties":false,"required":["kind","endpoint","model"],"properties":{"kind":{"const":"system_one"},"endpoint":{"type":"string","minLength":1,"maxLength":4096},"model":{"type":"string","minLength":1,"maxLength":256}}}
+    ]});
+    json!({"oneOf":[
+        {"type":"object","additionalProperties":false,"required":["key","value"],"properties":{
+            "key":{"const":"models.selection"},
+            "value":{"type":"object","additionalProperties":false,"required":["kind","selection"],"properties":{"kind":{"const":"model"},"selection":{"oneOf":[{"type":"null"},model]}}}
+        }},
+        {"type":"object","additionalProperties":false,"required":["key","value"],"properties":{
+            "key":{"const":"tools.selection"},
+            "value":{"type":"object","additionalProperties":false,"required":["kind","selection"],"properties":{"kind":{"const":"tool_selection"},"selection":selection}}
+        }},
+        {"type":"object","additionalProperties":false,"required":["key","value"],"properties":{
+            "key":{"const":"memory.embeddings.enabled"},
+            "value":{"type":"object","additionalProperties":false,"required":["kind","value"],"properties":{"kind":{"const":"boolean"},"value":{"type":"boolean"}}}
+        }},
+        {"type":"object","additionalProperties":false,"required":["key","value"],"properties":{
+            "key":{"const":"memory.embeddings.dimensions"},
+            "value":{"type":"object","additionalProperties":false,"required":["kind","value"],"properties":{"kind":{"const":"dimensions"},"value":{"type":["integer","null"],"minimum":1,"maximum":65536}}}
+        }}
+    ]})
 }
 
 fn rejected(tool: SettingsToolName) -> ToolError {
