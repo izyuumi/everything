@@ -1,6 +1,7 @@
 mod actor;
 pub(crate) mod evidence;
 mod inputs;
+mod remote;
 mod repository;
 mod schedule_context;
 mod tools;
@@ -9,6 +10,11 @@ mod worker;
 mod workspace;
 
 pub use actor::{Scheduler, ShutdownReport};
+pub(crate) use remote::RemoteResultCommit;
+pub use remote::{
+    RemoteBudgetCharge, RemoteDispatchPermit, RemoteOwnerApproval, RemoteTaskAdmission,
+    RemoteTaskBinding, RemoteTaskPhase, RemoteTaskSnapshot, RemoteTaskSubmission,
+};
 pub use schedule_context::ScheduleCallerContext;
 pub use tools::{SCHEDULER_TOOL_NAMES, SchedulerToolBinding, SchedulerTools};
 pub use types::{

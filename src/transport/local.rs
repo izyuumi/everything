@@ -279,7 +279,7 @@ impl LocalResponse {
                 LocalRequestPayload::OwnerOperation { operation },
                 LocalResponsePayload::OwnerOperationResult { result },
             ) => result
-                .validate_for(operation)
+                .validate_for_request(operation, request.request_id)
                 .map_err(LocalError::Protocol)?,
             (
                 LocalRequestPayload::WaitCommand { command_id, .. },

@@ -43,6 +43,8 @@ The event payload supports conversation creation, appended messages, assistant t
 
 The bounded sync payload contract below reuses these envelopes. Network framing, encryption, authenticated event delivery, and event-store access belong to their transport and synchronization implementations.
 
+`remote_task_finished` carries `RemoteTaskReport`: original local task/command and delegation/attempt IDs, executor attribution, immutable manifest/source digests, outcome, informational usage and artifact count. It contains no artifact bytes or provider continuation and is neither a user instruction nor an assistant message. Only the real authenticated Worker capability can enter the [atomic Agent/Scheduler result transaction](remote-result-admission.md). Local acceptance time is authoritative; reported remote finish time remains untrusted external metadata. Known outcomes settle the dedicated original task, while Unknown retains its reservation and full charge. Receipt replay preserves the original event and cannot overwrite later conversation work. Public decoding validates data shape, never authentication or settlement authority.
+
 ## Encrypted synchronization payloads
 
 Issue [#7](https://github.com/izyuumi/everything/issues/7) uses these structures inside authenticated encrypted application payloads. Conversation IDs, event sequences, commands, and events must not become plaintext relay metadata. Types and validation alone do not authenticate a sender or perform synchronization.
@@ -83,6 +85,8 @@ Tool argument schema validation, names, execution limits, result redaction, and 
 `transition()` rejects other transitions, decreasing update timestamps, failed states without a failure, and nonfailed states with a failure. It changes no fields on rejection. Returning an interrupted task to `queued` supports a host recovery decision; it does not by itself resume or retry execution. Terminal task records are immutable under this API. A deliberate retry creates a new task and command identity.
 
 Struct fields are public for integration and serialization. Deserialization guarantees typed IDs, timestamps, sequence, and schema version; it does not enforce cross-field task consistency, authorization, message-role policy, or historical transitions. The host must use validated constructors and transitions when modifying durable state and validate any imported records against its journal.
+
+The separate trusted remote-result path settles an exact root remote reservation from Waiting through its atomic task/conversation transaction. This narrow external-task operation does not add Waiting-to-Completed to the general `TaskRecord::transition` or Store transition API. An attributed report alone cannot enter it.
 
 ## Validation limits
 
