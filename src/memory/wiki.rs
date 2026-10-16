@@ -7,6 +7,7 @@ use cap_std::ambient_authority;
 use cap_std::fs::OpenOptionsExt;
 use cap_std::fs::{Dir, OpenOptions};
 use pulldown_cmark::{Event, LinkType, Options, Parser, Tag, TagEnd};
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 use uuid::Uuid;
@@ -57,7 +58,8 @@ impl Default for WikiLimits {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Provenance {
     pub page_path: String,
     pub start_line: usize,

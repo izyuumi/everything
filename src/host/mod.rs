@@ -1,9 +1,13 @@
 pub mod client;
 mod commands;
+pub mod composition;
 pub mod credentials;
 pub mod inbox;
+pub mod mcp;
+pub mod memory;
 mod owner;
 pub mod providers;
 pub mod publication;
 pub mod runtime;
+pub mod selection;
 pub mod settings;
