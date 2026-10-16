@@ -1,5 +1,7 @@
+use std::cell::RefCell;
 use std::collections::BTreeSet;
 use std::fmt;
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -15,8 +17,8 @@ use crate::protocol::{CommandId, ConversationId, DeviceId, UnixMillis};
 
 use super::super::actions::{
     ActionClaim, NativeActionAdmissionResult, NativeActionInvocation, NativeActionReference,
-    NativeHostEffectAdmission, NativePairingLifecycle, PairingApprovalIdentity,
-    PendingPairingApproval, PendingPairingLease, SettingsActionTarget,
+    NativePairingLifecycle, PairingApprovalIdentity, PendingPairingApproval, PendingPairingLease,
+    SettingsActionTarget,
 };
 use super::super::authority::{CallerSource, SettingsCaller, SettingsOperationOrigin};
 use super::super::contract::{
@@ -200,6 +202,63 @@ pub struct NativePairingApprovalResult {
     pub acceptance: Option<NativePairingAcceptance>,
 }
 
+struct PairingApprovalCleanup {
+    retirement_attempted: bool,
+    errors: Vec<SettingsServiceError>,
+}
+
+struct PairingApprovalGuard<'a> {
+    cleanup: &'a RefCell<PairingApprovalCleanup>,
+    armed: bool,
+    _mutation: OwnedMutexGuard<()>,
+    pairing: Arc<PendingPairingLease>,
+}
+
+impl Drop for PairingApprovalGuard<'_> {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        self.cleanup.borrow_mut().retirement_attempted = true;
+        match self.pairing.state.lock() {
+            Ok(mut state) => {
+                state.invitation = None;
+                if let Some(approval) = &mut state.approval {
+                    approval.delivery_closed = true;
+                    approval.acceptance = None;
+                }
+                if state.lifecycle == NativePairingLifecycle::Retained {
+                    state.lifecycle = NativePairingLifecycle::CancellationPending;
+                }
+            }
+            Err(_) => self
+                .cleanup
+                .borrow_mut()
+                .errors
+                .push(SettingsServiceError::Poisoned),
+        }
+        match self
+            .pairing
+            .endpoint
+            .retire_pending_pairing(self.pairing.pairing_id)
+        {
+            Ok(()) => match self.pairing.state.lock() {
+                Ok(mut state) => {
+                    if state.lifecycle == NativePairingLifecycle::CancellationPending {
+                        state.lifecycle = NativePairingLifecycle::NoLongerPending;
+                    }
+                }
+                Err(_) => self
+                    .cleanup
+                    .borrow_mut()
+                    .errors
+                    .push(SettingsServiceError::Poisoned),
+            },
+            Err(error) => self.cleanup.borrow_mut().errors.push(error.into()),
+        }
+    }
+}
+
 impl NativePairingApprovalResult {
     pub(crate) fn validate_for_input(
         &self,
@@ -238,20 +297,30 @@ impl NativePairingApprovalResult {
         {
             return Err("pairing approval result binding mismatch");
         }
+        if matches!(
+            self.operation.phase,
+            SettingsOperationPhase::Finished {
+                result: super::super::contract::SettingsOperationResult {
+                    state: SettingsOperationState::Completed { .. },
+                    ..
+                }
+            }
+        ) && !matches!(self.host_pin, NativePairingPinState::Committed { .. })
+        {
+            return Err("completed pairing approval has no original pin");
+        }
         if let NativePairingPinState::Committed {
             label,
             pinned_at,
             revoked_at,
             ..
         } = &self.host_pin
-        {
-            if label.is_empty()
+            && (label.trim().is_empty()
                 || label.len() > 256
                 || label.chars().any(char::is_control)
-                || revoked_at.is_some_and(|time| time.get() < pinned_at.get())
-            {
-                return Err("invalid pairing pin metadata");
-            }
+                || revoked_at.is_some_and(|time| time.get() < pinned_at.get()))
+        {
+            return Err("invalid pairing pin metadata");
         }
         if let Some(acceptance) = &self.acceptance {
             let acceptance = &acceptance.0.0;
@@ -308,8 +377,41 @@ impl SettingsService {
             _=cancellation.cancelled()=>return Err(SettingsServiceError::Cancelled),
             mutation=Arc::clone(&self.core.mutation).lock_owned()=>mutation,
         };
-        self.blocking(move |core| core.approve_pairing_owned(caller, input, cancellation, mutation))
-            .await
+        self.blocking(move |core| {
+            let expected = input.identity(core.authority.host_id)?;
+            let origin = core.authority.origin(&caller);
+            let cleanup = RefCell::new(PairingApprovalCleanup {
+                retirement_attempted: false,
+                errors: Vec::with_capacity(2),
+            });
+            let mut result = match catch_unwind(AssertUnwindSafe(|| {
+                core.approve_pairing_owned(caller, input, cancellation, mutation, &cleanup)
+            })) {
+                Ok(result) => result,
+                Err(_) => Err(SettingsServiceError::OutcomeUnknown {
+                    request_id: expected.request_id,
+                    cause: Box::new(SettingsServiceError::Worker),
+                    repair_error: None,
+                }),
+            };
+            let mut cleanup = cleanup.into_inner();
+            if cleanup.retirement_attempted
+                && result.is_err()
+                && let Err(error) = core.repair_failed_pairing_approval(&expected, origin)
+            {
+                cleanup.errors.push(error);
+            }
+            for error in cleanup.errors {
+                let cause = result.err().unwrap_or(SettingsServiceError::Worker);
+                result = Err(SettingsServiceError::OutcomeUnknown {
+                    request_id: expected.request_id,
+                    cause: Box::new(cause),
+                    repair_error: Some(Box::new(error)),
+                });
+            }
+            result
+        })
+        .await
     }
 
     pub(crate) async fn native_pairing_approval(
@@ -414,6 +516,7 @@ impl ServiceCore {
         input: NativePairingApprovalInput,
         cancellation: CancellationToken,
         mutation: OwnedMutexGuard<()>,
+        cleanup: &RefCell<PairingApprovalCleanup>,
     ) -> Result<NativePairingApprovalResult, SettingsServiceError> {
         let retained_mutation = mutation;
         self.authority.validate(&caller, true)?;
@@ -499,6 +602,12 @@ impl ServiceCore {
                 });
             }
         }
+        let mut approval_guard = PairingApprovalGuard {
+            cleanup,
+            armed: true,
+            _mutation: retained_mutation,
+            pairing: Arc::clone(&pairing),
+        };
         let record = if let Some(record) = existing {
             record
         } else {
@@ -563,30 +672,23 @@ impl ServiceCore {
         if let Err(error) = self.start_host_effect(&admission) {
             return Err(self.failed_claim_bookkeeping(&claim, error));
         }
-        let retained_effect = NativeHostEffectAdmission {
-            _mutation: retained_mutation,
-            claim: admission.claim,
-        };
         let outcome = (|| {
             self.check_live_pairing(&caller, &pairing, &approval)?;
             {
-                let state = retained_effect
-                    .claim
+                let state = claim
                     .state
                     .lock()
                     .map_err(|_| SettingsServiceError::Poisoned)?;
                 if state.closed
                     || !state.host_effect_started
-                    || retained_effect.claim.cancellation.is_cancelled()
+                    || claim.cancellation.is_cancelled()
                     || cancellation.is_cancelled()
-                    || Instant::now() >= retained_effect.claim.deadline
-                    || UnixMillis::now()?.get()
-                        >= retained_effect.claim.identity.binding.expires_at.get()
+                    || Instant::now() >= claim.deadline
+                    || UnixMillis::now()?.get() >= claim.identity.binding.expires_at.get()
                 {
                     return Err(SettingsServiceError::Expired);
                 }
-                self.authority
-                    .check_origin(&retained_effect.claim.identity.origin)?;
+                self.authority.check_origin(&claim.identity.origin)?;
             }
             let acceptance = self.endpoint.approve_pairing(
                 &input.request.0.0,
@@ -597,17 +699,18 @@ impl ServiceCore {
                 )?,
                 UnixMillis::now()?,
             )?;
-            self.cache_pairing_acceptance(&retained_effect, &pairing, &approval, acceptance)?;
+            self.cache_pairing_acceptance(&claim, &pairing, &approval, acceptance)?;
             Ok(())
         })();
-        self.settle_pairing_approval(&retained_effect, &pairing, &approval, outcome)?;
+        self.settle_pairing_approval(&claim, &pairing, &approval, outcome)?;
+        approval_guard.armed = false;
         let record = self.repository.get(input.operation_id)?;
         self.pairing_approval_result(&caller, &record)
     }
 
     fn cache_pairing_acceptance(
         &self,
-        effect: &NativeHostEffectAdmission,
+        claim: &Arc<ActionClaim>,
         pairing: &PendingPairingLease,
         approval: &PairingApprovalIdentity,
         acceptance: PairingAcceptance,
@@ -631,9 +734,9 @@ impl ServiceCore {
             Err(error) => return Err(error),
         };
         let live = source_live
-            && !effect.claim.cancellation.is_cancelled()
-            && Instant::now() < effect.claim.deadline
-            && UnixMillis::now()?.get() < effect.claim.identity.binding.expires_at.get()
+            && !claim.cancellation.is_cancelled()
+            && Instant::now() < claim.deadline
+            && UnixMillis::now()?.get() < claim.identity.binding.expires_at.get()
             && !pairing._session.cancellation.is_cancelled()
             && Instant::now() < pairing.deadline
             && UnixMillis::now()?.get() < pairing.expires_at.get()
@@ -663,7 +766,7 @@ impl ServiceCore {
 
     fn settle_pairing_approval(
         &self,
-        effect: &NativeHostEffectAdmission,
+        claim: &Arc<ActionClaim>,
         pairing: &Arc<PendingPairingLease>,
         approval: &PairingApprovalIdentity,
         outcome: Result<(), SettingsServiceError>,
@@ -681,10 +784,9 @@ impl ServiceCore {
                 None,
             ),
             (Ok(()), Ok(None)) => {
-                return Err(self.failed_claim_bookkeeping(
-                    &effect.claim,
-                    SettingsServiceError::CorruptJournal,
-                ));
+                return Err(
+                    self.failed_claim_bookkeeping(&claim, SettingsServiceError::CorruptJournal)
+                );
             }
             (Err(cause), Ok(None)) => {
                 let repair = pairing.cancel();
@@ -714,12 +816,12 @@ impl ServiceCore {
                     },
                 };
                 let repair = self.repository.finish(
-                    &effect.claim.identity,
-                    effect.claim.native.native_request_id,
-                    self.result(&effect.claim.identity, SettingsOperationState::Unknown),
+                    &claim.identity,
+                    claim.native.native_request_id,
+                    self.result(&claim.identity, SettingsOperationState::Unknown),
                     None,
                 );
-                let cleanup = self.release_approval_claim(&effect.claim);
+                let cleanup = self.release_approval_claim(&claim);
                 let repair_error = match (repair, cleanup) {
                     (Err(error), Err(cleanup)) => {
                         Some(Box::new(SettingsServiceError::OutcomeUnknown {
@@ -742,9 +844,9 @@ impl ServiceCore {
         if !matches!(record.phase(), SettingsOperationPhase::Finished { .. }) {
             self.repository
                 .finish(
-                    &effect.claim.identity,
-                    effect.claim.native.native_request_id,
-                    self.result(&effect.claim.identity, state),
+                    &claim.identity,
+                    claim.native.native_request_id,
+                    self.result(&claim.identity, state),
                     None,
                 )
                 .map_err(|cause| SettingsServiceError::OutcomeUnknown {
@@ -763,12 +865,13 @@ impl ServiceCore {
             }
             cell.invitation = None;
         }
-        self.release_approval_claim(&effect.claim)
-            .map_err(|cause| SettingsServiceError::OutcomeUnknown {
+        self.release_approval_claim(&claim).map_err(|cause| {
+            SettingsServiceError::OutcomeUnknown {
                 request_id: approval.request_id,
                 cause: Box::new(cause),
                 repair_error: None,
-            })?;
+            }
+        })?;
         self.release_pairing(pairing)?;
         if let Some(cause) = failure {
             return Err(cause);
@@ -877,6 +980,64 @@ impl ServiceCore {
         Ok(result)
     }
 
+    fn repair_failed_pairing_approval(
+        &self,
+        approval: &PairingApprovalIdentity,
+        origin: SettingsOperationOrigin,
+    ) -> Result<(), SettingsServiceError> {
+        let record = match self.repository.get(approval.request_id) {
+            Ok(record) => record,
+            Err(SettingsServiceError::NotFound) => return Ok(()),
+            Err(error) => return Err(error),
+        };
+        if record.identity.target
+            != SettingsActionTarget::PairingApproval(Box::new(approval.clone()))
+            || record.identity.origin != origin
+        {
+            return Err(SettingsServiceError::Conflict);
+        }
+        if !self.recover_pairing_approval(&record)?
+            && !matches!(record.phase(), SettingsOperationPhase::Finished { .. })
+        {
+            self.repository.finish_unadmitted(
+                &record.identity,
+                self.result(
+                    &record.identity,
+                    SettingsOperationState::Failed {
+                        reason: SettingsFailureReason::NativeActionFailed,
+                    },
+                ),
+            )?;
+        }
+        let claim = self
+            .claims
+            .lock()
+            .map_err(|_| SettingsServiceError::Poisoned)?
+            .get(&approval.request_id)
+            .cloned();
+        if let Some(claim) = claim {
+            if claim.identity != record.identity
+                || claim.native.native_request_id != approval.native_request_id
+            {
+                return Err(SettingsServiceError::Conflict);
+            }
+            self.release_approval_claim(&claim)?;
+        }
+        self.pending
+            .lock()
+            .map_err(|_| SettingsServiceError::Poisoned)?
+            .remove(&approval.request_id);
+        if let Some(pairing) = self.pairing(approval.creation_operation_id)? {
+            if pairing.pairing_id != approval.pairing_id
+                || pairing.session_id != record.identity.binding.client_session_id
+            {
+                return Err(SettingsServiceError::Conflict);
+            }
+            self.release_pairing(&pairing)?;
+        }
+        Ok(())
+    }
+
     pub(super) fn recover_pairing_approval(
         &self,
         record: &OperationRecord,
@@ -887,6 +1048,7 @@ impl ServiceCore {
         let SettingsOperationPhase::InFlight { native_request_id } = record.phase() else {
             return Ok(false);
         };
+        self.check_scope(&record.identity.binding.scope)?;
         self.check_approval_creation(record, approval)?;
         if *native_request_id != approval.native_request_id {
             return Err(SettingsServiceError::CorruptJournal);

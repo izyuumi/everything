@@ -59,6 +59,18 @@ pub enum DeviceSettingsRevocation {
 }
 
 impl DeviceEndpoint {
+    pub(crate) fn retire_pending_pairing(&self, pairing_id: MessageId) -> Result<(), DeviceError> {
+        if self.inner.role != EndpointRole::Host {
+            return Err(DeviceError::AccessDenied);
+        }
+        self.inner
+            .pairings
+            .lock()
+            .map_err(|_| DeviceError::Poisoned)?
+            .remove(&pairing_id);
+        Ok(())
+    }
+
     pub(crate) fn pairing_approval_state(
         &self,
         pairing_id: MessageId,

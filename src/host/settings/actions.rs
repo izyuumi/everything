@@ -456,6 +456,7 @@ impl PendingPairingLease {
                 approval.delivery_closed = true;
                 approval.acceptance = None;
             }
+            state.invitation = None;
             match state.lifecycle {
                 NativePairingLifecycle::Retained | NativePairingLifecycle::CancellationPending => {
                     state.lifecycle = NativePairingLifecycle::CancellationPending
