@@ -326,7 +326,10 @@ impl super::ServiceCore {
         Ok(OwnerSettingsWriteResult {
             operation: record.inspection(),
             settings,
-            restart_required: request.restart_required,
+            restart_required: request.restart_required
+                && record.write().is_some_and(|write| {
+                    write.resolution == Some(SettingsWriteResolution::Applied)
+                }),
         })
     }
 }
