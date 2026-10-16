@@ -27,6 +27,8 @@ The existing `EverythingMac build and analyze` and `EverythingIOS build and anal
 
 Configure repository rules to require `rust (ubuntu-latest)` and `Apple compatibility`, then verify the actual settings. Workflow source alone does not enable branch protection. Existing protected contexts must be reconciled through authorized settings rather than bypassed or removed implicitly. Record the current exact-head checks before integration; historical SDK runs do not cover new Swift sources.
 
+At the 2026-10-16 16:05 UTC settings audit, main was unprotected, with no required contexts or rules. The coordinator's authorized attempt to require both contexts failed with HTTP 403, `Resource not accessible by integration`; the subsequent settings read confirmed no change. Server enforcement remains unconfigured and requires integration access with repository Administration write permission. The coordinator still gates merges on the actual current-head fast checks; this process is not server-enforced branch protection.
+
 ## Explicit expensive validation
 
 The separate Extended validation workflow is manual only. Its `Extended Rust (ubuntu-latest)` and `Extended Rust (macos-latest)` jobs perform strict default/all-feature Clippy and both default/all-feature optimized workspace builds. `Rust 1.88 MSRV` checks the all-target/all-feature workspace with Rust 1.88. Their distinct names prevent a manual job from substituting for the normal formatting/Clippy context. This broader work remains available when platform, compiler or optimized-build verification is needed, without making it every PR's prerequisite.
