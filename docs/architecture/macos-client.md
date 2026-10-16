@@ -1,0 +1,36 @@
+# Native macOS menu bar client
+
+The optional `EverythingMac` application uses SwiftUI `MenuBarExtra` and the native Settings scene on macOS 14 or newer. The focused Xcode project contains one macOS application target and ten Swift sources. It contains no agent loop, database connection or provider adapter. The Rust host remains authoritative and owns task execution independently of this application.
+
+## Responsibilities
+
+- `EverythingMacApp` owns the observable application model and menu bar scene. Its termination delegate cancels and joins application-owned CLI requests before allowing normal app termination.
+- `HostModel` maintains presentation state, coalesced read refreshes, exact mutation identities and revision-checked settings snapshots. Connection edits remain drafts until Connect is selected. Tasks and approvals retain the connection that returned them, preventing stale callbacks from targeting another host.
+- `TasksView` inspects actual task metadata and offers cancellation and ordinary wake. A wake does not grant uncertain provider retry or tool cleanup authority. Legacy foreground ownership remains explicit.
+- `PermissionsView` reads bounded pending summaries for a selected conversation, loads exact scope and arguments separately, and rechecks that immutable request before submitting an operation decision. It uses the exact operation UUID and conversation, including spawned tasks; it does not derive task identity from a command UUID.
+- `SettingsView` edits workspace, execution mode, tool enablement and context budget. The complete original settings object is retained, and the existing revision is required when saving. Other fields and credential references remain intact. Credentials and other advanced settings use the CLI.
+- `Shared/OwnerIPC` contains bounded JSON values, local owner request records and a CLI-backed IPC client. It does not implement encrypted replica transport.
+
+## Owner IPC bridge
+
+The application runs an explicitly selected, trusted absolute Everything CLI executable without a shell. `owner --request-file` always uses the implemented Rust owner client; it never opens a competing Agent. Rust retains descriptor-relative state/socket checks, same-UID peer authentication, frame bounds and authoritative command admission. The application verifies the executable through a no-follow descriptor walk with trusted ancestor ownership and write permissions. This does not isolate code selected by the same user; the selected binary runs with that user's normal privileges.
+
+Each request uses a new private temporary directory and a 0600 regular request file. The file remains owned until its CLI child has exited, then normal completion removes it. At most four requests are admitted. Requests and output are bounded to 1 MiB and 2 MiB respectively; stderr is bounded to 64 KiB and its content is not surfaced or logged. JSON nesting is limited to 64. The environment forwards only the user's home directory, system executable search paths and a fixed UTF-8 locale; provider credentials are not forwarded.
+
+I/O and child waiting run on a bounded Dispatch queue. A 45-second monotonic deadline or task cancellation starts cancellation of the owned CLI. The supervisor attempts SIGINT immediately, SIGTERM after two seconds and SIGKILL after four seconds, each once for its captured positive CLI PID. Ownership and the admission slot remain until actual child exit. Filesystem calls and termination remain cooperative; this is not a claim that arbitrary blocked operating-system operations can be forcibly bounded. The client never signals the host process. Forced application termination cannot guarantee private temporary-file cleanup.
+
+The menu refreshes read-only metadata every 15 seconds while its label task is alive. This does not schedule or execute agent work. Task lists request up to ten records to accommodate large valid task instructions within the real frame limit. Conversation discovery returns up to 100 records. Pending approval pages contain 20 summaries with a retained exclusive cursor and a 1000-summary presentation cap. These are bounded views, not complete history exports.
+
+## Mutation and lifetime semantics
+
+Domain actions retain the complete current command envelope, including its original command ID, nullable issuing device and issue time. The owner CLI rejects unknown or omitted fields instead of silently discarding metadata. A transport failure preserves the exact in-memory request for an explicit retry; it never substitutes a new command identity. No mutation is automatically replayed on application restart. Inspect authoritative task, approval or settings state after an ambiguous result.
+
+Permission decisions pass through the durable host inbox and native authorizer. Settings preserve the complete snapshot and compare revisions. A pending action prevents connection changes and other mutations until it is reconciled. Its original command ID remains visible. Inspect result reads the actual host command receipt and clears the reminder only for a durable completed or rejected command. An owner can also confirm that they inspected current state and clear the application reminder; admitted host work and command history remain intact. The reminder is presentation state, not a second durable runtime queue.
+
+Service installation, start, stop and login enablement invoke the actual Rust `service` commands for `com.everything.host`. Installation and stopping require explicit user confirmation. They affect the launchd user agent, not a separately launched foreground host. Opening or closing the menu bar app neither starts nor stops the runtime. Normal Quit only drains the application's CLI children.
+
+## Validation limits
+
+This focused extraction preserves the original macOS core on the reviewed Rust Host and owner-IPC prerequisites at `36a84ea1b59e06e93a84413c4f890660d85cd9af`. Exact-head Xcode build/static analysis and application/UI/launchd runtime validation remain pending. The independently reviewed CLI child-cleanup correction is included; source extraction and syntax checks alone do not establish cancellation or Quit quiescence.
+
+Official Swift 6.0.3 parsed all ten client Swift files successfully. Linux Foundation-only Swift 6 type checking passed for JSON values, owner wire records and task/approval response records. Plist/XML and OpenStep project parsing found no missing object references, and the actual Rust CLI/Unix IPC bridge was exercised on disposable state. Apple framework type checking, Xcode build/static analysis, menu presentation, accessibility behavior, launchd actions and the quit-app/host-PID lifetime observation require macOS and remain unverified until performed there. No successful model inference is implied. Automated coverage remains deferred to [#32](https://github.com/izyuumi/everything/issues/32).
