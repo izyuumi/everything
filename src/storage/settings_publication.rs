@@ -61,6 +61,12 @@ enum PublicationAttemptFailure {
     Commit(rusqlite::Error),
 }
 
+impl CommittedSettingsReply {
+    pub(crate) fn header(&self) -> &EnvelopeHeader {
+        &self.header
+    }
+}
+
 impl Store {
     pub(crate) fn publish_settings_reply(
         &self,
