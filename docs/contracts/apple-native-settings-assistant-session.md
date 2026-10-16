@@ -1,0 +1,59 @@
+# Native Settings assistant ownership
+
+The macOS `NativeSettingsLifecycle`, `NativeSettingsSession` and `NativeSettingsStore` extend their existing native Settings parent with the eight closed assistant operations from [the Wire contract](apple-native-settings-assistant-wire.md). They use the same injected OwnerIPCClient, connection, native proof, gate and Host identity. This source increment supplies admission, original request ownership, scoped receipt adoption and cleanup. It does not supply an assistant view/controller, presentation of cards, successful model inference or completed [#115](https://github.com/izyuumi/everything/issues/115) manual acceptance.
+
+## Explicit originals and disclosure
+
+Store prepares an opaque Open action synchronously on MainActor before scheduling work. Lifecycle captures actual application activity, the existing gate generation and original wall/monotonic limits, and retains the original outer Open frame immediately. The original native parent must already be open. No Open performs inference. Session revalidates the captured admission and real parent at admission, then rechecks actual activity and original deadlines immediately before invoking the existing sensitive client.
+
+A child handle can be constructed only inside Session from an authenticated decoded Opened or Ready for that retained original. It binds the actual Session/gate incarnation, parent, Host, original Open frame, immutable disclosure and original deadline. It has no Session/Store back-reference. Closing/Unknown observations also retain any known child identity, even when the original Open reply was lost. A later reply cannot change the original child/provider/model/recipient/digest/tools/expiry or revive a genuinely closed original.
+
+Explicit disclosure acceptance captures the actual native gesture for that exact decoded handle. Each original Send requires that consent and a new synchronous foreground/generation/deadline capture. The configured recipient and digest are never supplied as editable admission fields. Gate changes invalidate old gestures, including hide/foreground cycles; neither activity return nor observation renews an original lifetime. There is no hosted fallback or automatic Send.
+
+Each Send has one original frame and turn identity. Its private admission carries at most8192 UTF-8 bytes of nonblank, NUL-free text. The whole escaped request must still fit the existing32768-byte sensitive input. Text is transferred to the one owned request, cleared from the admission, and released with the actual completed call; failed/unissued admissions are cleared on cancellation, hide/inactivity or retirement. Repeating the same actual admission joins its original task/outcome; a different object at a reused identity is rejected. A lost reply does not resubmit inference, refresh its context or select a new turn.
+
+Store has no observable chat/provisional/continuation fields. Its private metadata records original identities, membership, prepaid slots and opaque handles; it forwards private admissions through bounded work. Inputs, wire operations, handles and text-bearing observations have fixed redacted descriptions. Chat uses sensitive stdin, never generic OwnerRequest/request files, ordinary conversations, wiki or embeddings. No arbitrary-secret detection or memory zeroization guarantee is made.
+
+## Shared capacity
+
+The one existing Store identity calculation is:
+
+`operations + credentialLinkReservations + pairApprovalReservations + originalOpens + originalSends + sum(8 - materializedMutationsPerSend) <= 64`.
+
+The credential term remains every context with `initial || link != nil`. The Pair term remains every retained Pair context: the original creation already occupies operations and its approval consumes that reserved separate identity without adding another generic operation. Terminal/unused reservations remain counted.
+
+An Open reserves one identity; EACH original paid Send reserves its original plus eight worst-case mutation slots, nine total, synchronously before Task creation. Status can bind server-generated identities to those slots but cannot release them. A sealed genuine scoped receipt exchanges one remaining slot for one real operation in the same MainActor transaction. Duplicate same-turn adoption is neutral; another turn cannot consume that identity again. No receipt, missing baseline, empty status list or terminal phase refunds capacity. Unused reservations/tombstones remain until genuine Owner retirement. One otherwise empty owner can therefore hold one Open plus at most seven fully reserved Sends, fewer when other originals occupy capacity. The backend's eight-turn limit is unchanged.
+
+Session counts the representations of those same original admissions/remaining slots alongside its ordinary records and pairing approvals as a defensive backstop. This is not another allocation ledger. Its scoped adoption exchanges a prepaid slot even when the total is64. Ordinary, credential-link, Pair approval and assistant creation paths reject namespace collisions, including an adopted operation that has no ordinary Action.
+
+All assistant calls use existing owner.effects with limit4 and the same Session.calls limit4. OwnerIPCClient retains its global four-process guard and completes after actual process cleanup. Duplicate active Store reads are refused; Session coalesces only the same in-flight read/cleanup tuple. There is no extra client, executor, callback backlog or unbounded read queue. The Store retains at most eight Owners and never evicts unresolved ownership to admit another.
+
+## Bounded observations and scoped results
+
+Session retains one latest bounded Status per child, with distinct committed and provisional16KiB text cells. Text revisions cannot decrease; an equal revision cannot change the original turn or text-bearing tuple. Per-turn numeric floors cannot decrease. An observation must name a genuinely retained original Send; its union of server-derived mutation members is at most eight. No chunk queue or completed-read transcript is retained. Genuine original closure drops the latest text cell. These counts and Wire limits do not establish a process/RSS bound.
+
+AssistantObservation returns the actual Status and sealed operation handles from that authenticated original cohort. Text/Markdown, arbitrary UUIDs, generic changes-page IDs and billing counters cannot construct a handle, claim Applied or establish worker quiescence. Unknown remains uncertainty. A joined original call plus authenticated terminal observation may permit another explicit request to the backend's real gate; it does not resume or refund the old original.
+
+Historical Inspect uses the retained native cleanup proof and exact original parent/Host/chat/turn/operation. NotRecorded is not rejection or absence of effects. Session records the actual currently-awaiting reference from a genuine scoped Inspect. Live Details requires that exact retained reference before and after the request, actual activity/deadlines and the unchanged Wire whitelist: Patch/AwaitingConfirmation, Device Pair/Revoke/AwaitingAction, or Native OpenSection/AwaitingAction. It cannot produce owner replacement, final pairing approval, credential-entry or notification-authorization handles.
+
+Details returns a sealed Session-issued receipt rather than allowing callers to adopt arbitrary Details values. Session installs the exact target/inspection in its existing Record map under the prepaid identity. Store checks the same original cohort and matches genuine controls snapshot/registry scope/revision before constructing the existing NativeSettingsOperation; otherwise it retains the reservation/receipt, requests the normal controls refresh and reports uncertainty. The existing operation's binding/origin/write/terminal invariants remain. Adoption never confirms, presents, pairs or writes. Actual native execution still requires its separate existing gesture and authority. Credential/notification controls and Device ceremonies keep their existing owners.
+
+Authenticated receipts trigger ordinary controls refresh through the same Store paths. Cached UI metadata is presentation provenance, not model context. The Rust backend retains its genuine point-in-time same-ServiceCore Get per original Send and its separate pre-stream provider/source guard; replay does not refresh that captured context.
+
+## Child before parent
+
+Pane-only closure retires private pending input and operates on its original child; it never invalidates the conventional native parent, siblings, ordinary user work or Host. Close/CloseOpen/OpenStatus/Poll/Inspect may use retained cleanup authority after activity/expiry, without opening a child or admitting paid work. Details remains live-only.
+
+Lifecycle invalidation freezes every synchronously prepared original Open and passes that immutable snapshot into the SAME Session drain. Session closes fresh intake before awaiting, merges only genuine same-gate originals and joins actual Open/Send/read tasks and actual native calls. A late queued Open sees invalid/closing intake; an already-issued original is joined. No dropped waiter or empty process set establishes cleanup.
+
+Every original receives genuine CloseOpen before the existing parent Close, including a prepared/unissued or lost-reply original. CloseOpen can create the server's Closed tombstone before delayed Open. NotAccepted observation alone does not suppress or authorize another Open. Parent Close requires genuine Closed with the expected known child, Closed(nil) only if a child was never known, or the original's genuine Unavailable disposition. Status phase after AgentClose is not that acknowledgement.
+
+Ready/Closing/Unknown, mismatched identity, NotAccepted, malformed/lost replies or errors retain the original proof and Owner and skip parent Close. Existing ordinary reconciliation, credential ownership, Pair cancellation and actual Pair lifecycle observations still run and report their own truth. Cleanup joins actual local calls and reports uncertainty; it does not promise a hard OS/keyring deadline, remote-provider termination or absence of effects. No cleanup retry creates a replacement child or paid original.
+
+DrainReport preserves failures, unresolvedOperationIDs and the actual defaulted pairingLifecycles map, and adds default-empty unresolvedAssistantOpenRequestIDs. A nonempty new list also adds operationUncertain and independently makes Cleanup.hasIssues true. Store's credential cleanup forwards both maps/lists and preserves unlinkedCredentialOperationIDs and owner retention. Only genuine Pair cancelled/expired/noLongerPending facts clear its existing cleanup issue. Assistant originals never replace Pair or credential history.
+
+## Verification boundaries
+
+The Wire's complete escaped bounds stay Status200704, scoped Operation/Details65536 and other assistant results32768, using the existing checked reconstructed wrapper+126; stdin remains32768 and the process output guard2MiB. No parser allowance changes occur here. Backend two live/closing/Preparing/Unknown-owned children, one active turn, eight turns and eight mutation links remain authoritative; the client can refuse earlier.
+
+The source stage uses grammar, whitespace and immutable tree/ownership review only. Supported macOS SDK build/analyze, independent final source review and separately authorized disposable native-pipe observations remain required. No successful streaming/inference, Apple UI/OS effects, security/race verification or #115 completion is claimed. The native pane/controller and card/ceremony composition remain separate work. Deferred automated verification remains [#32](https://github.com/izyuumi/everything/issues/32); no new tests are added.
