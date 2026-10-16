@@ -8,7 +8,7 @@ Read [AGENTS.md](../AGENTS.md), then [implementation status](status/implementati
 
 ## Contracts
 
-[Events](contracts/events.md) · [Device sync](contracts/device-sync.md) · [Providers](contracts/providers.md) · [Tools](contracts/tools.md) · [Built-ins](contracts/builtin-tools.md) · [MCP](contracts/mcp.md) · [Discovery](contracts/selector.md) · [Broker](contracts/broker.md) · [Storage](contracts/storage.md) · [Wiki maintenance](contracts/consolidation.md) · [Embeddings](contracts/embeddings.md) · [Local IPC](contracts/local-ipc.md) · [Context](contracts/context.md)
+[Events](contracts/events.md) · [Device sync](contracts/device-sync.md) · [Providers](contracts/providers.md) · [Tools](contracts/tools.md) · [Built-ins](contracts/builtin-tools.md) · [MCP](contracts/mcp.md) · [Discovery](contracts/selector.md) · [Broker](contracts/broker.md) · [Storage](contracts/storage.md) · [Schedule storage](contracts/scheduling-storage.md) · [Wiki maintenance](contracts/consolidation.md) · [Embeddings](contracts/embeddings.md) · [Local IPC](contracts/local-ipc.md) · [Context](contracts/context.md)
 
 ## Development
 
