@@ -14,7 +14,7 @@ use crate::protocol::{CommandId, MessageId, UnixMillis};
 use super::SettingsRepository;
 use super::authority::{Authority, SessionAdmission};
 use super::contract::{
-    NativeSettingsAction, NotificationAuthorization, SETTINGS_CONTRACT_VERSION,
+    NativeSettingsAction, NotificationAuthorization, SETTINGS_CONTRACT_VERSION, SettingKey,
     SettingsActionReference, SettingsActionRequest, SettingsConfirmationReference,
     SettingsDeviceRequest, SettingsOperationResult, SettingsOperationState, SettingsPatch,
     SettingsScope, SettingsSection,
@@ -35,6 +35,18 @@ pub enum SettingsActionTarget {
     Patch(SettingsPatch),
     Native(SettingsActionRequest),
     Device(SettingsDeviceRequest),
+    OwnerReplacement(OwnerReplacementIdentity),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OwnerReplacementIdentity {
+    pub request_id: CommandId,
+    pub scope: SettingsScope,
+    pub expected_revision: u64,
+    pub exact_settings_sha256: String,
+    pub changed_keys: Vec<SettingKey>,
+    pub restart_required: bool,
 }
 
 impl SettingsActionTarget {
@@ -48,6 +60,24 @@ impl SettingsActionTarget {
             }
             Self::Native(request) => request.validate()?,
             Self::Device(request) => request.validate()?,
+            Self::OwnerReplacement(request) => {
+                super::operations::validate_digest(&request.exact_settings_sha256)?;
+                if !matches!(request.scope, SettingsScope::Host { .. })
+                    || request.expected_revision == 0
+                    || request.expected_revision >= i64::MAX as u64
+                    || request.changed_keys.len() > SettingKey::ALL.len()
+                    || !request
+                        .changed_keys
+                        .windows(2)
+                        .all(|keys| keys[0] < keys[1])
+                    || request
+                        .changed_keys
+                        .iter()
+                        .any(|key| key.scope() != super::contract::SettingScopeKind::Host)
+                {
+                    return Err(SettingsServiceError::Invalid("owner replacement identity"));
+                }
+            }
         }
         Ok(())
     }
@@ -57,6 +87,7 @@ impl SettingsActionTarget {
             Self::Patch(request) => request.request_id,
             Self::Native(request) => request.request_id,
             Self::Device(request) => request.request_id,
+            Self::OwnerReplacement(request) => request.request_id,
         }
     }
 
@@ -65,6 +96,7 @@ impl SettingsActionTarget {
             Self::Patch(request) => &request.scope,
             Self::Native(request) => &request.scope,
             Self::Device(request) => &request.scope,
+            Self::OwnerReplacement(request) => &request.scope,
         }
     }
 
@@ -73,6 +105,7 @@ impl SettingsActionTarget {
             Self::Patch(request) => Some(request.expected_revision),
             Self::Native(request) => Some(request.expected_revision),
             Self::Device(_) => None,
+            Self::OwnerReplacement(request) => Some(request.expected_revision),
         }
     }
 }

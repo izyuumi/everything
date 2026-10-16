@@ -9,8 +9,8 @@ use crate::storage::Store;
 use super::actions::{NativeActionObservation, NativeActionReference, SettingsActionTarget};
 use super::authority::SettingsOperationOrigin;
 use super::contract::{
-    SettingsActionReference, SettingsConfirmationReference, SettingsOperationResult,
-    SettingsOperationState, SettingsRequestBinding,
+    AgentMutability, SettingKey, SettingsActionReference, SettingsConfirmationReference,
+    SettingsOperationResult, SettingsOperationState, SettingsRequestBinding,
 };
 use super::service::SettingsServiceError;
 
@@ -42,6 +42,10 @@ pub enum SettingsOperationPhase {
     InFlight {
         native_request_id: CommandId,
     },
+    Applying {
+        expected_revision: u64,
+        revision: u64,
+    },
     Finished {
         result: SettingsOperationResult,
     },
@@ -54,6 +58,52 @@ pub struct SettingsOperationInspection {
     pub origin: SettingsOperationOrigin,
     pub phase: SettingsOperationPhase,
     pub updated_at: UnixMillis,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub write: Option<SettingsWriteInspection>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SettingsWriteInspection {
+    pub expected_revision: u64,
+    pub revision: u64,
+    pub changed_keys: Vec<SettingKey>,
+    pub restart_required: bool,
+    pub resolution: Option<SettingsWriteResolution>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SettingsWriteResolution {
+    Applied,
+    NotApplied,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct SettingsFileFingerprint {
+    pub revision: u64,
+    pub sha256: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct SettingsWriteIntent {
+    pub version: u16,
+    pub before: SettingsFileFingerprint,
+    pub after: SettingsFileFingerprint,
+    pub native_request_id: Option<CommandId>,
+    pub changed_keys: Vec<SettingKey>,
+    pub memory_changed: bool,
+    pub selection_changed: bool,
+    pub restart_required: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct SettingsWriteRecord {
+    pub intent: SettingsWriteIntent,
+    pub resolution: Option<SettingsWriteResolution>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -66,6 +116,8 @@ pub(super) struct PairingCreationMetadata {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct UpdateRecord {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    write: Option<SettingsWriteRecord>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pairing: Option<PairingCreationMetadata>,
     phase: SettingsOperationPhase,
@@ -94,6 +146,17 @@ impl OperationRecord {
             origin: self.identity.origin,
             phase: self.update.phase.clone(),
             updated_at: self.update.updated_at,
+            write: self
+                .update
+                .write
+                .as_ref()
+                .map(|write| SettingsWriteInspection {
+                    expected_revision: write.intent.before.revision,
+                    revision: write.intent.after.revision,
+                    changed_keys: write.intent.changed_keys.clone(),
+                    restart_required: write.intent.restart_required,
+                    resolution: write.resolution,
+                }),
         }
     }
 
@@ -103,6 +166,17 @@ impl OperationRecord {
 
     pub fn pairing(&self) -> Option<&PairingCreationMetadata> {
         self.update.pairing.as_ref()
+    }
+
+    pub fn write(&self) -> Option<&SettingsWriteRecord> {
+        self.update.write.as_ref()
+    }
+
+    pub fn admitted(&self) -> bool {
+        matches!(
+            self.phase(),
+            SettingsOperationPhase::InFlight { .. } | SettingsOperationPhase::Applying { .. }
+        ) || self.write().is_some_and(|write| write.resolution.is_none())
     }
 }
 
@@ -116,7 +190,10 @@ impl OperationIdentity {
             SettingsOperationOrigin::LocalOwner { request_id }
                 if *request_id == self.binding.request_id
                     && *request_id.as_uuid() == self.binding.client_session_id
-                    && matches!(self.target, SettingsActionTarget::Patch(_)) => {}
+                    && matches!(
+                        self.target,
+                        SettingsActionTarget::Patch(_) | SettingsActionTarget::OwnerReplacement(_)
+                    ) => {}
             SettingsOperationOrigin::NativeUi { session_id }
                 if *session_id == self.binding.client_session_id && !session_id.is_nil() => {}
             SettingsOperationOrigin::SettingsAgent {
@@ -182,7 +259,10 @@ impl OperationRepository {
             [], |row| row.get(0),
         )?;
         let awaiting = !matches!(phase, SettingsOperationPhase::Finished { .. });
-        if matches!(phase, SettingsOperationPhase::InFlight { .. }) {
+        if matches!(
+            phase,
+            SettingsOperationPhase::InFlight { .. } | SettingsOperationPhase::Applying { .. }
+        ) {
             return Err(SettingsServiceError::Invalid("initial operation phase"));
         }
         prepare_capacity(&transaction, awaiting)?;
@@ -199,6 +279,7 @@ impl OperationRepository {
             params![identity.binding.request_id.to_string(), encoded, identity.binding.issued_at.get() as i64, identity.binding.expires_at.get() as i64],
         )?;
         let update = UpdateRecord {
+            write: None,
             pairing: None,
             phase,
             observation: None,
@@ -274,6 +355,7 @@ impl OperationRepository {
         }
         transaction.execute("INSERT INTO settings_native_requests(request_id,operation_id,exact_request) VALUES(?1,?2,?3)", params![native.native_request_id.to_string(),native.operation_id.to_string(),native_json])?;
         let update = UpdateRecord {
+            write: None,
             pairing: None,
             phase: SettingsOperationPhase::InFlight {
                 native_request_id: native.native_request_id,
@@ -321,6 +403,7 @@ impl OperationRepository {
             return Err(SettingsServiceError::Conflict);
         }
         let update = UpdateRecord {
+            write: None,
             pairing: None,
             phase: SettingsOperationPhase::Finished { result },
             observation,
@@ -367,6 +450,7 @@ impl OperationRepository {
             return Err(SettingsServiceError::Conflict);
         }
         let update = UpdateRecord {
+            write: None,
             pairing: Some(metadata),
             observation: None,
             updated_at: UnixMillis::now()?,
@@ -405,11 +489,14 @@ impl OperationRepository {
         }
         if matches!(
             record.update.phase,
-            SettingsOperationPhase::InFlight { .. } | SettingsOperationPhase::Finished { .. }
+            SettingsOperationPhase::InFlight { .. }
+                | SettingsOperationPhase::Applying { .. }
+                | SettingsOperationPhase::Finished { .. }
         ) {
             return Ok(record.inspection());
         }
         let update = UpdateRecord {
+            write: None,
             pairing: None,
             phase: SettingsOperationPhase::Finished { result },
             observation: None,
@@ -463,6 +550,29 @@ impl OperationRepository {
         }
         Ok(records)
     }
+
+    pub fn unresolved_write(&self) -> Result<Option<OperationRecord>, SettingsServiceError> {
+        let connection = self.store.connection()?;
+        let mut statement = connection.prepare("SELECT o.request_id FROM settings_operations o JOIN settings_operation_updates u ON u.sequence=(SELECT max(sequence) FROM settings_operation_updates WHERE request_id=o.request_id) WHERE EXISTS(SELECT 1 FROM settings_operation_updates h WHERE h.request_id=o.request_id AND json_type(h.record,'$.write')='object') AND coalesce(json_extract(u.record,'$.write.resolution') IN ('applied','not_applied'),0)=0 ORDER BY o.request_id LIMIT 2")?;
+        let mut rows = statement.query([])?;
+        let mut found = None;
+        while let Some(row) = rows.next()? {
+            if found.is_some() {
+                return Err(SettingsServiceError::CorruptJournal);
+            }
+            let request_id = bounded_text(row, 0, 36)?.parse()?;
+            let record =
+                read(&connection, request_id)?.ok_or(SettingsServiceError::CorruptJournal)?;
+            if record
+                .write()
+                .is_none_or(|write| write.resolution.is_some())
+            {
+                return Err(SettingsServiceError::CorruptJournal);
+            }
+            found = Some(record);
+        }
+        Ok(found)
+    }
 }
 
 fn read(
@@ -503,6 +613,34 @@ fn read(
         if native.operation_id != request_id
             || native.native_request_id != native_request_id
             || native.session_id != identity.binding.client_session_id
+        {
+            return Err(SettingsServiceError::CorruptJournal);
+        }
+    }
+    if let Some(write) = &record.write
+        && let Some(native_request_id) = write.intent.native_request_id
+    {
+        let native = native_request(connection, native_request_id, request_id)?
+            .ok_or(SettingsServiceError::CorruptJournal)?;
+        if native.operation_id != request_id
+            || native.native_request_id != native_request_id
+            || native.session_id != identity.binding.client_session_id
+        {
+            return Err(SettingsServiceError::CorruptJournal);
+        }
+    }
+    let original: Option<String> = {
+        let mut statement = connection.prepare("SELECT record FROM settings_operation_updates WHERE request_id=?1 AND json_type(record,'$.write')='object' ORDER BY sequence LIMIT 1")?;
+        let mut rows = statement.query([request_id.to_string()])?;
+        rows.next()?
+            .map(|row| bounded_text(row, 0, MAX_UPDATE_BYTES).map(str::to_owned))
+            .transpose()?
+    };
+    if let Some(original) = original {
+        let original: UpdateRecord = decode(&original, MAX_UPDATE_BYTES)?;
+        validate_update(&identity, &original)?;
+        if original.write.as_ref().map(|write| &write.intent)
+            != record.write.as_ref().map(|write| &write.intent)
         {
             return Err(SettingsServiceError::CorruptJournal);
         }
@@ -614,6 +752,21 @@ fn validate_update(
             }
         }
         SettingsOperationPhase::InFlight { .. } => {}
+        SettingsOperationPhase::Applying {
+            expected_revision,
+            revision,
+        } => {
+            let write = update
+                .write
+                .as_ref()
+                .ok_or(SettingsServiceError::CorruptJournal)?;
+            if write.resolution.is_some()
+                || *expected_revision != write.intent.before.revision
+                || *revision != write.intent.after.revision
+            {
+                return Err(SettingsServiceError::CorruptJournal);
+            }
+        }
         SettingsOperationPhase::Finished { result } => {
             result.validate()?;
             if result.request_id != identity.binding.request_id
@@ -626,6 +779,33 @@ fn validate_update(
             {
                 return Err(SettingsServiceError::CorruptJournal);
             }
+        }
+    }
+    if let Some(write) = &update.write {
+        write.intent.validate(identity)?;
+        if update.observation.is_some() || update.pairing.is_some() {
+            return Err(SettingsServiceError::CorruptJournal);
+        }
+        match (&update.phase, write.resolution) {
+            (SettingsOperationPhase::Applying { .. }, None) => {}
+            (SettingsOperationPhase::Finished { result }, None)
+                if result.state == SettingsOperationState::Unknown => {}
+            (
+                SettingsOperationPhase::Finished { result },
+                Some(SettingsWriteResolution::Applied),
+            ) if matches!(result.state, SettingsOperationState::Applied { revision } | SettingsOperationState::PendingApplication { revision } | SettingsOperationState::RestartRequired { revision } if revision == write.intent.after.revision) =>
+                {}
+            (
+                SettingsOperationPhase::Finished { result },
+                Some(SettingsWriteResolution::NotApplied),
+            ) if matches!(
+                result.state,
+                SettingsOperationState::Failed { .. }
+                    | SettingsOperationState::Unavailable { .. }
+                    | SettingsOperationState::Cancelled
+                    | SettingsOperationState::Conflict { .. }
+            ) => {}
+            _ => return Err(SettingsServiceError::CorruptJournal),
         }
     }
     if update.observation.is_some()
@@ -703,4 +883,58 @@ fn decode<T: serde::de::DeserializeOwned + Serialize>(
         return Err(SettingsServiceError::CorruptJournal);
     }
     Ok(decoded)
+}
+
+impl SettingsWriteIntent {
+    pub fn validate(&self, identity: &OperationIdentity) -> Result<(), SettingsServiceError> {
+        validate_digest(&self.before.sha256)?;
+        validate_digest(&self.after.sha256)?;
+        if self.version != 1
+            || self.before.revision == 0
+            || self.before.revision >= i64::MAX as u64
+            || self.after.revision != self.before.revision + 1
+            || identity.binding.expected_revision != Some(self.before.revision)
+            || self.changed_keys.len() > SettingKey::ALL.len()
+            || !self.changed_keys.windows(2).all(|keys| keys[0] < keys[1])
+        {
+            return Err(SettingsServiceError::CorruptJournal);
+        }
+        match &identity.target {
+            SettingsActionTarget::Patch(patch) => {
+                let mut keys = patch
+                    .changes
+                    .iter()
+                    .map(|change| change.key)
+                    .collect::<Vec<_>>();
+                keys.sort_unstable();
+                if keys != self.changed_keys
+                    || (keys.iter().any(|key| {
+                        key.agent_mutability() == AgentMutability::RequiresNativeConfirmation
+                    }) && self.native_request_id.is_none())
+                {
+                    return Err(SettingsServiceError::CorruptJournal);
+                }
+            }
+            SettingsActionTarget::OwnerReplacement(request)
+                if matches!(
+                    identity.origin,
+                    super::authority::SettingsOperationOrigin::LocalOwner { .. }
+                ) && self.native_request_id.is_none()
+                    && request.changed_keys == self.changed_keys
+                    && request.restart_required == self.restart_required => {}
+            _ => return Err(SettingsServiceError::CorruptJournal),
+        }
+        Ok(())
+    }
+}
+
+pub(super) fn validate_digest(value: &str) -> Result<(), SettingsServiceError> {
+    if value.len() != 64
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return Err(SettingsServiceError::CorruptJournal);
+    }
+    Ok(())
 }
