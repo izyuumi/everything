@@ -665,10 +665,10 @@ actor ReplicaService {
     }
 
     private func receiveSettingsOwnedFrame(socket: RelayConnection, ticket: SettingsReceiveTicket) async throws {
-        let frame = try await socket.receive()
+        let received = try await socket.receive()
         guard settingsReceive === ticket, ticket.scope.socket === socket,
               isCurrentSettingsScope(ticket.scope) else { throw WireError.unavailable }
-        try await handle(frame, socket: socket)
+        try await handle(received.frame, socket: socket)
     }
 
     private func finishSettingsReceive(_ ticket: SettingsReceiveTicket) throws {

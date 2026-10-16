@@ -26,6 +26,32 @@ enum RelayFrame: Sendable {
     case pong
 }
 
+struct ReceivedRelayFrame: Sendable, CustomStringConvertible, CustomDebugStringConvertible {
+    let frame: RelayFrame
+    let originalByteCount: Int
+
+    fileprivate init(frame: RelayFrame, originalByteCount: Int) {
+        self.frame = frame
+        self.originalByteCount = originalByteCount
+    }
+
+    var description: String { "ReceivedRelayFrame([redacted])" }
+    var debugDescription: String { description }
+}
+
+private struct ReceivedRelayPacket: Sendable, CustomStringConvertible, CustomDebugStringConvertible {
+    let value: WireValue
+    let originalByteCount: Int
+
+    fileprivate init(value: WireValue, originalByteCount: Int) {
+        self.value = value
+        self.originalByteCount = originalByteCount
+    }
+
+    var description: String { "ReceivedRelayPacket([redacted])" }
+    var debugDescription: String { description }
+}
+
 final class RelaySessionDelegate: NSObject, URLSessionTaskDelegate, Sendable {
     func urlSession(_ session: URLSession, task: URLSessionTask, willPerformHTTPRedirection response: HTTPURLResponse, newRequest request: URLRequest, completionHandler: @escaping @Sendable (URLRequest?) -> Void) {
         completionHandler(nil)
@@ -111,8 +137,9 @@ actor RelayConnection {
         }
     }
 
-    func receive() async throws -> RelayFrame {
-        let raw = try await read(seconds: 90, maximum: 2_097_152)
+    func receive() async throws -> ReceivedRelayFrame {
+        let packet = try await readPacket(seconds: 90, maximum: 2_097_152)
+        let raw = packet.value
         let type = try raw.field("type").text
         let keys: Set<String>
         switch type {
@@ -128,13 +155,13 @@ actor RelayConnection {
         switch type {
         case "accepted":
             _ = try fields.required("duplicate").flag
-            return .accepted(try fields.required("message_id").identifier)
+            return ReceivedRelayFrame(frame: .accepted(try fields.required("message_id").identifier), originalByteCount: packet.originalByteCount)
         case "delivery":
             let envelope = try EncryptedEnvelope(fields.required("envelope"))
             guard envelope.header.recipient == localID else { throw WireError.identity }
-            return .delivery(envelope)
-        case "acknowledged": return .acknowledged(try fields.required("message_id").identifier)
-        case "pong": return .pong
+            return ReceivedRelayFrame(frame: .delivery(envelope), originalByteCount: packet.originalByteCount)
+        case "acknowledged": return ReceivedRelayFrame(frame: .acknowledged(try fields.required("message_id").identifier), originalByteCount: packet.originalByteCount)
+        case "pong": return ReceivedRelayFrame(frame: .pong, originalByteCount: packet.originalByteCount)
         case "error":
             let code = try fields.required("code").text
             if ["rate_limited", "queue_full", "session_already_active", "internal", "recipient_unavailable"].contains(code) { throw WireError.network }
@@ -144,6 +171,11 @@ actor RelayConnection {
     }
 
     private func read(seconds: Double, maximum: Int) async throws -> WireValue {
+        let packet = try await readPacket(seconds: seconds, maximum: maximum)
+        return packet.value
+    }
+
+    private func readPacket(seconds: Double, maximum: Int) async throws -> ReceivedRelayPacket {
         guard !closed else { throw WireError.network }
         let socket = socket
         let data = try await Self.bounded(socket: socket, seconds: seconds) {
@@ -157,7 +189,9 @@ actor RelayConnection {
             @unknown default: throw WireError.invalid
             }
         }
-        return try WireValue.parse(data, maximum: maximum)
+        let originalByteCount = data.count
+        let value = try WireValue.parse(data, maximum: maximum)
+        return ReceivedRelayPacket(value: value, originalByteCount: originalByteCount)
     }
 
     private static func bounded<T: Sendable>(socket: URLSessionWebSocketTask, seconds: Double, operation: @escaping @Sendable () async throws -> T) async throws -> T {
