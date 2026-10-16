@@ -143,9 +143,7 @@ impl ServiceCore {
                 (SettingsChangeState::AwaitingAction, None)
             }
             SettingsOperationPhase::InFlight { .. } => (SettingsChangeState::InFlight, None),
-            SettingsOperationPhase::Applying { revision, .. } => {
-                (SettingsChangeState::Applying, Some(*revision))
-            }
+            SettingsOperationPhase::Applying { .. } => (SettingsChangeState::Applying, None),
             SettingsOperationPhase::Finished { result } => match &result.state {
                 SettingsOperationState::Applied { revision } => {
                     (SettingsChangeState::Applied, Some(*revision))
