@@ -40,6 +40,27 @@ pub enum NativeSettingsOperation {
     AgentOpen {
         proof: NativeSessionProof,
     },
+    AgentOpenStatus {
+        proof: NativeSessionProof,
+        open_request_id: CommandId,
+    },
+    AgentCloseOpen {
+        proof: NativeSessionProof,
+        open_request_id: CommandId,
+    },
+    AgentInspectOperation {
+        proof: NativeSessionProof,
+        chat_id: Uuid,
+        turn_id: CommandId,
+        operation_id: CommandId,
+    },
+    AgentActionDetails {
+        proof: NativeSessionProof,
+        chat_id: Uuid,
+        turn_id: CommandId,
+        operation_id: CommandId,
+        reference: NativeActionReference,
+    },
     AgentSend {
         proof: NativeSessionProof,
         chat_id: Uuid,

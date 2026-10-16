@@ -6,7 +6,7 @@ use futures_util::{FutureExt, StreamExt};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::panic::AssertUnwindSafe;
-use tokio::sync::{Mutex, Notify, Semaphore, mpsc, oneshot};
+use tokio::sync::{Mutex, Notify, Semaphore, mpsc, oneshot, watch};
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
@@ -29,8 +29,10 @@ use crate::storage::settings_agent::{
 };
 use crate::tools::{ToolRegistry, broker::ToolBroker};
 
+use super::actions::SettingsActionTarget;
 use super::agent_tools::{InvocationResult, SettingsTools};
-use super::contract::SettingsToolName;
+use super::contract::{SettingsScope, SettingsToolName};
+use super::operations::SettingsOperationInspection;
 use super::service::SettingsService;
 use super::{
     SettingsAgentBinding, SettingsAgentSession, SettingsCaller, SettingsInvocationDisposition,
@@ -69,6 +71,9 @@ pub struct SettingsChatStatus {
     pub phase: SettingsChatPhase,
     pub turn_id: Option<CommandId>,
     pub assistant_text: String,
+    pub text_revision: u64,
+    pub provisional: Option<SettingsProvisionalText>,
+    pub context: Option<SettingsChatContextObservation>,
     pub operation_ids: Vec<CommandId>,
     pub model_attempts: u32,
     pub charged_tokens: u64,
@@ -77,12 +82,86 @@ pub struct SettingsChatStatus {
     pub usage_complete: bool,
 }
 
+pub(crate) const MAX_CHAT_STATUS_BYTES: usize = 200_704;
+pub(crate) const MAX_OPEN_STATE_BYTES: usize = 32 * 1024;
+pub(crate) const MAX_SCOPED_DETAILS_BYTES: usize = 64 * 1024;
+const MAX_OPEN_REQUESTS: usize = 1024;
+const MAX_OPEN_RECORD_BYTES: usize = 512;
+const MAX_CONTEXT_SNAPSHOT_BYTES: usize = 32 * 1024;
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SettingsProvisionalState {
+    Streaming,
+    Interrupted,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SettingsProvisionalText {
+    pub attempt_id: CommandId,
+    pub state: SettingsProvisionalState,
+    pub text: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SettingsChatContextObservation {
+    pub revision: u64,
+    pub observed_at: UnixMillis,
+    pub stale: bool,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case", deny_unknown_fields)]
+pub enum SettingsOpenState {
+    NotAccepted,
+    Ready { chat: SettingsChatOpened },
+    Closing { chat_id: Uuid },
+    Closed { chat_id: Option<Uuid> },
+    Unavailable,
+    Unknown { chat_id: Option<Uuid> },
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case", deny_unknown_fields)]
+pub enum SettingsOperationLookup {
+    NotRecorded,
+    Inspected {
+        operation: SettingsOperationInspection,
+    },
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum SettingsAssistantReply {
-    Opened { chat: SettingsChatOpened },
-    Accepted { chat_id: Uuid, turn_id: CommandId },
-    Status { status: SettingsChatStatus },
+    Opened {
+        chat: SettingsChatOpened,
+    },
+    OpenState {
+        open_request_id: CommandId,
+        state: SettingsOpenState,
+    },
+    Accepted {
+        chat_id: Uuid,
+        turn_id: CommandId,
+    },
+    Status {
+        status: SettingsChatStatus,
+    },
+    Operation {
+        chat_id: Uuid,
+        turn_id: CommandId,
+        operation_id: CommandId,
+        lookup: SettingsOperationLookup,
+    },
+    ActionDetails {
+        chat_id: Uuid,
+        turn_id: CommandId,
+        operation_id: CommandId,
+        operation: SettingsOperationInspection,
+        target: SettingsActionTarget,
+    },
     Unavailable,
 }
 
@@ -99,6 +178,15 @@ pub struct SettingsUncertaintyAcknowledgement {
 pub(crate) enum SettingsAgentCommand {
     Open {
         caller: SettingsCaller,
+        open_request_id: CommandId,
+    },
+    OpenStatus {
+        native_session_id: Uuid,
+        open_request_id: CommandId,
+    },
+    CloseOpen {
+        native_session_id: Uuid,
+        open_request_id: CommandId,
     },
     Send {
         native_session_id: Uuid,
