@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tokio::sync::{Notify, Semaphore, watch};
 use tokio_util::sync::CancellationToken;
@@ -47,13 +47,13 @@ pub enum EngineError {
     ShutdownPending,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct BlockedSchedule {
     pub job_id: ScheduledJobId,
     pub diagnostic: String,
 }
 
-#[derive(Clone, Debug, Default, Serialize)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct EngineStatus {
     pub active: bool,
     pub stopped: bool,

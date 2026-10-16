@@ -120,7 +120,10 @@ pub(super) fn capture_policy(
         .permissions
         .allowed_tools
         .iter()
-        .filter(|name| !SCHEDULER_TOOL_NAMES.contains(&name.as_str()))
+        .filter(|name| {
+            !SCHEDULER_TOOL_NAMES.contains(&name.as_str())
+                && !super::controls::SCHEDULE_CONTROL_NAMES.contains(&name.as_str())
+        })
         .cloned()
         .collect();
     let tools = target.budget.max_tool_calls > 0 && !allowed.is_empty();
@@ -175,9 +178,10 @@ pub(super) fn validate_policy(run: &ScheduledRun, policy: &ExecutionPolicy) -> S
     if policy.workspace_root != target.workspace_root
         || policy.mode > target.permissions.mode
         || !allowed.is_subset(&target.permissions.allowed_tools)
-        || allowed
-            .iter()
-            .any(|name| SCHEDULER_TOOL_NAMES.contains(&name.as_str()))
+        || allowed.iter().any(|name| {
+            SCHEDULER_TOOL_NAMES.contains(&name.as_str())
+                || super::controls::SCHEDULE_CONTROL_NAMES.contains(&name.as_str())
+        })
         || policy
             .limits
             .max_reserved_output_tokens
