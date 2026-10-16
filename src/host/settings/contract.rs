@@ -819,6 +819,9 @@ pub enum SettingsOperationState {
     Applied {
         revision: u64,
     },
+    Completed {
+        receipt_id: Uuid,
+    },
     PendingApplication {
         revision: u64,
     },
@@ -885,6 +888,7 @@ impl SettingsOperationResult {
             | SettingsOperationState::Conflict {
                 observed_revision: value,
             } => revision(*value)?,
+            SettingsOperationState::Completed { receipt_id } => non_nil(*receipt_id)?,
             SettingsOperationState::RequiresConfirmation { confirmation } => {
                 non_nil(confirmation.id)?
             }
