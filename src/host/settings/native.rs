@@ -4,14 +4,18 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::host::runtime::{HostError, HostInner};
-use crate::protocol::CommandId;
+use crate::protocol::{CommandId, DeviceId};
 use crate::transport::local::LocalCall;
 
 use super::actions::{
     NativeActionAdmissionResult, NativeActionInvocation, NativeActionObservation,
-    NativeActionReference, SettingsActionTarget,
+    NativeActionReference, NativePairingCreation, SettingsActionTarget,
 };
-use super::contract::{NativeSettingsAction, SettingsActionRequest, SettingsOperationResult};
+use super::contract::{
+    MAX_SETTINGS_DEVICE_PAGE, NativeSettingsAction, SettingsActionRequest, SettingsDeviceAction,
+    SettingsDevicePage, SettingsDeviceRequest, SettingsOperationResult, SettingsScope,
+};
+use super::service::NativeDeviceActionResult;
 use super::{
     NativeSessionOpened, NativeSessionProof, SettingsOperationInspection, SettingsOperationPhase,
 };
@@ -32,6 +36,32 @@ pub enum NativeSettingsOperation {
     RequestAction {
         proof: NativeSessionProof,
         request: SettingsActionRequest,
+    },
+    Devices {
+        proof: NativeSessionProof,
+        scope: SettingsScope,
+        after: Option<DeviceId>,
+        limit: usize,
+    },
+    PairDevice {
+        proof: NativeSessionProof,
+        request: SettingsDeviceRequest,
+    },
+    RevokeDevice {
+        proof: NativeSessionProof,
+        request: SettingsDeviceRequest,
+    },
+    ConfirmDevice {
+        proof: NativeSessionProof,
+        invocation: NativeActionInvocation,
+    },
+    Pairing {
+        proof: NativeSessionProof,
+        operation_id: CommandId,
+    },
+    CancelPairing {
+        proof: NativeSessionProof,
+        operation_id: CommandId,
     },
     Details {
         proof: NativeSessionProof,
@@ -62,6 +92,17 @@ pub enum NativeSettingsOperation {
 
 impl NativeSettingsOperation {
     pub fn validate(&self) -> Result<(), &'static str> {
+        match self {
+            Self::Devices { limit, .. } if *limit == 0 || *limit > MAX_SETTINGS_DEVICE_PAGE => {
+                return Err("invalid native device page limit");
+            }
+            Self::PairDevice { request, .. } | Self::RevokeDevice { request, .. } => {
+                request
+                    .validate()
+                    .map_err(|_| "invalid native device request")?;
+            }
+            _ => {}
+        }
         if let Self::RequestAction { request, .. } = self {
             request
                 .validate()
@@ -79,7 +120,12 @@ impl NativeSettingsOperation {
     fn allows_during_drain(&self) -> bool {
         matches!(
             self,
-            Self::Inspect { .. } | Self::Finalize { .. } | Self::Cancel { .. } | Self::Close { .. }
+            Self::Inspect { .. }
+                | Self::Finalize { .. }
+                | Self::Cancel { .. }
+                | Self::Close { .. }
+                | Self::Pairing { .. }
+                | Self::CancelPairing { .. }
         )
     }
 }
@@ -87,6 +133,15 @@ impl NativeSettingsOperation {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum NativeSettingsResult {
+    Devices {
+        page: SettingsDevicePage,
+    },
+    DeviceConfirmed {
+        result: NativeDeviceActionResult,
+    },
+    Pairing {
+        creation: NativePairingCreation,
+    },
     Opened {
         session: NativeSessionOpened,
     },
@@ -112,6 +167,43 @@ pub enum NativeSettingsResult {
 impl NativeSettingsResult {
     pub fn validate_for(&self, request: &NativeSettingsOperation) -> Result<(), &'static str> {
         match (request, self) {
+            (
+                NativeSettingsOperation::Devices {
+                    scope: SettingsScope::Host { host_id },
+                    limit,
+                    ..
+                },
+                Self::Devices { page },
+            ) if page.host_id == *host_id && page.devices.len() <= *limit => {
+                page.validate().map_err(|_| "invalid native device page")
+            }
+            (
+                NativeSettingsOperation::PairDevice { request, .. }
+                | NativeSettingsOperation::RevokeDevice { request, .. },
+                Self::Prepared { result },
+            ) if result.request_id == request.request_id && result.scope == request.scope => result
+                .validate()
+                .map_err(|_| "invalid native device result"),
+            (
+                NativeSettingsOperation::ConfirmDevice { invocation, .. },
+                Self::DeviceConfirmed { result },
+            ) => match result {
+                NativeDeviceActionResult::Pairing { creation } => {
+                    validate_pairing(creation, invocation.operation_id)
+                }
+                NativeDeviceActionResult::Existing { operation }
+                | NativeDeviceActionResult::Revoked { operation }
+                    if operation.binding.request_id == invocation.operation_id =>
+                {
+                    validate_inspection(operation)
+                }
+                _ => Err("native device result does not match its invocation"),
+            },
+            (
+                NativeSettingsOperation::Pairing { operation_id, .. }
+                | NativeSettingsOperation::CancelPairing { operation_id, .. },
+                Self::Pairing { creation },
+            ) => validate_pairing(creation, *operation_id),
             (NativeSettingsOperation::Open, Self::Opened { session })
                 if !session.proof.session_id().is_nil() && session.expires_at.get() > 0 =>
             {
@@ -190,6 +282,25 @@ fn validate_inspection(operation: &SettingsOperationInspection) -> Result<(), &'
     Ok(())
 }
 
+fn validate_pairing(
+    creation: &NativePairingCreation,
+    operation_id: CommandId,
+) -> Result<(), &'static str> {
+    validate_inspection(&creation.operation)?;
+    if creation.operation.binding.request_id != operation_id {
+        return Err("pairing result does not match its operation");
+    }
+    if let Some(invitation) = &creation.invitation
+        && (invitation.operation_id != operation_id
+            || invitation.expires_at.get() > creation.operation.binding.expires_at.get()
+            || invitation.fingerprint.len() > 128
+            || invitation.fingerprint.is_empty())
+    {
+        return Err("invalid native pairing invitation metadata");
+    }
+    Ok(())
+}
+
 fn presentation_target(target: &SettingsActionTarget) -> bool {
     matches!(
         target,
@@ -212,6 +323,59 @@ impl HostInner {
         }
         let service = &self.settings_service;
         match operation {
+            NativeSettingsOperation::Devices {
+                proof,
+                scope,
+                after,
+                limit,
+            } => {
+                let caller = service.native_caller(call, &proof)?;
+                Ok(NativeSettingsResult::Devices {
+                    page: service.devices(caller, scope, after, limit).await?,
+                })
+            }
+            NativeSettingsOperation::PairDevice { proof, request } => {
+                let caller = service.native_caller(call, &proof)?;
+                Ok(NativeSettingsResult::Prepared {
+                    result: service
+                        .pair_device(caller, request, call.cancellation.clone())
+                        .await?,
+                })
+            }
+            NativeSettingsOperation::RevokeDevice { proof, request } => {
+                let caller = service.native_caller(call, &proof)?;
+                Ok(NativeSettingsResult::Prepared {
+                    result: service
+                        .revoke_device(caller, request, call.cancellation.clone())
+                        .await?,
+                })
+            }
+            NativeSettingsOperation::ConfirmDevice { proof, invocation } => {
+                let caller = service.native_cleanup_caller(call, &proof)?;
+                Ok(NativeSettingsResult::DeviceConfirmed {
+                    result: service
+                        .confirm_device_action(caller, invocation, call.cancellation.clone())
+                        .await?,
+                })
+            }
+            NativeSettingsOperation::Pairing {
+                proof,
+                operation_id,
+            } => {
+                let caller = service.native_cleanup_caller(call, &proof)?;
+                Ok(NativeSettingsResult::Pairing {
+                    creation: service.native_pairing(caller, operation_id).await?,
+                })
+            }
+            NativeSettingsOperation::CancelPairing {
+                proof,
+                operation_id,
+            } => {
+                let caller = service.native_cleanup_caller(call, &proof)?;
+                Ok(NativeSettingsResult::Pairing {
+                    creation: service.cancel_native_pairing(caller, operation_id).await?,
+                })
+            }
             NativeSettingsOperation::Open => Ok(NativeSettingsResult::Opened {
                 session: service.open_native_session(call)?,
             }),
