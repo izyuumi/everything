@@ -1,12 +1,14 @@
 mod control_events;
 mod foreground;
 mod native;
+mod scheduled;
 mod steering;
 
 pub use control_events::{PermissionPublicationReceipt, TaskPublicationReceipt};
 pub use native::{
     LoopLimits, LoopStatus, NativeRunInfo, PauseReason, ProviderResume, ToolRunSetup,
 };
+pub use scheduled::{ScheduledResultCommand, ScheduledResultReceipt};
 pub use steering::{TaskInput, TaskInputCommand, TaskInputReceipt, TaskInputState};
 
 use std::collections::{BTreeMap, HashMap};
@@ -1059,6 +1061,7 @@ fn event_kind(event: &ConversationEvent) -> &'static str {
         ConversationEvent::PermissionDecided { .. } => "permission_decided",
         ConversationEvent::SteeringReceived { .. } => "steering_received",
         ConversationEvent::TaskWaitRequested { .. } => "task_wait_requested",
+        ConversationEvent::ScheduledRunFinished { .. } => "scheduled_run_finished",
         ConversationEvent::SubagentFinished { .. } => "subagent_finished",
     }
 }

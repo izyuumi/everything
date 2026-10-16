@@ -14,8 +14,8 @@ use super::{
     timestamp,
 };
 
-const MAX_POLICY_BYTES: usize = 32_768;
-const MAX_ATTEMPT_BYTES: i64 = 64 * 1_048_576;
+pub(super) const MAX_POLICY_BYTES: usize = 32_768;
+pub(super) const MAX_ATTEMPT_BYTES: i64 = 64 * 1_048_576;
 
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -32,14 +32,6 @@ pub struct ScheduledAttempt {
 }
 
 impl ScheduleRepository {
-    pub(super) fn terminal_journal_unknown(&self, task: TaskId) -> ScheduleResult<bool> {
-        Ok(self.store.connection()?.query_row(
-            "SELECT EXISTS(SELECT 1 FROM tool_calls WHERE task_id=?1 AND state IN ('running','unknown'))",
-            [task.to_string()],
-            |row| row.get(0),
-        )?)
-    }
-
     pub fn first_attempt(
         &self,
         occurrence: OccurrenceId,
@@ -122,8 +114,7 @@ pub(super) fn capture_policy(
 ) -> ScheduleResult<ExecutionPolicy> {
     let target = &run.definition.target;
     let maximum = target.configuration.max_output_tokens;
-    let requests =
-        u32::from(target.budget.max_model_requests).min(target.budget.max_output_tokens / maximum);
+    let requests = u32::from(target.budget.max_model_requests);
     let context = 128_000_u64.max(u64::from(maximum) + 2048);
     let allowed: BTreeSet<String> = target
         .permissions
@@ -142,7 +133,7 @@ pub(super) fn capture_policy(
         max_charged_tokens: context
             .checked_mul(u64::from(requests))
             .ok_or(ScheduleError::Invalid("attempt token ceiling overflow"))?,
-        max_reserved_output_tokens: None,
+        max_reserved_output_tokens: Some(u64::from(target.budget.max_output_tokens)),
         max_duration_ms: target.budget.timeout_ms,
         absolute_deadline: Some(occurrence_deadline(run)?),
     };
@@ -166,7 +157,7 @@ pub(super) fn capture_policy(
     Ok(policy)
 }
 
-fn validate_policy(run: &ScheduledRun, policy: &ExecutionPolicy) -> ScheduleResult<()> {
+pub(super) fn validate_policy(run: &ScheduledRun, policy: &ExecutionPolicy) -> ScheduleResult<()> {
     policy
         .validate()
         .map_err(|_| ScheduleError::Invalid("invalid scheduled native policy"))?;
@@ -175,14 +166,22 @@ fn validate_policy(run: &ScheduledRun, policy: &ExecutionPolicy) -> ScheduleResu
         .allowed_tools
         .as_ref()
         .ok_or(ScheduleError::Invalid("scheduled tools must be captured"))?;
-    let max_requests = u32::from(target.budget.max_model_requests)
-        .min(target.budget.max_output_tokens / target.configuration.max_output_tokens);
+    let max_requests = if policy.limits.max_reserved_output_tokens.is_some() {
+        u32::from(target.budget.max_model_requests)
+    } else {
+        u32::from(target.budget.max_model_requests)
+            .min(target.budget.max_output_tokens / target.configuration.max_output_tokens)
+    };
     if policy.workspace_root != target.workspace_root
         || policy.mode > target.permissions.mode
         || !allowed.is_subset(&target.permissions.allowed_tools)
         || allowed
             .iter()
             .any(|name| SCHEDULER_TOOL_NAMES.contains(&name.as_str()))
+        || policy
+            .limits
+            .max_reserved_output_tokens
+            .is_some_and(|cap| cap > u64::from(target.budget.max_output_tokens))
         || policy.limits.max_model_attempts > max_requests
         || policy.limits.max_tool_calls > u32::from(target.budget.max_tool_calls)
         || policy.limits.max_duration_ms > target.budget.timeout_ms
@@ -200,7 +199,15 @@ fn read_attempt(
     connection: &rusqlite::Connection,
     occurrence: OccurrenceId,
 ) -> ScheduleResult<Option<ScheduledAttempt>> {
-    let value=connection.query_row("SELECT attempt_number,task_id,conversation_id,create_command_id,input_command_id,accepted_at,deadline,execution,length(CAST(execution AS BLOB)),length(CAST(task_id AS BLOB)),length(CAST(conversation_id AS BLOB)),length(CAST(create_command_id AS BLOB)),length(CAST(input_command_id AS BLOB)) FROM scheduled_attempts WHERE occurrence_id=?1",[occurrence.to_string()],|row| {
+    read_attempt_number(connection, occurrence, 1)
+}
+
+pub(super) fn read_attempt_number(
+    connection: &rusqlite::Connection,
+    occurrence: OccurrenceId,
+    attempt_number: u32,
+) -> ScheduleResult<Option<ScheduledAttempt>> {
+    let value=connection.query_row("SELECT attempt_number,task_id,conversation_id,create_command_id,input_command_id,accepted_at,deadline,execution,length(CAST(execution AS BLOB)),length(CAST(task_id AS BLOB)),length(CAST(conversation_id AS BLOB)),length(CAST(create_command_id AS BLOB)),length(CAST(input_command_id AS BLOB)) FROM scheduled_attempts WHERE occurrence_id=?1 AND attempt_number=?2",rusqlite::params![occurrence.to_string(),attempt_number],|row| {
         let size:usize=row.get(8)?;
         if size>MAX_POLICY_BYTES {return Err(rusqlite::Error::InvalidQuery);}
         for column in 9..=12 {let size:usize=row.get(column)?;if size!=36 {return Err(rusqlite::Error::InvalidQuery);}}
@@ -234,9 +241,13 @@ fn read_attempt(
                 execution: serde_json::from_str(&row.7)?,
             };
             let run = super::store::required_run(connection, occurrence)?;
-            if attempt.attempt_number != 1
-                || attempt.task_id != run.initial_task_id
-                || attempt.accepted_at != run.claimed_at
+            if !(1..=u32::from(run.definition.policies.retry.max_attempts))
+                .contains(&attempt.attempt_number)
+                || attempt.attempt_number == 1
+                    && (attempt.task_id != run.initial_task_id
+                        || attempt.accepted_at != run.claimed_at)
+                || attempt.accepted_at < run.claimed_at
+                || attempt.accepted_at > attempt.deadline
                 || attempt.deadline != occurrence_deadline(&run)?
             {
                 return Err(ScheduleError::Invalid(
