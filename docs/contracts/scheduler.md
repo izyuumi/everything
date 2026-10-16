@@ -12,6 +12,8 @@ Queue admission is not completed inference. `status(task_id)` also reads termina
 
 `scheduler::task_snapshot(&Store, task_id)` reads the same validated durable snapshot without a live scheduler actor, including after shutdown. It performs synchronous SQLite work; asynchronous hosts must call it on a bounded blocking worker while retaining their state lease. It does not admit, wake, mutate or execute a task.
 
+`scheduler::task_publication_records(&Store, task_id)` returns the immutable initial TaskRecord and current checkpoint TaskRecord from one validated repository read. Publication uses this source without changing task state. This synchronous read has the same bounded blocking-worker and state-lease requirements.
+
 ## Execution and wakeup
 
 At most four configured primary tasks and three configured subagents run; defaults are one primary and three subagents. All nested descendants share the same global subagent allowance. Each activation uses the actual Agent::run_tools kernel and its per-conversation admission, with the same shared broker. A worker marks no TaskRows itself. The serialized control actor persists Running before dispatch and drains the full stream before recording an outcome. Only matching durable final native state completes a task. A successful shutdown report is retained in the handle before the actor exits, so retries after a timeout or a dropped caller still return the actual completed drain proof; generic actor closure never implies success.

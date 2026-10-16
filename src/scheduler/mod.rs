@@ -29,3 +29,11 @@ pub(crate) fn task_snapshot_with_evidence(
     let task = repository::load(store, task)?;
     Ok((task.snapshot(), task.checkpoint.terminal_evidence))
 }
+
+pub fn task_publication_records(
+    store: &crate::storage::Store,
+    task: crate::protocol::TaskId,
+) -> Result<(crate::protocol::TaskRecord, crate::protocol::TaskRecord), SchedulerError> {
+    let saved = repository::load(store, task)?;
+    Ok((saved.definition.initial, saved.checkpoint.task))
+}
