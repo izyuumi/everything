@@ -396,6 +396,14 @@ actor ReplicaStore: DurableEnvelopeInbox {
     }
 
     func acceptAuthenticated(_ envelope: EncryptedEnvelope, plaintext: Data, host: DevicePublicKeys, localID: UUID) throws -> Bool {
+        try recordAuthenticated(envelope, plaintext: plaintext, host: host, localID: localID)
+    }
+
+    func rejectAuthenticated(_ envelope: EncryptedEnvelope, host: DevicePublicKeys, localID: UUID) throws -> Bool {
+        try recordAuthenticated(envelope, plaintext: nil, host: host, localID: localID)
+    }
+
+    private func recordAuthenticated(_ envelope: EncryptedEnvelope, plaintext: Data?, host: DevicePublicKeys, localID: UUID) throws -> Bool {
         try database.transaction {
             try checkActive(host: host)
             guard try identityID() == localID, envelope.header.recipient == localID,
@@ -407,8 +415,13 @@ actor ReplicaStore: DurableEnvelopeInbox {
                 return false
             }
             let totals = try database.rows("SELECT count(*),coalesce(sum(length(payload)),0),sum(CASE WHEN done=0 THEN 1 ELSE 0 END) FROM inbox") { (sqlite3_column_int64($0, 0), sqlite3_column_int64($0, 1), sqlite3_column_int64($0, 2)) }.first ?? (0, 0, 0)
-            guard totals.0 < 150_000, totals.2 < 128, totals.1 + Int64(plaintext.count) <= 16_777_216 else { throw WireError.queueFull }
-            try database.execute("INSERT INTO inbox(id,digest,sender,recipient,expires,payload) VALUES (?,?,?,?,?,?)", [.text(id), .bytes(digest), .text(host.deviceID.uuidString.lowercased()), .text(localID.uuidString.lowercased()), .integer(Int64(envelope.header.expires)), .bytes(plaintext)])
+            guard totals.0 < 150_000 else { throw WireError.queueFull }
+            if let plaintext {
+                guard totals.2 < 128, totals.1 + Int64(plaintext.count) <= 16_777_216 else { throw WireError.queueFull }
+                try database.execute("INSERT INTO inbox(id,digest,sender,recipient,expires,payload) VALUES (?,?,?,?,?,?)", [.text(id), .bytes(digest), .text(host.deviceID.uuidString.lowercased()), .text(localID.uuidString.lowercased()), .integer(Int64(envelope.header.expires)), .bytes(plaintext)])
+            } else {
+                try database.execute("INSERT INTO inbox(id,digest,sender,recipient,expires,payload,done) VALUES (?,?,?,?,?,NULL,1)", [.text(id), .bytes(digest), .text(host.deviceID.uuidString.lowercased()), .text(localID.uuidString.lowercased()), .integer(Int64(envelope.header.expires))])
+            }
             return true
         }
     }
