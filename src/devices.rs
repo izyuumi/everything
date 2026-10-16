@@ -4,6 +4,8 @@ mod settings;
 mod settings_connection;
 #[cfg(unix)]
 mod settings_ingress;
+#[cfg(unix)]
+mod settings_reply;
 
 pub use session::RelaySessionStatus;
 pub use settings::{
@@ -24,6 +26,12 @@ pub(crate) use settings_ingress::{
     OwnedVerifiedSettingsCommand, OwnedVerifiedSettingsPacket, PendingSettingsReceipt,
     SettingsCommandIntent, SettingsParentReference, SettingsReceiveDrain, SettingsReceiveError,
     SettingsReceiveEvent, SettingsReceiveWitness, SettingsTransportReceipt, SettingsUpdateIntent,
+};
+
+#[cfg(unix)]
+pub(crate) use settings_reply::{
+    OriginalKind, OriginalLink, OriginalView, RemoteOperationPhase, RemoteOperationState,
+    RemoteServiceReceipt, ServiceLookup, SettingsOriginalReplyPacket, SettingsReplyContractError,
 };
 
 use crate::crypto::{
