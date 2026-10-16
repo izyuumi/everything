@@ -258,7 +258,10 @@ impl DeviceEndpoint {
                 continue;
             }
             let recipient = row.device_id.parse()?;
-            self.peer(recipient)?;
+            let peer = match self.peer(recipient) {
+                Err(DeviceError::Storage(StorageError::RevokedDevice(_))) => continue,
+                result => result?,
+            };
             let envelope: EncryptedEnvelope = serde_json::from_slice(&row.envelope)?;
             if envelope.header.message_id != id
                 || envelope.header.sender != self.public_keys().device_id
@@ -270,9 +273,24 @@ impl DeviceEndpoint {
                 ));
             }
             let retry_ms = 1_000_i64 << row.attempts.min(8);
-            self.inner
+            if let Err(error) = self
+                .inner
                 .store
-                .defer_outbox(&row.id, time(now)?.saturating_add(retry_ms))?;
+                .defer_outbox(&row.id, time(now)?.saturating_add(retry_ms))
+            {
+                if matches!(
+                    &error,
+                    StorageError::NotFound { entity: "outbox message", id } if id == &row.id
+                ) && !self.inner.store.confirm_transport_outbox(
+                    &row.id,
+                    &row.envelope,
+                    &serde_json::to_value(peer)?,
+                    time(now)?,
+                )? {
+                    continue;
+                }
+                return Err(error.into());
+            }
             envelopes.push(envelope);
             if envelopes.len() == count {
                 break;

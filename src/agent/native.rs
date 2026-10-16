@@ -16,7 +16,7 @@ use crate::permissions::{ApprovalRequest, ExecutionMode};
 use crate::protocol::{OperationId, TaskId, ToolCall, ToolResult};
 use crate::storage::{TaskState, ToolCallState};
 use crate::tools::{
-    ToolRegistry,
+    RetainedToolOwner, ToolRegistry,
     broker::{BrokerOutcome, OperationResult, TaskToolBroker, ToolInvocation},
 };
 
@@ -415,7 +415,9 @@ impl Agent {
             let owner = self.clone();
             let preparation = Arc::clone(setup);
             let (captured, native) = blocking(move || {
-                let definition = prepare_definition(&owner.store, &conversation, &preparation)?;
+                let retained_agent = owner;
+                let definition =
+                    prepare_definition(&retained_agent.store, &conversation, &preparation)?;
                 let native = prepare_native(&conversation, definition)?;
                 if native
                     .turn
@@ -506,7 +508,8 @@ impl Agent {
                 let prepared = if let Some(setup) = &setup {
                     let preparation = Arc::clone(setup); let owner = agent.clone();
                     let (captured, built, request) = blocking(move || {
-                        ensure_task(&owner.store, preparation.broker.authority().task_id(), preparation.broker.authority().conversation_id())?;
+                        let retained_agent = owner;
+                        ensure_task(&retained_agent.store, preparation.broker.authority().task_id(), preparation.broker.authority().conversation_id())?;
                         let built = build_context(&conversation, &preparation)?;
                         let request = built.request.clone();
                         Ok((conversation, built, request))
@@ -961,7 +964,9 @@ fn run_deadline(conversation: &Conversation) -> Result<Instant, AgentError> {
             if now < observed_floor(turn) {
                 0
             } else {
-                turn.deadline_ms.saturating_sub(now)
+                turn.deadline_ms
+                    .saturating_sub(now)
+                    .min(turn.definition.limits.max_duration_ms)
             }
         }
         None => 3_600_000,
@@ -1382,8 +1387,9 @@ impl Agent {
         let owner = self.clone();
         let scoped = setup.broker.clone();
         blocking(move || {
+            let retained_agent = owner;
             ensure_task(
-                &owner.store,
+                &retained_agent.store,
                 scoped.authority().task_id(),
                 scoped.authority().conversation_id(),
             )
@@ -1436,12 +1442,14 @@ impl Agent {
         let broker = setup.broker.clone();
         let child = token.clone();
         let call_observed_wall = Arc::clone(&observed_wall);
+        let retained_owner = RetainedToolOwner::new(self.clone());
         let calls = stream::iter(requests)
             .map(move |(index, invocation)| {
                 let broker = broker.clone();
                 let token = child.clone();
                 let observed_wall = Arc::clone(&call_observed_wall);
                 let admission_stopped = Arc::clone(&admission_stopped);
+                let owner = retained_owner.clone();
                 async move {
                     let now = UnixMillis::now()?.get();
                     let floor = observed_wall.fetch_max(now, Ordering::AcqRel);
@@ -1453,7 +1461,10 @@ impl Agent {
                         admission_stopped.store(true, Ordering::Release);
                         Ok::<_, AgentError>((index, None))
                     } else {
-                        Ok((index, Some(broker.execute(invocation, token).await)))
+                        Ok((
+                            index,
+                            Some(broker.execute_retained(invocation, token, owner).await),
+                        ))
                     }
                 }
             })

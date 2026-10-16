@@ -145,6 +145,10 @@ impl Wiki {
         Ok(wiki)
     }
 
+    pub(crate) fn index(&self) -> &WikiIndex {
+        &self.index
+    }
+
     pub fn root(&self) -> &Path {
         &self.root
     }
@@ -256,6 +260,14 @@ impl Wiki {
     }
 
     pub fn synchronize(&mut self) -> Result<SyncReport, WikiError> {
+        let profile = format!(
+            "pulldown-cmark-0.13.4.heading-chunks-v1;page={};chunk={};pages={};parts={}",
+            self.limits.max_page_bytes,
+            self.limits.max_chunk_bytes,
+            self.limits.max_pages,
+            self.limits.max_chunks_per_page
+        );
+        self.index.ensure_chunking_profile(&profile)?;
         let paths = self.page_paths()?;
         let mut report = SyncReport::default();
         for path in &paths {
@@ -306,8 +318,8 @@ impl Wiki {
         Ok(())
     }
 
-    fn persist_page(
-        &mut self,
+    pub(super) fn preflight_page_write(
+        &self,
         path: &str,
         markdown: &str,
         replace: bool,
@@ -335,7 +347,18 @@ impl Wiki {
         if exists && !replace {
             return Err(WikiError::AlreadyExists(path));
         }
-        let parent = Path::new(&path).parent().unwrap_or_else(|| Path::new(""));
+        Ok(page)
+    }
+
+    fn persist_page(
+        &mut self,
+        path: &str,
+        markdown: &str,
+        replace: bool,
+    ) -> Result<WikiPage, WikiError> {
+        let page = self.preflight_page_write(path, markdown, replace)?;
+        let path = page.path.as_str();
+        let parent = Path::new(path).parent().unwrap_or_else(|| Path::new(""));
         if !parent.as_os_str().is_empty() {
             self.directory
                 .create_dir_all(parent)
@@ -349,9 +372,9 @@ impl Wiki {
                 parent
             })
             .map_err(|source| io_error(self.root.join(parent), source))?;
-        let filename = Path::new(&path)
+        let filename = Path::new(path)
             .file_name()
-            .ok_or_else(|| WikiError::InvalidPath(path.clone()))?;
+            .ok_or_else(|| WikiError::InvalidPath(path.to_owned()))?;
         let temporary_name = format!(".everything-{}.tmp", Uuid::new_v4());
         let write_result = (|| {
             let mut options = OpenOptions::new();
@@ -367,15 +390,15 @@ impl Wiki {
             if replace {
                 parent_directory
                     .rename(&temporary_name, &parent_directory, filename)
-                    .map_err(|source| io_error(self.root.join(&path), source))?;
+                    .map_err(|source| io_error(self.root.join(path), source))?;
             } else {
                 parent_directory
                     .hard_link(&temporary_name, &parent_directory, filename)
                     .map_err(|source| {
                         if source.kind() == std::io::ErrorKind::AlreadyExists {
-                            WikiError::AlreadyExists(path.clone())
+                            WikiError::AlreadyExists(path.to_owned())
                         } else {
-                            io_error(self.root.join(&path), source)
+                            io_error(self.root.join(path), source)
                         }
                     })?;
                 parent_directory
