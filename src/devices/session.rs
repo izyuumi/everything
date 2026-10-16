@@ -3,6 +3,10 @@ use crate::relay_protocol::{
     RELAY_SCHEMA_VERSION, RelayClientMessage, RelayOrigin, RelayServerMessage,
 };
 use crate::transport::remote::{RelayConnection, RemoteError};
+#[cfg(unix)]
+use futures_util::FutureExt;
+#[cfg(unix)]
+use std::panic::AssertUnwindSafe;
 use std::time::Duration;
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
@@ -28,15 +32,39 @@ impl DeviceEndpoint {
             .await
     }
 
+    #[cfg(unix)]
     pub(crate) async fn run_relay_with_settings(
         &self,
         origin: RelayOrigin,
         cancellation: CancellationToken,
         status: watch::Sender<RelaySessionStatus>,
-        owner: HostSettingsTransportOwner,
+        mut owner: HostSettingsTransportOwner,
     ) -> Result<(), DeviceError> {
-        self.run_relay_owned(origin, cancellation, status, Some(owner))
-            .await
+        let result = AssertUnwindSafe(self.run_relay_owned(
+            origin,
+            cancellation,
+            status.clone(),
+            Some(&mut owner),
+        ))
+        .catch_unwind()
+        .await;
+        let result = match result {
+            Ok(result) => result,
+            Err(_) => {
+                owner.latch_failure();
+                Err(DeviceError::Worker)
+            }
+        };
+        if owner.close_and_wait().await.is_err() {
+            status.send_replace(RelaySessionStatus::Failed {
+                reason: "Settings transport ownership is quarantined; process restart required",
+            });
+            std::future::pending::<()>().await;
+        }
+        if result.is_ok() {
+            status.send_replace(RelaySessionStatus::Stopped);
+        }
+        result
     }
 
     async fn run_relay_owned(
@@ -44,7 +72,7 @@ impl DeviceEndpoint {
         origin: RelayOrigin,
         cancellation: CancellationToken,
         status: watch::Sender<RelaySessionStatus>,
-        mut settings_owner: Option<HostSettingsTransportOwner>,
+        mut settings_owner: Option<&mut HostSettingsTransportOwner>,
     ) -> Result<(), DeviceError> {
         let _session = self
             .inner
@@ -54,7 +82,9 @@ impl DeviceEndpoint {
         let mut attempt = 0_u32;
         loop {
             if cancellation.is_cancelled() {
-                status.send_replace(RelaySessionStatus::Stopped);
+                if settings_owner.is_none() {
+                    status.send_replace(RelaySessionStatus::Stopped);
+                }
                 return Ok(());
             }
             self.blocking(|endpoint| endpoint.ensure_active()).await?;
@@ -74,13 +104,21 @@ impl DeviceEndpoint {
                         .relay_session(&mut connection, &cancellation, &status)
                         .await;
                     drop(incarnation);
+                    #[cfg(unix)]
+                    if let Some(owner) = settings_owner.as_mut()
+                        && owner.drain_connection().await.is_err()
+                    {
+                        return Err(DeviceError::Worker);
+                    }
                     let close = connection.close().await;
                     if started.elapsed() >= Duration::from_secs(30) {
                         attempt = 0;
                     }
                     match (result, close) {
                         (Ok(()), _) if cancellation.is_cancelled() => {
-                            status.send_replace(RelaySessionStatus::Stopped);
+                            if settings_owner.is_none() {
+                                status.send_replace(RelaySessionStatus::Stopped);
+                            }
                             return Ok(());
                         }
                         (Err(error), _) => Err(error),
@@ -89,7 +127,9 @@ impl DeviceEndpoint {
                     }
                 }
                 Err(RemoteError::Cancelled) if cancellation.is_cancelled() => {
-                    status.send_replace(RelaySessionStatus::Stopped);
+                    if settings_owner.is_none() {
+                        status.send_replace(RelaySessionStatus::Stopped);
+                    }
                     return Ok(());
                 }
                 Err(error) => Err(error.into()),
@@ -108,7 +148,9 @@ impl DeviceEndpoint {
                     ),
                 )) => reason,
                 Err(DeviceError::Remote(RemoteError::Cancelled)) if cancellation.is_cancelled() => {
-                    status.send_replace(RelaySessionStatus::Stopped);
+                    if settings_owner.is_none() {
+                        status.send_replace(RelaySessionStatus::Stopped);
+                    }
                     return Ok(());
                 }
                 Err(error) => {
@@ -124,7 +166,9 @@ impl DeviceEndpoint {
             let delay = Duration::from_secs(1_u64 << attempt.min(5));
             tokio::select! {
                 _ = cancellation.cancelled() => {
-                    status.send_replace(RelaySessionStatus::Stopped);
+                    if settings_owner.is_none() {
+                        status.send_replace(RelaySessionStatus::Stopped);
+                    }
                     return Ok(());
                 }
                 _ = tokio::time::sleep(delay) => {}

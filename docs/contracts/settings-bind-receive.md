@@ -1,0 +1,63 @@
+# Owned fresh Bind receipt foundation
+
+This is held, unactivated Unix source for #116. The public `receive_envelope` and existing relay Delivery path still use metadata-only private rejection. The connected owner has a fresh Bind producer, but Delivery does not call it. Same-Authority parent installation, known-parent Bind observations, commands, publication, complete protocol cleanup and exact-head compiler/CI validation remain prerequisites to activation.
+
+Read [connection lifetime](settings-connection-lifetime.md), [private rejection](private-settings-ingress.md), [transport storage](settings-transport-storage.md) and [paired operations](paired-settings-operations.md) for the separate boundaries. The relay remains blind to plaintext.
+
+## Original owned admission
+
+`HostSettingsTransportOwner` retains its original Agent, StateLease, Main Store, endpoint and mutation mutex. Its connected guard exposes `try_receive(EncryptedEnvelope)` and `next_receive_event()`. Admission registers one encrypted frame before any guard wait or fork. The encrypted frame retains the existing full ciphertext/frame bounds; the private 32768-byte limit applies only after actual AEAD verification and private routing. The ordinary six lanes retain their existing payload limits and bytes.
+
+The original mutex wait is owned by the receive state. Once it completes, the state registers an original job count, starts the actual blocking closure in its own JoinSet and associates the original Tokio task ID before suspension. Dropping a `PendingSettingsReceipt` waiter does not cancel or remove that job. The waiter receives only transport disposition and a message ID; it never receives a plaintext packet, parent capability or private reply.
+
+The closure owns encrypted input, original context, actual mutation guard and final frame witness. It calls the real `DeviceIdentity::open` with an owned ReplayGuard. Signature, header, AEAD and crypto size validation precede its callback. Raw plaintext remains the crypto implementation's Zeroizing buffer and is destroyed before the original blocking result is joined. Ordinary packets use the existing durable ordinary path. Private malformed or unavailable lanes use the existing fixed rejected metadata path.
+
+## Closed fresh Bind
+
+The accepted private packet is one actual-object JSON wrapper with schema_version 1, payload kind `settings`, version 1, Host ID and message kind `bind`. The Bind contains its exact generation, binding request ID, original time and requested parent expiry. Every accepted nested object rejects unknown and duplicate fields. UUIDs must be nonnil, lowercase canonical strings; grant revisions are positive signed-SQLite-range integers. Trailing JSON, ambiguous routing, non-string kinds, unsupported tags and malformed intervals fail closed. No private generic JSON body is retained.
+
+Fresh inner and outer intervals must be positive and no longer than 30000 milliseconds. The outer expiry cannot exceed the original inner expiry. The full original immutable `BindingIntent` is also retained inside the opaque source; an admission cannot substitute another intent while borrowing a genuine source.
+
+The source is constructed only inside the real crypto callback. It retains the actually verified complete registration pin, original context, exact lightweight connection identity, envelope metadata, original wall/monotonic observation and a witness of the held original mutex guard. These fields and constructors are private. `matches_context` compares actual Main connection, StateLease Arc, endpoint Arc and mutation Arc; labels or UUID equality cannot reconstruct that association.
+
+The private admission count uses the actually verified peer only. Retained typed requests/outputs are bounded to 32 globally, four per peer and 1048576 logical request bytes; each request is at most 32768 bytes. These are logical ownership bounds, not an RSS or cryptographic-memory-erasure guarantee. One predecrypt frame/job is separate from those retained output bounds.
+
+## Same-transaction receipt
+
+`Store::admit_settings_bind` consumes a borrowed `SettingsBindAdmission` containing the actual opaque source and exact original intent. It owns one Main Immediate transaction. It does not accept a caller-provided timestamp, liveness flag, arbitrary transaction callback or claimed parent ID.
+
+The transaction reuses the ordinary full-pin/local-recipient, speculative prune and exact ciphertext-replay checks. An exact duplicate returns without committing speculative pruning and creates no history creator, reply reservation or dispatch. A conflicting message ID is an actual typed storage conflict.
+
+For a fresh Bind it reads the actual current Settings grant through the existing transaction-local reader. The local Host and peer must remain active; the complete verified peer keys, grant ID/revision and Active state must match. Fresh wall and original monotonic deadlines are checked after lock waits and immediately before commit, together with the actual held guard, exact owner/connection association and synchronous retirement state.
+
+The transaction reserves a per-connection history cell, checks the actual queued-plus-reserved outbox quotas and plain-INSERTs one Default reply reservation for 49152 ciphertext bytes. Its canonical provenance contains actual local/peer keys, Host/connection epochs, exact grant and parent=null. Publication expiry is at most current observation plus 60000 milliseconds and the original parent/grant expiry. The stored row is read back and matched exactly.
+
+It then inserts a processed transport marker with payload=NULL, command_id=NULL and no detail. Full pin, local recipient, grant, source and original time constraints are rechecked before the same commit. No Original, remote command, private body, private-text hash or diagnostic is written. No schema or crypto API changes are made here.
+
+Only a successful commit followed by actual history bookkeeping returns the sealed fresh disposition. Only then does the ReplayGuard return true and crypto open succeed. A failed or uncertain commit never becomes Fresh. The original history cell is retained as uncertain rather than retried or refunded.
+
+## Joined handoff and history
+
+The blocking return owns the guard, original context, receipt result, typed committed output and frame witness. The receive state observes that exact original job through JoinSet before releasing the guard and handing out `OwnedCommittedSettingsBind`. A `CommittedBindSource` borrows this sealed owner; neither type is serializable or cloneable and neither can be constructed from a durable row or DTO. A committed receipt is not a Settings caller, parent installation or reply publication.
+
+`BindingHistorySnapshot` is nonsecret observation only. Parent expiry is fixed by the minimum of requested expiry, original issue time plus 300000 milliseconds and actual grant expiry, with an original monotonic deadline. History has 32 global/four-per-peer cells per actual connection and no eviction or same-generation reuse. Preparing, committed and uncertain entries all count; the closed state vocabulary does not create a Core parent. A dropped creator becomes Unknown. No known-parent expiry exception is implemented: only a later genuine same-Authority still-live parent check can admit that exception.
+
+A future Core consumer must compare its actual original context and lightweight identities, re-read current grant/authority and retain the real owned request. It must not place CoreParent, ServiceCore, HostInner or a full worker context inside lightweight identities. Commands additionally require the future direct same-Core precommit gate before their own marker/Original/reservation transaction; no command validator or dispatch is supplied by this slice.
+
+## Cleanup and nonsecret witness
+
+The owned relay runner retains the full owner outside its borrowed pump future. It catches pump unwind, retires the connection and closes intake before socket close/retry. Both normal pump errors and caught panic attempt every actual receive JoinSet join; joined returned buffers are destroyed before evaluating drain. Non-admitted guard waits can be cancelled without a receipt because they have not spawned. External joined typed owners remain counted until actually dropped.
+
+`HostSettingsTransport::receive_witness()` returns a metadata-only handle that survives full owner drop and has no Agent, Store, endpoint, mutation context or Core back-reference. Its snapshot reports intake state, one-frame ownership, actual registered original jobs, retained private count/bytes, bookkeeping health and terminal quarantine. `complete()` requires closed intake, all those counts zero, healthy bookkeeping and no terminal quarantine. Counters decrement only at actual joins or final owned data destruction; a cancelled token or dropped wrapper is insufficient.
+
+Lost association, poisoned accounting, uncertain storage/bookkeeping and worker panic keep the witness non-clean. The runner first attempts its actual joins, then retains a failed full owner without retrying admission, refunding or claiming Stopped. Root must wire this actual witness into common Host quiescence and uncertainty-cleanup gates; scheduler worker counts alone do not include relay ownership.
+
+Catastrophic drop or abort of the whole owned relay future cannot await. That exceptional synchronous Drop retires identities, closes intake and, when complete drain cannot be established, moves its actual JoinSet, pending state, output associations, original context/Agent lease and ledger into one bounded terminal retained allocation. The original JoinSet is not dropped or aborted as cleanup. The surviving witness permanently reports terminal quarantine. This is an intentional irrecoverable RAM/state-lease retention requiring process restart; it is neither a rescue runtime nor recoverable drain. No repeated intake, retry or new allocation loop is started for that owner.
+
+The witness describes receive ownership only. It does not prove publication, reply-reservation release, Core parent cleanup, known effects or whole-protocol quiescence. Reservation consumption/refund and genuine Core ownership are absent and must be composed before activation. Existing ordinary blocking cleanup is not accepted private-path join evidence.
+
+## Failure and validation scope
+
+Expected frame/request/history/replay-marker/reply quota failures have typed capacity dispositions, no ACK and no private dispatch. Fixed rejection failures retain the actual typed storage cause while crypto receives a fixed ReplayStorage sentinel. No formatted private payload or error-string capacity classification is used. Ordinary error compatibility and duplicate rollback are retained. A zero count or logical rejection never establishes an effect outcome.
+
+Local validation for this source is direct Rust 1.88 formatting/parsing, diff review, changed-link checks and source preservation only. No compilation, SQL engine, database, crypto walkthrough, provider, Host runtime or Apple validation was performed for this slice. The earlier empty-schema system-SQLite preparation is separate evidence and does not verify these new producers. No tests or source comments were added. Issue #116 remains open.

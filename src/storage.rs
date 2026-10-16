@@ -6,6 +6,11 @@ mod settings_transport;
 mod transport;
 pub(crate) use external::ExternalTaskStateUpdate;
 pub(crate) use settings_grants::settings_grant_head_on;
+#[cfg(unix)]
+pub(crate) use settings_transport::{
+    SettingsBindAdmission, SettingsBindAdmissionError, SettingsBindReceiptCommit,
+    StoredSettingsBindReply,
+};
 pub use transport::*;
 pub(crate) use transport::{TransportInboxMetadata, TransportInboxRejection};
 

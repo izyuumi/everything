@@ -271,25 +271,7 @@ impl Store {
         validate_inbox(receipt, &disposition)?;
         let mut connection = self.connection()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        active_peer(&transaction, receipt.sender, Some(pinned_identity))?;
-        let local: Option<String> = transaction.query_row("SELECT device_id FROM transport_endpoint WHERE singleton = 1 AND revoked_at IS NULL", [], |row| row.get(0)).optional()?;
-        if local.as_deref() != Some(receipt.recipient) {
-            return Err(StorageError::TransportConflict(
-                "local recipient identity".into(),
-            ));
-        }
-        transaction.execute(
-            "DELETE FROM transport_inbox WHERE expires_at <= ?1 AND state != 'pending'",
-            [receipt.received_at],
-        )?;
-        let existing: Option<(String, String, String)> = transaction.query_row("SELECT sender, recipient, envelope_digest FROM transport_inbox WHERE message_id = ?1", [receipt.message_id], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?))).optional()?;
-        if let Some((sender, recipient, digest)) = existing {
-            if sender != receipt.sender
-                || recipient != receipt.recipient
-                || digest != receipt.envelope_digest
-            {
-                return Err(StorageError::TransportConflict(receipt.message_id.into()));
-            }
+        if !prepare_transport_receipt_in(&transaction, receipt, pinned_identity)? {
             return Ok(false);
         }
         let (markers, pending, pending_bytes): (i64, i64, i64) = transaction.query_row("SELECT count(*), coalesce(sum(state = 'pending'), 0), coalesce(sum(CASE WHEN state = 'pending' THEN length(payload) ELSE 0 END), 0) FROM transport_inbox", [], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?;
@@ -318,6 +300,69 @@ impl Store {
         }
         transaction.commit()?;
         Ok(true)
+    }
+
+    #[cfg(unix)]
+    pub(crate) fn admit_settings_bind(
+        &self,
+        admission: &super::SettingsBindAdmission<'_>,
+    ) -> Result<super::SettingsBindReceiptCommit, super::SettingsBindAdmissionError> {
+        use super::{SettingsBindAdmissionError, SettingsBindReceiptCommit};
+        admission
+            .source
+            .check_precommit(self, admission.intent)
+            .map_err(SettingsBindAdmissionError::Rejected)?;
+        let receipt = admission
+            .source
+            .receipt_metadata()
+            .map_err(SettingsBindAdmissionError::Rejected)?;
+        validate_inbox_metadata(&receipt)?;
+        let mut connection = self.connection()?;
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(StorageError::from)?;
+        if !prepare_transport_receipt_in(
+            &transaction,
+            &receipt,
+            admission.source.pinned_identity(),
+        )? {
+            return Ok(SettingsBindReceiptCommit::Duplicate);
+        }
+        let markers: i64 = transaction
+            .query_row("SELECT count(*) FROM transport_inbox", [], |row| row.get(0))
+            .map_err(StorageError::from)?;
+        if markers >= 100_000 {
+            return Err(SettingsBindAdmissionError::ReplayCapacity(
+                StorageError::TransportCapacity("durable receiver inbox"),
+            ));
+        }
+        let (grant, lifetime, now) =
+            super::settings_transport::validate_bind_on(self, &transaction, admission)?;
+        let creator = admission.source.reserve_binding(admission.intent)?;
+        let reservation = super::settings_transport::reserve_bind_reply_in(
+            &transaction,
+            admission,
+            lifetime,
+            now,
+        )?;
+        transaction.execute("INSERT INTO transport_inbox(message_id,sender,recipient,envelope_digest,payload,received_at,expires_at,state,command_id,detail) VALUES(?1,?2,?3,?4,NULL,?5,?6,'processed',NULL,NULL)",params![receipt.message_id,receipt.sender,receipt.recipient,receipt.envelope_digest,receipt.received_at,receipt.expires_at]).map_err(StorageError::from)?;
+        check_receipt_receiver(&transaction, &receipt, admission.source.pinned_identity())?;
+        let (current, final_lifetime, _) =
+            super::settings_transport::validate_bind_on(self, &transaction, admission)?;
+        if current != grant
+            || final_lifetime.expires_at != lifetime.expires_at
+            || final_lifetime.deadline != lifetime.deadline
+        {
+            return Err(SettingsBindAdmissionError::Bookkeeping);
+        }
+        transaction.commit().map_err(StorageError::from)?;
+        creator.committed(lifetime)?;
+        Ok(SettingsBindReceiptCommit::Fresh {
+            reservation,
+            grant,
+            lifetime,
+            creator,
+        })
     }
 
     pub fn pending_transport_inbox(&self, limit: usize) -> StorageResult<Vec<TransportInboxRow>> {
@@ -839,6 +884,56 @@ impl Store {
     }
 }
 
+fn check_receipt_receiver(
+    connection: &Connection,
+    receipt: &TransportInboxMetadata<'_>,
+    pinned_identity: &Value,
+) -> StorageResult<()> {
+    active_peer(connection, receipt.sender, Some(pinned_identity))?;
+    let local: Option<String> = connection
+        .query_row(
+            "SELECT device_id FROM transport_endpoint WHERE singleton = 1 AND revoked_at IS NULL",
+            [],
+            |row| row.get(0),
+        )
+        .optional()?;
+    if local.as_deref() != Some(receipt.recipient) {
+        return Err(StorageError::TransportConflict(
+            "local recipient identity".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn prepare_transport_receipt_in(
+    transaction: &rusqlite::Transaction<'_>,
+    receipt: &TransportInboxMetadata<'_>,
+    pinned_identity: &Value,
+) -> StorageResult<bool> {
+    check_receipt_receiver(transaction, receipt, pinned_identity)?;
+    transaction.execute(
+        "DELETE FROM transport_inbox WHERE expires_at <= ?1 AND state != 'pending'",
+        [receipt.received_at],
+    )?;
+    let existing: Option<(String, String, String)> = transaction
+        .query_row(
+            "SELECT sender, recipient, envelope_digest FROM transport_inbox WHERE message_id = ?1",
+            [receipt.message_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .optional()?;
+    if let Some((sender, recipient, digest)) = existing {
+        if sender != receipt.sender
+            || recipient != receipt.recipient
+            || digest != receipt.envelope_digest
+        {
+            return Err(StorageError::TransportConflict(receipt.message_id.into()));
+        }
+        return Ok(false);
+    }
+    Ok(true)
+}
+
 fn active_peer(
     connection: &Connection,
     id: &str,
@@ -861,22 +956,30 @@ fn active_peer(
     Ok(row)
 }
 
-fn validate_inbox(
-    row: &TransportInboxMetadata<'_>,
-    disposition: &TransportInboxDisposition<'_>,
-) -> StorageResult<()> {
+fn validate_inbox_metadata(row: &TransportInboxMetadata<'_>) -> StorageResult<()> {
     validate_id(row.message_id)?;
     validate_id(row.sender)?;
     validate_id(row.recipient)?;
     validate_time(row.received_at)?;
     validate_time(row.expires_at)?;
     if row.expires_at <= row.received_at
-        || matches!(disposition, TransportInboxDisposition::Pending(payload) if payload.is_empty() || payload.len() > MAX_JSON_BYTES)
         || row.envelope_digest.len() != 64
         || !row
             .envelope_digest
             .bytes()
             .all(|byte| byte.is_ascii_hexdigit())
+    {
+        return invalid("invalid durable inbox receipt");
+    }
+    Ok(())
+}
+
+fn validate_inbox(
+    row: &TransportInboxMetadata<'_>,
+    disposition: &TransportInboxDisposition<'_>,
+) -> StorageResult<()> {
+    validate_inbox_metadata(row)?;
+    if matches!(disposition, TransportInboxDisposition::Pending(payload) if payload.is_empty() || payload.len() > MAX_JSON_BYTES)
     {
         return invalid("invalid durable inbox receipt");
     }

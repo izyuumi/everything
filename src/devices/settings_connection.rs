@@ -7,8 +7,17 @@ use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
+#[cfg(unix)]
+use super::settings_ingress::{ReceiveContext, work::SettingsReceiveWork};
 use super::{DeviceEndpoint, DeviceError, EndpointRole};
+#[cfg(unix)]
+use super::{
+    PendingSettingsReceipt, SettingsReceiveDrain, SettingsReceiveError, SettingsReceiveEvent,
+    SettingsReceiveWitness,
+};
 use crate::agent::Agent;
+#[cfg(unix)]
+use crate::crypto::EncryptedEnvelope;
 use crate::protocol::DeviceId;
 use crate::transport::remote::RelayConnection;
 
@@ -29,6 +38,8 @@ pub(crate) struct SettingsConnectionIdentity {
 #[derive(Clone)]
 pub(crate) struct HostSettingsTransport {
     identity: Arc<SettingsHostIdentity>,
+    #[cfg(unix)]
+    receive: SettingsReceiveWitness,
 }
 
 pub(crate) struct HostSettingsTransportOwner {
@@ -36,11 +47,13 @@ pub(crate) struct HostSettingsTransportOwner {
     agent: Agent,
     endpoint: DeviceEndpoint,
     mutation: Arc<Mutex<()>>,
+    #[cfg(unix)]
+    receive: SettingsReceiveWork,
 }
 
 pub(super) struct SettingsConnectionOwner<'owner> {
     identity: Arc<SettingsConnectionIdentity>,
-    _owner: &'owner mut HostSettingsTransportOwner,
+    owner: &'owner mut HostSettingsTransportOwner,
 }
 
 impl SettingsHostIdentity {
@@ -88,6 +101,11 @@ impl SettingsConnectionIdentity {
 }
 
 impl HostSettingsTransport {
+    #[cfg(unix)]
+    pub(crate) fn receive_witness(&self) -> SettingsReceiveWitness {
+        self.receive.clone()
+    }
+
     pub(crate) fn host_identity(&self) -> &Arc<SettingsHostIdentity> {
         &self.identity
     }
@@ -114,15 +132,19 @@ impl HostSettingsTransportOwner {
             closed: AtomicBool::new(false),
             cancellation: CancellationToken::new(),
         });
+        let receive = SettingsReceiveWork::new();
+        let witness = receive.witness();
         Ok((
             HostSettingsTransport {
                 identity: Arc::clone(&identity),
+                receive: witness,
             },
             Self {
                 identity,
                 agent,
                 endpoint,
                 mutation,
+                receive,
             },
         ))
     }
@@ -151,14 +173,50 @@ impl HostSettingsTransportOwner {
             retired: AtomicBool::new(false),
             cancellation: self.identity.cancellation.child_token(),
         });
+        #[cfg(unix)]
+        {
+            let context = Arc::new(ReceiveContext {
+                agent: self.agent.clone(),
+                endpoint: self.endpoint.clone(),
+                mutation: Arc::clone(&self.mutation),
+            });
+            if self
+                .receive
+                .connect(Arc::clone(&identity), context)
+                .is_err()
+            {
+                identity.retire();
+                self.identity.close();
+                self.receive.latch_failure();
+                return Err(DeviceError::Worker);
+            }
+        }
         Ok(SettingsConnectionOwner {
             identity,
-            _owner: self,
+            owner: self,
         })
     }
 }
 
 impl SettingsConnectionOwner<'_> {
+    #[cfg(unix)]
+    pub(super) fn try_receive(
+        &mut self,
+        envelope: EncryptedEnvelope,
+    ) -> Result<PendingSettingsReceipt, SettingsReceiveError> {
+        let context = self.owner.receive.context()?;
+        self.owner
+            .receive
+            .admit(context, Arc::clone(&self.identity), envelope)
+    }
+
+    #[cfg(unix)]
+    pub(super) async fn next_receive_event(
+        &mut self,
+    ) -> Result<Option<SettingsReceiveEvent>, SettingsReceiveError> {
+        self.owner.receive.next().await
+    }
+
     pub(super) fn identity(&self) -> &Arc<SettingsConnectionIdentity> {
         &self.identity
     }
@@ -167,6 +225,29 @@ impl SettingsConnectionOwner<'_> {
 impl Drop for SettingsConnectionOwner<'_> {
     fn drop(&mut self) {
         self.identity.retire();
+        #[cfg(unix)]
+        self.owner.receive.close_intake();
+    }
+}
+
+#[cfg(unix)]
+impl HostSettingsTransportOwner {
+    pub(super) fn latch_failure(&mut self) {
+        self.identity.close();
+        self.receive.latch_failure();
+    }
+
+    pub(super) async fn drain_connection(
+        &mut self,
+    ) -> Result<SettingsReceiveDrain, SettingsReceiveError> {
+        self.receive.close_and_wait().await
+    }
+
+    pub(super) async fn close_and_wait(
+        &mut self,
+    ) -> Result<SettingsReceiveDrain, SettingsReceiveError> {
+        self.identity.close();
+        self.receive.close_and_wait().await
     }
 }
 

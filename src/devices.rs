@@ -2,6 +2,8 @@ mod routing;
 mod session;
 mod settings;
 mod settings_connection;
+#[cfg(unix)]
+mod settings_ingress;
 
 pub use session::RelaySessionStatus;
 pub use settings::{
@@ -11,6 +13,15 @@ pub use settings::{
 pub(crate) use settings_connection::{
     HostSettingsTransport, HostSettingsTransportOwner, SettingsConnectionIdentity,
     SettingsHostIdentity,
+};
+
+#[cfg(unix)]
+pub(crate) use settings_ingress::{
+    AuthenticatedSettingsSource, BindRejection, BindingCreator, BindingGeneration,
+    BindingHistorySnapshot, BindingHistoryState, BindingIntent, BindingLifetime,
+    CommittedBindSource, OwnedCommittedSettingsBind, OwnedVerifiedSettingsPacket,
+    PendingSettingsReceipt, SettingsReceiveDrain, SettingsReceiveError, SettingsReceiveEvent,
+    SettingsReceiveWitness, SettingsTransportReceipt,
 };
 
 use crate::crypto::{
@@ -476,6 +487,28 @@ impl DeviceEndpoint {
         envelope: &EncryptedEnvelope,
         now: UnixMillis,
     ) -> Result<EnvelopeAcceptance, DeviceError> {
+        let PreparedEnvelope {
+            peer,
+            pinned_identity,
+            digest,
+        } = self.prepare_envelope(envelope)?;
+        let mut guard = DurableInbox {
+            store: self.inner.store.clone(),
+            pinned_identity,
+            envelope_digest: digest,
+            outcome: DurableInboxOutcome::Unobserved,
+        };
+        let opened = self
+            .inner
+            .identity
+            .open(&peer.keys, envelope, now.get(), &mut guard);
+        self.finish_envelope(opened, guard.outcome)
+    }
+
+    fn prepare_envelope(
+        &self,
+        envelope: &EncryptedEnvelope,
+    ) -> Result<PreparedEnvelope, DeviceError> {
         self.ensure_active()?;
         let peer = self.peer(envelope.header.sender)?;
         if matches!(self.inner.role,EndpointRole::Replica{authoritative_host} if authoritative_host!=peer.keys.device_id)
@@ -489,17 +522,19 @@ impl DeviceEndpoint {
             ));
         }
         let digest = format!("{:x}", Sha256::digest(&encoded));
-        let mut guard = DurableInbox {
-            store: self.inner.store.clone(),
+        Ok(PreparedEnvelope {
             pinned_identity: serde_json::to_value(&peer)?,
-            envelope_digest: digest,
-            outcome: DurableInboxOutcome::Unobserved,
-        };
-        let opened = self
-            .inner
-            .identity
-            .open(&peer.keys, envelope, now.get(), &mut guard);
-        match (opened, guard.outcome) {
+            peer,
+            digest,
+        })
+    }
+
+    fn finish_envelope(
+        &self,
+        opened: Result<Zeroizing<Vec<u8>>, CryptoError>,
+        outcome: DurableInboxOutcome,
+    ) -> Result<EnvelopeAcceptance, DeviceError> {
+        match (opened, outcome) {
             (Ok(_plaintext), DurableInboxOutcome::OrdinaryNew) => {
                 self.inner.inbox_ready.notify_one();
                 Ok(EnvelopeAcceptance::New)
@@ -1219,6 +1254,12 @@ impl DeviceEndpoint {
 }
 
 const PRIVATE_INBOX_STORAGE_FAILURE: &str = "private_ingress_storage_failure";
+
+struct PreparedEnvelope {
+    peer: PeerRegistration,
+    pinned_identity: Value,
+    digest: String,
+}
 
 struct DurableInbox {
     store: Store,
