@@ -142,6 +142,7 @@ pub(super) fn capture_policy(
         max_charged_tokens: context
             .checked_mul(u64::from(requests))
             .ok_or(ScheduleError::Invalid("attempt token ceiling overflow"))?,
+        max_reserved_output_tokens: None,
         max_duration_ms: target.budget.timeout_ms,
         absolute_deadline: Some(occurrence_deadline(run)?),
     };
