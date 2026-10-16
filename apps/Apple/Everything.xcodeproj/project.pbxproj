@@ -4,6 +4,35 @@
     };
     "objectVersion" = "56";
     "objects" = {
+        "808DDBA265D11AC693905E9F" = {
+            "isa" = "PBXFileReference";
+            "lastKnownFileType" = "sourcecode.swift";
+            "path" = "ThisDeviceSettingsStore.swift";
+            "sourceTree" = "<group>";
+        };
+        "EFF70F2CFC5B410610126A70" = {
+            "isa" = "PBXBuildFile";
+            "fileRef" = "808DDBA265D11AC693905E9F";
+        };
+        "FD056B206DCB9ED00725C283" = {
+            "isa" = "PBXFileReference";
+            "lastKnownFileType" = "sourcecode.swift";
+            "path" = "ThisDeviceSettingsView.swift";
+            "sourceTree" = "<group>";
+        };
+        "1D5659246D722D17C78BBDDB" = {
+            "isa" = "PBXBuildFile";
+            "fileRef" = "FD056B206DCB9ED00725C283";
+        };
+        "DCCAC891CFB1755B73CEAFC6" = {
+            "isa" = "PBXGroup";
+            "children" = (
+                "808DDBA265D11AC693905E9F",
+                "FD056B206DCB9ED00725C283",
+            );
+            "path" = "Settings";
+            "sourceTree" = "<group>";
+        };
         "D2CE169C5FD56BC9C3B1E381" = {
             "isa" = "PBXFileReference";
             "lastKnownFileType" = "sourcecode.swift";
@@ -722,6 +751,7 @@
                 "DB3CA5728EF5E4438EF80274",
                 "A023B409344CC33CA7E46FF1",
                 "51327B0574AFD65741A5344B",
+                "DCCAC891CFB1755B73CEAFC6",
             );
             "path" = "iOS";
             "sourceTree" = "<group>";
@@ -868,6 +898,8 @@
                 "5B08F2911E7EE03422FFB427",
                 "B5F617E76B6E6D17675ACA18",
                 "EF0F9908666D96BAD7A63664",
+                "EFF70F2CFC5B410610126A70",
+                "1D5659246D722D17C78BBDDB",
             );
             "runOnlyForDeploymentPostprocessing" = "0";
         };
