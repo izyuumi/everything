@@ -1,11 +1,16 @@
 mod routing;
 mod session;
 mod settings;
+mod settings_connection;
 
 pub use session::RelaySessionStatus;
 pub use settings::{
     DeviceSettingsPage, DeviceSettingsSummary, MAX_DEVICE_SETTINGS_PAGE,
     MAX_DEVICE_SETTINGS_PAGE_BYTES, PairingCancellation,
+};
+pub(crate) use settings_connection::{
+    HostSettingsTransport, HostSettingsTransportOwner, SettingsConnectionIdentity,
+    SettingsHostIdentity,
 };
 
 use crate::crypto::{
@@ -298,6 +303,9 @@ impl DeviceEndpoint {
     }
     pub fn role(&self) -> &EndpointRole {
         &self.inner.role
+    }
+    pub(crate) fn shares_store(&self, store: &Store) -> bool {
+        self.inner.store.shares_connection(store)
     }
     pub fn identity(&self) -> Arc<DeviceIdentity> {
         Arc::clone(&self.inner.identity)
