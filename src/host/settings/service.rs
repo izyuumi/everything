@@ -4,6 +4,8 @@ mod changes;
 mod credentials;
 mod devices;
 mod grant_owner;
+#[cfg(unix)]
+mod paired;
 mod pairing;
 mod persistence;
 mod projection;
@@ -13,6 +15,8 @@ mod writes;
 
 pub use changes::{SettingsChangeHint, SettingsChangePage, SettingsChangeState};
 pub use devices::NativeDeviceActionResult;
+#[cfg(unix)]
+pub(crate) use paired::{PairedParentAdmission, PairedSettingsParent};
 pub use pairing::{
     NativePairingAcceptance, NativePairingAccess, NativePairingApprovalInput,
     NativePairingApprovalResult, NativePairingConversationAccess, NativePairingPinState,

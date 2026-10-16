@@ -1,3 +1,9 @@
+#[cfg(unix)]
+mod paired;
+
+#[cfg(unix)]
+pub(crate) use paired::PairedSettingsParent;
+
 use std::collections::BTreeMap;
 use std::fmt;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -189,6 +195,8 @@ struct Sessions {
     closed: bool,
     values: BTreeMap<Uuid, Session>,
     agents: BTreeMap<Uuid, AgentSession>,
+    #[cfg(unix)]
+    paired: paired::PairedParents,
 }
 
 struct AgentSession {
@@ -238,6 +246,8 @@ impl Authority {
                 closed: false,
                 values: BTreeMap::new(),
                 agents: BTreeMap::new(),
+                #[cfg(unix)]
+                paired: paired::PairedParents::default(),
             }),
         })
     }
@@ -768,6 +778,8 @@ impl Authority {
             session.closed = true;
             session.cancellation.cancel();
         }
+        #[cfg(unix)]
+        sessions.paired.close();
         Ok(())
     }
 
