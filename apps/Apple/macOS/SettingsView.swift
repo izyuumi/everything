@@ -8,6 +8,29 @@ struct SettingsView: View {
     @State private var confirmingInstall = false
 
     var body: some View {
+        TabView {
+            hostSettings
+                .tabItem { Label("General", systemImage: "gearshape") }
+            Group {
+                if let store = model.thisMacSettings {
+                    ThisMacSettingsView(store: store)
+                } else {
+                    Text("This Mac preferences are unavailable because Application Support could not be located.")
+                        .padding()
+                }
+            }
+            .tabItem { Label("Notifications", systemImage: "bell") }
+        }
+        .frame(width: 700, height: 800)
+        .background {
+            SettingsWindowObserver(bindingID: model.settingsSurfaceID,
+                                   onChange: { visible, active in model.settingsWindowChanged(visible: visible, active: active) },
+                                   onClose: { model.settingsWindowClosed() })
+                .frame(width: 0, height: 0)
+        }
+    }
+
+    private var hostSettings: some View {
         Form {
             Section("Owner connection: Connect applies edits") {
                 TextField("Everything executable", text: $model.executable)
