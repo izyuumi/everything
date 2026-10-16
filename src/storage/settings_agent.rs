@@ -36,6 +36,7 @@ pub(crate) enum SettingsFencePhase {
     Unknown,
     Settled,
     StoppedUncertain,
+    StoppedUnusable,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -400,6 +401,8 @@ fn validate_fence(value: &SettingsTurnFence) -> StorageResult<()> {
                 || !value.mutation_ids.is_empty()
                 || value.provider_complete
                 || value.usage_complete)
+        || value.phase == SettingsFencePhase::StoppedUnusable
+            && (value.tool_calls != 0 || !value.mutation_ids.is_empty() || !value.provider_complete)
     {
         return invalid("invalid Settings turn fence");
     }
@@ -608,6 +611,7 @@ fn phase(value: SettingsFencePhase) -> &'static str {
         SettingsFencePhase::Unknown => "unknown",
         SettingsFencePhase::Settled => "settled",
         SettingsFencePhase::StoppedUncertain => "stopped_uncertain",
+        SettingsFencePhase::StoppedUnusable => "stopped_unusable",
     }
 }
 
