@@ -16,7 +16,9 @@ use super::contract::{
     SettingsDeviceAction, SettingsDevicePage, SettingsDeviceRequest, SettingsOperationResult,
     SettingsPatch, SettingsScope, SettingsSnapshot,
 };
-use super::service::NativeDeviceActionResult;
+use super::service::{
+    NativeDeviceActionResult, NativePairingApprovalInput, NativePairingApprovalResult,
+};
 use super::{
     NativeSessionOpened, NativeSessionProof, SettingsOperationInspection, SettingsOperationPhase,
 };
@@ -88,6 +90,14 @@ pub enum NativeSettingsOperation {
         proof: NativeSessionProof,
         operation_id: CommandId,
     },
+    ApprovePairing {
+        proof: NativeSessionProof,
+        approval: Box<NativePairingApprovalInput>,
+    },
+    PairingApproval {
+        proof: NativeSessionProof,
+        operation_id: CommandId,
+    },
     Details {
         proof: NativeSessionProof,
         operation_id: CommandId,
@@ -123,6 +133,7 @@ pub enum NativeSettingsOperation {
 impl NativeSettingsOperation {
     pub fn validate(&self) -> Result<(), &'static str> {
         match self {
+            Self::ApprovePairing { approval, .. } => approval.validate()?,
             Self::Changes {
                 after_sequence,
                 limit,
@@ -185,6 +196,7 @@ impl NativeSettingsOperation {
                 | Self::Close { .. }
                 | Self::Pairing { .. }
                 | Self::CancelPairing { .. }
+                | Self::PairingApproval { .. }
         )
     }
 }
@@ -209,6 +221,9 @@ pub enum NativeSettingsResult {
     },
     Pairing {
         creation: NativePairingCreation,
+    },
+    PairingApproved {
+        result: Box<NativePairingApprovalResult>,
     },
     Opened {
         session: NativeSessionOpened,
@@ -235,6 +250,23 @@ pub enum NativeSettingsResult {
 impl NativeSettingsResult {
     pub fn validate_for(&self, request: &NativeSettingsOperation) -> Result<(), &'static str> {
         match (request, self) {
+            (
+                NativeSettingsOperation::ApprovePairing { proof, approval },
+                Self::PairingApproved { result },
+            ) if result.operation.binding.client_session_id == proof.session_id() => {
+                result.validate_for_input(approval)
+            }
+            (
+                NativeSettingsOperation::PairingApproval {
+                    proof,
+                    operation_id,
+                },
+                Self::PairingApproved { result },
+            ) if result.operation.binding.request_id == *operation_id
+                && result.operation.binding.client_session_id == proof.session_id() =>
+            {
+                result.validate()
+            }
             (NativeSettingsOperation::Describe { .. }, Self::Described { registry }) => {
                 validate_registry(registry)
             }
@@ -483,6 +515,29 @@ impl HostInner {
         }
         let service = &self.settings_service;
         match operation {
+            NativeSettingsOperation::ApprovePairing { proof, approval } => {
+                let caller = service.native_cleanup_caller(call, &proof)?;
+                Ok(NativeSettingsResult::PairingApproved {
+                    result: Box::new(
+                        service
+                            .approve_native_pairing(caller, *approval, call.cancellation.clone())
+                            .await?,
+                    ),
+                })
+            }
+            NativeSettingsOperation::PairingApproval {
+                proof,
+                operation_id,
+            } => {
+                let caller = service.native_cleanup_caller(call, &proof)?;
+                Ok(NativeSettingsResult::PairingApproved {
+                    result: Box::new(
+                        service
+                            .native_pairing_approval(caller, operation_id)
+                            .await?,
+                    ),
+                })
+            }
             NativeSettingsOperation::Describe { proof } => {
                 let caller = service.native_caller(call, &proof)?;
                 Ok(NativeSettingsResult::Described {
