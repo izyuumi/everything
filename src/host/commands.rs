@@ -614,35 +614,39 @@ impl HostInner {
                     "an existing native turn requires its original setup and no option overrides",
                 ));
             }
-            let authority = crate::permissions::ExecutionAuthority::new(
-                conversation_id.to_string(),
-                run.task_id.to_string(),
-                run.workspace_root,
-                run.mode,
-            )?
-            .restrict_tools(run.allowed_tools.into_iter().collect())?;
-            let setup = crate::agent::ToolRunSetup::resume(
-                self.broker.scoped(authority.clone()),
-                self.registry.clone(),
-                &conversation,
-                crate::agent::ProviderResume::OnlyUnstarted,
-            )?;
-            return Ok(EffectiveCommand::Turn {
-                execution: ExecutionPolicy {
-                    workspace_root: authority.workspace_root().into(),
-                    mode: authority.mode(),
-                    tools_enabled: setup.limits.max_tool_calls > 0,
-                    allowed_tools: Some(
-                        self.registry
-                            .descriptors()
-                            .filter(|tool| authority.permits_tool(&tool.name))
-                            .map(|tool| tool.name.clone())
-                            .collect(),
-                    ),
-                    budget: setup.budget,
-                    limits: setup.limits,
-                },
-            });
+            return self
+                .blocking(move |host| {
+                    let authority = crate::permissions::ExecutionAuthority::new(
+                        conversation_id.to_string(),
+                        run.task_id.to_string(),
+                        run.workspace_root,
+                        run.mode,
+                    )?
+                    .restrict_tools(run.allowed_tools.into_iter().collect())?;
+                    let setup = crate::agent::ToolRunSetup::resume(
+                        host.broker.scoped(authority.clone()),
+                        host.registry.clone(),
+                        &conversation,
+                        crate::agent::ProviderResume::OnlyUnstarted,
+                    )?;
+                    Ok(EffectiveCommand::Turn {
+                        execution: ExecutionPolicy {
+                            workspace_root: authority.workspace_root().into(),
+                            mode: authority.mode(),
+                            tools_enabled: setup.limits.max_tool_calls > 0,
+                            allowed_tools: Some(
+                                host.registry
+                                    .descriptors()
+                                    .filter(|tool| authority.permits_tool(&tool.name))
+                                    .map(|tool| tool.name.clone())
+                                    .collect(),
+                            ),
+                            budget: setup.budget,
+                            limits: setup.limits,
+                        },
+                    })
+                })
+                .await;
         }
         let options = options.clone();
         let output = conversation.config.max_output_tokens;
