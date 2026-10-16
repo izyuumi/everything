@@ -2,6 +2,8 @@
 
 Read [AGENTS.md](../AGENTS.md), then [implementation status](status/implementation.md).
 
+For embedding control integration, read [live memory application](architecture/memory-live-application.md).
+
 ## Architecture
 
 [Overview](architecture/overview.md) · [Runtime](architecture/runtime.md) · [Agents](architecture/agents.md) · [Scheduling](architecture/scheduling.md) · [Models](architecture/models.md) · [Tools](architecture/tools.md) · [Built-ins](architecture/builtin-tools.md) · [MCP](architecture/mcp.md) · [Discovery](architecture/selector.md) · [System One](architecture/system-one.md) · [Permissions](architecture/permissions.md) · [Broker](architecture/broker.md) · [Context](architecture/context.md) · [Memory](architecture/memory.md) · [Wiki maintenance](architecture/consolidation.md) · [Hybrid retrieval](architecture/hybrid.md) · [EmbeddingGemma 2](architecture/embeddinggemma2.md) · [Transport](architecture/transport.md) · [Devices](architecture/devices.md) · [Relay](architecture/relay.md) · [Service](architecture/service.md) · [Headless host](architecture/host.md) · [Host settings](architecture/host-settings.md) · [Host memory](architecture/host-memory.md) · [Host MCP](architecture/host-mcp.md) · [macOS client](architecture/macos-client.md) · [Scoped worker](architecture/cloud-worker.md) · [Security](architecture/security.md)

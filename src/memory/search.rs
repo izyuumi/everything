@@ -110,6 +110,7 @@ mod hybrid {
 
     use super::*;
     use crate::memory::Wiki;
+    use crate::memory::consolidate::SemanticCapture;
     use crate::memory::embedding::{Embedder, EmbeddingError, EmbeddingIndexSpec, EmbeddingInput};
     use crate::memory::index::IndexedChunk;
     use crate::memory::vector::{
@@ -186,7 +187,35 @@ mod hybrid {
                     "build chunks require 1..1024 and elapsed requires positive..300 seconds",
                 ));
             }
-            let result = self.build(wiki, budget, fresh, cancellation);
+            self.rebuild_inner(wiki, budget, fresh, cancellation, None)
+        }
+
+        pub(crate) fn rebuild_guarded(
+            &mut self,
+            wiki: &mut Wiki,
+            budget: BuildBudget,
+            fresh: bool,
+            cancellation: &CancellationToken,
+            semantic: &SemanticCapture,
+        ) -> Result<BuildReport, VectorError> {
+            if !(1..=1_024).contains(&budget.max_chunks)
+                || budget.max_elapsed.is_zero()
+                || budget.max_elapsed > Duration::from_secs(300)
+            {
+                return Err(VectorError::Invalid("invalid semantic build budget"));
+            }
+            self.rebuild_inner(wiki, budget, fresh, cancellation, Some(semantic))
+        }
+
+        fn rebuild_inner(
+            &mut self,
+            wiki: &mut Wiki,
+            budget: BuildBudget,
+            fresh: bool,
+            cancellation: &CancellationToken,
+            semantic: Option<&SemanticCapture>,
+        ) -> Result<BuildReport, VectorError> {
+            let result = self.build(wiki, budget, fresh, cancellation, semantic);
             if let Err(error) = &result {
                 self.index.failure(error)?;
             }
@@ -199,12 +228,16 @@ mod hybrid {
             budget: BuildBudget,
             fresh: bool,
             cancellation: &CancellationToken,
+            semantic: Option<&SemanticCapture>,
         ) -> Result<BuildReport, VectorError> {
+            semantic_checkpoint(semantic)?;
             checkpoint(cancellation)?;
             wiki.synchronize()?;
             checkpoint(cancellation)?;
             let source = wiki.index().source_fingerprint()?;
+            semantic_checkpoint(semantic)?;
             let generation = self.index.prepare(&self.spec, &source, fresh)?;
+            semantic_checkpoint(semantic)?;
             if generation.ready {
                 return Ok(BuildReport {
                     generation,
@@ -215,6 +248,7 @@ mod hybrid {
             let mut processed = 0;
             let mut cursor = generation.after_chunk_id;
             loop {
+                semantic_checkpoint(semantic)?;
                 checkpoint(cancellation)?;
                 if processed >= budget.max_chunks {
                     return self.progress(generation.id, BuildStop::ChunkBudget);
@@ -228,6 +262,7 @@ mod hybrid {
                     16 * 1024 * 1024,
                 )?;
                 for chunk in page.chunks {
+                    semantic_checkpoint(semantic)?;
                     checkpoint(cancellation)?;
                     if started.elapsed() >= budget.max_elapsed {
                         return self.progress(generation.id, BuildStop::TimeBudget);
@@ -245,12 +280,15 @@ mod hybrid {
                         let reused = existing.is_some();
                         let vector = match existing {
                             Some(vector) => vector,
-                            None => match self.embedder.embed(&input, cancellation) {
-                                Err(EmbeddingError::Cancelled) => {
-                                    return Err(VectorError::Cancelled);
+                            None => {
+                                semantic_checkpoint(semantic)?;
+                                match self.embedder.embed(&input, cancellation) {
+                                    Err(EmbeddingError::Cancelled) => {
+                                        return Err(VectorError::Cancelled);
+                                    }
+                                    result => result?,
                                 }
-                                result => result?,
-                            },
+                            }
                         };
                         checkpoint(cancellation)?;
                         self.index.record(
@@ -272,7 +310,9 @@ mod hybrid {
                     if current != source {
                         return Err(VectorError::SourceChanged);
                     }
+                    semantic_checkpoint(semantic)?;
                     let generation = self.index.activate(generation.id, &current)?;
+                    semantic_checkpoint(semantic)?;
                     return Ok(BuildReport {
                         generation,
                         stop: BuildStop::Complete,
@@ -298,6 +338,28 @@ mod hybrid {
             limit: usize,
             cancellation: &CancellationToken,
         ) -> Result<SearchResponse, SearchError> {
+            self.search_inner(wiki, query, limit, cancellation, None)
+        }
+
+        pub(crate) fn search_guarded(
+            &self,
+            wiki: &mut Wiki,
+            query: &str,
+            limit: usize,
+            cancellation: &CancellationToken,
+            semantic: &SemanticCapture,
+        ) -> Result<SearchResponse, SearchError> {
+            self.search_inner(wiki, query, limit, cancellation, Some(semantic))
+        }
+
+        fn search_inner(
+            &self,
+            wiki: &mut Wiki,
+            query: &str,
+            limit: usize,
+            cancellation: &CancellationToken,
+            semantic: Option<&SemanticCapture>,
+        ) -> Result<SearchResponse, SearchError> {
             if cancellation.is_cancelled() {
                 return Err(SearchError::Cancelled);
             }
@@ -316,7 +378,10 @@ mod hybrid {
             if limit == 0 || query.trim().is_empty() {
                 return Ok(lexical_response(Vec::new(), FallbackReason::Disabled, None));
             }
-            let response = match self.semantic(wiki, query, cancellation) {
+            if semantic.is_some_and(|capture| !capture.admitted()) {
+                return Ok(self.fallback(wiki, query, limit, FallbackReason::Disabled, None)?);
+            }
+            let response = match self.semantic(wiki, query, cancellation, semantic) {
                 Ok(Semantic::Fallback(reason, diagnostic)) => {
                     self.fallback(wiki, query, limit, reason, diagnostic)?
                 }
@@ -354,6 +419,9 @@ mod hybrid {
             if cancellation.is_cancelled() {
                 return Err(SearchError::Cancelled);
             }
+            if semantic.is_some_and(|capture| !capture.admitted()) {
+                return Ok(self.fallback(wiki, query, limit, FallbackReason::Disabled, None)?);
+            }
             Ok(response)
         }
 
@@ -378,8 +446,12 @@ mod hybrid {
             wiki: &mut Wiki,
             query: &str,
             cancellation: &CancellationToken,
+            semantic: Option<&SemanticCapture>,
         ) -> Result<Semantic, VectorError> {
             checkpoint(cancellation)?;
+            if semantic.is_some_and(|capture| !capture.admitted()) {
+                return Ok(Semantic::Fallback(FallbackReason::Disabled, None));
+            }
             let status = self.index.status()?;
             let Some(active) = status.active else {
                 return Ok(Semantic::Fallback(
@@ -400,6 +472,9 @@ mod hybrid {
                 ));
             }
             let input = EmbeddingInput::query(query)?;
+            if semantic.is_some_and(|capture| !capture.admitted()) {
+                return Ok(Semantic::Fallback(FallbackReason::Disabled, None));
+            }
             let vector = match self.embedder.embed(&input, cancellation) {
                 Err(EmbeddingError::Cancelled) => return Err(VectorError::Cancelled),
                 result => result?,
@@ -433,8 +508,18 @@ mod hybrid {
                 }
                 results.push((id, distance));
             }
+            if semantic.is_some_and(|capture| !capture.admitted()) {
+                return Ok(Semantic::Fallback(FallbackReason::Disabled, None));
+            }
             Ok(Semantic::Ready(results))
         }
+    }
+
+    fn semantic_checkpoint(semantic: Option<&SemanticCapture>) -> Result<(), VectorError> {
+        if semantic.is_some_and(|capture| !capture.admitted()) {
+            return Err(VectorError::Cancelled);
+        }
+        Ok(())
     }
 
     type RankPair = (Option<(usize, f64)>, Option<(usize, f64)>);
