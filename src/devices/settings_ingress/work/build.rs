@@ -1,3 +1,5 @@
+mod queued;
+
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -8,6 +10,9 @@ use tokio::task::{Id, JoinError};
 
 use crate::devices::SettingsReplySealContext;
 use crate::storage::{CommittedSettingsReply, SettingsReplyPublishFailure};
+
+pub(crate) use queued::OwnedQueuedSettingsReply;
+pub(super) use queued::QueuedReplyRegistry;
 
 use super::{
     PairedHandoffReadError, PendingSettingsReplyBuild, ReceiveContext, RegisteredReplyBuild,

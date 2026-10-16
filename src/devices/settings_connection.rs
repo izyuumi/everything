@@ -11,8 +11,8 @@ use uuid::Uuid;
 use super::settings_ingress::{
     ReceiveContext,
     work::{
-        PairedResultAdmissionFailure, PendingSettingsReplyBuild, SettingsReceiveWork,
-        SettingsReceiveWorkEvent,
+        OwnedQueuedSettingsReply, PairedResultAdmissionFailure, PendingSettingsReplyBuild,
+        SettingsReceiveWork, SettingsReceiveWorkEvent,
     },
 };
 use super::{DeviceEndpoint, DeviceError, EndpointRole};
@@ -26,6 +26,8 @@ use crate::crypto::EncryptedEnvelope;
 #[cfg(unix)]
 use crate::host::settings::agent::{PairedResultHandoff, SettingsAgentRuntime};
 use crate::protocol::DeviceId;
+#[cfg(unix)]
+use crate::protocol::MessageId;
 use crate::transport::remote::RelayConnection;
 
 pub(crate) struct SettingsHostIdentity {
@@ -251,6 +253,24 @@ impl SettingsConnectionOwner<'_> {
         self.owner
             .receive
             .try_start_reply_build(&self.identity, ticket, authority)
+    }
+
+    #[cfg(unix)]
+    pub(super) fn try_queue_joined_reply(
+        &mut self,
+        ticket: &PendingSettingsReplyBuild,
+    ) -> Result<MessageId, SettingsReceiveError> {
+        self.owner
+            .receive
+            .try_queue_joined_reply(&self.identity, ticket)
+    }
+
+    #[cfg(unix)]
+    pub(super) fn queued_reply(
+        &self,
+        message_id: MessageId,
+    ) -> Result<Option<&OwnedQueuedSettingsReply>, SettingsReceiveError> {
+        self.owner.receive.queued_reply(message_id)
     }
 
     #[cfg(unix)]

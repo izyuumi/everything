@@ -12,7 +12,8 @@ use tokio::sync::{Notify, OwnedMutexGuard, oneshot};
 use tokio::task::{Id, JoinSet};
 use uuid::Uuid;
 
-use build::{ReplyBuildState, ReplyBuildWorkerOutput};
+pub(crate) use build::OwnedQueuedSettingsReply;
+use build::{QueuedReplyRegistry, ReplyBuildState, ReplyBuildWorkerOutput};
 
 use super::access::{AccessReceiptOutput, AccessWorkState, OwnedCommittedSettingsAccess};
 use super::{
@@ -80,6 +81,7 @@ pub(in crate::devices) struct SettingsReceiveWork {
     receipts: BTreeMap<Id, oneshot::Sender<Result<SettingsTransportReceipt, SettingsReceiveError>>>,
     pending: Option<PendingInput>,
     build: Option<ReplyBuildState>,
+    queued: QueuedReplyRegistry,
     history: Option<Arc<BindingHistory>>,
     context: Option<Arc<ReceiveContext>>,
     closed: bool,
@@ -282,6 +284,7 @@ type TerminalQuarantine = (
     JoinSet<RegisteredJobOutput>,
     Option<PendingInput>,
     Option<ReplyBuildState>,
+    QueuedReplyRegistry,
     BTreeMap<Id, oneshot::Sender<Result<SettingsTransportReceipt, SettingsReceiveError>>>,
     Option<Arc<ReceiveContext>>,
     Option<Arc<BindingHistory>>,
@@ -659,6 +662,7 @@ impl SettingsReceiveWork {
             receipts: BTreeMap::new(),
             pending: None,
             build: None,
+            queued: QueuedReplyRegistry::default(),
             history: None,
             context: None,
             closed: true,
@@ -1692,6 +1696,7 @@ impl SettingsReceiveWork {
                 .checked_add(usize::from(self.reply_build_task().is_some()))
                 == Some(self.jobs.len())
             && self.build.is_some() == report.reply_build_active
+            && self.queued.healthy(&self.ledger, report.private_requests)
             && self
                 .history
                 .as_ref()
@@ -1751,6 +1756,7 @@ impl Drop for SettingsReceiveWork {
                 std::mem::replace(&mut self.jobs, JoinSet::new()),
                 self.pending.take(),
                 self.build.take(),
+                std::mem::take(&mut self.queued),
                 std::mem::take(&mut self.receipts),
                 self.context.take(),
                 self.history.take(),
