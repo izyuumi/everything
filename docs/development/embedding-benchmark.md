@@ -6,9 +6,11 @@ Issue [#12](https://github.com/izyuumi/everything/issues/12) includes the standa
 
 Prepare the pinned model bundle and a trusted compatible ONNX Runtime shared library according to the backend documentation. Selecting a native library explicitly authorizes loading its code; do not use an untrusted library. Model files remain outside the repository. The `local-embeddings` Cargo feature is required; default builds skip the backend and benchmark binary.
 
+Launch the benchmark with `ORT_DISABLE_TELEMETRY=1` set before process start. The backend rejects missing or other values before runtime access and retains API telemetry suppression. The earlier numerical/performance observations below did not establish network silence; [#72](https://github.com/izyuumi/everything/issues/72) tracks runtime telemetry and verification of the specific supported build. This environment control is not an OS sandbox for an arbitrary native library.
+
 ```sh
 cargo build --release --features local-embeddings --bin everything-embedding-bench
-./target/release/everything-embedding-bench \
+ORT_DISABLE_TELEMETRY=1 ./target/release/everything-embedding-bench \
   --runtime-library /absolute/path/to/libonnxruntime.dylib \
   --model-dir /absolute/path/to/embeddinggemma-2-onnx \
   --threads 2 \
@@ -44,7 +46,7 @@ Linux reports `VmRSS` and lifetime peak `VmHWM` from the bounded `/proc/self/sta
 Capture an independent Linux process measurement using the built executable, so compilation is excluded:
 
 ```sh
-/usr/bin/time -v -o embedding-process.txt \
+/usr/bin/time -v -o embedding-process.txt env ORT_DISABLE_TELEMETRY=1 \
   ./target/release/everything-embedding-bench \
   --runtime-library /absolute/path/to/libonnxruntime.so \
   --model-dir /absolute/path/to/embeddinggemma-2-onnx \
@@ -54,7 +56,7 @@ Capture an independent Linux process measurement using the built executable, so 
 On macOS, collect native process memory with the platform command:
 
 ```sh
-/usr/bin/time -l \
+/usr/bin/time -l env ORT_DISABLE_TELEMETRY=1 \
   ./target/release/everything-embedding-bench \
   --runtime-library /absolute/path/to/libonnxruntime.dylib \
   --model-dir /absolute/path/to/embeddinggemma-2-onnx \
