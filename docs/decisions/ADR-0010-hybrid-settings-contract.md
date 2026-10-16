@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted contract direction for #108/#118. Typed metadata and shape validation are implemented; command, native-action, restricted-agent and client behavior remain assigned implementation work in #109–#118. Fresh CI and runtime acceptance are separate gates.
+Accepted for #108/#118. The typed contract, shared service, native actions, restricted profile and macOS controls/assistant are integrated through #163 with supported compilation/static checks. Scoped remote Settings remains #116 work. Native UI, provider, OS and security acceptance retain their separate gates.
 
 ## Context
 

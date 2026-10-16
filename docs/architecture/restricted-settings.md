@@ -1,6 +1,6 @@
 # Restricted Settings agent source
 
-The #113 runtime implementation merged in PR #143 after exact-tree Linux/macOS compilation, static analysis, release and Rust1.88 checks passed. The #115 live-presentation, original-Open recovery, per-Send context and scoped-receipt additions require their own combined Rust gates and disposable runtime verification. This document describes the implemented source boundaries; it does not establish working inference, an Apple screen, native platform verification or security readiness. Deferred automation remains [#32](https://github.com/izyuumi/everything/issues/32).
+The #113 runtime implementation merged in PR #143 after exact-tree Linux/macOS compilation, static analysis, release and Rust1.88 checks passed. The later #115 owning-layer bridges and macOS inspector are normally integrated through #163, whose corrected exact head passed Ubuntu and both Apple SDK gates. They still require disposable UI/provider/runtime verification. This document describes the implemented source boundaries; it does not establish working inference, observed Apple UI behavior, native platform effects or security readiness. Start at [the compact assistant map](settings-agent.md) for the actual seven-tool and native presentation boundary. Deferred automation remains [#32](https://github.com/izyuumi/everything/issues/32).
 
 ## Ownership and execution
 

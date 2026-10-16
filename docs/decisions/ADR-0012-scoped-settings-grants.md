@@ -1,6 +1,6 @@
 # ADR-0012: Scoped Settings grants retain immutable owner decisions
 
-Status: Accepted direction; grant storage and genuine local-owner consumers are implemented in source, awaiting independent consumer review, integration and required validation.
+Status: Accepted; grant storage and genuine local-owner consumers merged in #156 after source review and current-head Ubuntu/Apple checks. The transaction-local reader merged in #164 after Ubuntu/compatibility success with a legitimate SDK skip. A separate system-SQLite empty-schema preparation does not verify Rust Store mutations, replay/capacity or remote authority; those behavior gates remain.
 
 ## Context
 
