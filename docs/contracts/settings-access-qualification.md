@@ -63,3 +63,5 @@ These are synchronous read-only checks on the caller's transaction. They neither
 Direct Rust1.88 formatting and source/tree preservation do not establish compilation, SQL, grant/revocation/cancellation timing, encrypted transport or client/security acceptance. The new qualification is uninvoked until its real downstream owners and consumers are integrated. #116/#117 remain open, and deferred automated coverage stays #32.
 
 The actual joined output qualification type is narrowly exported through the existing paired/service modules for its subsequent real counted projector/sealer. Main provenance remains the concrete publisher obligation; no existing receive guard or transaction identity is manufactured by these exports.
+
+The service exposes only the genuine joined-output `QualifiedSettingsAccessReply` type to its subsequent publisher. Unused broad aliases for the earlier status-only qualification and receipt-only command qualification are removed; their defining types and inferred-return methods are unchanged. Narrowing these internal aliases supplies no new successful consumer or current authority.
