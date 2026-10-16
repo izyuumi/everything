@@ -2,6 +2,7 @@ mod changes;
 mod credentials;
 mod devices;
 mod persistence;
+mod projection;
 mod updates;
 
 pub use changes::{SettingsChangeHint, SettingsChangePage, SettingsChangeState};
@@ -99,6 +100,10 @@ pub enum SettingsServiceError {
     #[error(transparent)]
     Device(#[from] DeviceError),
     #[error(transparent)]
+    Memory(#[from] crate::host::memory::MemoryError),
+    #[error(transparent)]
+    Selection(#[from] crate::host::selection::SelectionPreflightError),
+    #[error(transparent)]
     Credential(#[from] crate::credentials::CredentialError),
 }
 
@@ -119,6 +124,26 @@ pub(crate) struct SettingsStartupContext {
     pub settings: super::HostSettings,
     pub policy: SettingsStartupPolicy,
     pub pending_application: Option<SettingsOperationInspection>,
+}
+
+impl SettingsStartupContext {
+    pub(crate) fn embedding_preferences(&self) -> crate::host::memory::EmbeddingPreferences {
+        let mut preferences = updates::embedding_preferences(&self.settings);
+        if !matches!(self.policy, SettingsStartupPolicy::Ready) {
+            preferences.enabled = false;
+        }
+        preferences
+    }
+
+    pub(crate) fn selection_configuration(
+        &self,
+    ) -> (crate::host::selection::SelectionSettings, bool) {
+        (
+            self.settings.selection.clone(),
+            matches!(self.policy, SettingsStartupPolicy::Ready)
+                && updates::selection_enabled(&self.settings),
+        )
+    }
 }
 
 struct ActiveSettingsWrite {

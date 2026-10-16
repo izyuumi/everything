@@ -251,3 +251,33 @@ fn same_value(
     let right = serde_json::to_value(right).map_err(|_| SettingsServiceError::Encoding)?;
     Ok(left == right)
 }
+
+pub(super) fn embedding_preferences(
+    settings: &HostSettings,
+) -> crate::host::memory::EmbeddingPreferences {
+    crate::host::memory::EmbeddingPreferences {
+        configured: settings.memory.embeddings.clone(),
+        enabled: embeddings_enabled(settings),
+        dimensions: match settings.preference_overrides.embedding_dimensions {
+            EmbeddingDimensionsOverride::Inherit => {
+                crate::host::memory::EmbeddingDimensionChoice::Inherit
+            }
+            EmbeddingDimensionsOverride::BackendDefault => {
+                crate::host::memory::EmbeddingDimensionChoice::BackendDefault
+            }
+            EmbeddingDimensionsOverride::Selected { dimensions } => {
+                crate::host::memory::EmbeddingDimensionChoice::Selected { dimensions }
+            }
+        },
+    }
+}
+
+pub(super) fn selection_enabled(settings: &HostSettings) -> bool {
+    settings
+        .preference_overrides
+        .system_one_enabled
+        .unwrap_or(matches!(
+            settings.selection,
+            SelectionSettings::SystemOne { .. }
+        ))
+}
