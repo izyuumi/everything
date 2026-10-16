@@ -558,16 +558,15 @@ impl Actor {
                             None
                         }
                     };
+                    let native_unknown = native.as_ref().is_some_and(native_outcome_unknown);
                     match native
                         .as_ref()
                         .map(|native| native_usage(&attempt, Some(native)))
                     {
-                        Some(Ok(usage)) => {
-                            (usage, native.as_ref().is_some_and(native_outcome_unknown))
-                        }
+                        Some(Ok(usage)) => (usage, native_unknown),
                         Some(Err(error)) => {
                             self.error(&EngineError::Schedule(error));
-                            (native_usage(&attempt, None)?, false)
+                            (native_usage(&attempt, None)?, native_unknown)
                         }
                         None => (native_usage(&attempt, None)?, false),
                     }
