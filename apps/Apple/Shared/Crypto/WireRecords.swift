@@ -62,6 +62,7 @@ struct WireEvent: Sendable, Equatable, Identifiable {
             _ = try payload.field("operation_id").identifier
             guard try ["allow", "deny"].contains(payload.field("decision").text) else { throw WireError.invalid }
         case "scheduled_run_finished": _ = try WireScheduledRunNotification(payload.field("notification"))
+        case "remote_task_finished": _ = try WireRemoteTaskReport(payload.field("report"))
         case "steering_received", "task_wait_requested", "subagent_finished":
             _ = try payload.field("task_id").identifier
             _ = try payload.field("command_id").identifier
@@ -230,6 +231,68 @@ struct WireScheduledRunNotification: Sendable {
         guard generation > 0, generation <= UInt64(Int64.max), (taskID == nil) == (executionConversationID == nil),
               ["succeeded", "failed", "cancelled", "skipped", "unknown"].contains(outcome),
               summary.utf8.count <= 4_096, !summary.contains("\0"), WirePermissionInspection.isDigest(outcomeDigest) else { throw WireError.invalid }
+        self.raw = raw
+    }
+}
+
+struct WireRemoteTaskReport: Sendable {
+    let raw: WireValue
+
+    init(_ raw: WireValue) throws {
+        _ = try raw.encoded(maximum: 65_536)
+        let keys: Set<String> = ["task_id", "command_id", "delegation_id", "attempt_id", "manifest_digest", "executor", "executor_fingerprint", "source_message_id", "envelope_digest", "packet_digest", "source", "outcome", "summary", "usage", "artifact_count", "quarantine_digest", "finished_at", "accepted_at"]
+        let fields = try raw.object(keys: keys, required: keys.subtracting(["quarantine_digest", "finished_at"]))
+        for key in ["task_id", "command_id", "delegation_id", "attempt_id", "executor", "source_message_id"] { _ = try fields.required(key).identifier }
+        for key in ["manifest_digest", "envelope_digest", "packet_digest"] {
+            guard try WirePermissionInspection.isDigest(fields.required(key).text) else { throw WireError.invalid }
+        }
+        let fingerprint = try fields.required("executor_fingerprint").text
+        guard fingerprint.utf8.count == 71, fingerprint.utf8.enumerated().allSatisfy({ index, byte in
+            index % 9 == 8 ? byte == 45 : (48...57).contains(byte) || (97...102).contains(byte)
+        }) else { throw WireError.invalid }
+        let outcome = try fields.required("outcome").text
+        let summary = try fields.required("summary").text
+        let artifactCount = try fields.required("artifact_count").integer
+        guard ["succeeded", "failed", "cancelled", "unknown", "rejected"].contains(outcome),
+              summary.utf8.count <= 8_192, !summary.contains("\0"), artifactCount <= 64 else { throw WireError.invalid }
+        _ = try WireID.timestamp(fields.required("accepted_at"))
+        let finished = fields["finished_at"] ?? .null
+        if finished != .null { _ = try WireID.timestamp(finished) }
+        let quarantine = fields["quarantine_digest"] ?? .null
+        let quarantineDigest = quarantine == .null ? nil : try quarantine.text
+        if let quarantineDigest, !WirePermissionInspection.isDigest(quarantineDigest) { throw WireError.invalid }
+        guard artifactCount == 0 || quarantineDigest != nil,
+              !["unknown", "rejected"].contains(outcome) || artifactCount == 0 && quarantineDigest == nil else { throw WireError.invalid }
+        let usage = try fields.required("usage")
+        let usageKeys: Set<String> = ["model_attempts", "tool_calls", "charged_tokens", "reserved_output_tokens", "reported_input_tokens", "reported_output_tokens"]
+        let counters = try usage.object(keys: usageKeys, required: usageKeys.subtracting(["reserved_output_tokens"]))
+        var emptyUsage = true
+        for key in ["model_attempts", "tool_calls", "charged_tokens", "reported_input_tokens", "reported_output_tokens"] {
+            let counter = try counters.required(key).integer
+            if ["model_attempts", "tool_calls"].contains(key), counter > UInt64(UInt32.max) { throw WireError.invalid }
+            if counter != 0 { emptyUsage = false }
+        }
+        if let reserved = counters["reserved_output_tokens"], reserved != .null {
+            _ = try reserved.integer
+            emptyUsage = false
+        }
+        let source = try fields.required("source")
+        switch try source.field("kind").text {
+        case "result":
+            let sourceKeys: Set<String> = ["kind", "result_digest"]
+            let sourceFields = try source.object(keys: sourceKeys, required: sourceKeys)
+            let resultDigest = try sourceFields.required("result_digest").text
+            guard WirePermissionInspection.isDigest(resultDigest), outcome != "rejected", finished != .null,
+                  quarantineDigest == nil || quarantineDigest == resultDigest else { throw WireError.invalid }
+        case "rejected":
+            let sourceKeys: Set<String> = ["kind", "reason"]
+            let sourceFields = try source.object(keys: sourceKeys, required: sourceKeys)
+            let reason = try sourceFields.required("reason").text
+            guard !reason.isEmpty, reason.utf8.count <= 256,
+                  !reason.unicodeScalars.contains(where: { $0.properties.generalCategory == .control }),
+                  outcome == "rejected", finished == .null, emptyUsage else { throw WireError.invalid }
+        default: throw WireError.invalid
+        }
         self.raw = raw
     }
 }
