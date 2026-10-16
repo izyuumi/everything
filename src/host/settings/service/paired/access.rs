@@ -249,6 +249,9 @@ impl SettingsReceiptAuthority {
         }
         plan.check_time(observed.wall, observed.monotonic)?;
         let (wall, monotonic) = source.check_precommit(store)?;
+        if wall < observed.wall || monotonic < observed.monotonic {
+            return Err(SettingsServiceError::OutsideScope.into());
+        }
         plan.check_time(wall, monotonic)
     }
 
