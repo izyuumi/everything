@@ -117,10 +117,62 @@ actor DeviceIdentity {
     func seal(_ plaintext: Data, recipient: DevicePublicKeys, now: UInt64) throws -> EncryptedEnvelope {
         guard !plaintext.isEmpty, plaintext.count <= 1_048_576, recipient.deviceID != publicKeys.deviceID else { throw WireError.size }
         let header = try EnvelopeHeader(sender: publicKeys.deviceID, recipient: recipient.deviceID, created: now, lifetime: 604_800_000)
+        return try seal(plaintext, recipient: recipient, header: header)
+    }
+
+    private func seal(_ plaintext: Data, recipient: DevicePublicKeys, header: EnvelopeHeader) throws -> EncryptedEnvelope {
         let sealed = try ChaChaPoly.seal(plaintext, using: key(peer: recipient, header: header), nonce: ChaChaPoly.Nonce(data: header.nonce), authenticating: header.canonical)
         let bytes = sealed.ciphertext + sealed.tag
         let unsigned = EncryptedEnvelope(header: header, ciphertext: bytes, signature: Data())
         return EncryptedEnvelope(header: header, ciphertext: bytes, signature: try sign(unsigned.signedBytes))
+    }
+
+    func sealSettings(_ request: RemoteSettingsAccessRequest, recipient: DevicePublicKeys) throws -> EncryptedEnvelope {
+        let context = try settingsSealContext(hostID: request.hostID, time: request.time, recipient: recipient)
+        return try sealSettings(request.encoded(), context: context)
+    }
+
+    func sealSettings(_ request: RemoteSettingsBindRequest, recipient: DevicePublicKeys) throws -> EncryptedEnvelope {
+        let context = try settingsSealContext(hostID: request.hostID, time: request.time, recipient: recipient)
+        return try sealSettings(request.encoded(), context: context)
+    }
+
+    private struct SettingsSealContext: CustomStringConvertible, CustomDebugStringConvertible {
+        let recipient: DevicePublicKeys
+        let header: EnvelopeHeader
+        let deadline: ContinuousClock.Instant
+
+        var description: String { "SettingsSealContext([redacted])" }
+        var debugDescription: String { description }
+    }
+
+    private func settingsSealContext(hostID: UUID, time: RemoteSettingsRequestTime,
+                                     recipient: DevicePublicKeys) throws -> SettingsSealContext {
+        let started = ContinuousClock.now
+        let created = try WireID.now()
+        let recipient = try DevicePublicKeys(deviceID: recipient.deviceID, signingKey: recipient.signingKey,
+                                             encryptionKey: recipient.encryptionKey)
+        guard hostID == recipient.deviceID, recipient.deviceID != publicKeys.deviceID else { throw WireError.identity }
+        guard time.issuedAt <= created, created < time.expiresAt else { throw WireError.expired }
+        let lifetime = time.expiresAt - created
+        guard lifetime <= 30_000 else { throw WireError.expired }
+        let deadline = started.advanced(by: .milliseconds(Int64(lifetime)))
+        let header = try EnvelopeHeader(sender: publicKeys.deviceID, recipient: recipient.deviceID,
+                                        created: created, lifetime: lifetime)
+        return SettingsSealContext(recipient: recipient, header: header, deadline: deadline)
+    }
+
+    private func sealSettings(_ plaintext: Data, context: SettingsSealContext) throws -> EncryptedEnvelope {
+        guard !plaintext.isEmpty, plaintext.count <= 32_768 else { throw WireError.size }
+        let envelope = try seal(plaintext, recipient: context.recipient, header: context.header)
+        _ = try envelope.wire.encoded(maximum: 49_152)
+        _ = try WireValue.object([
+            "type": .string("send"), "schema_version": .unsigned(1), "envelope": envelope.wire
+        ]).encoded(maximum: 364_544)
+        let observed = try WireID.now()
+        guard observed >= context.header.created, observed < context.header.expires,
+              ContinuousClock.now < context.deadline else { throw WireError.expired }
+        return envelope
     }
 
     func receive(_ envelope: EncryptedEnvelope, host: DevicePublicKeys, into inbox: any DurableEnvelopeInbox, now: UInt64) async throws -> Bool {
