@@ -207,11 +207,15 @@ impl SettingsConnectionOwner<'_> {
     pub(super) fn try_receive(
         &mut self,
         envelope: EncryptedEnvelope,
+        receipt_authority: crate::host::settings::service::SettingsReceiptAuthority,
     ) -> Result<PendingSettingsReceipt, SettingsReceiveError> {
         let context = self.owner.receive.context()?;
-        self.owner
-            .receive
-            .admit(context, Arc::clone(&self.identity), envelope)
+        self.owner.receive.admit(
+            context,
+            Arc::clone(&self.identity),
+            envelope,
+            receipt_authority,
+        )
     }
 
     #[cfg(unix)]

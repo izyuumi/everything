@@ -9,11 +9,12 @@ use tokio::sync::{Notify, OwnedMutexGuard, oneshot};
 use tokio::task::{Id, JoinSet};
 
 use super::{
-    BindingHistory, ReceiveContext, SettingsReceiveError, SettingsReceiveEvent,
-    SettingsTransportReceipt, WorkCompletion,
+    BindingHistory, OwnedVerifiedSettingsCommand, ReceiveContext, SettingsCommandOutcome,
+    SettingsReceiveError, SettingsReceiveEvent, SettingsTransportReceipt, WorkCompletion,
 };
 use crate::crypto::EncryptedEnvelope;
 use crate::devices::SettingsConnectionIdentity;
+use crate::host::settings::service::SettingsReceiptAuthority;
 use crate::protocol::DeviceId;
 
 #[derive(Default)]
@@ -65,6 +66,7 @@ pub(in crate::devices) struct SettingsReceiveWork {
 }
 
 struct PendingInput {
+    receipt_authority: SettingsReceiptAuthority,
     envelope: EncryptedEnvelope,
     context: Arc<ReceiveContext>,
     connection: Arc<SettingsConnectionIdentity>,
@@ -75,6 +77,7 @@ struct PendingInput {
 }
 
 pub(super) struct WorkerInput {
+    receipt_authority: Option<SettingsReceiptAuthority>,
     pub(super) envelope: EncryptedEnvelope,
     pub(super) context: Arc<ReceiveContext>,
     pub(super) connection: Arc<SettingsConnectionIdentity>,
@@ -85,10 +88,19 @@ pub(super) struct WorkerInput {
 }
 
 struct WorkerOutput {
-    completion: Result<WorkCompletion, SettingsReceiveError>,
+    receipt_authority: Option<SettingsReceiptAuthority>,
     guard: GuardScope,
     context: Arc<ReceiveContext>,
+    completion: Result<WorkCompletion, SettingsReceiveError>,
+    retained_command: Option<OwnedVerifiedSettingsCommand>,
+    command_outcome: Option<SettingsCommandOutcome>,
     frame: Option<FrameWitness>,
+}
+
+pub(super) struct CommandWorkState {
+    pub(super) authority: Option<SettingsReceiptAuthority>,
+    pub(super) command: Option<OwnedVerifiedSettingsCommand>,
+    pub(super) outcome: Option<SettingsCommandOutcome>,
 }
 
 pub(super) struct GuardScope {
@@ -256,6 +268,7 @@ impl SettingsReceiveWork {
         context: Arc<ReceiveContext>,
         connection: Arc<SettingsConnectionIdentity>,
         envelope: EncryptedEnvelope,
+        receipt_authority: SettingsReceiptAuthority,
     ) -> Result<PendingSettingsReceipt, SettingsReceiveError> {
         if self.closed || self.failure.is_some() || !connection.is_live() {
             return Err(SettingsReceiveError::Closed);
@@ -289,6 +302,7 @@ impl SettingsReceiveWork {
         let waiting = Box::pin(Arc::clone(&context.mutation).lock_owned());
         let (receipt, receiver) = oneshot::channel();
         self.pending = Some(PendingInput {
+            receipt_authority,
             envelope,
             context,
             connection,
@@ -309,6 +323,7 @@ impl SettingsReceiveWork {
                 return Err(self.ledger.fail());
             };
             let PendingInput {
+                receipt_authority,
                 envelope,
                 context,
                 connection,
@@ -319,6 +334,7 @@ impl SettingsReceiveWork {
             } = pending;
             drop(waiting);
             let input = WorkerInput {
+                receipt_authority: Some(receipt_authority),
                 envelope,
                 context,
                 connection,
@@ -372,7 +388,10 @@ impl SettingsReceiveWork {
             return Err(SettingsReceiveError::Bookkeeping);
         };
         let WorkerOutput {
+            receipt_authority,
             completion,
+            retained_command,
+            command_outcome,
             guard,
             context,
             frame,
@@ -381,26 +400,44 @@ impl SettingsReceiveWork {
             self.failure = Some(self.ledger.fail());
             self.closed = true;
             let _ = receipt.send(Err(SettingsReceiveError::Bookkeeping));
-            drop(completion);
+            drop(receipt_authority);
             drop(guard);
             drop(context);
+            drop(retained_command);
+            drop(completion);
+            drop(command_outcome);
             return Err(SettingsReceiveError::Bookkeeping);
         }
+        drop(receipt_authority);
         drop(guard);
         drop(context);
+        drop(retained_command);
         match completion {
             Ok(WorkCompletion {
                 receipt: result,
                 bind,
             }) => {
+                let event = match (bind, command_outcome) {
+                    (Some(bind), None) => SettingsReceiveEvent::CommittedBind(bind),
+                    (None, Some(SettingsCommandOutcome::Fresh(command))) => {
+                        SettingsReceiveEvent::CommittedCommand(command)
+                    }
+                    (None, Some(SettingsCommandOutcome::Historical(command))) => {
+                        SettingsReceiveEvent::HistoricalCommand(command)
+                    }
+                    (None, None) => SettingsReceiveEvent::ReceiptSettled,
+                    (Some(_), Some(_)) => {
+                        self.failure = Some(self.ledger.fail());
+                        self.closed = true;
+                        return Err(SettingsReceiveError::Bookkeeping);
+                    }
+                };
                 let _ = receipt.send(Ok(result));
                 drop(frame);
-                Ok(Some(match bind {
-                    Some(bind) => SettingsReceiveEvent::CommittedBind(bind),
-                    None => SettingsReceiveEvent::ReceiptSettled,
-                }))
+                Ok(Some(event))
             }
             Err(error) => {
+                drop(command_outcome);
                 if error.quarantines() {
                     self.ledger.fail();
                     self.failure = Some(error.clone());
@@ -549,17 +586,26 @@ impl Drop for PrivateWitness {
 }
 
 fn run(mut input: WorkerInput) -> WorkerOutput {
-    let completion = match std::panic::catch_unwind(AssertUnwindSafe(|| super::execute(&input))) {
-        Ok(result) => result,
-        Err(_) => Err(SettingsReceiveError::Worker),
+    let mut command = CommandWorkState {
+        authority: input.receipt_authority.take(),
+        command: None,
+        outcome: None,
     };
+    let completion =
+        match std::panic::catch_unwind(AssertUnwindSafe(|| super::execute(&input, &mut command))) {
+            Ok(result) => result,
+            Err(_) => Err(SettingsReceiveError::Worker),
+        };
     WorkerOutput {
+        receipt_authority: command.authority.take(),
         completion,
         guard: GuardScope {
             guard: input.guard.guard.take(),
             active: Arc::clone(&input.guard.active),
         },
         context: Arc::clone(&input.context),
+        retained_command: command.command.take(),
+        command_outcome: command.outcome.take(),
         frame: input.frame.take(),
     }
 }

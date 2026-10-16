@@ -22,12 +22,15 @@ use crate::crypto::{CryptoError, DevicePublicKeys, EncryptedEnvelope, ReplayGuar
 use crate::host::settings::SettingsGrantHead;
 use crate::protocol::{DeviceId, MessageId, UnixMillis};
 use crate::storage::{
-    SettingsBindAdmission, SettingsBindAdmissionError, SettingsBindReceiptCommit, Store,
+    SettingsBindAdmission, SettingsBindAdmissionError, SettingsBindReceiptCommit,
+    SettingsCommandAdmission, SettingsCommandAdmissionError, SettingsCommandReceiptCommit, Store,
     StoredSettingsBindReply, TransportInboxMetadata, TransportInboxRejection,
 };
 
+use command::SettingsCommandOutcome;
 pub(crate) use command::{
-    AuthenticatedSettingsCommandSource, CommandRejection, OwnedVerifiedSettingsCommand,
+    AuthenticatedSettingsCommandSource, CommandRejection, CommittedSettingsCommandSource,
+    OwnedCommittedSettingsCommand, OwnedHistoricalSettingsCommand, OwnedVerifiedSettingsCommand,
     SettingsCommandIntent, SettingsParentReference, SettingsUpdateIntent,
 };
 pub(crate) use wire::{BindingGeneration, BindingIntent};
@@ -51,6 +54,8 @@ pub(crate) enum SettingsReceiveError {
     RejectionStorage(#[source] Arc<crate::storage::StorageError>),
     #[error("private Settings receipt admission failed")]
     Admission(#[source] Arc<SettingsBindAdmissionError>),
+    #[error("private Settings command receipt admission failed")]
+    CommandAdmission(#[source] Arc<SettingsCommandAdmissionError>),
 }
 
 impl fmt::Debug for SettingsReceiveError {
@@ -64,6 +69,7 @@ impl SettingsReceiveError {
         matches!(self, Self::Bookkeeping | Self::Worker)
             || matches!(self, Self::RejectionStorage(error) if !matches!(error.as_ref(), crate::storage::StorageError::TransportCapacity(_)))
             || matches!(self, Self::Admission(error) if !error.is_capacity())
+            || matches!(self, Self::CommandAdmission(error) if !error.is_capacity())
     }
 }
 
@@ -517,6 +523,8 @@ pub(crate) enum SettingsTransportReceipt {
 
 pub(crate) enum SettingsReceiveEvent {
     CommittedBind(OwnedCommittedSettingsBind),
+    CommittedCommand(OwnedCommittedSettingsCommand),
+    HistoricalCommand(OwnedHistoricalSettingsCommand),
     ReceiptSettled,
 }
 
@@ -529,12 +537,14 @@ enum ReplayOutcome {
     Unobserved,
     Legacy,
     Committed(OwnedCommittedSettingsBind),
+    Command,
     Duplicate,
     Failure(SettingsReceiveError),
 }
 
 struct OwnedReplay<'input> {
     input: &'input work::WorkerInput,
+    command: &'input mut work::CommandWorkState,
     clock: ClockFloor,
     peer: PeerRegistration,
     pinned_identity: Value,
@@ -614,6 +624,9 @@ impl OwnedReplay<'_> {
         if plaintext.len() > wire::MAX_PRIVATE_REQUEST_BYTES {
             return Err(self.fail(SettingsReceiveError::Capacity));
         }
+        if let command::DecodedCommand::Update(intent) = command::decode(plaintext) {
+            return self.update(record, plaintext.len(), now_ms, intent);
+        }
         let reason =
             match wire::decode(plaintext) {
                 wire::DecodedBind::Bind(intent) => {
@@ -678,9 +691,100 @@ impl OwnedReplay<'_> {
         self.outcome = ReplayOutcome::Legacy;
         self.legacy.record_rejected(record, now_ms, reason)
     }
+
+    fn update(
+        &mut self,
+        record: ReplayRecord,
+        bytes: usize,
+        now_ms: u64,
+        intent: SettingsCommandIntent,
+    ) -> Result<bool, CryptoError> {
+        if self.command.command.is_some()
+            || self.command.outcome.is_some()
+            || self.command.authority.is_none()
+        {
+            return Err(self.fail(SettingsReceiveError::Bookkeeping));
+        }
+        let envelope = self.verified_envelope(&record, now_ms)?;
+        let deadline = match envelope.clock.deadline(intent.expires_at.get()) {
+            Ok(deadline) => deadline,
+            Err(BindRejection::Expired) => {
+                self.outcome = ReplayOutcome::Legacy;
+                return self.legacy.record_rejected(
+                    record,
+                    now_ms,
+                    TransportInboxRejection::SettingsUnavailable,
+                );
+            }
+            Err(_) => return Err(self.fail(SettingsReceiveError::Bookkeeping)),
+        };
+        let Some(authority) = self.command.authority.take() else {
+            return Err(self.fail(SettingsReceiveError::Bookkeeping));
+        };
+        let witness = match self.input.ledger.private(self.peer.keys.device_id, bytes) {
+            Ok(witness) => witness,
+            Err(error) => {
+                self.command.authority = Some(authority);
+                return Err(self.fail(error));
+            }
+        };
+        self.command.command = Some(OwnedVerifiedSettingsCommand::from_verified_update(
+            envelope, intent, authority, deadline, witness,
+        ));
+        let Some(verified) = self.command.command.as_ref() else {
+            return Err(self.fail(SettingsReceiveError::Bookkeeping));
+        };
+        let admitted =
+            self.input
+                .context
+                .agent
+                .store()
+                .admit_settings_command(&SettingsCommandAdmission {
+                    source: verified.authority_source(),
+                    authority: verified.receipt_authority(),
+                });
+        match admitted {
+            Ok(SettingsCommandReceiptCommit::Duplicate) => {
+                self.outcome = ReplayOutcome::Duplicate;
+                Ok(false)
+            }
+            Ok(SettingsCommandReceiptCommit::Fresh { original, reply }) => {
+                let Some(verified) = self.command.command.take() else {
+                    return Err(self.fail(SettingsReceiveError::Bookkeeping));
+                };
+                self.command.outcome = Some(SettingsCommandOutcome::Fresh(
+                    OwnedCommittedSettingsCommand::from_commit(verified, original, reply),
+                ));
+                self.outcome = ReplayOutcome::Command;
+                Ok(true)
+            }
+            Ok(SettingsCommandReceiptCommit::Known { original, reply }) => {
+                let Some(verified) = self.command.command.take() else {
+                    return Err(self.fail(SettingsReceiveError::Bookkeeping));
+                };
+                self.command.outcome = Some(SettingsCommandOutcome::Historical(
+                    OwnedHistoricalSettingsCommand::from_commit(verified, original, reply),
+                ));
+                self.outcome = ReplayOutcome::Command;
+                Ok(true)
+            }
+            Err(error) if error.is_policy_rejection() => {
+                self.outcome = ReplayOutcome::Legacy;
+                self.legacy.record_rejected(
+                    record,
+                    now_ms,
+                    TransportInboxRejection::SettingsUnavailable,
+                )
+            }
+            Err(error) => Err(self.fail(SettingsReceiveError::CommandAdmission(Arc::new(error)))),
+        }
+    }
 }
 
-pub(super) fn execute(input: &work::WorkerInput) -> Result<WorkCompletion, SettingsReceiveError> {
+pub(super) fn execute(
+    input: &work::WorkerInput,
+    command: &mut work::CommandWorkState,
+) -> Result<WorkCompletion, SettingsReceiveError> {
     let prepared = input
         .context
         .endpoint
@@ -689,6 +793,7 @@ pub(super) fn execute(input: &work::WorkerInput) -> Result<WorkCompletion, Setti
     let clock = ClockFloor::capture()?;
     let mut replay = OwnedReplay {
         input,
+        command,
         clock,
         peer: prepared.peer,
         pinned_identity: prepared.pinned_identity.clone(),
@@ -714,6 +819,13 @@ pub(super) fn execute(input: &work::WorkerInput) -> Result<WorkCompletion, Setti
             Ok(WorkCompletion {
                 receipt: SettingsTransportReceipt::PrivateCommitted { message_id: id },
                 bind: Some(bind),
+            })
+        }
+        (Ok(raw), ReplayOutcome::Command) => {
+            drop(raw);
+            Ok(WorkCompletion {
+                receipt: SettingsTransportReceipt::PrivateCommitted { message_id: id },
+                bind: None,
             })
         }
         (Err(CryptoError::Replay), ReplayOutcome::Duplicate) => Ok(WorkCompletion {
