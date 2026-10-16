@@ -98,6 +98,11 @@ final class DeviceNotificationActions {
         var requested = false
     }
 
+    private enum InitialAdmission {
+        case eligible(generation: UInt64, deadline: ContinuousClock.Instant)
+        case rejected(DeviceNotificationActionError)
+    }
+
     private let authorization: NotificationAuthorizationService
     private var invocations: [UUID: Invocation] = [:]
     private var prompting: UUID?
@@ -114,10 +119,21 @@ final class DeviceNotificationActions {
             return await wait(for: previous.task, requestID: requestID)
         }
         guard invocations.count < Self.maximumInvocations else { return result(requestID, session.deviceID, .capacity) }
+        let admission: InitialAdmission
+        let lifetime = identity.expiresAt.timeIntervalSinceNow
+        if requestID == UUID(uuid: (0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0))
+            || identity.expectedRevision == 0 || identity.expectedRevision > UInt64(Int64.max) {
+            admission = .rejected(.invalidRequest)
+        } else if !lifetime.isFinite || lifetime <= 0 || lifetime > 300 {
+            admission = .rejected(.expired)
+        } else {
+            do { admission = .eligible(generation: try session.capture(), deadline: ContinuousClock.now.advanced(by: .seconds(lifetime))) }
+            catch { admission = .rejected(.inactive) }
+        }
         let cancellation = InvocationCancellation()
         cancellation.requested = Task.isCancelled
         let task = Task { @MainActor in
-            await self.perform(requestID: requestID, identity: identity, cancellation: cancellation, session: session, preferences: preferences)
+            await self.perform(requestID: requestID, identity: identity, admission: admission, cancellation: cancellation, session: session, preferences: preferences)
         }
         invocations[requestID] = Invocation(identity: identity, cancellation: cancellation, task: task)
         return await wait(for: task, requestID: requestID)
@@ -135,17 +151,19 @@ final class DeviceNotificationActions {
         }
     }
 
-    private func perform(requestID: UUID, identity: Identity, cancellation: InvocationCancellation, session: DeviceForegroundSession, preferences: DevicePreferenceStore) async -> DeviceNotificationActionResult {
+    private func perform(requestID: UUID, identity: Identity, admission: InitialAdmission, cancellation: InvocationCancellation, session: DeviceForegroundSession, preferences: DevicePreferenceStore) async -> DeviceNotificationActionResult {
         do {
             guard !cancellation.requested else { return result(requestID, identity.deviceID, .cancelled) }
-            let lifetime = identity.expiresAt.timeIntervalSinceNow
-            guard requestID != UUID(uuid: (0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)),
-                  identity.expectedRevision > 0, identity.expectedRevision <= UInt64(Int64.max),
-                  lifetime.isFinite, lifetime > 0, lifetime <= 300 else {
-                return result(requestID, identity.deviceID, .expired)
+            let generation: UInt64
+            let deadline: ContinuousClock.Instant
+            switch admission {
+            case .eligible(let originalGeneration, let originalDeadline):
+                generation = originalGeneration
+                deadline = originalDeadline
+            case .rejected(.invalidRequest): return result(requestID, identity.deviceID, .failed(observation: nil))
+            case .rejected(.expired): return result(requestID, identity.deviceID, .expired)
+            case .rejected(.inactive): return result(requestID, identity.deviceID, .cancelled)
             }
-            let generation = try session.capture()
-            let deadline = ContinuousClock.now.advanced(by: .seconds(lifetime))
             let current = try await preferences.snapshot()
             guard current.deviceID == identity.deviceID else { return result(requestID, identity.deviceID, .failed(observation: nil)) }
             guard current.revision == identity.expectedRevision else { return result(requestID, identity.deviceID, .conflict(observedRevision: current.revision)) }
