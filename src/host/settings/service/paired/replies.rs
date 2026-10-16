@@ -17,9 +17,10 @@ use crate::crypto::DevicePublicKeys;
 use crate::devices::{
     BindRejection, BindingHistoryState, CommandRejection, OriginalKind, OriginalLink, OriginalView,
     OwnedCommittedSettingsBind, RemoteOperationPhase, RemoteOperationState, RemoteServiceReceipt,
-    ReplyBuildPermit, ServiceLookup, SettingsBindReplyContractError, SettingsBindReplyPacket,
-    SettingsOriginalReplyPacket, SettingsParentReference, SettingsReceiveError,
-    SettingsReplyContractError, SettingsReplyPublicationError, SettingsReplyQualification,
+    ReplyBuildPermit, ServiceLookup, SettingsAccessReplyContractError,
+    SettingsBindReplyContractError, SettingsBindReplyPacket, SettingsOriginalReplyPacket,
+    SettingsParentReference, SettingsReceiveError, SettingsReplyContractError,
+    SettingsReplyPublicationError, SettingsReplyQualification,
 };
 use crate::host::settings::SettingsGrantReference;
 use crate::host::settings::contract::SettingsOperationState;
@@ -29,6 +30,7 @@ use crate::storage::settings_originals::{
 };
 use crate::storage::{ConsumedSettingsReply, Store, settings_grant_head_on};
 
+use super::access::SettingsAccessQualificationError;
 use super::{
     OriginalReplySource, PairedSettingsParent, QualifiedOriginalReply, SettingsGrantOwner,
     SettingsGrantState, SettingsOperationPhase, SettingsReceiptAuthority, SettingsServiceError,
@@ -49,6 +51,10 @@ pub(crate) enum SettingsReplyProjectionError {
     OriginalData(#[from] SettingsReplyContractError),
     #[error("Settings Bind reply data is invalid")]
     BindData(#[from] SettingsBindReplyContractError),
+    #[error("Settings Access reply current authority check failed")]
+    AccessQualification(#[from] SettingsAccessQualificationError),
+    #[error("Settings Access reply data is invalid")]
+    AccessData(#[from] SettingsAccessReplyContractError),
     #[error("Settings reply provenance encoding failed")]
     Provenance(#[source] serde_json::Error),
 }
@@ -111,6 +117,9 @@ impl SettingsReceiptAuthority {
             }
             SettingsReplyQualification::Bind(qualified) => {
                 self.recheck_consumed_bind_reply_on(store, transaction, qualified)?;
+            }
+            SettingsReplyQualification::Access(_) => {
+                self.recheck_consumed_access_reply_on(store, transaction, consumed)?;
             }
         }
         Ok(())

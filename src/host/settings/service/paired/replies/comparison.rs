@@ -15,6 +15,7 @@ use crate::storage::settings_originals::{
 use crate::storage::{ConsumedSettingsReply, Store};
 
 use super::super::QualifiedOriginalReply;
+use super::super::access::AccessReplyComparison;
 use super::{SettingsReceiptAuthority, SettingsReplyProjectionError, SettingsServiceError};
 
 pub(crate) struct SettingsReplyComparison {
@@ -24,6 +25,7 @@ pub(crate) struct SettingsReplyComparison {
 }
 
 enum ReplyComparisonObservation {
+    Access(AccessReplyComparison),
     Original {
         invocation: Arc<()>,
         linked: bool,
@@ -70,6 +72,10 @@ impl SettingsReceiptAuthority {
                 wall: qualified.observed_wall,
                 monotonic: qualified.observed_monotonic,
             },
+            SettingsReplyQualification::Access(qualified) => ReplyComparisonObservation::Access(
+                self.capture_access_reply_comparison(qualified)
+                    .map_err(SettingsReplyProjectionError::from)?,
+            ),
         };
         Ok(SettingsReplyComparison {
             message_id: sealed.header().message_id,

@@ -7,18 +7,21 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tokio::sync::OwnedMutexGuard;
 use uuid::Uuid;
+use zeroize::Zeroizing;
 
 use crate::crypto::DevicePublicKeys;
 use crate::devices::{
-    AccessStatusRejection, DeviceAccess, DeviceError, OwnedCommittedSettingsAccess,
-    OwnedVerifiedSettingsAccess,
+    AccessStatusRejection, BindingGeneration, DeviceAccess, DeviceError,
+    OwnedCommittedSettingsAccess, OwnedVerifiedSettingsAccess, ReplyBuildPermit,
+    SettingsAccessReplyPacket, SettingsReplyPublicationError, SettingsReplyQualification,
 };
 use crate::host::settings::{SettingsGrantHead, SettingsGrantReference};
-use crate::protocol::{DeviceId, UnixMillis};
-use crate::storage::{StorageError, Store, settings_grant_head_on};
+use crate::protocol::{DeviceId, MessageId, UnixMillis};
+use crate::storage::{ConsumedSettingsReply, StorageError, Store, settings_grant_head_on};
 
 use super::{
-    SettingsGrantState, SettingsReceiptAuthority, SettingsServiceError, original_reply_text,
+    SettingsGrantOwner, SettingsGrantState, SettingsReceiptAuthority, SettingsReplyProjectionError,
+    SettingsServiceError, original_reply_text,
 };
 
 const MAX_ACCESS_IDENTITY_BYTES: usize = 16 * 1024;
@@ -613,6 +616,48 @@ struct AccessReplyObservation {
     reply_deadline: Instant,
 }
 
+struct AccessReplyRead {
+    status: AccessObservation,
+    owner: SettingsGrantOwner,
+    reply_deadline: Instant,
+}
+
+pub(crate) struct SettingsAccessReplyProjection {
+    plaintext: Zeroizing<Vec<u8>>,
+    floor: (UnixMillis, Instant),
+    deadline: Instant,
+}
+
+pub(super) struct AccessReplyComparison {
+    query: Arc<()>,
+    invocation: Arc<()>,
+    family: SettingsAccessReplyFamily,
+    grant: Option<SettingsGrantReference>,
+    query_floor: (UnixMillis, Instant),
+    query_deadline: Instant,
+    reply_deadline: Instant,
+    observed_wall: UnixMillis,
+    observed_monotonic: Instant,
+}
+
+impl SettingsAccessReplyProjection {
+    pub(crate) fn into_parts(self) -> (Zeroizing<Vec<u8>>, (UnixMillis, Instant), Instant) {
+        (self.plaintext, self.floor, self.deadline)
+    }
+}
+
+impl fmt::Debug for SettingsAccessReplyProjection {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("SettingsAccessReplyProjection([owned private data])")
+    }
+}
+
+impl fmt::Debug for AccessReplyComparison {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("AccessReplyComparison([sealed association only])")
+    }
+}
+
 impl fmt::Debug for QualifiedSettingsAccessReply<'_> {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str("QualifiedSettingsAccessReply([joined own-status read])")
@@ -654,6 +699,118 @@ impl SettingsReceiptAuthority {
         transaction: &Transaction<'_>,
         qualified: &QualifiedSettingsAccessReply<'_>,
     ) -> Result<(), SettingsAccessQualificationError> {
+        self.check_access_reply_association(qualified)?;
+        let observed = self.observe_access_reply_on(
+            store,
+            transaction,
+            qualified.mutation,
+            qualified.request,
+        )?;
+        check_access_reply_observation(qualified, &observed)
+    }
+
+    pub(crate) fn project_access_reply_on(
+        &self,
+        store: &Store,
+        transaction: &Transaction<'_>,
+        qualified: &QualifiedSettingsAccessReply<'_>,
+        permit: &ReplyBuildPermit,
+    ) -> Result<SettingsAccessReplyProjection, SettingsReplyProjectionError> {
+        permit.check_access(qualified.request)?;
+        self.check_access_reply_association(qualified)?;
+        let observed = self.observe_access_reply_on(
+            store,
+            transaction,
+            qualified.mutation,
+            qualified.request,
+        )?;
+        check_access_reply_observation(qualified, &observed)?;
+        let source = qualified.request.verified_request().authority_source();
+        let in_reply_to: MessageId = source
+            .receipt_metadata()
+            .map_err(SettingsAccessQualificationError::from)?
+            .message_id
+            .parse()
+            .map_err(SettingsServiceError::from)?;
+        let intent = source.intent();
+        let packet = match &observed.status.decision {
+            AccessDecision::GrantUnavailable => SettingsAccessReplyPacket::grant_unavailable(
+                intent.host_id,
+                in_reply_to,
+                intent.query_id,
+            )?,
+            AccessDecision::Active(head) => SettingsAccessReplyPacket::from_grant_head(
+                intent.host_id,
+                in_reply_to,
+                intent.query_id,
+                BindingGeneration {
+                    grant_id: head.grant.change.target.grant_id,
+                    grant_revision: head.grant.revision,
+                    host_epoch: source.connection().host_identity().host_epoch(),
+                    connection_epoch: source.connection().connection_epoch(),
+                },
+                head,
+            )?,
+        };
+        Ok(SettingsAccessReplyProjection {
+            plaintext: packet.encode_checked()?,
+            floor: (observed.status.wall, observed.status.monotonic),
+            deadline: observed.reply_deadline,
+        })
+    }
+
+    pub(super) fn recheck_consumed_access_reply_on(
+        &self,
+        store: &Store,
+        transaction: &Transaction<'_>,
+        consumed: &ConsumedSettingsReply<'_, '_, '_, '_>,
+    ) -> Result<(), SettingsReplyPublicationError> {
+        consumed.check_on(transaction)?;
+        let SettingsReplyQualification::Access(qualified) = consumed.sealed().qualification()
+        else {
+            return Err(SettingsReplyPublicationError::Conflict);
+        };
+        self.check_access_reply_association(qualified)
+            .map_err(SettingsReplyProjectionError::from)?;
+        let read = self
+            .read_access_reply_on(store, transaction, qualified.mutation, qualified.request)
+            .map_err(SettingsReplyProjectionError::from)?;
+        let observed = self
+            .finish_access_reply_observation(store, qualified.request, read)
+            .map_err(SettingsReplyProjectionError::from)?;
+        check_access_reply_observation(qualified, &observed)
+            .map_err(SettingsReplyProjectionError::from)?;
+        Ok(())
+    }
+
+    pub(super) fn capture_access_reply_comparison(
+        &self,
+        qualified: &QualifiedSettingsAccessReply<'_>,
+    ) -> Result<AccessReplyComparison, SettingsAccessQualificationError> {
+        self.check_access_reply_association(qualified)?;
+        Ok(AccessReplyComparison {
+            query: Arc::clone(&qualified.query),
+            invocation: Arc::clone(&qualified.invocation),
+            family: qualified.request.reply_reservation().family,
+            grant: match &qualified.decision {
+                AccessDecision::GrantUnavailable => None,
+                AccessDecision::Active(head) => Some(SettingsGrantReference {
+                    grant_id: head.grant.change.target.grant_id,
+                    revision: head.grant.revision,
+                }),
+            },
+            query_floor: qualified.query_floor,
+            query_deadline: qualified.query_deadline,
+            reply_deadline: qualified.reply_deadline,
+            observed_wall: qualified.observed_wall,
+            observed_monotonic: qualified.observed_monotonic,
+        })
+    }
+
+    fn check_access_reply_association(
+        &self,
+        qualified: &QualifiedSettingsAccessReply<'_>,
+    ) -> Result<(), SettingsAccessQualificationError> {
         if !std::ptr::eq(self, qualified.authority)
             || !Arc::ptr_eq(
                 &qualified.invocation,
@@ -663,22 +820,6 @@ impl SettingsReceiptAuthority {
                     .authority_source()
                     .invocation_identity(),
             )
-        {
-            return Err(SettingsServiceError::OutsideScope.into());
-        }
-        let observed = self.observe_access_reply_on(
-            store,
-            transaction,
-            qualified.mutation,
-            qualified.request,
-        )?;
-        if !Arc::ptr_eq(&observed.status.query, &qualified.query)
-            || observed.status.query_floor != qualified.query_floor
-            || observed.status.query_deadline != qualified.query_deadline
-            || observed.reply_deadline != qualified.reply_deadline
-            || observed.status.decision != qualified.decision
-            || observed.status.wall < qualified.observed_wall
-            || observed.status.monotonic < qualified.observed_monotonic
         {
             return Err(SettingsServiceError::OutsideScope.into());
         }
@@ -692,6 +833,18 @@ impl SettingsReceiptAuthority {
         mutation: &OwnedMutexGuard<()>,
         request: &OwnedCommittedSettingsAccess,
     ) -> Result<AccessReplyObservation, SettingsAccessQualificationError> {
+        let read = self.read_access_reply_on(store, connection, mutation, request)?;
+        check_access_reply_reservation(connection, request)?;
+        self.finish_access_reply_observation(store, request, read)
+    }
+
+    fn read_access_reply_on(
+        &self,
+        store: &Store,
+        connection: &Connection,
+        mutation: &OwnedMutexGuard<()>,
+        request: &OwnedCommittedSettingsAccess,
+    ) -> Result<AccessReplyRead, SettingsAccessQualificationError> {
         if !Arc::ptr_eq(OwnedMutexGuard::mutex(mutation), &self.core.mutation) {
             return Err(SettingsServiceError::OutsideScope.into());
         }
@@ -699,7 +852,25 @@ impl SettingsReceiptAuthority {
         let status = self.observe_access_on(store, connection, verified)?;
         let owner = self.core.authority.paired_receipt_owner(&self.host)?;
         let reply_deadline = check_access_reply_metadata(request, &status)?;
-        check_access_reply_reservation(connection, request)?;
+        Ok(AccessReplyRead {
+            status,
+            owner,
+            reply_deadline,
+        })
+    }
+
+    fn finish_access_reply_observation(
+        &self,
+        store: &Store,
+        request: &OwnedCommittedSettingsAccess,
+        read: AccessReplyRead,
+    ) -> Result<AccessReplyObservation, SettingsAccessQualificationError> {
+        let AccessReplyRead {
+            status,
+            owner,
+            reply_deadline,
+        } = read;
+        let verified = request.verified_request();
         let observed = self.core.authority.observe_access_query(
             &self.host,
             verified.authority_source(),
@@ -738,6 +909,23 @@ impl SettingsReceiptAuthority {
             reply_deadline,
         })
     }
+}
+
+fn check_access_reply_observation(
+    qualified: &QualifiedSettingsAccessReply<'_>,
+    observed: &AccessReplyObservation,
+) -> Result<(), SettingsAccessQualificationError> {
+    if !Arc::ptr_eq(&observed.status.query, &qualified.query)
+        || observed.status.query_floor != qualified.query_floor
+        || observed.status.query_deadline != qualified.query_deadline
+        || observed.reply_deadline != qualified.reply_deadline
+        || observed.status.decision != qualified.decision
+        || observed.status.wall < qualified.observed_wall
+        || observed.status.monotonic < qualified.observed_monotonic
+    {
+        return Err(SettingsServiceError::OutsideScope.into());
+    }
+    Ok(())
 }
 
 fn check_access_reply_metadata(

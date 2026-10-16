@@ -10,14 +10,17 @@ use uuid::Uuid;
 use crate::agent::Agent;
 use crate::crypto::{CryptoError, EnvelopeHeader};
 use crate::host::settings::service::{
-    OriginalReplySource, QualifiedBindReply, QualifiedOriginalReply, SettingsReceiptAuthority,
-    SettingsReplyProjectionError,
+    OriginalReplySource, QualifiedBindReply, QualifiedOriginalReply, QualifiedSettingsAccessReply,
+    SettingsAccessReplyFamily, SettingsReceiptAuthority, SettingsReplyProjectionError,
 };
 use crate::protocol::{DeviceId, ProtocolError, UnixMillis};
 use crate::relay_protocol::{MAX_RELAY_FRAME_BYTES, RELAY_SCHEMA_VERSION, RelayClientMessage};
 use crate::storage::{OutboxRow, StorageError, Store, TransportOutboxInsert};
 
-use super::{DeviceEndpoint, EndpointRole, OwnedCommittedSettingsBind, ReplyBuildPermit};
+use super::{
+    DeviceEndpoint, EndpointRole, OwnedCommittedSettingsAccess, OwnedCommittedSettingsBind,
+    ReplyBuildPermit,
+};
 
 pub(crate) struct SettingsReplySealContext<'source> {
     pub(crate) agent: &'source Agent,
@@ -31,11 +34,14 @@ pub(crate) struct SettingsReplySealContext<'source> {
 pub(crate) enum SettingsReplyQualification<'qualified, 'source> {
     Original(&'qualified QualifiedOriginalReply<'source>),
     Bind(&'qualified QualifiedBindReply<'source>),
+    Access(&'qualified QualifiedSettingsAccessReply<'source>),
 }
 
 pub(crate) enum SettingsReplyFamily {
     OriginalInspection,
     BindDefault,
+    AccessDefault,
+    AccessDenial,
 }
 
 pub(crate) struct SettingsReplyReservation {
@@ -51,6 +57,7 @@ pub(crate) struct SettingsReplyReservation {
 enum PublicationSource<'source> {
     Original(OriginalReplySource<'source>),
     Bind(&'source OwnedCommittedSettingsBind),
+    Access(&'source OwnedCommittedSettingsAccess),
 }
 
 struct SealPlan {
@@ -100,26 +107,79 @@ impl SettingsReplyFamily {
     pub(crate) fn name(&self) -> &'static str {
         match self {
             Self::OriginalInspection => "inspection",
-            Self::BindDefault => "default",
+            Self::BindDefault | Self::AccessDefault => "default",
+            Self::AccessDenial => "denial",
         }
     }
 
     pub(crate) fn reserved_bytes(&self) -> usize {
         match self {
             Self::OriginalInspection => 90_112,
-            Self::BindDefault => 49_152,
+            Self::BindDefault | Self::AccessDefault => 49_152,
+            Self::AccessDenial => 4_096,
         }
     }
 
     fn plaintext_bytes(&self) -> usize {
         match self {
             Self::OriginalInspection => 65_536,
-            Self::BindDefault => 32_768,
+            Self::BindDefault | Self::AccessDefault => 32_768,
+            Self::AccessDenial => 2_048,
         }
     }
 }
 
 impl<'transaction, 'connection, 'source> SealedSettingsReply<'transaction, 'connection, 'source> {
+    pub(crate) fn access(
+        context: SettingsReplySealContext<'source>,
+        transaction: &'transaction Transaction<'connection>,
+        qualified: &'transaction QualifiedSettingsAccessReply<'source>,
+        request: &'source OwnedCommittedSettingsAccess,
+    ) -> Result<Self, SettingsReplyPublicationError> {
+        context
+            .permit
+            .check_access(request)
+            .map_err(SettingsReplyProjectionError::from)?;
+        let source = request.verified_request().authority_source();
+        context.check(source.matches_context(
+            context.agent,
+            context.endpoint,
+            OwnedMutexGuard::mutex(context.mutation),
+        ))?;
+        let reply = request.reply_reservation();
+        let reservation = SettingsReplyReservation {
+            reservation_id: reply.reservation_id,
+            local_device_id: reply.local_device_id,
+            peer_device_id: reply.peer_device_id,
+            provenance: reply.provenance.clone(),
+            family: match reply.family {
+                SettingsAccessReplyFamily::Default => SettingsReplyFamily::AccessDefault,
+                SettingsAccessReplyFamily::Denial => SettingsReplyFamily::AccessDenial,
+            },
+            created_at: reply.created_at,
+            expires_at: reply.expires_at,
+        };
+        let projection = context.authority.project_access_reply_on(
+            context.store,
+            transaction,
+            qualified,
+            context.permit,
+        )?;
+        let (plaintext, floor, deadline) = projection.into_parts();
+        Self::seal(
+            context,
+            transaction,
+            SettingsReplyQualification::Access(qualified),
+            PublicationSource::Access(request),
+            SealPlan {
+                reservation,
+                floor,
+                deadline,
+            },
+            plaintext,
+        )
+    }
+
     pub(crate) fn original(
         context: SettingsReplySealContext<'source>,
         transaction: &'transaction Transaction<'connection>,
@@ -283,7 +343,12 @@ impl<'transaction, 'connection, 'source> SealedSettingsReply<'transaction, 'conn
             || reservation.local_device_id != context.endpoint.public_keys().device_id
             || reservation.reservation_id.is_nil()
             || reservation.peer_device_id == reservation.local_device_id
-            || reservation.created_at < floor.0
+            || match &source {
+                PublicationSource::Original(_) | PublicationSource::Bind(_) => {
+                    reservation.created_at < floor.0
+                }
+                PublicationSource::Access(_) => reservation.created_at > floor.0,
+            }
             || reservation.created_at >= reservation.expires_at
         {
             return Err(SettingsReplyPublicationError::Conflict);
@@ -306,6 +371,10 @@ impl<'transaction, 'connection, 'source> SealedSettingsReply<'transaction, 'conn
                 request.authority_source().verified_peer_keys()
             }
             PublicationSource::Bind(request) => request.authority_source().verified_peer_keys(),
+            PublicationSource::Access(request) => request
+                .verified_request()
+                .authority_source()
+                .verified_peer_keys(),
         };
         if peer.device_id != reservation.peer_device_id {
             return Err(SettingsReplyPublicationError::Conflict);
@@ -395,6 +464,11 @@ impl<'transaction, 'connection, 'source> SealedSettingsReply<'transaction, 'conn
                 .context
                 .authority
                 .recheck_bind_reply_on(self.context.store, transaction, qualified)?,
+            SettingsReplyQualification::Access(qualified) => self
+                .context
+                .authority
+                .recheck_access_reply_on(self.context.store, transaction, qualified)
+                .map_err(SettingsReplyProjectionError::from)?,
         }
         Ok(())
     }
@@ -438,6 +512,19 @@ impl<'transaction, 'connection, 'source> SealedSettingsReply<'transaction, 'conn
                     .map_err(SettingsReplyProjectionError::from)?;
                 request.authority_source().connection().is_live()
                     && request.authority_source().matches_context(
+                        self.context.agent,
+                        self.context.endpoint,
+                        OwnedMutexGuard::mutex(self.context.mutation),
+                    )
+            }
+            PublicationSource::Access(request) => {
+                self.context
+                    .permit
+                    .check_access(request)
+                    .map_err(SettingsReplyProjectionError::from)?;
+                let source = request.verified_request().authority_source();
+                source.connection().is_live()
+                    && source.matches_context(
                         self.context.agent,
                         self.context.endpoint,
                         OwnedMutexGuard::mutex(self.context.mutation),
