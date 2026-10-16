@@ -398,14 +398,18 @@ async fn reconcile_startup(core: &RuntimeCore) -> Result<(), WorkerError> {
                 || job.cancellation_requested
                 || manifest.model != core.providers.profile
                 || manifest.deadline.get() <= UnixMillis::now()?.get()
-                || core
+                || match core
                     .endpoint
                     .blocking({
                         let peer = job.peer;
                         move |repository| repository.peer(peer)
                     })
                     .await
-                    .is_err();
+                {
+                    Ok(_) => false,
+                    Err(WorkerError::UntrustedPeer) => true,
+                    Err(error) => return Err(error),
+                };
             if unsafe_dispatch {
                 core.scheduler.cancel(manifest.ids.task_id).await?;
             }
@@ -439,14 +443,18 @@ async fn reconcile(core: &RuntimeCore) -> Result<(), WorkerError> {
             continue;
         }
         let mut native = core.scheduler.status(manifest.ids.task_id).await?;
-        let revoked = core
+        let revoked = match core
             .endpoint
             .blocking({
                 let peer = job.peer;
                 move |repository| repository.peer(peer)
             })
             .await
-            .is_err();
+        {
+            Ok(_) => false,
+            Err(WorkerError::UntrustedPeer) => true,
+            Err(error) => return Err(error),
+        };
         if !native.task.status.is_terminal()
             && (job.cancellation_requested
                 || revoked
