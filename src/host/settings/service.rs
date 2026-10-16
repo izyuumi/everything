@@ -372,7 +372,7 @@ impl SettingsService {
     ) -> Result<SettingsOperationResult, SettingsServiceError> {
         target.validate()?;
         self.core.check_scope(target.scope())?;
-        let session_id = self.core.authority.session(&caller)?;
+        let session_id = self.core.operation_session(&caller, &target)?;
         let mutation = self.enter(&caller, &cancellation).await?;
         self.blocking(move |core| {
             let _mutation = mutation;
@@ -395,24 +395,12 @@ impl SettingsService {
                 Err(SettingsServiceError::NotFound) => {}
                 Err(error) => return Err(error),
             }
-            let issued_at = UnixMillis::now()?;
-            let (expires_at, deadline) = core.authority.lifetime(&caller)?;
-            let identity = OperationIdentity {
-                version: 1,
-                binding: SettingsRequestBinding {
-                    request_id: target.request_id(),
-                    principal_id: core.authority.principal(),
-                    client_session_id: session_id,
-                    scope: target.scope().clone(),
-                    expected_revision: target.expected_revision(),
-                    exact_request_sha256: request_digest(&target)?,
-                    issued_at,
-                    expires_at,
-                },
-                target,
-                origin: core.authority.origin(&caller),
-            };
-            let phase = if let Some(expected) = identity.binding.expected_revision {
+            let (identity, deadline) = core.operation_identity(&caller, target)?;
+            let phase = if matches!(caller.source, CallerSource::LocalOwner { .. }) {
+                SettingsOperationPhase::Finished {
+                    result: core.result(&identity, SettingsOperationState::HostActionRequired),
+                }
+            } else if let Some(expected) = identity.binding.expected_revision {
                 let actual = core.settings.snapshot()?.revision;
                 if !matches!(identity.binding.scope, SettingsScope::Host { .. }) {
                     SettingsOperationPhase::Finished {
@@ -935,6 +923,69 @@ impl SettingsService {
 }
 
 impl ServiceCore {
+    fn operation_session(
+        &self,
+        caller: &SettingsCaller,
+        target: &SettingsActionTarget,
+    ) -> Result<Uuid, SettingsServiceError> {
+        self.authority.validate(caller, false)?;
+        match caller.source {
+            CallerSource::LocalOwner { request_id }
+                if request_id == target.request_id()
+                    && matches!(
+                        target,
+                        SettingsActionTarget::Patch(_) | SettingsActionTarget::OwnerReplacement(_)
+                    ) =>
+            {
+                Ok(*request_id.as_uuid())
+            }
+            CallerSource::LocalOwner { .. } => Err(SettingsServiceError::OutsideScope),
+            _ => self.authority.session(caller),
+        }
+    }
+
+    fn operation_identity(
+        &self,
+        caller: &SettingsCaller,
+        target: SettingsActionTarget,
+    ) -> Result<(OperationIdentity, Instant), SettingsServiceError> {
+        target.validate()?;
+        self.check_scope(target.scope())?;
+        let client_session_id = self.operation_session(caller, &target)?;
+        let issued_at = UnixMillis::now()?;
+        let (expires_at, deadline) = match caller.source {
+            CallerSource::LocalOwner { .. } => {
+                let lifetime = super::contract::MAX_SETTINGS_ACTION_LIFETIME_MS;
+                let expiry = issued_at
+                    .get()
+                    .checked_add(lifetime)
+                    .ok_or(SettingsServiceError::Expired)?;
+                let deadline = Instant::now()
+                    .checked_add(std::time::Duration::from_millis(lifetime))
+                    .ok_or(SettingsServiceError::Expired)?;
+                (UnixMillis::try_from(expiry)?, deadline)
+            }
+            _ => self.authority.lifetime(caller)?,
+        };
+        let identity = OperationIdentity {
+            version: 1,
+            binding: SettingsRequestBinding {
+                request_id: target.request_id(),
+                principal_id: self.authority.principal(),
+                client_session_id,
+                scope: target.scope().clone(),
+                expected_revision: target.expected_revision(),
+                exact_request_sha256: request_digest(&target)?,
+                issued_at,
+                expires_at,
+            },
+            target,
+            origin: self.authority.origin(caller),
+        };
+        identity.validate()?;
+        Ok((identity, deadline))
+    }
+
     fn require_resolved_file(&self) -> Result<(), SettingsServiceError> {
         if let Some(operation) = self.repository.unresolved_write()? {
             return Err(SettingsServiceError::WriteBlocked {
