@@ -868,6 +868,7 @@ impl MemoryService {
     ) -> Result<EmbeddingApplyAdmission, MemoryError> {
         self.ensure_accepting()?;
         if request.settings_revision == 0
+            || request.settings_revision > i64::MAX as u64
             || request.request_sha256.len() != 64
             || !request
                 .request_sha256

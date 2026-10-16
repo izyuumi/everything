@@ -2299,13 +2299,18 @@ impl Consolidator {
         &self,
         result: Result<Option<super::search::HybridSearch>, super::vector::VectorError>,
     ) -> Result<(), ConsolidationError> {
+        if matches!(
+            &result,
+            Err(super::vector::VectorError::Cancelled
+                | super::vector::VectorError::Embedding(
+                    super::embedding::EmbeddingError::Cancelled
+                ))
+        ) {
+            return Err(ConsolidationError::Cancelled);
+        }
         let capture = self.replace_semantics(result.as_ref().is_ok_and(Option::is_some))?;
         let (hybrid, diagnostic) = match result {
             Ok(hybrid) => (hybrid, None),
-            Err(
-                super::vector::VectorError::Cancelled
-                | super::vector::VectorError::Embedding(super::embedding::EmbeddingError::Cancelled),
-            ) => return Err(ConsolidationError::Cancelled),
             Err(_) => (
                 None,
                 Some("local embedding backend is unavailable".to_owned()),
