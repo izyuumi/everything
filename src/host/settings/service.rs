@@ -17,7 +17,7 @@ use super::SettingsRepository;
 use super::actions::{
     ActionClaim, ClaimState, NativeActionAdmission, NativeActionAdmissionResult,
     NativeActionDetails, NativeActionInvocation, NativeActionObservation, NativeActionReference,
-    SettingsActionTarget,
+    NativeHostEffectAdmission, SettingsActionTarget,
 };
 use super::authority::{
     Authority, CallerSource, NativeSessionOpened, NativeSessionProof, SettingsAgentSession,
@@ -62,6 +62,12 @@ pub enum SettingsServiceError {
     Encoding,
     #[error("native session randomness is unavailable")]
     Entropy,
+    #[error("settings mutation may be admitted; inspect its original operation {request_id}")]
+    OutcomeUnknown {
+        request_id: CommandId,
+        cause: Box<SettingsServiceError>,
+        repair_error: Option<Box<SettingsServiceError>>,
+    },
     #[error("settings worker failed; inspect its original operation")]
     Worker,
     #[error(transparent)]
@@ -430,6 +436,21 @@ impl SettingsService {
                 session_id,
                 reference: invocation.reference,
             };
+            if let Some(inspection) = core.repository.replay_claim(&record.identity, &native)? {
+                return Ok(NativeActionAdmissionResult::Existing(inspection));
+            }
+            {
+                let claims = core
+                    .claims
+                    .lock()
+                    .map_err(|_| SettingsServiceError::Poisoned)?;
+                if claims.len() >= 64 {
+                    return Err(SettingsServiceError::Capacity);
+                }
+                if claims.contains_key(&invocation.operation_id) {
+                    return Err(SettingsServiceError::Conflict);
+                }
+            }
             let retained_session = core.authority.admit(&caller)?;
             let (record, fresh) = core.repository.claim(&record.identity, &native, || {
                 core.authority.validate(&caller, false)?;
@@ -455,24 +476,80 @@ impl SettingsService {
                     host_effect_started: false,
                 }),
                 repository: core.repository.clone(),
+                authority: Arc::clone(&core.authority),
+                settings: core.settings.clone(),
                 session: Mutex::new(Some(retained_session)),
                 _agent: core.agent.clone(),
             });
-            let mut claims = core
-                .claims
-                .lock()
-                .map_err(|_| SettingsServiceError::Poisoned)?;
-            if claims.len() >= 64 || claims.contains_key(&invocation.operation_id) {
-                return Err(SettingsServiceError::Capacity);
+            let insertion = match core.claims.lock() {
+                Ok(mut claims) => match claims.entry(invocation.operation_id) {
+                    std::collections::btree_map::Entry::Vacant(entry) => {
+                        entry.insert(Arc::clone(&claim));
+                        Ok(())
+                    }
+                    std::collections::btree_map::Entry::Occupied(_) => {
+                        Err(SettingsServiceError::Conflict)
+                    }
+                },
+                Err(_) => Err(SettingsServiceError::Poisoned),
+            };
+            if let Err(error) = insertion {
+                return Err(core.failed_claim_bookkeeping(&claim, error));
             }
-            claims.insert(invocation.operation_id, Arc::clone(&claim));
-            core.pending
-                .lock()
-                .map_err(|_| SettingsServiceError::Poisoned)?
-                .remove(&invocation.operation_id);
+            match core.pending.lock() {
+                Ok(mut pending) => {
+                    pending.remove(&invocation.operation_id);
+                }
+                Err(_) => {
+                    return Err(
+                        core.failed_claim_bookkeeping(&claim, SettingsServiceError::Poisoned)
+                    );
+                }
+            }
             Ok(NativeActionAdmissionResult::Admitted(
                 NativeActionAdmission { claim },
             ))
+        })
+        .await
+    }
+
+    pub(crate) async fn start_host_effect(
+        &self,
+        admission: NativeActionAdmission,
+        cancellation: CancellationToken,
+    ) -> Result<NativeHostEffectAdmission, SettingsServiceError> {
+        if !Arc::ptr_eq(&self.core.authority, &admission.claim.authority) {
+            return Err(SettingsServiceError::OutsideScope);
+        }
+        let mutation = tokio::select! {
+            biased;
+            _=cancellation.cancelled()=>return Err(SettingsServiceError::Cancelled),
+            mutation=Arc::clone(&self.core.mutation).lock_owned()=>mutation,
+        };
+        self.blocking(move |_core| {
+            if cancellation.is_cancelled() {
+                return Err(SettingsServiceError::Cancelled);
+            }
+            let mut state = admission
+                .claim
+                .state
+                .lock()
+                .map_err(|_| SettingsServiceError::Poisoned)?;
+            admission.claim.check_effect(&state)?;
+            match &admission.claim.identity.target {
+                SettingsActionTarget::Device(_) | SettingsActionTarget::Patch(_) => {}
+                SettingsActionTarget::Native(super::contract::SettingsActionRequest {
+                    action: super::contract::NativeSettingsAction::CredentialEntry { .. },
+                    ..
+                }) => {}
+                _ => return Err(SettingsServiceError::OutsideScope),
+            }
+            state.host_effect_started = true;
+            drop(state);
+            Ok(NativeHostEffectAdmission {
+                _mutation: mutation,
+                claim: admission.claim,
+            })
         })
         .await
     }
@@ -545,10 +622,17 @@ impl SettingsService {
                     Ok(record.inspection())
                 }
                 SettingsOperationPhase::Finished { .. } => Ok(record.inspection()),
-                _ => core.repository.finish_unadmitted(
-                    &record.identity,
-                    core.result(&record.identity, SettingsOperationState::Cancelled),
-                ),
+                _ => {
+                    let inspection = core.repository.finish_unadmitted(
+                        &record.identity,
+                        core.result(&record.identity, SettingsOperationState::Cancelled),
+                    )?;
+                    core.pending
+                        .lock()
+                        .map_err(|_| SettingsServiceError::Poisoned)?
+                        .remove(&request_id);
+                    Ok(inspection)
+                }
             }
         })
         .await
@@ -582,6 +666,10 @@ impl SettingsService {
                         &record.identity,
                         core.result(&record.identity, SettingsOperationState::Cancelled),
                     )?;
+                    core.pending
+                        .lock()
+                        .map_err(|_| SettingsServiceError::Poisoned)?
+                        .remove(&record.identity.binding.request_id);
                 }
             }
             Ok(())
@@ -634,6 +722,24 @@ impl SettingsService {
 }
 
 impl ServiceCore {
+    fn failed_claim_bookkeeping(
+        &self,
+        claim: &ActionClaim,
+        cause: SettingsServiceError,
+    ) -> SettingsServiceError {
+        let repair = self.repository.finish(
+            &claim.identity,
+            claim.native.native_request_id,
+            self.result(&claim.identity, SettingsOperationState::Unknown),
+            None,
+        );
+        SettingsServiceError::OutcomeUnknown {
+            request_id: claim.identity.binding.request_id,
+            cause: Box::new(cause),
+            repair_error: repair.err().map(Box::new),
+        }
+    }
+
     fn expire_unadmitted(&self) -> Result<(), SettingsServiceError> {
         let now = UnixMillis::now()?;
         for record in self.repository.pending()? {
@@ -744,12 +850,7 @@ impl ServiceCore {
     }
 
     fn check_current(&self, identity: &OperationIdentity) -> Result<(), SettingsServiceError> {
-        self.authority.check_origin(&identity.origin)?;
-        if let Some(expected) = identity.binding.expected_revision
-            && self.settings.snapshot()?.revision != expected
-        {
-            return Err(SettingsServiceError::Conflict);
-        }
+        super::actions::validate_current(&self.authority, &self.settings, identity)?;
         self.check_scope(&identity.binding.scope)
     }
 

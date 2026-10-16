@@ -3,12 +3,14 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
+use tokio::sync::OwnedMutexGuard;
 use tokio_util::sync::CancellationToken;
 
 use crate::agent::Agent;
 use crate::protocol::{CommandId, UnixMillis};
 
-use super::authority::SessionAdmission;
+use super::SettingsRepository;
+use super::authority::{Authority, SessionAdmission};
 use super::contract::{
     NativeSettingsAction, NotificationAuthorization, SETTINGS_CONTRACT_VERSION,
     SettingsActionReference, SettingsActionRequest, SettingsConfirmationReference,
@@ -150,16 +152,32 @@ impl NativeActionAdmission {
             .state
             .lock()
             .map_err(|_| SettingsServiceError::Poisoned)?;
-        if state.closed
-            || self.claim.cancellation.is_cancelled()
-            || Instant::now() >= self.claim.deadline
-            || UnixMillis::now()?.get() >= self.claim.identity.binding.expires_at.get()
-        {
-            return Err(SettingsServiceError::Expired);
-        }
-        Ok(())
+        self.claim.check_effect(&state)
     }
 
+    pub fn cancellation(&self) -> CancellationToken {
+        self.claim.cancellation.child_token()
+    }
+}
+
+pub struct NativeHostEffectAdmission {
+    pub(super) _mutation: OwnedMutexGuard<()>,
+    pub(super) claim: Arc<ActionClaim>,
+}
+
+impl fmt::Debug for NativeHostEffectAdmission {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("NativeHostEffectAdmission([retained])")
+    }
+}
+
+impl NativeHostEffectAdmission {
+    pub fn target(&self) -> &SettingsActionTarget {
+        &self.claim.identity.target
+    }
+    pub fn operation_id(&self) -> CommandId {
+        self.claim.identity.binding.request_id
+    }
     pub fn cancellation(&self) -> CancellationToken {
         self.claim.cancellation.child_token()
     }
@@ -172,6 +190,8 @@ pub(super) struct ActionClaim {
     pub cancellation: CancellationToken,
     pub state: Mutex<ClaimState>,
     pub repository: OperationRepository,
+    pub authority: Arc<Authority>,
+    pub settings: SettingsRepository,
     pub session: Mutex<Option<SessionAdmission>>,
     pub _agent: Agent,
 }
@@ -182,6 +202,20 @@ pub(super) struct ClaimState {
 }
 
 impl ActionClaim {
+    pub fn check_effect(&self, state: &ClaimState) -> Result<(), SettingsServiceError> {
+        if state.closed
+            || self.cancellation.is_cancelled()
+            || Instant::now() >= self.deadline
+            || UnixMillis::now()?.get() >= self.identity.binding.expires_at.get()
+        {
+            return Err(SettingsServiceError::Expired);
+        }
+        if state.host_effect_started {
+            return Err(SettingsServiceError::Conflict);
+        }
+        validate_current(&self.authority, &self.settings, &self.identity)
+    }
+
     pub fn close(&self) -> Result<(), SettingsServiceError> {
         self.state
             .lock()
@@ -258,4 +292,18 @@ impl ActionClaim {
         drop(retained_session);
         Ok(inspection)
     }
+}
+
+pub(super) fn validate_current(
+    authority: &Authority,
+    settings: &SettingsRepository,
+    identity: &OperationIdentity,
+) -> Result<(), SettingsServiceError> {
+    authority.check_origin(&identity.origin)?;
+    if let Some(expected) = identity.binding.expected_revision
+        && settings.snapshot()?.revision != expected
+    {
+        return Err(SettingsServiceError::Conflict);
+    }
+    Ok(())
 }

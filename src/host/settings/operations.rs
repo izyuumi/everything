@@ -193,6 +193,24 @@ impl OperationRepository {
         Ok(OperationRecord { identity, update })
     }
 
+    pub fn replay_claim(
+        &self,
+        expected: &OperationIdentity,
+        native: &NativeRequest,
+    ) -> Result<Option<SettingsOperationInspection>, SettingsServiceError> {
+        let connection = self.store.connection()?;
+        let record =
+            read(&connection, native.operation_id)?.ok_or(SettingsServiceError::NotFound)?;
+        if &record.identity != expected || expected.binding.client_session_id != native.session_id {
+            return Err(SettingsServiceError::Conflict);
+        }
+        match native_request(&connection, native.native_request_id, native.operation_id)? {
+            Some(original) if original == *native => Ok(Some(record.inspection())),
+            Some(_) => Err(SettingsServiceError::Conflict),
+            None => Ok(None),
+        }
+    }
+
     pub fn claim(
         &self,
         expected: &OperationIdentity,
