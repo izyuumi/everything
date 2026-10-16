@@ -184,9 +184,15 @@ impl TerminalTaskEvidence {
                 u64::from(limits.max_model_attempts)
                     * u64::from(definition.execution.budget.reserved_output_tokens),
             );
+            let expected_output = u64::from(*model_requests)
+                .checked_mul(u64::from(
+                    definition.execution.budget.reserved_output_tokens,
+                ))
+                .ok_or(SchedulerError::Conflict(definition.initial.id))?;
             if *model_requests > limits.max_model_attempts
                 || *tool_calls > limits.max_tool_calls
-                || reserved_output_tokens.is_some_and(|tokens| tokens > maximum_output)
+                || reserved_output_tokens
+                    .is_some_and(|tokens| tokens != expected_output || tokens > maximum_output)
                 || *deadline_ms > i64::MAX as u64
                 || limits
                     .absolute_deadline
