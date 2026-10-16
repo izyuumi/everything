@@ -175,6 +175,16 @@ pub(super) struct SessionAdmission {
     pub cancellation: CancellationToken,
 }
 
+impl SessionAdmission {
+    pub fn retain(&self) -> Self {
+        self.admitted.fetch_add(1, Ordering::AcqRel);
+        Self {
+            admitted: Arc::clone(&self.admitted),
+            cancellation: self.cancellation.child_token(),
+        }
+    }
+}
+
 impl Drop for SessionAdmission {
     fn drop(&mut self) {
         self.admitted.fetch_sub(1, Ordering::AcqRel);

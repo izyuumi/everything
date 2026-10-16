@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
-use crate::protocol::{CommandId, UnixMillis};
+use crate::protocol::{CommandId, MessageId, UnixMillis};
 use crate::storage::Store;
 
 use super::actions::{NativeActionObservation, NativeActionReference, SettingsActionTarget};
@@ -58,7 +58,16 @@ pub struct SettingsOperationInspection {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub(super) struct PairingCreationMetadata {
+    pub pairing_id: MessageId,
+    pub expires_at: UnixMillis,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct UpdateRecord {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pairing: Option<PairingCreationMetadata>,
     phase: SettingsOperationPhase,
     observation: Option<NativeActionObservation>,
     updated_at: UnixMillis,
@@ -90,6 +99,10 @@ impl OperationRecord {
 
     pub fn phase(&self) -> &SettingsOperationPhase {
         &self.update.phase
+    }
+
+    pub fn pairing(&self) -> Option<&PairingCreationMetadata> {
+        self.update.pairing.as_ref()
     }
 }
 
@@ -182,6 +195,7 @@ impl OperationRepository {
             params![identity.binding.request_id.to_string(), encoded, identity.binding.issued_at.get() as i64, identity.binding.expires_at.get() as i64],
         )?;
         let update = UpdateRecord {
+            pairing: None,
             phase,
             observation: None,
             updated_at: now,
@@ -256,6 +270,7 @@ impl OperationRepository {
         }
         transaction.execute("INSERT INTO settings_native_requests(request_id,operation_id,exact_request) VALUES(?1,?2,?3)", params![native.native_request_id.to_string(),native.operation_id.to_string(),native_json])?;
         let update = UpdateRecord {
+            pairing: None,
             phase: SettingsOperationPhase::InFlight {
                 native_request_id: native.native_request_id,
             },
@@ -302,9 +317,65 @@ impl OperationRepository {
             return Err(SettingsServiceError::Conflict);
         }
         let update = UpdateRecord {
+            pairing: None,
             phase: SettingsOperationPhase::Finished { result },
             observation,
             updated_at: UnixMillis::now()?,
+        };
+        validate_update(expected, &update)?;
+        append(&transaction, expected.binding.request_id, &update)?;
+        transaction.commit()?;
+        Ok(OperationRecord {
+            identity: record.identity,
+            update,
+        }
+        .inspection())
+    }
+
+    pub fn finish_pairing(
+        &self,
+        expected: &OperationIdentity,
+        native_request_id: CommandId,
+        metadata: PairingCreationMetadata,
+    ) -> Result<SettingsOperationInspection, SettingsServiceError> {
+        let mut connection = self.store.connection()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let record = read(&transaction, expected.binding.request_id)?
+            .ok_or(SettingsServiceError::NotFound)?;
+        if record.identity != *expected {
+            return Err(SettingsServiceError::Conflict);
+        }
+        let native = native_request(&transaction, native_request_id, expected.binding.request_id)?
+            .ok_or(SettingsServiceError::NotFound)?;
+        if native.operation_id != expected.binding.request_id
+            || native.native_request_id != native_request_id
+            || native.session_id != expected.binding.client_session_id
+        {
+            return Err(SettingsServiceError::Conflict);
+        }
+        if matches!(record.phase(), SettingsOperationPhase::Finished { .. }) {
+            if record.update.pairing.as_ref() != Some(&metadata) {
+                return Err(SettingsServiceError::Conflict);
+            }
+            return Ok(record.inspection());
+        }
+        if *record.phase() != (SettingsOperationPhase::InFlight { native_request_id }) {
+            return Err(SettingsServiceError::Conflict);
+        }
+        let update = UpdateRecord {
+            pairing: Some(metadata),
+            observation: None,
+            updated_at: UnixMillis::now()?,
+            phase: SettingsOperationPhase::Finished {
+                result: SettingsOperationResult {
+                    contract_version: super::contract::SETTINGS_CONTRACT_VERSION,
+                    request_id: expected.binding.request_id,
+                    scope: expected.binding.scope.clone(),
+                    state: SettingsOperationState::Completed {
+                        receipt_id: Uuid::new_v4(),
+                    },
+                },
+            },
         };
         validate_update(expected, &update)?;
         append(&transaction, expected.binding.request_id, &update)?;
@@ -335,6 +406,7 @@ impl OperationRepository {
             return Ok(record.inspection());
         }
         let update = UpdateRecord {
+            pairing: None,
             phase: SettingsOperationPhase::Finished { result },
             observation: None,
             updated_at: UnixMillis::now()?,
@@ -556,6 +628,28 @@ fn validate_update(
         && !matches!(update.phase, SettingsOperationPhase::Finished { .. })
     {
         return Err(SettingsServiceError::CorruptJournal);
+    }
+    if let Some(pairing) = &update.pairing {
+        if !matches!(
+            identity.target,
+            SettingsActionTarget::Device(super::contract::SettingsDeviceRequest {
+                action: super::contract::SettingsDeviceAction::Pair,
+                ..
+            })
+        ) || !matches!(
+            update.phase,
+            SettingsOperationPhase::Finished {
+                result: SettingsOperationResult {
+                    state: SettingsOperationState::Completed { .. },
+                    ..
+                }
+            }
+        ) || update.observation.is_some()
+            || pairing.expires_at.get() <= identity.binding.issued_at.get()
+            || pairing.expires_at.get() > identity.binding.expires_at.get()
+        {
+            return Err(SettingsServiceError::CorruptJournal);
+        }
     }
     encode(update, MAX_UPDATE_BYTES)?;
     Ok(())
