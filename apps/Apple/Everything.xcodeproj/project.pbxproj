@@ -271,6 +271,8 @@
                 "CBC431BA93DCE5CACC66E10B",
                 "7E7D8D78E755D9A44588FF03",
                 "F268C94F1107E41A24BC4E7C",
+                "830E4251423ED3AE66572933",
+                "94A9A108AA5077C575700CD1",
             );
             "runOnlyForDeploymentPostprocessing" = "0";
         };
@@ -278,6 +280,7 @@
             "isa" = "PBXFrameworksBuildPhase";
             "buildActionMask" = "2147483647";
             "files" = (
+                "21C767B34FBE81EE061A7317",
             );
             "runOnlyForDeploymentPostprocessing" = "0";
         };
@@ -552,6 +555,7 @@
                 "1672D00E6A98F3AEC599F720",
                 "1016BFB55EA83224B544938D",
                 "8142C7C1729E8CFE99701500",
+                "E1742BBBF2AF1C93541EBB3E",
             );
             "path" = "Shared/Crypto";
             "sourceTree" = "<group>";
@@ -628,6 +632,7 @@
                 "2F3AB4CB8B06E5D28B4F2F33",
                 "C89ED0CC74EE3AF87D4A7D7F",
                 "99A19055582DE7DB5A06C02F",
+                "5B08F2911E7EE03422FFB427",
             );
             "runOnlyForDeploymentPostprocessing" = "0";
         };
@@ -826,6 +831,28 @@
                 "F69C7CCC36DDAE7DE87E7982",
                 "0566276132F9903036CBD62B",
             );
+        };
+        "E1742BBBF2AF1C93541EBB3E" = {
+            "isa" = "PBXFileReference";
+            "lastKnownFileType" = "sourcecode.swift";
+            "path" = "DevicePublicKeys.swift";
+            "sourceTree" = "<group>";
+        };
+        "94A9A108AA5077C575700CD1" = {
+            "isa" = "PBXBuildFile";
+            "fileRef" = "E1742BBBF2AF1C93541EBB3E";
+        };
+        "5B08F2911E7EE03422FFB427" = {
+            "isa" = "PBXBuildFile";
+            "fileRef" = "E1742BBBF2AF1C93541EBB3E";
+        };
+        "830E4251423ED3AE66572933" = {
+            "isa" = "PBXBuildFile";
+            "fileRef" = "DBC527B988DB26C420FF77F1";
+        };
+        "21C767B34FBE81EE061A7317" = {
+            "isa" = "PBXBuildFile";
+            "fileRef" = "3B38C43243463B34043D02F5";
         };
     };
     "rootObject" = "244210E48437B6556980A702";
