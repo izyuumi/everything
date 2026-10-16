@@ -18,7 +18,7 @@ A child input may be accepted after safe consumption computed WaitingForEvents b
 
 Steering acceptance does not grant retry permission. ProviderInFlight, interrupted execution, unknown effects, reconciliation and exhausted budgets retain their original owner-action requirements. Cancellation continues to signal native provider and broker futures and preserves queued input for inspection; it does not manufacture a completed result or erase an uncertain turn. Legacy text-only execution cannot consume task inputs and rejects a queued input before inference.
 
-The Agent primitive is implemented independently of Scheduler and HostInbox. Scheduler wait-set ownership, child terminal delivery repair, authenticated command admission and approval wake handoff are documented at their composition boundary once integrated. Automated acceptance coverage is deferred to #32. Successful live model continuation remains unverified without authorized credentials.
+The Agent primitive is implemented independently of Scheduler and HostInbox. The [Scheduler contract](scheduler.md) documents the implemented wait-set ownership, child terminal delivery repair and approval wake handoff. Authenticated command admission and production background-host composition remain separate work in #18/#68. Automated acceptance coverage is deferred to #32. Successful live model continuation remains unverified without authorized credentials.
 
 ## Agent validation
 

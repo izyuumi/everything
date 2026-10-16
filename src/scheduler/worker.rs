@@ -404,6 +404,10 @@ fn saved_stop(
             PauseReason::ReconciliationRequired { .. } | PauseReason::BrokerRejected { .. } => {
                 WaitingReason::Reconciliation
             }
+            PauseReason::WaitingForEvents { wait_id } => WaitingReason::Children { wait_id },
+            PauseReason::ChildOutcomeUnknown { child_task_id } => {
+                WaitingReason::ChildOutcomeUnknown { child_task_id }
+            }
             PauseReason::InterruptedTool => WaitingReason::Interrupted,
             PauseReason::Cancellation if cancelled => return ExecutionStop::Cancelled,
             PauseReason::Cancellation => WaitingReason::Interrupted,

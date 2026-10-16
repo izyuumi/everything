@@ -232,6 +232,8 @@ pub enum WaitingReason {
     Approval,
     ProviderUncertain { attempt_id: CommandId },
     InFlight,
+    Children { wait_id: CommandId },
+    ChildOutcomeUnknown { child_task_id: TaskId },
     Reconciliation,
     Interrupted,
     Limit,
@@ -333,6 +335,35 @@ pub(super) struct TaskCheckpoint {
     pub last_output: Option<String>,
     pub diagnostic: Option<String>,
     pub resumes: Vec<ResumeAudit>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub child_wait: Option<ChildWaitSet>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct ChildWaitSet {
+    pub wait_id: CommandId,
+    pub active_command_id: CommandId,
+    pub accepted_at: UnixMillis,
+    pub children: Vec<WaitChild>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct WaitChild {
+    pub task_id: TaskId,
+    pub delivery: Option<ChildDelivery>,
+}
+
+#[derive(Clone, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct ChildDelivery {
+    pub delivery_id: CommandId,
+    pub accepted_at: UnixMillis,
+    pub command_id: CommandId,
+    pub status: crate::protocol::TaskStatus,
+    pub output: String,
+    pub outcome_unknown: bool,
 }
 
 #[derive(Clone)]

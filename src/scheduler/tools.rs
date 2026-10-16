@@ -16,6 +16,14 @@ use crate::tools::{
 use super::actor::{HandleInner, Scheduler};
 use super::{SchedulerError, TaskSnapshot, WaitingReason};
 
+pub const SCHEDULER_TOOL_NAMES: &[&str] = &[
+    "spawn_agent",
+    "send_agent",
+    "agent_status",
+    "cancel_agent",
+    "wait_agents",
+];
+
 const MAX_INSTRUCTION_BYTES: usize = 32_768;
 const MAX_PREVIEW_BYTES: usize = 8_192;
 const MAX_DIAGNOSTIC_BYTES: usize = 1_024;
@@ -41,6 +49,7 @@ impl SchedulerTools {
             ControlOperation::Send,
             ControlOperation::Status,
             ControlOperation::Cancel,
+            ControlOperation::Wait,
         ]
         .map(|operation| {
             Arc::new(SchedulerTool {
@@ -122,6 +131,7 @@ enum ControlOperation {
     Send,
     Status,
     Cancel,
+    Wait,
 }
 
 struct SchedulerTool {
@@ -150,7 +160,16 @@ struct TargetArguments {
     task_id: String,
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WaitArguments {
+    task_ids: Vec<String>,
+}
+
 enum ControlRequest {
+    Wait {
+        children: Vec<TaskId>,
+    },
     Spawn {
         instruction: String,
         mode: Option<ExecutionMode>,
@@ -210,6 +229,11 @@ impl Tool for SchedulerTool {
         }
         let workspace = context.workspace_root().to_owned();
         let result = match request {
+            ControlRequest::Wait { children } => {
+                scheduler
+                    .tool_wait(caller, workspace, operation, children)
+                    .await
+            }
             ControlRequest::Spawn { instruction, mode } => {
                 scheduler
                     .tool_spawn(caller, workspace, operation, instruction, mode)
@@ -251,6 +275,11 @@ fn descriptor(operation: ControlOperation) -> ToolDescriptor {
     let instruction = json!({"type":"string","minLength":1,"maxLength":MAX_INSTRUCTION_BYTES});
     let target = json!({"type":"string","minLength":36,"maxLength":36,"format":"uuid"});
     let (name, description, input_schema) = match operation {
+        ControlOperation::Wait => (
+            "wait_agents",
+            "Register an explicit wait for up to 32 descendant tasks and return immediately; native execution yields after this known tool round until child results arrive",
+            json!({"type":"object","properties":{"task_ids":{"type":"array","items":target,"minItems":1,"maxItems":32,"uniqueItems":true}},"required":["task_ids"],"additionalProperties":false}),
+        ),
         ControlOperation::Spawn => (
             "spawn_agent",
             "Admit a native child task with an isolated workspace and inherited or narrower authority; return its current durable state without waiting for completion",
@@ -287,6 +316,26 @@ fn parse_request(
     arguments: Value,
 ) -> Result<ControlRequest, &'static str> {
     match operation {
+        ControlOperation::Wait => {
+            let arguments: WaitArguments = serde_json::from_value(arguments)
+                .map_err(|_| "invalid native child wait arguments")?;
+            let children = arguments
+                .task_ids
+                .iter()
+                .map(|value| task_id(value))
+                .collect::<Result<Vec<_>, _>>()?;
+            if children.is_empty()
+                || children.len() > 32
+                || children
+                    .iter()
+                    .collect::<std::collections::BTreeSet<_>>()
+                    .len()
+                    != children.len()
+            {
+                return Err("wait requires 1 to 32 distinct descendant task IDs");
+            }
+            Ok(ControlRequest::Wait { children })
+        }
         ControlOperation::Spawn => {
             let arguments: SpawnArguments = serde_json::from_value(arguments)
                 .map_err(|_| "invalid native task spawn arguments")?;

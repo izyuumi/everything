@@ -1,4 +1,4 @@
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -8,7 +8,10 @@ use tokio::sync::{mpsc, oneshot, watch};
 use tokio::task::{Id, JoinSet};
 use tokio_util::sync::CancellationToken;
 
-use crate::agent::{Conversation, LoopStatus, PauseReason, TextCommand};
+use crate::agent::{
+    Conversation, LoopStatus, PauseReason, TaskInput, TaskInputCommand, TaskInputReceipt,
+    TextCommand,
+};
 use crate::permissions::ExecutionMode;
 use crate::protocol::{
     CommandId, ConversationId, MessageContent, MessageRole, TaskId, TaskRecord, TaskStatus,
@@ -50,6 +53,13 @@ enum Control {
         oneshot::Sender<Result<Option<TaskSnapshot>, SchedulerError>>,
     ),
     Wake(TaskId, Reply),
+    Steer {
+        task: TaskId,
+        delivery: CommandId,
+        accepted_at: UnixMillis,
+        instruction: String,
+        reply: oneshot::Sender<Result<TaskInputReceipt, SchedulerError>>,
+    },
     Cancel(TaskId, Reply),
     Resume {
         task: TaskId,
@@ -63,6 +73,13 @@ enum Control {
         operation: CommandId,
         instruction: String,
         mode: Option<ExecutionMode>,
+        reply: Reply,
+    },
+    Wait {
+        caller: TaskId,
+        workspace: PathBuf,
+        operation: CommandId,
+        children: Vec<TaskId>,
         reply: Reply,
     },
     Send {
@@ -188,6 +205,32 @@ impl Scheduler {
         self.request(|reply| Control::Wake(task, reply)).await
     }
 
+    pub async fn steer(
+        &self,
+        task: TaskId,
+        delivery_id: CommandId,
+        accepted_at: UnixMillis,
+        instruction: String,
+    ) -> Result<TaskInputReceipt, SchedulerError> {
+        let (reply, result) = oneshot::channel();
+        self.inner
+            .sender
+            .send(Control::Steer {
+                task,
+                delivery: delivery_id,
+                accepted_at,
+                instruction,
+                reply,
+            })
+            .await
+            .map_err(|_| SchedulerError::Stopped)?;
+        result.await.map_err(|_| {
+            SchedulerError::MutationUncertain(
+                "control actor stopped after accepting steering".into(),
+            )
+        })?
+    }
+
     pub async fn cancel(&self, task: TaskId) -> Result<TaskSnapshot, SchedulerError> {
         self.request(|reply| Control::Cancel(task, reply)).await
     }
@@ -288,6 +331,23 @@ impl Scheduler {
         .await
     }
 
+    pub(super) async fn tool_wait(
+        &self,
+        caller: TaskId,
+        workspace: PathBuf,
+        operation: CommandId,
+        children: Vec<TaskId>,
+    ) -> Result<TaskSnapshot, SchedulerError> {
+        self.request(|reply| Control::Wait {
+            caller,
+            workspace,
+            operation,
+            children,
+            reply,
+        })
+        .await
+    }
+
     pub(super) async fn tool_send(
         &self,
         caller: TaskId,
@@ -352,6 +412,7 @@ struct Actor {
     active: HashMap<TaskId, Active>,
     workers: JoinSet<ExecutionOutcome>,
     retry_once: HashMap<TaskId, ResumeTarget>,
+    wake_active: HashSet<TaskId>,
     stopping: bool,
     activated: bool,
     shutdown: Vec<oneshot::Sender<ShutdownReport>>,
@@ -376,6 +437,7 @@ impl Actor {
             active: HashMap::new(),
             workers: JoinSet::new(),
             retry_once: HashMap::new(),
+            wake_active: HashSet::new(),
             stopping: false,
             activated: false,
             shutdown: Vec::new(),
@@ -397,11 +459,15 @@ impl Actor {
 
     async fn recover(&mut self) -> Result<(), SchedulerError> {
         let tasks = repository::unfinished(&self.store(), self.limits.max_pending_tasks)?;
-        for mut task in tasks {
-            let id = task.definition.initial.id;
+        for saved in tasks {
+            let id = saved.definition.initial.id;
+            let mut task = repository::load(&self.store(), id)?;
+            if task.checkpoint.task.status.is_terminal() {
+                continue;
+            }
             match repository::encode_checkpoint(&task.checkpoint) {
                 Err(SchedulerError::Capacity("task checkpoint bytes")) => {
-                    tracing::warn!(task_id=%id, "legacy scheduler checkpoint lacks reserved lifecycle capacity; owner inspection is required before admission");
+                    tracing::warn!(task_id=%id, "legacy scheduler checkpoint lacks reserved lifecycle and child delivery capacity; owner inspection is required before admission");
                     continue;
                 }
                 Err(error) => return Err(error),
@@ -443,7 +509,14 @@ impl Actor {
                 return Err(SchedulerError::Conflict(id));
             }
             repair_handoff(&self.store(), &mut task, &conversation)?;
-            match native_waiting(&conversation, &task) {
+            match native_waiting(&conversation, &task)
+                .filter(|_| !pending_input_can_run(&conversation, &task))
+            {
+                Some(WaitingReason::Approval | WaitingReason::InFlight) => {
+                    task.checkpoint.waiting = None;
+                    repository::save(&self.store(), &mut task, TaskStatus::Queued)?;
+                    self.queue(id);
+                }
                 Some(reason) => {
                     task.checkpoint.waiting = Some(reason);
                     save_waiting(&self.store(), &mut task)?;
@@ -455,6 +528,7 @@ impl Actor {
                 }
             }
         }
+        self.repair_child_deliveries().await?;
         Ok(())
     }
 
@@ -507,6 +581,7 @@ impl Actor {
                         Some(Err(error)) => {
                             if let Some(id) = self.active.iter().find_map(|(id, active)| (active.join == error.id()).then_some(*id)) {
                                 self.active.remove(&id);
+                                self.wake_active.remove(&id);
                                 if let Ok(mut task) = repository::load(&self.store(), id) {
                                     task.checkpoint.waiting = Some(WaitingReason::Reconciliation);
                                     task.checkpoint.diagnostic = Some("scheduler worker stopped unexpectedly; inspect native and broker journals".into());
@@ -524,6 +599,7 @@ impl Actor {
 
     fn stop(&mut self) {
         self.stopping = true;
+        self.wake_active.clear();
         for active in self.active.values() {
             active.cancellation.cancel();
         }
@@ -583,6 +659,20 @@ impl Actor {
                 };
                 let _ = reply.send(result);
             }
+            Control::Steer {
+                task,
+                delivery,
+                accepted_at,
+                instruction,
+                reply,
+            } => {
+                let result = if self.stopping {
+                    Err(SchedulerError::Stopped)
+                } else {
+                    self.steer(task, delivery, accepted_at, instruction).await
+                };
+                let _ = reply.send(result);
+            }
             Control::Cancel(id, reply) => {
                 let result = self.cancel(id).await;
                 let _ = reply.send(result);
@@ -613,6 +703,20 @@ impl Actor {
                 } else {
                     self.spawn(caller, workspace, operation, instruction, mode)
                         .await
+                };
+                let _ = reply.send(result);
+            }
+            Control::Wait {
+                caller,
+                workspace,
+                operation,
+                children,
+                reply,
+            } => {
+                let result = if self.stopping {
+                    Err(SchedulerError::Stopped)
+                } else {
+                    self.wait(caller, workspace, operation, children).await
                 };
                 let _ = reply.send(result);
             }
@@ -892,12 +996,219 @@ impl Actor {
         Ok(task.snapshot())
     }
 
+    async fn wait(
+        &mut self,
+        caller: TaskId,
+        workspace: PathBuf,
+        operation: CommandId,
+        children: Vec<TaskId>,
+    ) -> Result<TaskSnapshot, SchedulerError> {
+        if children.is_empty()
+            || children.len() > 32
+            || children
+                .iter()
+                .collect::<std::collections::BTreeSet<_>>()
+                .len()
+                != children.len()
+        {
+            return Err(SchedulerError::Invalid(
+                "wait requires 1 to 32 distinct descendants",
+            ));
+        }
+        let mut task = self.validate_caller(caller, &workspace)?;
+        let accepted_at = self.operation_time(caller, operation, "wait_agents")?;
+        let wait_id = CommandId::try_from(derived_id(operation, b"wait"))?;
+        for child in &children {
+            repository::authorize_target(&self.store(), caller, *child, false)?;
+        }
+        if let Some(existing) = &task.checkpoint.child_wait {
+            if existing.wait_id == wait_id {
+                if existing.active_command_id != task.checkpoint.active_command
+                    || existing
+                        .children
+                        .iter()
+                        .map(|child| child.task_id)
+                        .collect::<Vec<_>>()
+                        != children
+                    || existing.accepted_at != accepted_at
+                {
+                    return Err(SchedulerError::Conflict(caller));
+                }
+                if !super::inputs::repair(&self.services.agent, &self.store(), &mut task)
+                    .await
+                    .map_err(mutation_uncertain)?
+                {
+                    task.checkpoint.child_wait = None;
+                    repository::save(&self.store(), &mut task, TaskStatus::Running)
+                        .map_err(mutation_uncertain)?;
+                    return Err(SchedulerError::Capacity("native input inbox is full"));
+                }
+                return Ok(task.snapshot());
+            }
+            let conversation = self
+                .services
+                .agent
+                .conversation(task.definition.initial.conversation_id)
+                .await?;
+            let state = conversation.task_input_state();
+            if state.wait_id.is_some()
+                || state.pending != 0
+                || existing
+                    .children
+                    .iter()
+                    .any(|child| child.delivery.is_none())
+            {
+                return Err(SchedulerError::Capacity(
+                    "task already has an unresolved child wait",
+                ));
+            }
+        }
+        let previous_wait = task.checkpoint.child_wait.clone();
+        task.checkpoint.child_wait = Some(ChildWaitSet {
+            wait_id,
+            active_command_id: task.checkpoint.active_command,
+            accepted_at,
+            children: children
+                .into_iter()
+                .map(|task_id| WaitChild {
+                    task_id,
+                    delivery: None,
+                })
+                .collect(),
+        });
+        repository::encode_checkpoint(&task.checkpoint)?;
+        repository::save(&self.store(), &mut task, TaskStatus::Running)
+            .map_err(mutation_uncertain)?;
+        if !super::inputs::repair(&self.services.agent, &self.store(), &mut task)
+            .await
+            .map_err(mutation_uncertain)?
+        {
+            task.checkpoint.child_wait = previous_wait;
+            repository::save(&self.store(), &mut task, TaskStatus::Running)
+                .map_err(mutation_uncertain)?;
+            return Err(SchedulerError::Capacity("native input inbox is full"));
+        }
+        Ok(task.snapshot())
+    }
+
+    async fn repair_child_deliveries(&mut self) -> Result<(), SchedulerError> {
+        let tasks = repository::unfinished(&self.store(), self.limits.max_pending_tasks)?;
+        for mut task in tasks {
+            if task.checkpoint.child_wait.is_some() {
+                let id = task.definition.initial.id;
+                super::inputs::repair(&self.services.agent, &self.store(), &mut task).await?;
+                self.queue_pending_input(id).await?;
+            }
+        }
+        Ok(())
+    }
+
+    async fn steer(
+        &mut self,
+        id: TaskId,
+        delivery: CommandId,
+        accepted_at: UnixMillis,
+        instruction: String,
+    ) -> Result<TaskInputReceipt, SchedulerError> {
+        if instruction.trim().is_empty() || instruction.len() > 32_768 || instruction.contains('\0')
+        {
+            return Err(SchedulerError::Invalid(
+                "steering requires 1 to 32768 UTF-8 bytes without NUL",
+            ));
+        }
+        let task = repository::load(&self.store(), id)?;
+        let command = if let Some(original) = self.store().command_request(&delivery.to_string())? {
+            let event = original
+                .events
+                .first()
+                .filter(|_| original.events.len() == 1)
+                .ok_or(crate::agent::AgentError::CommandConflict(delivery))?;
+            let event: crate::protocol::EventEnvelope =
+                serde_json::from_value(event.payload.clone())
+                    .map_err(|_| crate::agent::AgentError::CommandConflict(delivery))?;
+            match event.payload {
+                crate::protocol::ConversationEvent::SteeringReceived {
+                    task_id,
+                    command_id,
+                    instruction: ref saved,
+                } if task_id == id && *saved == instruction => command_id,
+                _ => return Err(crate::agent::AgentError::CommandConflict(delivery).into()),
+            }
+        } else {
+            if task.checkpoint.task.status.is_terminal() {
+                return Err(SchedulerError::Terminal(id));
+            }
+            if repository::cancelled_ancestor(&self.store(), id)? {
+                return Err(SchedulerError::OutsideScope);
+            }
+            task.checkpoint.active_command
+        };
+        let receipt = self
+            .services
+            .agent
+            .accept_task_input(TaskInputCommand {
+                conversation_id: task.definition.initial.conversation_id,
+                task_id: id,
+                active_command_id: command,
+                delivery_id: delivery,
+                accepted_at,
+                input: TaskInput::Steering { instruction },
+            })
+            .await
+            .map_err(|error| match error {
+                crate::agent::AgentError::Storage(_) | crate::agent::AgentError::Worker => {
+                    mutation_uncertain(error.into())
+                }
+                _ => error.into(),
+            })?;
+        self.queue_pending_input(id)
+            .await
+            .map_err(mutation_uncertain)?;
+        Ok(receipt)
+    }
+
+    async fn queue_pending_input(&mut self, id: TaskId) -> Result<(), SchedulerError> {
+        let mut task = repository::load(&self.store(), id)?;
+        if task.checkpoint.task.status.is_terminal()
+            || self.active.contains_key(&id)
+            || repository::cancelled_ancestor(&self.store(), id)?
+            || matches!(
+                task.checkpoint.waiting,
+                Some(WaitingReason::ProviderUnavailable | WaitingReason::Stopped)
+            )
+        {
+            return Ok(());
+        }
+        if matches!(
+            repository::encode_checkpoint(&task.checkpoint),
+            Err(SchedulerError::Capacity("task checkpoint bytes"))
+        ) {
+            tracing::warn!(task_id=%id, "native input remains durable but legacy scheduler checkpoint capacity prevents admission; owner inspection is required");
+            return Ok(());
+        }
+        let conversation = self
+            .services
+            .agent
+            .conversation(task.definition.initial.conversation_id)
+            .await?;
+        if conversation.config != task.definition.configuration {
+            return Err(SchedulerError::Conflict(id));
+        }
+        if pending_input_can_run(&conversation, &task) {
+            task.checkpoint.waiting = None;
+            repository::save(&self.store(), &mut task, TaskStatus::Queued)?;
+            self.queue(id);
+        }
+        Ok(())
+    }
+
     async fn wake(&mut self, id: TaskId) -> Result<TaskSnapshot, SchedulerError> {
         let mut task = repository::load(&self.store(), id)?;
         if task.checkpoint.task.status.is_terminal() {
             return Ok(task.snapshot());
         }
         if self.active.contains_key(&id) {
+            self.wake_active.insert(id);
             return Ok(task.snapshot());
         }
         let conversation = self.repair_initial_acceptance(&task, None).await?;
@@ -907,11 +1218,19 @@ impl Actor {
                 WaitingReason::ProviderUncertain { .. }
                     | WaitingReason::Limit
                     | WaitingReason::Reconciliation
+                    | WaitingReason::ChildOutcomeUnknown { .. }
                     | WaitingReason::Interrupted
                     | WaitingReason::NativePaused { .. }
             )
         }) {
             return Err(SchedulerError::OwnerDecision(id));
+        }
+        if matches!(
+            native_waiting(&conversation, &task),
+            Some(WaitingReason::Children { .. })
+        ) && !pending_input_can_run(&conversation, &task)
+        {
+            return Ok(task.snapshot());
         }
         task.checkpoint.waiting = None;
         repository::save(&self.store(), &mut task, TaskStatus::Queued)?;
@@ -1032,6 +1351,7 @@ impl Actor {
                 let status = child.checkpoint.task.status;
                 repository::save(&self.store(), &mut child, status)?;
                 self.retry_once.remove(&target);
+                self.wake_active.remove(&target);
                 if let Some(active) = self.active.get(&target) {
                     active.cancellation.cancel();
                 } else {
@@ -1085,6 +1405,7 @@ impl Actor {
                         WaitingReason::ProviderUncertain { .. }
                             | WaitingReason::Reconciliation
                             | WaitingReason::InFlight
+                            | WaitingReason::ChildOutcomeUnknown { .. }
                     )
                 });
                 if repository::has_unknown_operations(&self.store(), id)? && uncertainty.is_none() {
@@ -1103,6 +1424,11 @@ impl Actor {
                     task.checkpoint.waiting = None;
                     repository::save(&self.store(), &mut task, TaskStatus::Cancelled)?;
                 }
+                self.repair_child_deliveries().await?;
+                continue;
+            }
+            if task.checkpoint.task.status.is_terminal() {
+                self.repair_child_deliveries().await?;
                 continue;
             }
             if self.services.broker.is_quarantined() {
@@ -1136,6 +1462,7 @@ impl Actor {
                 .remove(&id)
                 .filter(|target| target.matches(&conversation, &task));
             if let Some(reason) = native_waiting(&conversation, &task)
+                && !pending_input_can_run(&conversation, &task)
                 && resume.is_none()
                 && !matches!(reason, WaitingReason::Approval | WaitingReason::InFlight)
             {
@@ -1167,7 +1494,9 @@ impl Actor {
     }
 
     async fn finish(&mut self, outcome: ExecutionOutcome) -> Result<(), SchedulerError> {
+        let wake_active = self.wake_active.remove(&outcome.task_id);
         let mut task = repository::load(&self.store(), outcome.task_id)?;
+        super::inputs::retire_consumed(&self.services.agent, &self.store(), &mut task).await?;
         if repository::cancelled_ancestor(&self.store(), outcome.task_id)? {
             task.checkpoint.cancel_requested = true;
         }
@@ -1196,6 +1525,7 @@ impl Actor {
                         .await?;
                     task.checkpoint.queued.remove(0);
                     task.checkpoint.active_command = next.command_id;
+                    task.checkpoint.child_wait = None;
                     repository::save(&self.store(), &mut task, TaskStatus::Queued)?;
                     self.queue(outcome.task_id);
                 } else if !task.checkpoint.queued.is_empty()
@@ -1255,6 +1585,7 @@ impl Actor {
                                 WaitingReason::ProviderUncertain { .. }
                                     | WaitingReason::Reconciliation
                                     | WaitingReason::InFlight
+                                    | WaitingReason::ChildOutcomeUnknown { .. }
                             );
                         if journal_unknown {
                             task.checkpoint.waiting = Some(WaitingReason::Reconciliation);
@@ -1269,6 +1600,53 @@ impl Actor {
                                 TaskStatus::Cancelled
                             },
                         )?;
+                        self.repair_child_deliveries().await?;
+                        return Ok(());
+                    }
+                }
+                if wake_active
+                    && !self.stopping
+                    && !task.checkpoint.cancel_requested
+                    && matches!(reason, WaitingReason::Approval | WaitingReason::InFlight)
+                {
+                    let conversation = self
+                        .services
+                        .agent
+                        .conversation(task.definition.initial.conversation_id)
+                        .await?;
+                    if conversation.config != task.definition.configuration {
+                        return Err(SchedulerError::Conflict(outcome.task_id));
+                    }
+                    if matches!(
+                        native_waiting(&conversation, &task),
+                        Some(WaitingReason::Approval | WaitingReason::InFlight)
+                    ) {
+                        task.checkpoint.waiting = None;
+                        task.checkpoint.diagnostic = diagnostic;
+                        repository::save(&self.store(), &mut task, TaskStatus::Queued)?;
+                        self.queue(outcome.task_id);
+                        self.repair_child_deliveries().await?;
+                        return Ok(());
+                    }
+                }
+                if matches!(reason, WaitingReason::Children { .. })
+                    && !self.stopping
+                    && !task.checkpoint.cancel_requested
+                {
+                    let conversation = self
+                        .services
+                        .agent
+                        .conversation(task.definition.initial.conversation_id)
+                        .await?;
+                    if conversation.config != task.definition.configuration {
+                        return Err(SchedulerError::Conflict(outcome.task_id));
+                    }
+                    if pending_input_can_run(&conversation, &task) {
+                        task.checkpoint.waiting = None;
+                        task.checkpoint.diagnostic = diagnostic;
+                        repository::save(&self.store(), &mut task, TaskStatus::Queued)?;
+                        self.queue(outcome.task_id);
+                        self.repair_child_deliveries().await?;
                         return Ok(());
                     }
                 }
@@ -1290,6 +1668,7 @@ impl Actor {
                 repository::save(&self.store(), &mut task, TaskStatus::Failed)?;
             }
         }
+        self.repair_child_deliveries().await?;
         Ok(())
     }
 }
@@ -1325,6 +1704,7 @@ fn repair_handoff(
             return Err(SchedulerError::Conflict(task.definition.initial.id));
         }
         task.checkpoint.active_command = next.command_id;
+        task.checkpoint.child_wait = None;
         task.checkpoint.queued.remove(0);
         task.checkpoint.waiting = None;
         repository::save(store, task, TaskStatus::Queued)?;
@@ -1354,6 +1734,7 @@ fn initial_task(
             last_output: None,
             diagnostic: None,
             resumes: Vec::new(),
+            child_wait: None,
         },
         state: crate::storage::TaskState::Queued,
     }
@@ -1420,6 +1801,10 @@ fn native_waiting(conversation: &Conversation, task: &StoredTask) -> Option<Wait
             PauseReason::ReconciliationRequired { .. } | PauseReason::BrokerRejected { .. } => {
                 WaitingReason::Reconciliation
             }
+            PauseReason::WaitingForEvents { wait_id } => WaitingReason::Children { wait_id },
+            PauseReason::ChildOutcomeUnknown { child_task_id } => {
+                WaitingReason::ChildOutcomeUnknown { child_task_id }
+            }
             PauseReason::InterruptedTool => WaitingReason::Interrupted,
             PauseReason::ModelAttemptLimit
             | PauseReason::ToolCallLimit
@@ -1445,4 +1830,22 @@ fn derived_id(operation: CommandId, purpose: &[u8]) -> uuid::Uuid {
     bytes[6] = (bytes[6] & 0x0f) | 0x80;
     bytes[8] = (bytes[8] & 0x3f) | 0x80;
     uuid::Uuid::from_bytes(bytes)
+}
+
+fn pending_input_can_run(conversation: &Conversation, task: &StoredTask) -> bool {
+    conversation.task_input_state().pending > 0
+        && conversation.info.pending_command_id == Some(task.checkpoint.active_command)
+        && conversation.native_run().is_none_or(|run| {
+            (run.status == LoopStatus::Completed
+                && run.command_id != task.checkpoint.active_command)
+                || (run.task_id == task.definition.initial.id
+                    && run.command_id == task.checkpoint.active_command
+                    && matches!(
+                        run.status,
+                        LoopStatus::Ready
+                            | LoopStatus::Paused {
+                                reason: PauseReason::WaitingForEvents { .. }
+                            }
+                    ))
+        })
 }
