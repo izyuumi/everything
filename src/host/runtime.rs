@@ -137,8 +137,11 @@ impl HostService {
         let prepared_lease = Arc::clone(&lease);
         let (agent, settings, devices, registry, authorizer, discovery, task_tools, relay_origin) =
             tokio::task::spawn_blocking(move || {
-                let _database = prepared_lease.validate_database()?;
-                let store = Store::open(prepared_lease.path().join("everything.sqlite3"))?;
+                let database = prepared_lease.validate_database()?;
+                let store = Store::open_validated(
+                    prepared_lease.path().join("everything.sqlite3"),
+                    database,
+                )?;
                 let directory =
                     cap_std::fs::Dir::from_std_file(prepared_lease.directory.file.try_clone()?);
                 let identity = crate::devices::load_or_create_identity_in(&directory)?;
@@ -176,7 +179,7 @@ impl HostService {
             .await
             .map_err(|_| HostError::Worker)??;
         let credentials = CredentialVault::from_environment();
-        let broker = ToolBroker::start(
+        let broker = ToolBroker::start_with_owner(
             agent.store(),
             registry.clone(),
             authorizer.clone(),
@@ -187,6 +190,7 @@ impl HostService {
                 execution_timeout: Duration::from_secs(300),
                 cancellation_grace: Duration::from_secs(5),
             },
+            agent.clone(),
         )
         .await?;
         let (server, calls) = LocalServer::bind_with_lease(lease, LocalOptions::default()).await?;
@@ -483,10 +487,10 @@ impl HostInner {
         let response = result.unwrap_or_else(|error| LocalResponsePayload::Rejected {
             error: public_failure(&error),
         });
-        if let Err(error) = call.respond(response) {
-            if !matches!(error, LocalError::Disconnected) {
-                tracing::warn!("owner reply could not be delivered");
-            }
+        if let Err(error) = call.respond(response)
+            && !matches!(error, LocalError::Disconnected)
+        {
+            tracing::warn!("owner reply could not be delivered");
         }
     }
 
