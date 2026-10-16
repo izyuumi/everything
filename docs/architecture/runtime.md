@@ -10,7 +10,7 @@ The host runs one native Rust agent kernel with persistent text conversations an
 
 Filesystem bootstrap, SQLite operations, history conversion, request/context construction, schema validation, and bounded serialization run on blocking workers. Owned network and tool futures run asynchronously. Blocking durable operations retain host ownership and admission even if their awaiting caller is dropped. Linux and macOS are the initial foreground platforms; unsupported platforms return an explicit error.
 
-`src/agent/steering.rs` owns the typed persistent input queue, exact acceptance replay, child-wait state and strict control-only merge validation. It has no dependency on Host or Scheduler. A short per-conversation write gate protects checkpoint commits while the existing execution gate retains one native loop per conversation. Steering and child input consumption preserve immutable task inputs and original budget accounting; see [the steering contract](../contracts/steering.md).
+`src/agent/steering.rs` owns the typed persistent input queue, exact acceptance replay, child-wait state and strict control-only merge validation. It has no dependency on Host or Scheduler. A short per-conversation write gate protects checkpoint commits while the existing execution gate retains one native loop per conversation. Steering and child input consumption preserve immutable task inputs and original budget accounting; see [the steering contract](../contracts/steering.md). The Scheduler composes durable delivery repair and event-driven wakeups through that API; production background-host and owner-command wiring remain separate work in #18/#68.
 
 ## Accepted commands and durable history
 
@@ -55,6 +55,8 @@ The CLI uses only real registered `read_file`, `write_file`, `search_files`, `sh
 - Saved native definitions are bounded to 2 MiB, memory to 1 MiB, and selected tool definitions to 512 KiB.
 - Default limits are 16 model attempts, 64 tool calls, 16 calls per response, eight concurrent call futures, 64 selected tools, one million charged tokens, and one hour. Validated callers can tighten them, including a zero-tool-call budget. Limits and wall-clock rollback stop execution before dispatch.
 - Credentials come from the environment. Literal loopback HTTP(S) proxy selection is explicit and immutable per conversation. The foreground CLI does not proxy commands to an already running background owner.
+
+Each native stream anchors one monotonic deadline. Before provider requests and buffered broker admission, the kernel checks the saved observed-wall floor and effective wall deadline as well as that monotonic deadline. Samples below the floor or at expiry stop further admission without refunding charges or replacing stronger in-flight/reconciliation status. Legacy records use the original start as their floor, and the constructed timeout remains capped by the configured duration. Historical seeded clock-phase inspections are described in the [agent contract](../contracts/agent.md); actual operating-system clock changes and successful inference across rollback remain unverified.
 
 Automated coverage is deferred to [#32](https://github.com/izyuumi/everything/issues/32). Compilation and disposable local inspection do not verify live provider inference, provider billing, or successful opaque continuation through a live provider. This implementation is not a security audit or a claim of production readiness.
 

@@ -18,6 +18,8 @@ Serialized schemas are limited to `MAX_TOOL_SCHEMA_BYTES` (262144 bytes) and arg
 
 `ToolExecutionContext::new(request_id, task_id, workspace_root, cancellation)` accepts host-supplied identifiers and a `tokio_util::sync::CancellationToken`. Identifiers contain 1–256 bytes, cannot be whitespace-only, and cannot contain control characters. The workspace root must be absolute. Private context fields are exposed through read-only accessors. The context has no Serde deserializer and must never be constructed by decoding model arguments.
 
+Native Agent dispatch attaches a private retained owner to each invocation context. Cloning the complete context preserves that owner without exposing the Agent or granting authority. The registry's blocking validation and builtin filesystem worker retain the complete context until their actual work and resource cleanup finish, even if an awaiting future is dropped. Tool implementations that move work into separate owned workers must preserve the complete context for the same lifetime. A path or cancellation-token clone alone does not retain the owner. Context debugging does not inspect the retained owner's contents.
+
 `check_cancelled()` returns the typed `Cancelled` error. The registry checks cancellation before validation and before invoking the implementation. Once execution starts, implementations must observe `cancellation()`, stop their work, and release resources. The registry does not drop an executing future automatically, because doing so would not guarantee cleanup. An absolute workspace path is metadata, not a security boundary; arbitrary shell confinement requires operating-system enforcement or explicit trusted execution policy.
 
 ## Errors and deferred verification
