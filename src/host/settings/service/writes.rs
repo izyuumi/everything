@@ -309,7 +309,7 @@ impl SettingsService {
             .admit_native_action(caller, invocation, cancellation.clone())
             .await?
         {
-            NativeActionAdmissionResult::Existing(record) => return Ok(record),
+            NativeActionAdmissionResult::Existing(record) => return Ok(*record),
             NativeActionAdmissionResult::Admitted(admission) => admission,
         };
         let claim = Arc::clone(&admission.claim);

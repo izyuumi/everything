@@ -23,8 +23,8 @@ struct ApplicationWork {
 }
 
 enum PreparedApplication {
-    Finished(SettingsOperationInspection),
-    Work(ApplicationWork),
+    Finished(Box<SettingsOperationInspection>),
+    Work(Box<ApplicationWork>),
 }
 
 impl SettingsService {
@@ -57,8 +57,8 @@ impl SettingsService {
             })
             .await?;
         let work = match prepared {
-            PreparedApplication::Finished(result) => return Ok(result),
-            PreparedApplication::Work(work) => work,
+            PreparedApplication::Finished(result) => return Ok(*result),
+            PreparedApplication::Work(work) => *work,
         };
         let Some(generation) = work.semantic.clone() else {
             return self
@@ -221,7 +221,7 @@ impl ServiceCore {
         self.require_resolved_file()?;
         let record = self.repository.get(operation_id)?;
         if record.application().is_some() {
-            return Ok(PreparedApplication::Finished(record.inspection()));
+            return Ok(PreparedApplication::Finished(Box::new(record.inspection())));
         }
         let write = record.write().ok_or(SettingsServiceError::Conflict)?;
         if write.resolution != Some(super::super::operations::SettingsWriteResolution::Applied)
@@ -246,7 +246,7 @@ impl ServiceCore {
                 .lock()
                 .map_err(|_| SettingsServiceError::Poisoned)?
                 .remove(&operation_id);
-            return Ok(PreparedApplication::Finished(result));
+            return Ok(PreparedApplication::Finished(Box::new(result)));
         }
         let composition = self.composition()?;
         let existing = self
@@ -306,18 +306,18 @@ impl ServiceCore {
                         .remove(&operation_id);
                     tracing::warn!(operation_id=%operation_id,"original selector application stopped after generation rejection");
                     drop(cause);
-                    return Ok(PreparedApplication::Finished(result));
+                    return Ok(PreparedApplication::Finished(Box::new(result)));
                 }
             }
         }
-        Ok(PreparedApplication::Work(ApplicationWork {
+        Ok(PreparedApplication::Work(Box::new(ApplicationWork {
             identity: record.identity.clone(),
             intent: write.intent.clone(),
             settings: current,
             composition,
             semantic: capture.semantic,
             selection_generation,
-        }))
+        })))
     }
 }
 

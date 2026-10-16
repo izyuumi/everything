@@ -154,7 +154,9 @@ impl SettingsService {
             .await?
         {
             NativeActionAdmissionResult::Existing(operation) => {
-                return Ok(NativeDeviceActionResult::Existing { operation });
+                return Ok(NativeDeviceActionResult::Existing {
+                    operation: *operation,
+                });
             }
             NativeActionAdmissionResult::Admitted(admission) => admission,
         };

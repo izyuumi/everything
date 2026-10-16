@@ -284,7 +284,7 @@ impl Authority {
         OsRng
             .try_fill_bytes(&mut *secret)
             .map_err(|_| SettingsServiceError::Entropy)?;
-        let encoded = Zeroizing::new(STANDARD.encode(&*secret));
+        let encoded = Zeroizing::new(STANDARD.encode(secret.as_slice()));
         let session_id = Uuid::new_v4();
         let session = Session {
             secret_hash: secret_hash(&encoded),
@@ -359,9 +359,7 @@ impl Authority {
                     .values
                     .get(&id)
                     .ok_or(SettingsServiceError::OutsideScope)?;
-                if cleanup {
-                    Ok(())
-                } else if !sessions.closed && !session.closed && session.live(now) {
+                if cleanup || !sessions.closed && !session.closed && session.live(now) {
                     Ok(())
                 } else {
                     Err(SettingsServiceError::OutsideScope)

@@ -155,7 +155,7 @@ pub struct NativeActionDetails {
 
 pub enum NativeActionAdmissionResult {
     Admitted(NativeActionAdmission),
-    Existing(SettingsOperationInspection),
+    Existing(Box<SettingsOperationInspection>),
 }
 
 pub struct NativeActionAdmission {

@@ -656,7 +656,9 @@ impl HostInner {
                     .await?
                 {
                     NativeActionAdmissionResult::Existing(operation) => {
-                        Ok(NativeSettingsResult::Inspected { operation })
+                        Ok(NativeSettingsResult::Inspected {
+                            operation: *operation,
+                        })
                     }
                     NativeActionAdmissionResult::Admitted(admission) => {
                         let target = admission.target().clone();

@@ -582,7 +582,7 @@ impl SettingsService {
                 reference: invocation.reference,
             };
             if let Some(inspection) = core.repository.replay_claim(&record.identity, &native)? {
-                return Ok(NativeActionAdmissionResult::Existing(inspection));
+                return Ok(NativeActionAdmissionResult::Existing(Box::new(inspection)));
             }
             {
                 let claims = core
@@ -608,7 +608,9 @@ impl SettingsService {
                 core.check_current(&record.identity)
             })?;
             if !fresh {
-                return Ok(NativeActionAdmissionResult::Existing(record.inspection()));
+                return Ok(NativeActionAdmissionResult::Existing(Box::new(
+                    record.inspection(),
+                )));
             }
             let deadline = original_deadline.ok_or(SettingsServiceError::Expired)?;
             let claim = Arc::new(ActionClaim {
