@@ -5,16 +5,17 @@ use uuid::Uuid;
 
 use crate::host::runtime::{HostError, HostInner};
 use crate::protocol::{CommandId, DeviceId};
-use crate::transport::local::LocalCall;
+use crate::transport::local::{LocalCall, LocalResponse, LocalResponsePayload};
 
 use super::actions::{
     NativeActionAdmissionResult, NativeActionInvocation, NativeActionObservation,
     NativeActionReference, NativePairingCreation, SettingsActionTarget,
 };
+use super::agent::{SettingsAgentCommand, SettingsAssistantReply, SettingsChatStatus};
 use super::contract::{
     MAX_SETTINGS_DEVICE_PAGE, NativeSettingsAction, SettingRegistry, SettingsActionRequest,
     SettingsDeviceAction, SettingsDevicePage, SettingsDeviceRequest, SettingsOperationResult,
-    SettingsPatch, SettingsScope, SettingsSnapshot,
+    SettingsPatch, SettingsScope, SettingsSnapshot, SettingsToolName,
 };
 use super::service::{
     NativeDeviceActionResult, NativePairingApprovalInput, NativePairingApprovalResult,
@@ -36,6 +37,24 @@ pub struct NativeSettingsInput {
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum NativeSettingsOperation {
     Open,
+    AgentOpen {
+        proof: NativeSessionProof,
+    },
+    AgentSend {
+        proof: NativeSessionProof,
+        chat_id: Uuid,
+        turn_id: CommandId,
+        provider_binding_sha256: String,
+        text: String,
+    },
+    AgentPoll {
+        proof: NativeSessionProof,
+        chat_id: Uuid,
+    },
+    AgentClose {
+        proof: NativeSessionProof,
+        chat_id: Uuid,
+    },
     Describe {
         proof: NativeSessionProof,
     },
@@ -133,6 +152,28 @@ pub enum NativeSettingsOperation {
 impl NativeSettingsOperation {
     pub fn validate(&self) -> Result<(), &'static str> {
         match self {
+            Self::AgentOpen { proof } if proof.session_id().is_nil() => {
+                return Err("invalid native Settings parent session");
+            }
+            Self::AgentSend {
+                proof,
+                chat_id,
+                provider_binding_sha256,
+                text,
+                ..
+            } => {
+                validate_chat_identity(proof, *chat_id)?;
+                if !canonical_sha256(provider_binding_sha256)
+                    || text.trim().is_empty()
+                    || text.contains('\0')
+                    || text.len() > crate::agent::settings::MAX_INPUT
+                {
+                    return Err("invalid native Settings chat input");
+                }
+            }
+            Self::AgentPoll { proof, chat_id } | Self::AgentClose { proof, chat_id } => {
+                validate_chat_identity(proof, *chat_id)?;
+            }
             Self::ApprovePairing { approval, .. } => approval.validate()?,
             Self::Changes {
                 after_sequence,
@@ -197,6 +238,8 @@ impl NativeSettingsOperation {
                 | Self::Pairing { .. }
                 | Self::CancelPairing { .. }
                 | Self::PairingApproval { .. }
+                | Self::AgentPoll { .. }
+                | Self::AgentClose { .. }
         )
     }
 }
@@ -204,6 +247,9 @@ impl NativeSettingsOperation {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum NativeSettingsResult {
+    Assistant {
+        reply: SettingsAssistantReply,
+    },
     Described {
         registry: SettingRegistry,
     },
@@ -250,6 +296,13 @@ pub enum NativeSettingsResult {
 impl NativeSettingsResult {
     pub fn validate_for(&self, request: &NativeSettingsOperation) -> Result<(), &'static str> {
         match (request, self) {
+            (
+                NativeSettingsOperation::AgentOpen { .. }
+                | NativeSettingsOperation::AgentSend { .. }
+                | NativeSettingsOperation::AgentPoll { .. }
+                | NativeSettingsOperation::AgentClose { .. },
+                Self::Assistant { reply },
+            ) => validate_assistant_reply(reply, request),
             (
                 NativeSettingsOperation::ApprovePairing { proof, approval },
                 Self::PairingApproved { result },
@@ -392,6 +445,102 @@ impl NativeSettingsResult {
     }
 }
 
+fn validate_chat_identity(proof: &NativeSessionProof, chat_id: Uuid) -> Result<(), &'static str> {
+    if proof.session_id().is_nil() || chat_id.is_nil() {
+        return Err("invalid native Settings chat identity");
+    }
+    Ok(())
+}
+
+fn canonical_sha256(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+fn validate_assistant_reply(
+    reply: &SettingsAssistantReply,
+    request: &NativeSettingsOperation,
+) -> Result<(), &'static str> {
+    request.validate()?;
+    match (request, reply) {
+        (NativeSettingsOperation::AgentOpen { .. }, SettingsAssistantReply::Opened { chat })
+            if !chat.chat_id.is_nil()
+                && matches!(chat.provider.as_str(), "openai" | "anthropic")
+                && !chat.model.trim().is_empty()
+                && chat.model.len() <= 256
+                && !chat.model.contains('\0')
+                && !chat.recipient.trim().is_empty()
+                && chat.recipient.len() <= 4096
+                && !chat.recipient.contains('\0')
+                && canonical_sha256(&chat.provider_binding_sha256)
+                && chat.expires_at.get() > 0
+                && chat.tools.len() == SettingsToolName::ALL.len()
+                && chat
+                    .tools
+                    .iter()
+                    .zip(SettingsToolName::ALL)
+                    .all(|(actual, expected)| actual == expected.provider_name()) =>
+        {
+            Ok(())
+        }
+        (
+            NativeSettingsOperation::AgentSend {
+                chat_id, turn_id, ..
+            },
+            SettingsAssistantReply::Accepted {
+                chat_id: actual_chat,
+                turn_id: actual_turn,
+            },
+        ) if chat_id == actual_chat && turn_id == actual_turn => Ok(()),
+        (
+            NativeSettingsOperation::AgentPoll { chat_id, .. }
+            | NativeSettingsOperation::AgentClose { chat_id, .. },
+            SettingsAssistantReply::Status { status },
+        ) if *chat_id == status.chat_id => validate_chat_status(status),
+        (
+            NativeSettingsOperation::AgentOpen { .. } | NativeSettingsOperation::AgentSend { .. },
+            SettingsAssistantReply::Unavailable,
+        ) => Ok(()),
+        _ => Err("native Settings assistant response does not match its request"),
+    }
+}
+
+fn validate_chat_status(status: &SettingsChatStatus) -> Result<(), &'static str> {
+    if status.chat_id.is_nil()
+        || status.assistant_text.len() > crate::agent::settings::MAX_TEXT
+        || status.assistant_text.contains('\0')
+        || status.operation_ids.len() > crate::storage::settings_agent::MAX_SETTINGS_MUTATIONS
+        || status
+            .operation_ids
+            .iter()
+            .enumerate()
+            .any(|(index, id)| status.operation_ids[..index].contains(id))
+        || status.model_attempts > 4
+        || status.reserved_output_tokens > 8192
+    {
+        return Err("invalid native Settings chat status");
+    }
+    Ok(())
+}
+
+fn assistant_result(
+    call: &LocalCall,
+    reply: SettingsAssistantReply,
+) -> Result<NativeSettingsResult, HostError> {
+    let result = NativeSettingsResult::Assistant { reply };
+    let response = LocalResponse {
+        schema_version: call.request.schema_version,
+        request_id: call.request.request_id,
+        payload: LocalResponsePayload::NativeSettingsResult {
+            result: result.clone(),
+        },
+    };
+    response.validate_for(&call.request)?;
+    Ok(result)
+}
+
 fn validate_inspection(operation: &SettingsOperationInspection) -> Result<(), &'static str> {
     operation
         .validate()
@@ -515,6 +664,56 @@ impl HostInner {
         }
         let service = &self.settings_service;
         match operation {
+            NativeSettingsOperation::AgentOpen { proof } => {
+                let caller = service.native_caller(call, &proof)?;
+                let reply = self
+                    .settings_agents
+                    .request(SettingsAgentCommand::Open { caller })
+                    .await?;
+                assistant_result(call, reply)
+            }
+            NativeSettingsOperation::AgentSend {
+                proof,
+                chat_id,
+                turn_id,
+                provider_binding_sha256,
+                text,
+            } => {
+                service.native_caller(call, &proof)?;
+                let reply = self
+                    .settings_agents
+                    .request(SettingsAgentCommand::Send {
+                        native_session_id: proof.session_id(),
+                        chat_id,
+                        turn_id,
+                        provider_binding_sha256,
+                        text,
+                    })
+                    .await?;
+                assistant_result(call, reply)
+            }
+            NativeSettingsOperation::AgentPoll { proof, chat_id } => {
+                service.native_cleanup_caller(call, &proof)?;
+                let reply = self
+                    .settings_agents
+                    .request(SettingsAgentCommand::Poll {
+                        native_session_id: proof.session_id(),
+                        chat_id,
+                    })
+                    .await?;
+                assistant_result(call, reply)
+            }
+            NativeSettingsOperation::AgentClose { proof, chat_id } => {
+                service.native_cleanup_caller(call, &proof)?;
+                let reply = self
+                    .settings_agents
+                    .request(SettingsAgentCommand::Close {
+                        native_session_id: proof.session_id(),
+                        chat_id,
+                    })
+                    .await?;
+                assistant_result(call, reply)
+            }
             NativeSettingsOperation::ApprovePairing { proof, approval } => {
                 let caller = service.native_cleanup_caller(call, &proof)?;
                 Ok(NativeSettingsResult::PairingApproved {
