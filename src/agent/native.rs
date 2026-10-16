@@ -998,9 +998,10 @@ impl Agent {
         let owner = self.clone();
         let captured = conversation.clone();
         *conversation = blocking(move || {
+            let retained_agent = owner;
             let _write = write;
             let _admission = admission;
-            let current = load_conversation(&owner.store, captured.info.id)?;
+            let current = load_conversation(&retained_agent.store, captured.info.id)?;
             let mut proposed = captured.checkpoint.clone();
             steering::merge_controls(&captured, &current, &mut proposed)?;
             Ok(current)
@@ -1072,9 +1073,10 @@ impl Agent {
         let owner = self.clone();
         let captured = conversation.clone();
         let (saved, committed) = blocking(move || {
+            let retained_agent = owner;
             let _admission = admission;
             let _write = write;
-            let mut current = load_conversation(&owner.store, captured.info.id)?;
+            let mut current = load_conversation(&retained_agent.store, captured.info.id)?;
             steering::merge_controls(&captured, &current, &mut checkpoint)?;
             let proposed_status = checkpoint.native.as_ref().map(NativeCheckpoint::status);
             if checkpoint.inputs.has_pending()
@@ -1155,7 +1157,7 @@ impl Agent {
             };
             let journal_command = CommandId::new().to_string();
             let revision = if rows.is_empty() {
-                owner
+                retained_agent
                     .store
                     .checkpoint_conversation_state(
                         &current.info.id.to_string(),
@@ -1165,7 +1167,7 @@ impl Agent {
                     )?
                     .revision
             } else {
-                owner.store.append_with_state(
+                retained_agent.store.append_with_state(
                     &AppendRequest {
                         conversation_id: current.info.id.to_string(),
                         command_id: journal_command,
@@ -1320,6 +1322,7 @@ impl Agent {
         let mode = turn.definition.mode;
         let owner = self.clone();
         blocking(move || {
+            let retained_agent = owner;
             let mode = serde_json::to_value(mode).map_err(|_| AgentError::Worker)?;
             let mut retained = PauseReason::DurationLimit;
             for call in calls {
@@ -1329,7 +1332,7 @@ impl Agent {
                     retained = reason.clone();
                 }
                 let operation_id = call.call.id.to_string();
-                if let Some(row) = owner.store.tool_call(&operation_id)? {
+                if let Some(row) = retained_agent.store.tool_call(&operation_id)? {
                     if row.id != operation_id
                         || row.conversation_id != id
                         || row.task_id.as_deref() != Some(task_id.as_str())
