@@ -835,16 +835,15 @@ fn receipt_shape(
     {
         return Err(WorkerError::Conflict("worker command receipt phase"));
     }
-    if let Some(native) = native {
-        if receipt.conversation_id != native.conversation_id
+    if let Some(native) = native
+        && (receipt.conversation_id != native.conversation_id
             || receipt.accepted_at > native.admitted_at
             || receipt
                 .applied
                 .as_ref()
-                .is_some_and(|applied| applied.task_id.is_some_and(|task| task != native.task_id))
-        {
-            return Err(WorkerError::Conflict("worker command and native identity"));
-        }
+                .is_some_and(|applied| applied.task_id.is_some_and(|task| task != native.task_id)))
+    {
+        return Err(WorkerError::Conflict("worker command and native identity"));
     }
     Ok(())
 }

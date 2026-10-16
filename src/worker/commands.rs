@@ -902,10 +902,10 @@ async fn handle_call(
             },
         }
     });
-    if let Err(error) = call.respond(response) {
-        if !matches!(error, LocalError::Disconnected) {
-            tracing::warn!("worker owner reply could not be delivered");
-        }
+    if let Err(error) = call.respond(response)
+        && !matches!(error, LocalError::Disconnected)
+    {
+        tracing::warn!("worker owner reply could not be delivered");
     }
 }
 
