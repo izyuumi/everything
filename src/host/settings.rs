@@ -8,6 +8,7 @@ pub(crate) mod grants;
 pub mod native;
 mod operations;
 pub mod service;
+pub(super) mod transport;
 
 pub(crate) use authority::SettingsAgentBinding;
 pub use authority::{

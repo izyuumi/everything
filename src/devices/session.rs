@@ -24,6 +24,28 @@ impl DeviceEndpoint {
         cancellation: CancellationToken,
         status: watch::Sender<RelaySessionStatus>,
     ) -> Result<(), DeviceError> {
+        self.run_relay_owned(origin, cancellation, status, None)
+            .await
+    }
+
+    pub(crate) async fn run_relay_with_settings(
+        &self,
+        origin: RelayOrigin,
+        cancellation: CancellationToken,
+        status: watch::Sender<RelaySessionStatus>,
+        owner: HostSettingsTransportOwner,
+    ) -> Result<(), DeviceError> {
+        self.run_relay_owned(origin, cancellation, status, Some(owner))
+            .await
+    }
+
+    async fn run_relay_owned(
+        &self,
+        origin: RelayOrigin,
+        cancellation: CancellationToken,
+        status: watch::Sender<RelaySessionStatus>,
+        mut settings_owner: Option<HostSettingsTransportOwner>,
+    ) -> Result<(), DeviceError> {
         let _session = self
             .inner
             .session
@@ -42,11 +64,16 @@ impl DeviceEndpoint {
                     .await;
             let result = match connection {
                 Ok(mut connection) => {
+                    let incarnation = settings_owner
+                        .as_mut()
+                        .map(|owner| owner.connected_relay(self, &connection))
+                        .transpose()?;
                     status.send_replace(RelaySessionStatus::Connected);
                     let started = tokio::time::Instant::now();
                     let result = self
                         .relay_session(&mut connection, &cancellation, &status)
                         .await;
+                    drop(incarnation);
                     let close = connection.close().await;
                     if started.elapsed() >= Duration::from_secs(30) {
                         attempt = 0;

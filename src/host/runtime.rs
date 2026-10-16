@@ -531,11 +531,24 @@ impl HostService {
             let host = inner.clone();
             let relay_stop = work_stop.clone();
             workers.spawn(async move {
-                HostWorker::Relay(
-                    host.devices
-                        .run_relay(origin, relay_stop, host.relay_updates.clone())
-                        .await,
-                )
+                let outcome = match super::settings::transport::host_settings_transport(
+                    host.agent.clone(),
+                    host.devices.clone(),
+                    Arc::clone(&host.mutation),
+                ) {
+                    Ok((_, owner)) => {
+                        host.devices
+                            .run_relay_with_settings(
+                                origin,
+                                relay_stop,
+                                host.relay_updates.clone(),
+                                owner,
+                            )
+                            .await
+                    }
+                    Err(error) => Err(error),
+                };
+                HostWorker::Relay(outcome)
             });
         }
         if let Some(coordinator) = inner.worker.get().cloned() {
