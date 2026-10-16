@@ -18,6 +18,8 @@ pub(crate) use settings_connection::{
 };
 
 #[cfg(unix)]
+pub(crate) use settings_ingress::work::ReplyBuildPermit;
+#[cfg(unix)]
 pub(crate) use settings_ingress::{
     AuthenticatedSettingsCommandSource, AuthenticatedSettingsSource, BindRejection, BindingCreator,
     BindingGeneration, BindingHistorySnapshot, BindingHistoryState, BindingIntent, BindingLifetime,
