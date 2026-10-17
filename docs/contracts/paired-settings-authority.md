@@ -42,4 +42,14 @@ A successful observation advances the cell's observed times and returns the gran
 - `check_principal` lets a paired caller replay only operations whose origin is the same device. File reconciliation rejects paired callers; the local owner keeps its cleanup authority over every origin.
 - Fresh paired operations are capped at 32 retained identities per device and 128 in total within the shared 1024-identity journal; exact replay is checked before the cap.
 
+## Paired session parents
+
+A [remote restricted session](settings-remote-session.md) needs a parent for its restricted-runtime child. `paired_session_parent` adds one to the same native-session table: it records the device's full public keys and grant id/revision, has a random unusable proof hash and lives at most 300 s and never past the grant expiry. At most one exists per device and four in total, all counting toward the existing 16 native sessions.
+
+- `native` and `validate` refuse a native caller for a paired parent, so native-only routes (confirmations, details, credential, pairing and device ceremonies, Close) cannot use it.
+- `begin_paired_agent` creates the child through the shared child insertion used by `begin_agent`, and refuses while the parent already owns a live child (`Capacity`).
+- `paired_agent_grant` returns the device keys and grant reference for a child caller whose parent is paired; the service uses it to reread the grant head on every list/get/update call.
+- `current_paired_session_parent` finds the device's parent for the same grant revision (Send/Poll/Close).
+- `retire_paired_sessions(device)` closes and cancels the device's parents, which cancels their children. Owner grant changes, owner and native device revocation, a remote request that finds no Active grant, and a tool call that finds a changed grant call it.
+
 Device revocation paths that do not take the Host mutation guard are not serialized with an in-progress paired write; the pin is rechecked when access is reread before the write.
