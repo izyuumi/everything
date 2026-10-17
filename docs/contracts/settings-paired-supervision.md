@@ -1,6 +1,6 @@
 # Paired Settings supervision
 
-The private paired job slice extends the existing Settings supervisor in `src/host/settings/agent.rs`, with affine result custody in its private `agent/handoff.rs` child. It is held and not connected to accepted relay delivery. The real background pump, registered started build, encryption/publication, Original terminal bookkeeping, parent retirement and reservation cleanup remain integration prerequisites. No successful-cleanup or result-release substitute is provided.
+The private paired job slice extends the existing Settings supervisor in `src/host/settings/agent.rs`, with affine result custody in its private `agent/handoff.rs` child. It is held and not connected to accepted relay delivery. Registered BUILD/publication and the [final socket unit](settings-private-socket-admission.md) now exist internally; accepted background dispatch, exact Original bookkeeping, parent retirement and reservation cleanup remain integration prerequisites. No successful-cleanup or result-release substitute is provided.
 
 ## Intake and bounds
 
@@ -46,7 +46,7 @@ Whole Supervisor Drop after paired admission closes intake, marks permanent nonc
 
 ## Validation and integration limits
 
-The concrete enqueue/result/adoption definitions are held pending Root and independent review and actual integration consumers. Standalone Rust1.88 formatting/parsing and exact source-preservation checks do not verify compilation, runtime joins, relay acceptance, encryption, populated storage, providers or security. Supported strict exact-head CI and actual disposable observations remain pending. Accepted relay delivery stays disabled until the real pump, current projection, publication, started-build lifecycle and genuine cleanup are integrated. No source comments or automated tests are added; deferred automation remains #32 and issue #116 remains open.
+The concrete enqueue/result/adoption definitions and later internal consumers have Root/independent source review; accepted dispatch and genuine retirement remain absent. Standalone Rust1.88 formatting/parsing and exact source-preservation checks do not verify compilation, runtime joins, relay acceptance, encryption, populated storage, providers or security. Supported strict exact-head CI and actual disposable observations remain pending. Accepted relay delivery stays disabled until the real pump, current projection, publication, started-build lifecycle and genuine cleanup are integrated. No source comments or automated tests are added; deferred automation remains #32 and issue #116 remains open.
 
 ## Subsequent same-Work started publisher retention
 
@@ -56,7 +56,7 @@ After successful Work adoption and enqueue of its genuine acknowledgment, the sa
 
 JoinedReady deliberately retains the whole original input and armed permit, without a queued owner, release, cleanup receipt or decrement of the Supervisor live count. A stopped waiter, failed publisher, commit ambiguity, actual JoinError or unmatched output equally retains the real source/error data nonclean. Dropping a ticket or outer driving future changes no ownership. Existing Supervisor records, checked never-reused record allocator, mpsc8 control, native workers and owner-stop logic are unchanged; transferred parents are not claimed closed by dropping or forwarding a handle.
 
-The actual accepted background pump, genuine queued successor/permit settlement, current counted sender, parent cleanup/live retirement and client adoption remain separate consumers. Direct formatting/static source preservation prove no runtime join, cancellation/SQL fault behavior, transported response or activation. The source does not complete #116/#117 or security/manual acceptance; deferred automation remains #32.
+The genuine queued successor/permit settlement and counted final sender now exist internally. Accepted background pump, parent cleanup/live retirement and complete transported client acceptance remain separate prerequisites. Direct formatting/static source preservation prove no runtime join, cancellation/SQL fault behavior, transported response or activation. The source does not complete #116/#117 or security/manual acceptance; deferred automation remains #32.
 
 ## Queued successor retains the adopted paired owner
 
@@ -66,4 +66,4 @@ Bind's actual installed parent remains before its charged committed Bind and his
 
 Registry entries retain their original private charges and remain bounded by32; no scheduling/send queue or second runtime is introduced. Whole Work Drop preserves the full registry in its existing terminal allocation. An affine queued owner dropped outside that path retains its complete actual payload plus typed abandonment cause and permanently faults the same ledger, bounded by the original still-held charge. Fault/provisional ownership cannot be borrowed as settled or described as clean drain. The Supervisor still retains its own actual records and joins; no flags or receipt IDs replace that ownership.
 
-Current queued disclosure/protected-history validation, separately counted total16 sends, actual parent/creator retirement and exact Supervisor cleanup receipt/live decrement remain separate prerequisites. Neither BUILD memory settlement nor queue registration activates private ingress or supplies final Host quiescence. Direct formatting/static checks provide no compiler/runtime/transport/security acceptance; #116/#117 remain open and automated verification is deferred to #32.
+Queued disclosure/protected-history validation and internal total16/final-socket consumers now exist. The actual [Host supplier](settings-host-relay-capability.md) retains the original service/runtime without a dispatcher. Actual invocation, parent/creator retirement and exact Supervisor cleanup receipt/live decrement remain separate prerequisites. Neither BUILD memory settlement nor queue registration activates private ingress or supplies final Host quiescence. Direct formatting/static checks provide no compiler/runtime/transport/security acceptance; #116/#117 remain open and automated verification is deferred to #32.
