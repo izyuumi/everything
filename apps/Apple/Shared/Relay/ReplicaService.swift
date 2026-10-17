@@ -242,6 +242,9 @@ actor ReplicaService {
 
     private final class OrdinarySend {
         var started: ContinuousClock.Instant?
+        var sendReturned = false
+        var accepted = false
+        var failed = false
     }
 
     private final class SettingsAccessSend {
@@ -251,6 +254,7 @@ actor ReplicaService {
         var sendReturned = false
         var accepted = false
         var replyReturned = false
+        var failed = false
 
         init(original: PendingSettingsAccess) {
             self.original = original
@@ -1028,8 +1032,15 @@ actor ReplicaService {
         let key = OutboundID.access(sent.original.request.queryID)
         guard case .access(let registered) = outbound[key], registered === sent,
               outboundSocket === sent.original.scope.socket else { throw WireError.conflict }
-        guard sent.sendReturned, sent.accepted, sent.replyReturned else { return }
+        guard !sent.failed, sent.sendReturned, sent.accepted, sent.replyReturned else { return }
         outbound.removeValue(forKey: key)
+    }
+
+    private func completeOrdinarySend(_ sent: OrdinarySend, id: UUID, socket: RelayConnection) throws {
+        guard outboundSocket === socket, case .ordinary(let registered) = outbound[.ordinary(id)],
+              registered === sent else { throw WireError.conflict }
+        guard !sent.failed, sent.sendReturned, sent.accepted else { return }
+        outbound.removeValue(forKey: .ordinary(id))
     }
 
     private func hasOutboundMessage(_ id: UUID) -> Bool {
@@ -1057,6 +1068,7 @@ actor ReplicaService {
             try completeSettingsAccessSend(sent)
         } catch {
             sent.sendReturned = true
+            sent.failed = true
             retireSettingsScope(socket: socket)
             throw error
         }
@@ -1106,7 +1118,16 @@ actor ReplicaService {
             guard outboundSocket === socket, case .ordinary(let registered) = outbound[.ordinary(row.id)],
                   registered === ordinary else { throw WireError.conflict }
             ordinary.started = .now
-            try await socket.send(.object(["type": .string("send"), "schema_version": .unsigned(1), "envelope": row.envelope.wire]))
+            do {
+                try await socket.send(.object(["type": .string("send"), "schema_version": .unsigned(1), "envelope": row.envelope.wire]))
+                ordinary.sendReturned = true
+                try completeOrdinarySend(ordinary, id: row.id, socket: socket)
+            } catch {
+                ordinary.sendReturned = true
+                ordinary.failed = true
+                retireSettingsScope(socket: socket)
+                throw error
+            }
         }
         if reconnectForCapacity && outbound.isEmpty && inboxDrained && rows.isEmpty { throw WireError.network }
     }
@@ -1135,7 +1156,8 @@ actor ReplicaService {
             if case .ordinary(let ordinary) = outbound[.ordinary(id)] {
                 guard ordinary.started != nil else { throw WireError.conflict }
                 try await store.relayAccepted(id)
-                outbound.removeValue(forKey: .ordinary(id))
+                ordinary.accepted = true
+                try completeOrdinarySend(ordinary, id: id, socket: socket)
             } else {
                 guard let access = outbound.values.compactMap({ entry -> SettingsAccessSend? in
                     if case .access(let sent) = entry, sent.envelope?.header.messageID == id { return sent }
