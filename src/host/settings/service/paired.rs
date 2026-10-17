@@ -1,3 +1,5 @@
+mod pins;
+
 mod access;
 
 pub(crate) use access::{
@@ -1121,6 +1123,11 @@ impl SettingsReceiptAuthority {
             floor,
             deadline,
             &self.core.application_stop,
+        )?;
+        self.check_reply_pins_on(
+            connection,
+            source.verified_peer_keys(),
+            source.pinned_identity(),
         )?;
         let intent = source.intent();
         let expected = RemoteAcceptedIdentity {

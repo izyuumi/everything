@@ -347,6 +347,12 @@ impl SettingsReceiptAuthority {
             parent,
             &self.core.application_stop,
         )?;
+        self.check_reply_pins_on(
+            connection,
+            source.verified_peer_keys(),
+            source.pinned_identity(),
+        )
+        .map_err(SettingsServiceError::from)?;
         let head = settings_grant_head_on(connection, owner, source.verified_peer_keys().device_id)
             .map_err(SettingsServiceError::from)?
             .ok_or(SettingsServiceError::OutsideScope)?;
