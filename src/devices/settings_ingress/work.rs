@@ -102,6 +102,16 @@ struct PendingInput {
     frame: FrameWitness,
 }
 
+struct TerminalPendingInput {
+    _receipt_authority: SettingsReceiptAuthority,
+    _envelope: EncryptedEnvelope,
+    _context: Arc<ReceiveContext>,
+    _connection: Arc<SettingsConnectionIdentity>,
+    _history: Arc<BindingHistory>,
+    _receipt: oneshot::Sender<Result<SettingsTransportReceipt, SettingsReceiveError>>,
+    _frame: FrameWitness,
+}
+
 pub(super) struct WorkerInput {
     receipt_authority: Option<SettingsReceiptAuthority>,
     pub(super) envelope: EncryptedEnvelope,
@@ -292,7 +302,7 @@ struct RegisteredReplyBuild {
 
 type TerminalQuarantine = (
     JoinSet<RegisteredJobOutput>,
-    Option<PendingInput>,
+    Option<TerminalPendingInput>,
     Option<ReplyBuildState>,
     QueuedReplyRegistry,
     BTreeMap<Id, oneshot::Sender<Result<SettingsTransportReceipt, SettingsReceiveError>>>,
@@ -2013,6 +2023,31 @@ impl SettingsReceiveWork {
     }
 }
 
+impl PendingInput {
+    fn into_terminal(self) -> TerminalPendingInput {
+        let Self {
+            receipt_authority,
+            envelope,
+            context,
+            connection,
+            history,
+            waiting,
+            receipt,
+            frame,
+        } = self;
+        drop(waiting);
+        TerminalPendingInput {
+            _receipt_authority: receipt_authority,
+            _envelope: envelope,
+            _context: context,
+            _connection: connection,
+            _history: history,
+            _receipt: receipt,
+            _frame: frame,
+        }
+    }
+}
+
 impl Drop for SettingsReceiveWork {
     fn drop(&mut self) {
         self.closed = true;
@@ -2021,9 +2056,10 @@ impl Drop for SettingsReceiveWork {
         if !self.report().complete() || self.failure.is_some() {
             self.ledger.terminal.store(true, Ordering::Release);
             self.ledger.changed.notify_waiters();
+            let pending = self.pending.take().map(PendingInput::into_terminal);
             let retained: TerminalQuarantine = (
                 std::mem::replace(&mut self.jobs, JoinSet::new()),
-                self.pending.take(),
+                pending,
                 self.build.take(),
                 std::mem::take(&mut self.queued),
                 std::mem::take(&mut self.receipts),
@@ -2108,6 +2144,8 @@ fn run(mut input: WorkerInput) -> WorkerOutput {
             Ok(result) => result,
             Err(_) => Err(SettingsReceiveError::Worker),
         };
+    input.guard.active.store(false, Ordering::Release);
+    drop(input.guard.guard.take());
     WorkerOutput {
         receipt_authority: command.authority.take(),
         completion,

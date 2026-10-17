@@ -70,9 +70,11 @@ result or Arc-wrapped actual error is installed before any classification; resul
 is declared before the boxed verified owner and final private witness. Raw opened
 bytes are destroyed before worker output. The original JoinSet result enters the
 existing retained slot before any fallible accounting/ID/association check. The
-actual receive guard retires only after real join, before permanent fault parking,
-so uncertainty retains Source/Agent lease/result without holding Host mutation
-forever. Only the original task/receipt ID, exact context/connection/full peer,
+actual receive guard retires on the original worker stack after synchronous
+execution or its caught unwind ends, before output construction. Returned guard
+metadata keeps the same inactive flag. A quarantined unpolled completed result
+therefore cannot retain the Host mutex; running execution still holds its guard.
+Only the original task/receipt ID, exact context/connection/full peer,
 ledger/witness and Fresh-family/metadata matrix can privately construct
 OwnedCommittedSettingsRead. Its reply precedes the boxed verified owner. Known,
 Duplicate, confirmed policy and expected capacity settle without that owner.
@@ -84,6 +86,13 @@ refund its query. Normal cleanup joins; catastrophic whole-owner Drop preserves
 existing bounded terminal quarantine. Read adds no BUILD eligibility stamp,
 shared request variant, permit, queue or sender. Existing four BUILD variants
 remain unchanged.
+
+Whole-owner Drop destroys the original pending mutex-acquisition future before
+archival. Terminal pending state retains every other original input, receipt,
+context and history field with its frame witness last, but has no mutex future.
+This also releases a semaphore permit assigned before the waiter was repolled.
+Neither guard release nor waiter destruction settles a task, Source or charge;
+original task IDs, true joins and nonclean terminal accounting remain required.
 
 Existing close-and-wait may discard a successful internal event and establish
 receive-memory/job quiescence only; it does not clean this reservation or prove
