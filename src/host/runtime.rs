@@ -918,9 +918,11 @@ impl HostService {
 
 impl HostInner {
     pub(super) fn settings_transport_drained(&self) -> bool {
-        self.settings_transport
-            .get()
-            .is_none_or(|transport| transport.receive_witness().snapshot().complete())
+        !self.devices.outbound_is_quarantined()
+            && self
+                .settings_transport
+                .get()
+                .is_none_or(|transport| transport.receive_witness().snapshot().complete())
     }
 
     pub(super) fn ensure_accepting(&self) -> Result<(), HostError> {

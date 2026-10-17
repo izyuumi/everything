@@ -1,0 +1,9 @@
+# Ordinary relay ownership health
+
+Each actual `DeviceEndpoint` clone group shares one monotonic `EndpointInner.outbound_failed` atomic. Its initial value is false. The private `quarantine_outbound` operation stores true with Release ordering; `outbound_is_quarantined` observes with Acquire ordering. There is no reset or recovery constructor. `check_outbound_health` returns the fixed `DeviceError::OutboundQuarantined` when set. These observations perform no SQL or locking.
+
+The actual Host transport-drain conjunction also requires that this endpoint is not quarantined. All existing native worker, private receive, Settings service, Broker and composition drain conditions remain necessary. A false quarantine flag proves no join, buffer destruction, current authorization or completed drain. Creating another endpoint is not proof that the original endpoint drained.
+
+The ordinary send-window consumer is not installed by this increment. Its reviewed producer chain must retain actual input, original preparation handle, joined output and socket message in the same bounded window. It must check health under the existing acquired session mutex before admission, before reconnect and before reporting Stopped. Catastrophic future/window or handle loss must retain the complete bounded unresolved ownership before fencing reuse. It must not retain a Host mutex guard or claim that a flag, task label, abort or reference count proves a true join.
+
+Ordinary awaited network errors remain eligible for existing durable retry after genuine preparation and buffer cleanup. They do not set permanent quarantine. The forthcoming consumer must distinguish such real completion from abandoned ownership. No sender currently invokes the new private check/latch methods; this source increment does not establish that consumer, runtime behavior or private Settings activation. Compilation and runtime verification remain separate.
