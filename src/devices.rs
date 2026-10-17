@@ -56,7 +56,8 @@ pub(crate) use settings_ingress::{
 };
 #[cfg(unix)]
 pub(crate) use settings_ingress::{
-    AuthenticatedSettingsReadSource, OwnedVerifiedSettingsRead, SettingsReadSourceError,
+    AuthenticatedSettingsReadSource, OwnedCommittedSettingsRead, OwnedVerifiedSettingsRead,
+    SettingsReadSourceError,
 };
 
 #[cfg(unix)]
