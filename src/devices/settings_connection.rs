@@ -29,7 +29,7 @@ use crate::host::settings::agent::{PairedResultHandoff, SettingsAgentRuntime};
 use crate::protocol::DeviceId;
 #[cfg(unix)]
 use crate::protocol::MessageId;
-use crate::transport::remote::RelayConnection;
+use crate::transport::remote::{RelayConnection, RelaySocketIdentity};
 
 pub(crate) struct SettingsHostIdentity {
     host_id: DeviceId,
@@ -40,6 +40,7 @@ pub(crate) struct SettingsHostIdentity {
 
 pub(crate) struct SettingsConnectionIdentity {
     host: Arc<SettingsHostIdentity>,
+    socket: Arc<RelaySocketIdentity>,
     connection_epoch: Uuid,
     retired: AtomicBool,
     cancellation: CancellationToken,
@@ -96,6 +97,7 @@ impl SettingsConnectionIdentity {
 
     pub(crate) fn is_live(&self) -> bool {
         self.host.is_live()
+            && self.socket.is_live()
             && !self.retired.load(Ordering::Acquire)
             && !self.cancellation.is_cancelled()
     }
@@ -166,7 +168,7 @@ impl HostSettingsTransportOwner {
     pub(super) fn connected_relay<'owner>(
         &'owner mut self,
         endpoint: &DeviceEndpoint,
-        _connection: &RelayConnection,
+        connection: &RelayConnection,
     ) -> Result<SettingsConnectionOwner<'owner>, DeviceError> {
         if !self.identity.is_live() || !Arc::ptr_eq(&self.endpoint.inner, &endpoint.inner) {
             self.identity.close();
@@ -174,6 +176,7 @@ impl HostSettingsTransportOwner {
                 "settings transport connection owner does not match endpoint",
             ));
         }
+        let socket = connection.capture_socket_identity(self.identity.host_id)?;
         let connection_epoch = match new_epoch() {
             Ok(epoch) => epoch,
             Err(error) => {
@@ -183,6 +186,7 @@ impl HostSettingsTransportOwner {
         };
         let identity = Arc::new(SettingsConnectionIdentity {
             host: Arc::clone(&self.identity),
+            socket,
             connection_epoch,
             retired: AtomicBool::new(false),
             cancellation: self.identity.cancellation.child_token(),

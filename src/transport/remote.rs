@@ -1,6 +1,7 @@
 use std::{
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
     sync::Arc,
+    sync::atomic::{AtomicBool, Ordering},
     time::Duration,
 };
 
@@ -54,9 +55,25 @@ pub enum RemoteError {
 
 pub struct RelayConnection {
     socket: Option<Socket>,
+    socket_identity: Arc<RelaySocketIdentity>,
     device_id: DeviceId,
     cancellation: CancellationToken,
     last_received: Instant,
+}
+
+pub(crate) struct RelaySocketIdentity {
+    closed: AtomicBool,
+    cancellation: CancellationToken,
+}
+
+impl RelaySocketIdentity {
+    pub(crate) fn is_live(&self) -> bool {
+        !self.closed.load(Ordering::Acquire) && !self.cancellation.is_cancelled()
+    }
+
+    fn close(&self) {
+        self.closed.store(true, Ordering::Release);
+    }
 }
 
 impl RelayConnection {
@@ -93,10 +110,30 @@ impl RelayConnection {
         }
         Ok(Self {
             socket: Some(socket),
+            socket_identity: Arc::new(RelaySocketIdentity {
+                closed: AtomicBool::new(false),
+                cancellation: cancellation.clone(),
+            }),
             device_id,
             cancellation,
             last_received: Instant::now(),
         })
+    }
+
+    pub(crate) fn capture_socket_identity(
+        &self,
+        local_device: DeviceId,
+    ) -> Result<Arc<RelaySocketIdentity>, RemoteError> {
+        if self.device_id != local_device {
+            return Err(RemoteError::Protocol);
+        }
+        if self.cancellation.is_cancelled() {
+            return Err(RemoteError::Cancelled);
+        }
+        if self.socket.is_none() || !self.socket_identity.is_live() {
+            return Err(RemoteError::Closed);
+        }
+        Ok(Arc::clone(&self.socket_identity))
     }
 
     pub async fn send(&mut self, message: &RelayClientMessage) -> Result<(), RemoteError> {
@@ -118,6 +155,7 @@ impl RelayConnection {
         let socket = self.socket.as_mut().ok_or(RemoteError::Closed)?;
         let result = send_frame(socket, message, &self.cancellation).await;
         if result.is_err() {
+            self.socket_identity.close();
             self.socket = None;
         }
         result
@@ -146,12 +184,14 @@ impl RelayConnection {
             _ => Ok(message),
         });
         if result.is_err() {
+            self.socket_identity.close();
             self.socket = None;
         }
         result
     }
 
     pub async fn close(&mut self) -> Result<(), RemoteError> {
+        self.socket_identity.close();
         let Some(mut socket) = self.socket.take() else {
             return Ok(());
         };
@@ -162,6 +202,12 @@ impl RelayConnection {
                 result.map_err(|_| RemoteError::Timeout)?.map_err(socket_error)
             }
         }
+    }
+}
+
+impl Drop for RelayConnection {
+    fn drop(&mut self) {
+        self.socket_identity.close();
     }
 }
 
