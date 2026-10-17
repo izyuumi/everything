@@ -136,6 +136,7 @@ final class HostModel {
         selectedTask = nil
         selectedApproval = nil
         taskDetails = .null
+        serviceStatus = nil
         message = nil
     }
 
@@ -532,15 +533,36 @@ final class HostModel {
         guard !acting, !closing, pendingAction == nil, !connectionEdited else { return }
         acting = true
         defer { acting = false }
+        let original = connection
+        let expected = ["install": "installed", "start": "started", "stop": "stopped", "status": "status", "enable": "enabled", "disable": "enabled"]
         do {
-            let result = try await client.service(action, connection: connection)
-            if action == "status" {
-                guard result["kind"].string == "status", let installed = result["status"]["installed"].bool,
-                      let loaded = result["status"]["loaded"].bool else { throw OwnerClientError.invalidResponse }
-                serviceStatus = installed ? (loaded ? "Installed and loaded" : "Installed, stopped") : "Not installed"
-            } else { message = "Service \(action) completed. Refresh to inspect the host." }
-            await refresh()
-        } catch { message = error.localizedDescription }
+            let result = try await client.service(action, connection: original)
+            guard result["kind"].string == expected[action],
+                  action != "enable" || result["enabled"].bool == true,
+                  action != "disable" || result["enabled"].bool == false else { throw OwnerClientError.invalidResponse }
+            guard original == connection, !closing else { return }
+            if action != "status" { message = "Service \(action) completed." }
+            let status = action == "status" ? result : try await client.service("status", connection: original)
+            guard original == connection, !closing else { return }
+            serviceStatus = try Self.describeService(status)
+        } catch { if original == connection, !closing { message = error.localizedDescription } }
+        await refresh()
+    }
+
+    private static func describeService(_ result: JSONValue) throws -> String {
+        let status = result["status"]
+        guard result["kind"].string == "status", let installed = status["installed"].bool,
+              let enabled = status["enabled"].bool, let loaded = status["loaded"].bool else { throw OwnerClientError.invalidResponse }
+        let pid = status["process_id"]
+        let exit = status["last_exit_status"]
+        guard pid == .null || pid.unsigned.map({ $0 > 0 && $0 <= UInt64(UInt32.max) }) == true,
+              pid == .null || loaded else { throw OwnerClientError.invalidResponse }
+        var parts = [installed ? "Installed" : "Not installed", enabled ? "enabled at login" : "disabled at login"]
+        if let process = pid.unsigned { parts.append("running as PID \(process)") }
+        else { parts.append(loaded ? "loaded, not running" : "not loaded") }
+        if case .integer(let code) = exit { parts.append("last exit \(code)") }
+        else if exit != .null { throw OwnerClientError.invalidResponse }
+        return parts.joined(separator: ", ")
     }
 
     func settingsWindowAttached(_ window: NSWindow?) {
