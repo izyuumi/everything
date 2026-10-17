@@ -28,6 +28,16 @@ pub(crate) struct TransportOutboundCandidate {
     pub(crate) routing: TransportOutboundRouting,
 }
 
+pub(crate) struct LoadedOrdinaryOutbound {
+    row: OutboxRow,
+}
+
+impl LoadedOrdinaryOutbound {
+    pub(crate) fn into_row(self) -> OutboxRow {
+        self.row
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct TransportInboxRow {
     pub message_id: String,
@@ -620,6 +630,39 @@ impl Store {
             }
         }
         Ok(None)
+    }
+
+    pub(crate) fn load_ordinary_transport_candidate(
+        &self,
+        now: i64,
+        candidate: &TransportOutboundCandidate,
+    ) -> StorageResult<Option<LoadedOrdinaryOutbound>> {
+        validate_time(now)?;
+        validate_interval(candidate.created_at, candidate.not_before)?;
+        if !matches!(candidate.routing, TransportOutboundRouting::Ordinary) {
+            return invalid("ordinary outbound loading requires ordinary routing");
+        }
+        let connection = self.connection()?;
+        let mut statement = connection.prepare("SELECT o.id,o.device_id,o.envelope,o.created_at,o.not_before,o.attempts,o.delivered_at FROM outbox AS o JOIN transport_outbox AS t ON t.message_id=o.id JOIN devices AS d ON d.id=o.device_id WHERE o.id=?1 AND o.device_id=?2 AND o.created_at=?3 AND o.not_before=?4 AND o.delivered_at IS NULL AND o.not_before<=?5 AND t.expires_at>?5 AND d.revoked_at IS NULL AND NOT EXISTS(SELECT 1 FROM settings_transport_private_outbox AS p WHERE p.message_id=o.id)")?;
+        let mut rows = statement.query(params![
+            candidate.message_id.to_string(),
+            candidate.recipient.to_string(),
+            candidate.created_at,
+            candidate.not_before,
+            now,
+        ])?;
+        let Some(row) = rows.next()? else {
+            return Ok(None);
+        };
+        let rusqlite::types::ValueRef::Blob(bytes) = row.get_ref(2)? else {
+            return invalid("ordinary outbound envelope is not a blob");
+        };
+        if bytes.is_empty() || bytes.len() > MAX_TRANSPORT_ENVELOPE {
+            return invalid("ordinary outbound envelope exceeds bound");
+        }
+        Ok(Some(LoadedOrdinaryOutbound {
+            row: outbox_row(row)?,
+        }))
     }
 
     pub fn pending_transport_outbox(
