@@ -4,6 +4,20 @@
     };
     "objectVersion" = "56";
     "objects" = {
+        "B3318A3EF70F41BA995E423A" = {
+            "isa" = "PBXFileReference";
+            "lastKnownFileType" = "sourcecode.swift";
+            "path" = "RemoteSettingsReadWire.swift";
+            "sourceTree" = "<group>";
+        };
+        "8D596A726DB34B3CBBE69E3E" = {
+            "isa" = "PBXBuildFile";
+            "fileRef" = "B3318A3EF70F41BA995E423A";
+        };
+        "DFBA1E0725CD4B728B4C83F9" = {
+            "isa" = "PBXBuildFile";
+            "fileRef" = "B3318A3EF70F41BA995E423A";
+        };
         "E4C41019D3CB4E0092AF4E8D" = {
             "isa" = "PBXFileReference";
             "lastKnownFileType" = "sourcecode.swift";
@@ -238,6 +252,7 @@
                 "4EFC3B1B64D7B87D25B1B9B2",
                 "E4C41019D3CB4E0092AF4E8D",
                 "0CD7411C80928D1614229C05",
+                "B3318A3EF70F41BA995E423A",
             );
             "path" = "Shared/Settings";
             "sourceTree" = "<group>";
@@ -595,6 +610,7 @@
                 "7E2A7CA90A2C4616966F3D9F",
                 "675B6E03408CDAA4029469CB",
                 "06F53160CAEBDFE3BD3E0FB7",
+                "8D596A726DB34B3CBBE69E3E",
             );
             "runOnlyForDeploymentPostprocessing" = "0";
         };
@@ -965,6 +981,7 @@
                 "EF0F9908666D96BAD7A63664",
                 "EFF70F2CFC5B410610126A70",
                 "1D5659246D722D17C78BBDDB",
+                "DFBA1E0725CD4B728B4C83F9",
             );
             "runOnlyForDeploymentPostprocessing" = "0";
         };
