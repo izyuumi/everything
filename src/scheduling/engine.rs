@@ -264,7 +264,10 @@ impl Actor {
         let runs = self
             .work(move |repository, _| Ok(repository.unfinished_runs(cursor, BATCH)?))
             .await?;
-        self.recovery_cursor = runs.last().map(|run| run.occurrence_id);
+        self.recovery_cursor = runs
+            .last()
+            .filter(|_| runs.len() == BATCH)
+            .map(|run| run.occurrence_id);
         for run in runs {
             if self.stop.is_cancelled() {
                 return Err(EngineError::Cancelled);
@@ -323,9 +326,9 @@ impl Actor {
         let next = self
             .work(|repository, _| Ok(repository.earliest_due()?))
             .await?;
-        let now = wall_now()?;
+        let current = wall_now()?;
         Ok(next.filter(|next| *next > now).map_or(AUDIT, |next| {
-            Duration::from_millis(next.get() - now.get()).min(AUDIT)
+            Duration::from_millis(next.get().saturating_sub(current.get())).min(AUDIT)
         }))
     }
 
@@ -648,7 +651,10 @@ impl Actor {
         let deliveries = self
             .work(move |repository, _| Ok(repository.pending_deliveries(cursor, BATCH)?))
             .await?;
-        self.delivery_cursor = deliveries.last().map(|delivery| delivery.occurrence_id);
+        self.delivery_cursor = deliveries
+            .last()
+            .filter(|_| deliveries.len() == BATCH)
+            .map(|delivery| delivery.occurrence_id);
         self.status
             .send_modify(|status| status.delivery_error = None);
         for delivery in deliveries {
