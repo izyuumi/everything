@@ -36,9 +36,13 @@ pub(crate) struct PairedResultHandoff {
     payload: Option<PairedHandoffPayload>,
 }
 
+#[derive(Debug, thiserror::Error)]
 pub(crate) enum PairedHandoffReadError {
+    #[error("Settings paired handoff is closed")]
     Closed,
+    #[error("Settings paired handoff retains a rejected Bind")]
     RejectedBind,
+    #[error("Settings paired handoff ownership bookkeeping failed")]
     Bookkeeping,
 }
 
