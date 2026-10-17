@@ -40,7 +40,7 @@ use command::SettingsCommandOutcome;
 pub(crate) use command::{
     AuthenticatedSettingsCommandSource, CommandRejection, CommittedSettingsCommandSource,
     OwnedCommittedSettingsCommand, OwnedHistoricalSettingsCommand, OwnedVerifiedSettingsCommand,
-    SettingsCommandIntent, SettingsParentReference, SettingsUpdateIntent,
+    SettingsCommandIntent, SettingsParentReference,
 };
 use read_source::ReadWorkState;
 pub(crate) use read_source::{
