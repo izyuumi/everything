@@ -1,6 +1,7 @@
 mod access;
 mod command;
 pub(super) mod read;
+mod read_source;
 mod wire;
 pub(super) mod work;
 
@@ -40,6 +41,9 @@ pub(crate) use command::{
     AuthenticatedSettingsCommandSource, CommandRejection, CommittedSettingsCommandSource,
     OwnedCommittedSettingsCommand, OwnedHistoricalSettingsCommand, OwnedVerifiedSettingsCommand,
     SettingsCommandIntent, SettingsParentReference, SettingsUpdateIntent,
+};
+pub(crate) use read_source::{
+    AuthenticatedSettingsReadSource, OwnedVerifiedSettingsRead, SettingsReadSourceError,
 };
 pub(crate) use wire::{BindingGeneration, BindingIntent};
 pub(crate) use work::{PendingSettingsReceipt, SettingsReceiveDrain, SettingsReceiveWitness};
