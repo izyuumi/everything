@@ -22,6 +22,7 @@ Scoped Settings transport foundations, with public accepted dispatch still disab
 - [Read qualification](contracts/settings-read-qualification.md): one shared query ledger, current parent/full pins/R and fixed deadlines; receipt and value/Original producers remain separate.
 - [Apple Bind ownership](contracts/apple-settings-bind-owner.md): the first immutable Bind identity, shared pending/receive custody and genuine Fresh projection; live transport and recovery remain separate.
 - [Outbound selection](contracts/transport-outbound-selection.md): bounded metadata selection before ciphertext loading; counted send ownership and current authorization remain separate.
+- [Ordinary relay health](contracts/ordinary-relay-health.md): endpoint quarantine is a negative Host drain fence; the real sender and cleanup remain required.
 
 Worker contracts: [Endpoint and capabilities](contracts/worker.md) · [Staging](contracts/worker-staging.md) · [Revocation](contracts/worker-revocation.md) · [Executor](contracts/worker-executor.md) · [Native root lane](contracts/remote-tasks.md) · [Neutral reports](contracts/remote-results.md) · [Verified result admission](contracts/remote-result-admission.md) · [Bridge](contracts/worker-bridge.md) · [Terminal sources](contracts/worker-terminal-sources.md) · [External storage](contracts/external-task-storage.md) · [Binding lookup](contracts/remote-binding-lookup.md) · [Host DTOs](contracts/host-worker.md) · [Host admission](contracts/host-worker-admission.md) · [Host service](contracts/host-worker-service.md).
 
