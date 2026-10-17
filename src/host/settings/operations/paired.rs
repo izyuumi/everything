@@ -1,3 +1,5 @@
+mod history;
+
 use super::{
     OperationIdentity, SettingsOperationInspection, SettingsOperationPhase, SettingsWriteIntent,
     UpdateRecord, request_digest,
