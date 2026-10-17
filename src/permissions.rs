@@ -466,7 +466,15 @@ impl Authorizer {
         let Some(rule) = self.scope_rules.get(tool_name) else {
             return Ok(deny("tool has no trusted host scope registration"));
         };
-        let scope = derive_scope(authority, operation_id, descriptor, rule, arguments)?;
+        let scope = match derive_scope(authority, operation_id, descriptor, rule, arguments) {
+            Ok(scope) => scope,
+            Err(PermissionError::InvalidTarget(_)) => {
+                return Ok(deny(
+                    "filesystem target cannot be resolved inside the inherited workspace",
+                ));
+            }
+            Err(error) => return Err(error),
+        };
         let approval_id = approval_id(&scope)?;
         let existing_request = self
             .store
