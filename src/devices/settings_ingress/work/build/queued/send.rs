@@ -1,5 +1,8 @@
 use super::*;
 use crate::devices::session::outbound::RelaySendWindow;
+use crate::devices::session::outbound::{
+    SettingsPreparationStop, SettingsPreparationWorkerFailure,
+};
 use crate::storage::{TransportOutboundCandidate, TransportOutboundRouting};
 use crate::transport::remote::{RelaySocketIdentity, RemoteError};
 use thiserror::Error;
@@ -9,6 +12,7 @@ pub(in crate::devices) struct PendingSettingsSend {
 }
 
 pub(in crate::devices) struct SettingsSendSource {
+    candidate: TransportOutboundCandidate,
     reply: Option<OwnedQueuedSettingsReply>,
     association: Arc<SettingsSendLoanAssociation>,
 }
@@ -100,6 +104,115 @@ impl SettingsSendSource {
         association: &Arc<SettingsSendLoanAssociation>,
     ) -> bool {
         Arc::ptr_eq(&self.association, association) && self.reply.is_some()
+    }
+
+    pub(in crate::devices) fn preparation_wait_inputs(
+        &self,
+    ) -> Result<
+        (
+            Arc<tokio::sync::Mutex<()>>,
+            std::time::Instant,
+            tokio_util::sync::CancellationToken,
+        ),
+        SettingsPreparationWorkerFailure,
+    > {
+        use SettingsPreparationWorkerFailure as Failure;
+
+        let owner = self.reply.as_ref().ok_or(Failure::Association)?;
+        let payload = owner.settled_payload().map_err(Failure::Owner)?;
+        if !self.association.matches_payload(
+            payload,
+            &self.association.ledger,
+            self.candidate.message_id,
+        ) || self.candidate.recipient != payload.committed.header().recipient
+        {
+            return Err(Failure::Association);
+        }
+        let (deadline, expiry) = match owner.request().map_err(Failure::Owner)? {
+            SettingsReplyBuildRequest::Fresh(request) => {
+                let source = request.committed_source();
+                (
+                    source.original_deadline(),
+                    source.authority_source().intent().expires_at.get(),
+                )
+            }
+            SettingsReplyBuildRequest::Historical(request) => (
+                request.original_deadline(),
+                request.authority_source().intent().expires_at.get(),
+            ),
+            SettingsReplyBuildRequest::Bind { request, .. } => {
+                let lifetime = request.committed_source().lifetime();
+                (lifetime.deadline, lifetime.expires_at.get())
+            }
+            SettingsReplyBuildRequest::Access(request) => {
+                let source = request.verified_request().authority_source();
+                (source.original_deadline(), source.intent().expires_at.get())
+            }
+            SettingsReplyBuildRequest::Snapshot(request) => {
+                let source = request.read_owner().verified_request().authority_source();
+                let super::super::super::super::read::SettingsReadRequest::Snapshot(intent) =
+                    source.request()
+                else {
+                    return Err(Failure::Association);
+                };
+                (source.original_deadline(), intent.expires_at.get())
+            }
+        };
+        let clipping = expiry
+            .checked_sub(payload.committed.header().expires_at_ms)
+            .ok_or(Failure::Association)?;
+        let deadline = deadline
+            .checked_sub(std::time::Duration::from_millis(clipping))
+            .ok_or(Failure::Association)?;
+        Ok((
+            Arc::clone(&payload.input.context.mutation),
+            deadline,
+            self.association.connection.cancellation(),
+        ))
+    }
+
+    pub(in crate::devices) fn load_preparation_ciphertext(
+        &self,
+        mutation: &tokio::sync::OwnedMutexGuard<()>,
+    ) -> Result<crate::relay_protocol::RelayClientMessage, SettingsPreparationWorkerFailure> {
+        use SettingsPreparationWorkerFailure as Failure;
+
+        if !self.association.connection.is_live() {
+            return Err(Failure::Stopped(SettingsPreparationStop::ConnectionClosed));
+        }
+        let owner = self.reply.as_ref().ok_or(Failure::Association)?;
+        let payload = owner.settled_payload().map_err(Failure::Owner)?;
+        let request = owner.request().map_err(Failure::Owner)?;
+        let fresh;
+        let authority = match request {
+            SettingsReplyBuildRequest::Fresh(request) => {
+                fresh = request.committed_source();
+                fresh.receipt_authority()
+            }
+            SettingsReplyBuildRequest::Historical(request) => request.receipt_authority(),
+            SettingsReplyBuildRequest::Bind { .. } => &payload.input.authority,
+            SettingsReplyBuildRequest::Access(request) => {
+                request.verified_request().receipt_authority()
+            }
+            SettingsReplyBuildRequest::Snapshot(request) => {
+                request.read_owner().verified_request().receipt_authority()
+            }
+        };
+        let context = &payload.input.context;
+        if context.endpoint.outbound_is_quarantined() {
+            return Err(Failure::Stopped(SettingsPreparationStop::Closed));
+        }
+        context
+            .agent
+            .store()
+            .load_private_settings_ciphertext(
+                &context.endpoint,
+                authority,
+                mutation,
+                &self.candidate,
+                owner,
+            )
+            .map_err(Failure::Load)
     }
 }
 
@@ -219,6 +332,7 @@ impl SettingsReceiveWork {
         };
         let owner = reply.take().ok_or(Admission::Association)?;
         reserved.install(Arc::new(SettingsSendSource {
+            candidate,
             reply: Some(owner),
             association,
         }));
