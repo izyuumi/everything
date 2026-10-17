@@ -36,6 +36,14 @@ struct SettingsAssistantOperationView: View {
                         Text(verbatim: issue.errorDescription ?? "The original operation could not be inspected.")
                             .foregroundStyle(.red)
                     }
+                    if let revision = controller.conflictRevision(card) {
+                        Text(verbatim: "Settings changed to revision " + String(revision) + " after this proposal. It cannot be applied; nothing was saved by it.")
+                            .foregroundStyle(.orange)
+                        Button("Ask to re-propose against current settings") { controller.requestReproposal(card) }
+                            .disabled(!controller.canReview)
+                        Text("This only fills the question. Review and send it to get a new proposal.")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
                     if card.isWorking { ProgressView("Reading the original operation…") }
                     Button("Inspect authenticated operation") { controller.inspect(card) }
                         .disabled(card.isWorking || !controller.canPublish)
