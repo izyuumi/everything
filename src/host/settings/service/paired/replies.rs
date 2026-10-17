@@ -173,12 +173,12 @@ impl SettingsReceiptAuthority {
     ) -> Result<(), SettingsReplyPublicationError> {
         consumed.check_on(transaction)?;
         match consumed.sealed().qualification() {
-            SettingsReplyQualification::Original(qualified) => {
-                self.recheck_consumed_original_reply_on(store, transaction, qualified)
+            SettingsReplyQualification::Original(_) => {
+                self.recheck_consumed_original_reply_on(store, transaction, consumed)
                     .map_err(SettingsReplyProjectionError::from)?;
             }
-            SettingsReplyQualification::Bind(qualified) => {
-                self.recheck_consumed_bind_reply_on(store, transaction, qualified)?;
+            SettingsReplyQualification::Bind(_) => {
+                self.recheck_consumed_bind_reply_on(store, transaction, consumed)?;
             }
             SettingsReplyQualification::Access(_) => {
                 self.recheck_consumed_access_reply_on(store, transaction, consumed)?;
@@ -299,8 +299,12 @@ impl SettingsReceiptAuthority {
         &self,
         store: &Store,
         transaction: &Transaction<'_>,
-        qualified: &QualifiedBindReply<'_>,
+        consumed: &ConsumedSettingsReply<'_, '_, '_, '_>,
     ) -> Result<(), SettingsReplyProjectionError> {
+        let SettingsReplyQualification::Bind(qualified) = consumed.sealed().qualification() else {
+            return Err(SettingsServiceError::OutsideScope.into());
+        };
+        let sealed_created_at = consumed.sealed().header().created_at_ms;
         self.check_bind_reply_association(qualified)?;
         let read = self.read_bind_reply_on(
             store,
@@ -312,6 +316,9 @@ impl SettingsReceiptAuthority {
         check_bind_reservation_identity(qualified.request, read.wall)?;
         let observed =
             self.finish_bind_reply_observation(qualified.request, qualified.parent, read)?;
+        if observed.wall.get() < sealed_created_at {
+            return Err(SettingsServiceError::OutsideScope.into());
+        }
         check_bind_reply_observation(qualified, observed)
     }
 

@@ -1054,13 +1054,22 @@ impl SettingsReceiptAuthority {
         &self,
         store: &Store,
         transaction: &Transaction<'_>,
-        qualified: &QualifiedOriginalReply<'_>,
+        consumed: &crate::storage::ConsumedSettingsReply<'_, '_, '_, '_>,
     ) -> Result<(), SettingsServiceError> {
+        let crate::devices::SettingsReplyQualification::Original(qualified) =
+            consumed.sealed().qualification()
+        else {
+            return Err(SettingsServiceError::OutsideScope);
+        };
+        let sealed_created_at = consumed.sealed().header().created_at_ms;
         self.check_original_reply_association(qualified)?;
         let read =
             self.read_original_reply_on(store, transaction, qualified.mutation, &qualified.source)?;
         check_original_reply_reservation_identity(&qualified.source, read.wall)?;
         let observed = self.finish_original_reply_observation(&qualified.source, read)?;
+        if observed.wall.get() < sealed_created_at {
+            return Err(SettingsServiceError::OutsideScope);
+        }
         check_original_reply_observation(qualified, observed)
     }
 
