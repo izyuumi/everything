@@ -540,6 +540,134 @@ struct ReplicaSettingsInspectionRequestInput: CustomStringConvertible, CustomDeb
     var debugDescription: String { description }
 }
 
+final class ReplicaSettingsUpdateInput: Sendable, CustomStringConvertible, CustomDebugStringConvertible {
+    private let admission = OSAllocatedUnfairLock(initialState: false)
+    fileprivate let service: ReplicaService
+    fileprivate let scope: ReplicaSettingsScopeToken
+    fileprivate let bindingHandle: ReplicaSettingsRequestHandle
+    fileprivate let requestID: UUID
+    fileprivate let expectedSettingsRevision: UInt64
+    fileprivate let enabled: Bool?
+    fileprivate let dimensions: RemoteSettingsUpdateDimensions?
+    let wallFloor: UInt64
+    let monotonicFloor: ContinuousClock.Instant
+    let expiresAt: UInt64
+    let deadline: ContinuousClock.Instant
+
+    fileprivate init(service: ReplicaService, scope: ReplicaSettingsScopeToken,
+                     bindingHandle: ReplicaSettingsRequestHandle, requestID: UUID,
+                     expectedSettingsRevision: UInt64, enabled: Bool?, dimensions: RemoteSettingsUpdateDimensions?,
+                     wallFloor: UInt64, monotonicFloor: ContinuousClock.Instant, expiresAt: UInt64) {
+        self.service = service
+        self.scope = scope
+        self.bindingHandle = bindingHandle
+        self.requestID = requestID
+        self.expectedSettingsRevision = expectedSettingsRevision
+        self.enabled = enabled
+        self.dimensions = dimensions
+        self.wallFloor = wallFloor
+        self.monotonicFloor = monotonicFloor
+        self.expiresAt = expiresAt
+        deadline = monotonicFloor.advanced(by: .milliseconds(Int64(expiresAt - wallFloor)))
+    }
+
+    fileprivate func consumeAdmission() throws {
+        try admission.withLock { consumed in
+            guard !consumed else { throw WireError.conflict }
+            consumed = true
+        }
+    }
+
+    var description: String { "ReplicaSettingsUpdateInput([redacted])" }
+    var debugDescription: String { description }
+}
+
+@MainActor
+final class ReplicaSettingsUpdateGesture {
+    private var input: ReplicaSettingsUpdateInput?
+
+    init(service: ReplicaService, scope: ReplicaSettingsScopeToken, bindingHandle: ReplicaSettingsRequestHandle,
+         expectedSettingsRevision: UInt64, enabled: Bool?, dimensions: RemoteSettingsUpdateDimensions?) throws {
+        let monotonic = ContinuousClock.now
+        let wall = try WireID.now()
+        let requestID = UUID()
+        guard requestID != WireID.zero, expectedSettingsRevision > 0,
+              expectedSettingsRevision <= UInt64(Int64.max), enabled != nil || dimensions != nil else { throw WireError.invalid }
+        if case .some(.selected(let value)) = dimensions {
+            guard value > 0, value <= 65_536 else { throw WireError.invalid }
+        }
+        let expiry = wall.addingReportingOverflow(30_000)
+        guard wall > 0, !expiry.overflow, expiry.partialValue <= UInt64(Int64.max) else { throw WireError.expired }
+        input = ReplicaSettingsUpdateInput(service: service, scope: scope, bindingHandle: bindingHandle,
+                                           requestID: requestID, expectedSettingsRevision: expectedSettingsRevision,
+                                           enabled: enabled, dimensions: dimensions, wallFloor: wall,
+                                           monotonicFloor: monotonic, expiresAt: expiry.partialValue)
+    }
+
+    func take() throws -> ReplicaSettingsUpdateInput {
+        guard let captured = input else { throw WireError.conflict }
+        input = nil
+        return captured
+    }
+}
+
+struct ReplicaSettingsUpdateRequestInput: CustomStringConvertible, CustomDebugStringConvertible {
+    let hostID: UUID
+    let requestID: UUID
+    let expectedSettingsRevision: UInt64
+    let enabled: Bool?
+    let dimensions: RemoteSettingsUpdateDimensions?
+    let time: RemoteSettingsRequestTime
+
+    fileprivate init(hostID: UUID, requestID: UUID,
+                     expectedSettingsRevision: UInt64, enabled: Bool?, dimensions: RemoteSettingsUpdateDimensions?,
+                     time: RemoteSettingsRequestTime) {
+        self.hostID = hostID
+        self.requestID = requestID
+        self.expectedSettingsRevision = expectedSettingsRevision
+        self.enabled = enabled
+        self.dimensions = dimensions
+        self.time = time
+    }
+
+    var description: String { "ReplicaSettingsUpdateRequestInput([redacted])" }
+    var debugDescription: String { description }
+}
+
+struct ReplicaSettingsUpdateReplyExpectation: Sendable, CustomStringConvertible, CustomDebugStringConvertible {
+    let request: RemoteSettingsUpdateRequest
+    let encryptedRequestID: UUID
+
+    fileprivate init(request: RemoteSettingsUpdateRequest, encryptedRequestID: UUID) {
+        self.request = request
+        self.encryptedRequestID = encryptedRequestID
+    }
+
+    var description: String { "ReplicaSettingsUpdateReplyExpectation([redacted])" }
+    var debugDescription: String { description }
+}
+
+final class ReplicaSettingsUpdateQualification: CustomStringConvertible, CustomDebugStringConvertible {
+    fileprivate let attempt: ReplicaService.SettingsUpdateReceiveAttempt
+    fileprivate let committed: CommittedReplicaSettingsReply
+
+    fileprivate init(attempt: ReplicaService.SettingsUpdateReceiveAttempt, committed: CommittedReplicaSettingsReply) {
+        self.attempt = attempt
+        self.committed = committed
+    }
+
+    func checkCurrent(for committed: CommittedReplicaSettingsReply, owner: isolated ReplicaService) throws {
+        try owner.checkSettingsUpdateQualification(self, committed: committed)
+    }
+
+    func consumeForUpdateProjection(for committed: CommittedReplicaSettingsReply, owner: isolated ReplicaService) throws {
+        try owner.consumeSettingsUpdateQualification(self, committed: committed)
+    }
+
+    var description: String { "ReplicaSettingsUpdateQualification([redacted])" }
+    var debugDescription: String { description }
+}
+
 actor ReplicaService {
     private let store: ReplicaStore
     private let identity: DeviceIdentity
@@ -571,6 +699,7 @@ actor ReplicaService {
         case access(ReplicaSettingsAccessInput)
         case snapshot(ReplicaSettingsSnapshotInput)
         case inspection(ReplicaSettingsInspectionInput)
+        case update(ReplicaSettingsUpdateInput)
 
         var description: String { "SettingsInputCapture([redacted])" }
         var debugDescription: String { description }
@@ -582,6 +711,7 @@ actor ReplicaService {
         case bind(UUID)
         case snapshot(UUID)
         case inspection(UUID)
+        case update(UUID)
     }
 
     private enum OutboundSend {
@@ -590,6 +720,7 @@ actor ReplicaService {
         case bind(SettingsBindSend)
         case snapshot(SettingsSnapshotSend)
         case inspection(SettingsInspectionSend)
+        case update(SettingsUpdateSend)
     }
 
     private final class OrdinarySend {
@@ -651,6 +782,130 @@ actor ReplicaService {
         init(original: PendingSettingsInspection) {
             self.original = original
         }
+    }
+
+    private final class SettingsUpdateSend {
+        let original: PendingSettingsUpdate
+        var envelope: EncryptedEnvelope?
+        var sendStarted = false
+        var sendReturned = false
+        var accepted = false
+        var replyReturned = false
+        var failed = false
+
+        init(original: PendingSettingsUpdate) { self.original = original }
+    }
+
+    fileprivate final class SettingsUpdateOriginalRecord: CustomStringConvertible, CustomDebugStringConvertible {
+        weak var scope: SettingsConnectionScope?
+        let host: DevicePublicKeys
+        let localID: UUID
+        let generation: RemoteSettingsGeneration
+        let handle: ReplicaSettingsRequestHandle
+        let input: ReplicaSettingsUpdateRequestInput
+        let wallFloor: UInt64
+        let monotonicFloor: ContinuousClock.Instant
+        let deadline: ContinuousClock.Instant
+        var request: RemoteSettingsUpdateRequest?
+        var encryptedRequestID: UUID?
+        var outcome: RemoteSettingsOriginalView?
+        var status: ReplicaSettingsAccessRequestStatus?
+
+        init(scope: SettingsConnectionScope, handle: ReplicaSettingsRequestHandle,
+             generation: RemoteSettingsGeneration, input: ReplicaSettingsUpdateRequestInput, wallFloor: UInt64,
+             monotonicFloor: ContinuousClock.Instant, deadline: ContinuousClock.Instant) {
+            self.scope = scope
+            host = scope.host
+            localID = scope.localID
+            self.generation = generation
+            self.handle = handle
+            self.input = input
+            self.wallFloor = wallFloor
+            self.monotonicFloor = monotonicFloor
+            self.deadline = deadline
+        }
+
+        var description: String { "SettingsUpdateOriginalRecord([redacted])" }
+        var debugDescription: String { description }
+    }
+
+    fileprivate final class PendingSettingsUpdate: CustomStringConvertible, CustomDebugStringConvertible {
+        let handle: ReplicaSettingsRequestHandle
+        let capture: ReplicaSettingsUpdateInput
+        let scope: SettingsConnectionScope
+        let association: SettingsBindingAssociation
+        let input: ReplicaSettingsUpdateRequestInput
+        let record: SettingsUpdateOriginalRecord
+        let deadline: ContinuousClock.Instant
+        var requestCaptured = false
+        var phase = SettingsRequestPreparation.waiting
+        var retired = false
+        var consumed = false
+
+        var request: RemoteSettingsUpdateRequest? { record.request }
+        var wallFloor: UInt64 { capture.wallFloor }
+        var monotonicFloor: ContinuousClock.Instant { capture.monotonicFloor }
+
+        init(handle: ReplicaSettingsRequestHandle, capture: ReplicaSettingsUpdateInput,
+             scope: SettingsConnectionScope, association: SettingsBindingAssociation,
+             input: ReplicaSettingsUpdateRequestInput, record: SettingsUpdateOriginalRecord,
+             deadline: ContinuousClock.Instant) {
+            self.handle = handle
+            self.capture = capture
+            self.scope = scope
+            self.association = association
+            self.input = input
+            self.record = record
+            self.deadline = deadline
+        }
+
+        var description: String { "PendingSettingsUpdate([redacted])" }
+        var debugDescription: String { description }
+    }
+
+    fileprivate enum SettingsUpdateOriginal: CustomStringConvertible, CustomDebugStringConvertible {
+        case absent
+        case prepared(PendingSettingsUpdate, EncryptedEnvelope)
+
+        var description: String { "SettingsUpdateOriginal([redacted])" }
+        var debugDescription: String { description }
+    }
+
+    fileprivate final class SettingsUpdateReceiveAttempt: CustomStringConvertible, CustomDebugStringConvertible {
+        let issuer: ObjectIdentifier
+        let ticket: SettingsReceiveTicket
+        let received: ReceivedRelayFrame
+        let original: SettingsUpdateOriginal
+        var classified: ReplicaClassifiedDelivery?
+        var committed: CommittedReplicaSettingsReply?
+        var qualification = SettingsAccessQualificationState.unissued
+
+        init(issuer: ObjectIdentifier, ticket: SettingsReceiveTicket, received: ReceivedRelayFrame,
+             original: SettingsUpdateOriginal) {
+            self.issuer = issuer
+            self.ticket = ticket
+            self.received = received
+            self.original = original
+        }
+
+        var description: String { "SettingsUpdateReceiveAttempt([redacted])" }
+        var debugDescription: String { description }
+    }
+
+    private enum SettingsUpdateReceiveResult: CustomStringConvertible, CustomDebugStringConvertible {
+        case durable(ReplicaClassifiedDelivery)
+        case qualified(ReplicaSettingsUpdateQualification)
+        case duplicate(CommittedReplicaSettingsReply)
+        case refused(CommittedReplicaSettingsReply)
+
+        var description: String { "SettingsUpdateReceiveResult([redacted])" }
+        var debugDescription: String { description }
+    }
+
+    private var settingsUpdateOriginal: SettingsUpdateOriginalRecord?
+    private var pendingSettingsUpdate: PendingSettingsUpdate? {
+        guard case .update(let pending) = pendingSettingsRequest else { return nil }
+        return pending
     }
 
     private var acknowledgements = Set<UUID>()
@@ -824,6 +1079,7 @@ actor ReplicaService {
         case bind(PendingSettingsBind)
         case snapshot(PendingSettingsSnapshot)
         case inspection(PendingSettingsInspection)
+        case update(PendingSettingsUpdate)
 
         var description: String { "PendingSettingsRequest([redacted])" }
         var debugDescription: String { description }
@@ -868,6 +1124,7 @@ actor ReplicaService {
         let deadline: ContinuousClock.Instant
         let requestedParentDeadline: ContinuousClock.Instant
         let readableKeys: [SettingKey]
+        let writableKeys: [SettingKey]
         var request: RemoteSettingsBindRequest?
         var requestCaptured = false
         var retired = false
@@ -878,7 +1135,7 @@ actor ReplicaService {
         init(scope: SettingsConnectionScope, capture: ReplicaSettingsBindInput, handle: ReplicaSettingsRequestHandle,
              input: ReplicaSettingsBindRequestInput, wallFloor: UInt64,
              monotonicFloor: ContinuousClock.Instant, deadline: ContinuousClock.Instant,
-             requestedParentDeadline: ContinuousClock.Instant, readableKeys: [SettingKey]) {
+             requestedParentDeadline: ContinuousClock.Instant, readableKeys: [SettingKey], writableKeys: [SettingKey]) {
             self.scope = scope
             self.capture = capture
             accessHandle = capture.accessHandle
@@ -889,6 +1146,7 @@ actor ReplicaService {
             self.deadline = deadline
             self.requestedParentDeadline = requestedParentDeadline
             self.readableKeys = readableKeys
+            self.writableKeys = writableKeys
         }
 
         var description: String { "SettingsBindingAssociation([redacted])" }
@@ -1002,6 +1260,7 @@ actor ReplicaService {
         case bind(SettingsBindReceiveAttempt)
         case snapshot(SettingsSnapshotReceiveAttempt)
         case inspection(SettingsInspectionReceiveAttempt)
+        case update(SettingsUpdateReceiveAttempt)
 
         var description: String { "SettingsReceiveAttempt([redacted])" }
         var debugDescription: String { description }
@@ -1450,7 +1709,8 @@ actor ReplicaService {
                                                    grantExpiresAt: grantExpiresAt)
         let association = SettingsBindingAssociation(
             scope: scope, capture: capture, handle: handle, input: input, wallFloor: capture.wallFloor,
-            monotonicFloor: capture.monotonicFloor, deadline: deadline, requestedParentDeadline: parentDeadline, readableKeys: summary.readableKeys
+            monotonicFloor: capture.monotonicFloor, deadline: deadline, requestedParentDeadline: parentDeadline, readableKeys: summary.readableKeys,
+            writableKeys: summary.writableKeys
         )
         let pending = PendingSettingsBind(capture: capture, scope: scope, cache: cache, association: association)
         let key = OutboundID.bind(input.bindingRequestID)
@@ -1481,6 +1741,9 @@ actor ReplicaService {
         } else if let pending = pendingSettingsInspection, pending.handle === handle {
             settingsInspectionOutcome = .cancelled
             retirePendingSettingsInspection(pending)
+        } else if let pending = pendingSettingsUpdate, pending.handle === handle {
+            pending.record.status = .cancelled
+            retirePendingSettingsUpdate(pending)
         } else if let pending = pendingSettingsBind, pending.association.handle === handle {
             retirePendingSettingsBind(pending)
         }
@@ -1495,6 +1758,9 @@ actor ReplicaService {
             case .inspection(let sent) where sent.original.handle === handle:
                 settingsInspectionOutcome = .cancelled
                 retirePendingSettingsInspection(sent.original)
+            case .update(let sent) where sent.original.handle === handle:
+                sent.original.record.status = .cancelled
+                retirePendingSettingsUpdate(sent.original)
             case .bind(let sent) where sent.original.association.handle === handle:
                 sent.original.association.retired = true
                 retirePendingSettingsBind(sent.original)
@@ -1824,6 +2090,7 @@ actor ReplicaService {
            settingsSnapshotOutcome == nil { settingsSnapshotOutcome = .interrupted }
         if outbound.values.contains(where: { if case .inspection = $0 { true } else { false } }),
            settingsInspectionOutcome == nil { settingsInspectionOutcome = .interrupted }
+        if let record = settingsUpdateOriginal, record.status == nil { record.status = .interrupted }
         outbound.removeAll()
         outboundSocket = nil
         lastSettingsInput = nil
@@ -1837,7 +2104,7 @@ actor ReplicaService {
         outbound.values.contains { entry in
             switch entry {
             case .ordinary: false
-            case .access, .bind, .snapshot, .inspection: true
+            case .access, .bind, .snapshot, .inspection, .update: true
             }
         }
     }
@@ -1907,6 +2174,7 @@ actor ReplicaService {
             case .bind(let sent): sent.envelope?.header.messageID == id
             case .snapshot(let sent): sent.envelope?.header.messageID == id
             case .inspection(let sent): sent.envelope?.header.messageID == id
+            case .update(let sent): sent.envelope?.header.messageID == id
             case .ordinary: false
             }
         }
@@ -1973,6 +2241,7 @@ actor ReplicaService {
         try await preparePendingSettingsBind(socket: socket)
         try await preparePendingSettingsSnapshot(socket: socket)
         try await preparePendingSettingsInspection(socket: socket)
+        try await preparePendingSettingsUpdate(socket: socket)
         try await store.checkActive()
         let inboxDrained = try await drainInbox()
         if refresh, inboxDrained {
@@ -2009,12 +2278,19 @@ actor ReplicaService {
                     if settingsInspectionOutcome == nil { settingsInspectionOutcome = .expired }
                     throw WireError.timeout
                 }
+            case .update(let sent):
+                guard try isCurrentSettingsUpdateOriginal(sent.original) || sent.original.consumed,
+                      ContinuousClock.now < sent.original.deadline else {
+                    if sent.original.record.status == nil { sent.original.record.status = .expired }
+                    throw WireError.timeout
+                }
             }
         }
         try await sendPendingSettingsAccess(socket: socket)
         try await sendPendingSettingsBind(socket: socket)
         try await sendPendingSettingsSnapshot(socket: socket)
         try await sendPendingSettingsInspection(socket: socket)
+        try await sendPendingSettingsUpdate(socket: socket)
         let now = try WireID.now()
         let ordinaryIDs = Set(outbound.keys.compactMap { key -> UUID? in
             if case .ordinary(let id) = key { return id }
@@ -2097,14 +2373,22 @@ actor ReplicaService {
                           snapshot.original.scope.socket === socket else { throw WireError.conflict }
                     snapshot.accepted = true
                     try completeSettingsSnapshotSend(snapshot)
-                } else {
-                    guard let inspection = outbound.values.compactMap({ entry -> SettingsInspectionSend? in
-                        if case .inspection(let sent) = entry, sent.envelope?.header.messageID == id { return sent }
-                        return nil
-                    }).first, inspection.sendStarted, !inspection.accepted,
+                } else if let inspection = outbound.values.compactMap({ entry -> SettingsInspectionSend? in
+                    if case .inspection(let sent) = entry, sent.envelope?.header.messageID == id { return sent }
+                    return nil
+                }).first {
+                    guard inspection.sendStarted, !inspection.accepted,
                           inspection.original.scope.socket === socket else { throw WireError.conflict }
                     inspection.accepted = true
                     try completeSettingsInspectionSend(inspection)
+                } else {
+                    guard let update = outbound.values.compactMap({ entry -> SettingsUpdateSend? in
+                        if case .update(let sent) = entry, sent.envelope?.header.messageID == id { return sent }
+                        return nil
+                    }).first, update.sendStarted, !update.accepted,
+                          update.original.scope.socket === socket else { throw WireError.conflict }
+                    update.accepted = true
+                    try completeSettingsUpdateSend(update)
                 }
             }
         case .acknowledged(let id):
@@ -2250,6 +2534,9 @@ actor ReplicaService {
         }
         if let pending = pendingSettingsInspection, socket == nil || pending.scope.socket === socket {
             retirePendingSettingsInspection(pending)
+        }
+        if let pending = pendingSettingsUpdate, socket == nil || pending.scope.socket === socket {
+            retirePendingSettingsUpdate(pending)
         }
         if let association = settingsBindingAssociation,
            socket == nil || association.scope?.socket === socket {
@@ -2420,7 +2707,13 @@ actor ReplicaService {
         }
         guard acknowledgements.count < 128 else { throw WireError.identity }
         do {
-            if pendingSettingsInspection != nil {
+            if pendingSettingsUpdate != nil {
+                let result = try await classifySettingsUpdateReceive(received, ticket: ticket)
+                switch result {
+                case .qualified(let qualification): try await adoptSettingsUpdateOutcome(qualification)
+                case .durable, .duplicate, .refused: break
+                }
+            } else if pendingSettingsInspection != nil {
                 let result = try await classifySettingsInspectionReceive(received, ticket: ticket)
                 switch result {
                 case .qualified(let qualification): try await adoptSettingsInspectionDisplay(qualification)
@@ -2559,7 +2852,7 @@ actor ReplicaService {
         switch classified.result {
         case .ordinary, .refused:
             return .durable(classified)
-        case .settingsAccess(let proof), .settingsBind(let proof), .settingsSnapshot(let proof), .settingsInspection(let proof):
+        case .settingsAccess(let proof), .settingsBind(let proof), .settingsSnapshot(let proof), .settingsInspection(let proof), .settingsUpdate(let proof):
             verified = proof
         }
         guard verified.matchesVerifiedPeer(ticket.scope.host, localID: ticket.scope.localID) else {
@@ -2955,7 +3248,7 @@ actor ReplicaService {
         switch classified.result {
         case .ordinary, .refused:
             return .durable(classified)
-        case .settingsSnapshot(let proof), .settingsAccess(let proof), .settingsBind(let proof), .settingsInspection(let proof):
+        case .settingsSnapshot(let proof), .settingsAccess(let proof), .settingsBind(let proof), .settingsInspection(let proof), .settingsUpdate(let proof):
             verified = proof
         }
         guard verified.matchesVerifiedPeer(ticket.scope.host, localID: ticket.scope.localID) else {
@@ -3350,7 +3643,7 @@ actor ReplicaService {
         switch classified.result {
         case .ordinary, .refused:
             return .durable(classified)
-        case .settingsInspection(let proof), .settingsAccess(let proof), .settingsBind(let proof), .settingsSnapshot(let proof):
+        case .settingsInspection(let proof), .settingsAccess(let proof), .settingsBind(let proof), .settingsSnapshot(let proof), .settingsUpdate(let proof):
             verified = proof
         }
         guard verified.matchesVerifiedPeer(ticket.scope.host, localID: ticket.scope.localID) else {
@@ -3617,7 +3910,7 @@ actor ReplicaService {
         switch classified.result {
         case .ordinary, .refused:
             return .durable(classified)
-        case .settingsAccess(let proof), .settingsBind(let proof), .settingsSnapshot(let proof), .settingsInspection(let proof):
+        case .settingsAccess(let proof), .settingsBind(let proof), .settingsSnapshot(let proof), .settingsInspection(let proof), .settingsUpdate(let proof):
             verified = proof
         }
         guard verified.matchesVerifiedPeer(ticket.scope.host, localID: ticket.scope.localID) else {
@@ -3722,6 +4015,7 @@ actor ReplicaService {
         var bindCompletion: (PendingSettingsBind, EncryptedEnvelope, Bool)?
         var snapshotCompletion: (PendingSettingsSnapshot, EncryptedEnvelope, Bool)?
         var inspectionCompletion: (PendingSettingsInspection, EncryptedEnvelope, Bool)?
+        var updateCompletion: (PendingSettingsUpdate, EncryptedEnvelope, Bool)?
         do {
             switch owner.attempt {
             case .access(let attempt):
@@ -3785,6 +4079,22 @@ actor ReplicaService {
                         throw WireError.conflict
                     }
                     inspectionCompletion = (pending, prepared, try isCurrentSettingsInspectionOriginal(pending))
+                }
+                attempt.classified = nil
+                attempt.committed = nil
+            case .update(let attempt):
+                guard attempt.issuer == ObjectIdentifier(self), attempt.ticket === ticket else {
+                    retireSettingsScope(socket: ticket.scope.socket)
+                    throw WireError.conflict
+                }
+                if case .prepared(let pending, let prepared) = attempt.original {
+                    guard pendingSettingsUpdate === pending, pending.scope === ticket.scope,
+                          case .receiving(let retained) = pending.phase,
+                          sameSettingsEnvelope(retained, prepared) else {
+                        retireSettingsScope(socket: ticket.scope.socket)
+                        throw WireError.conflict
+                    }
+                    updateCompletion = (pending, prepared, try isCurrentSettingsUpdateOriginal(pending))
                 }
                 attempt.classified = nil
                 attempt.committed = nil
@@ -3856,6 +4166,443 @@ actor ReplicaService {
                 pendingSettingsRequest = nil
             }
         }
+        if let (pending, prepared, current) = updateCompletion {
+            if pending.consumed,
+               case .update(let sent) = outbound[.update(pending.input.requestID)], sent.original === pending {
+                sent.replyReturned = true
+                try completeSettingsUpdateSend(sent)
+            }
+            if current {
+                pending.phase = .prepared(prepared)
+            } else {
+                pending.retired = true
+                pending.phase = .waiting
+                pendingSettingsRequest = nil
+            }
+        }
         settingsReceive = nil
     }
+
+    func requestSettingsUpdate(_ capture: ReplicaSettingsUpdateInput) throws -> ReplicaSettingsRequestHandle {
+        try Task.checkCancellation()
+        guard capture.service === self, let scope = settingsScope, isCurrentSettingsScope(scope),
+              scope.token === capture.scope, let association = settingsBindingAssociation,
+              association.handle === capture.bindingHandle, association.scope === scope,
+              let parent = association.parent, let parentDeadline = association.parentDeadline,
+              let bindingRequest = association.request,
+              try isCurrentSettingsParent(association, scope: scope) else { throw WireError.unavailable }
+        if let pending = pendingSettingsUpdate, pending.capture === capture { return pending.handle }
+        guard settingsUpdateOriginal == nil, pendingSettingsRequest == nil, !hasPrivateSettingsSend,
+              outbound.count < 16, outboundSocket === scope.socket else { throw WireError.queueFull }
+        guard capture.expectedSettingsRevision > 0, capture.expectedSettingsRevision <= UInt64(Int64.max),
+              capture.enabled != nil || capture.dimensions != nil,
+              capture.enabled == nil || association.writableKeys.contains(.embeddingsEnabled),
+              capture.dimensions == nil || association.writableKeys.contains(.embeddingsDimensions) else { throw WireError.invalid }
+        if case .some(.selected(let value)) = capture.dimensions {
+            guard value > 0, value <= 65_536 else { throw WireError.invalid }
+        }
+        let monotonic = ContinuousClock.now
+        let wall = try WireID.now()
+        guard capture.wallFloor >= association.wallFloor, capture.monotonicFloor >= association.monotonicFloor,
+              wall >= capture.wallFloor, wall < capture.expiresAt,
+              monotonic >= capture.monotonicFloor, monotonic < capture.deadline else { throw WireError.expired }
+        let expiresAt = min(capture.expiresAt, parent.expiresAt)
+        guard expiresAt > capture.wallFloor else { throw WireError.expired }
+        let time = try RemoteSettingsRequestTime(issuedAt: capture.wallFloor, expiresAt: expiresAt)
+        let deadline = min(capture.monotonicFloor.advanced(by: .milliseconds(Int64(expiresAt - capture.wallFloor))), parentDeadline)
+        guard monotonic < deadline else { throw WireError.expired }
+        let key = OutboundID.update(capture.requestID)
+        guard outbound[key] == nil else { throw WireError.conflict }
+        try capture.consumeAdmission()
+        let input = ReplicaSettingsUpdateRequestInput(hostID: scope.host.deviceID,
+                            requestID: capture.requestID, expectedSettingsRevision: capture.expectedSettingsRevision,
+                            enabled: capture.enabled, dimensions: capture.dimensions, time: time)
+        let handle = ReplicaSettingsRequestHandle()
+        let record = SettingsUpdateOriginalRecord(scope: scope, handle: handle, generation: bindingRequest.generation, input: input,
+                            wallFloor: capture.wallFloor, monotonicFloor: capture.monotonicFloor, deadline: deadline)
+        let pending = PendingSettingsUpdate(handle: handle, capture: capture, scope: scope,
+                            association: association, input: input, record: record, deadline: deadline)
+        settingsUpdateOriginal = record
+        pendingSettingsRequest = .update(pending)
+        outbound[key] = .update(SettingsUpdateSend(original: pending))
+        lastSettingsInput = .update(capture)
+        do {
+            let request = try parent.prepareUpdateRequest(owner: self)
+            guard pendingSettingsUpdate === pending, record.request == nil,
+                  request.hostID == input.hostID, request.requestID == input.requestID,
+                  request.parent.generation == record.generation, request.time == input.time,
+                  request.expectedSettingsRevision == input.expectedSettingsRevision,
+                  request.enabled == input.enabled, request.dimensions == input.dimensions else { throw WireError.conflict }
+            record.request = request
+            return handle
+        } catch {
+            record.status = .interrupted
+            retirePendingSettingsUpdate(pending)
+            throw error
+        }
+    }
+
+    func captureSettingsUpdateRequestInput(_ projection: ReplicaSettingsBoundParentProjection) throws -> ReplicaSettingsUpdateRequestInput {
+        try Task.checkCancellation()
+        guard let pending = pendingSettingsUpdate, try isCurrentSettingsUpdateOriginal(pending),
+              pending.association.parent === projection, !pending.requestCaptured,
+              pending.request == nil, case .waiting = pending.phase,
+              case .update(let sent) = outbound[.update(pending.input.requestID)],
+              sent.original === pending, !sent.sendStarted else { throw WireError.unavailable }
+        pending.requestCaptured = true
+        return pending.input
+    }
+
+    private func isCurrentSettingsUpdateOriginal(_ pending: PendingSettingsUpdate) throws -> Bool {
+        guard pendingSettingsUpdate === pending, settingsUpdateOriginal === pending.record,
+              !pending.retired, !pending.consumed, pending.input.requestID == pending.capture.requestID,
+              pending.input.expectedSettingsRevision == pending.capture.expectedSettingsRevision,
+              pending.input.enabled == pending.capture.enabled, pending.input.dimensions == pending.capture.dimensions,
+              pending.record.host == pending.scope.host, pending.record.localID == pending.scope.localID,
+              pending.association.request?.generation == pending.record.generation,
+              isCurrentSettingsScope(pending.scope),
+              try isCurrentSettingsParent(pending.association, scope: pending.scope) else { return false }
+        let monotonic = ContinuousClock.now
+        let wall = try WireID.now()
+        return wall >= pending.wallFloor && wall < pending.input.time.expiresAt
+            && monotonic >= pending.monotonicFloor && monotonic < pending.deadline
+    }
+
+    private func checkSettingsUpdateStore(_ pending: PendingSettingsUpdate) async throws -> Bool {
+        guard try isCurrentSettingsUpdateOriginal(pending) else { return false }
+        let scope = pending.scope
+        try await store.checkActive(host: scope.host)
+        guard try isCurrentSettingsUpdateOriginal(pending) else { return false }
+        let localID = try await store.identityID()
+        guard try isCurrentSettingsUpdateOriginal(pending) else { return false }
+        guard localID == scope.localID else { throw WireError.identity }
+        return true
+    }
+
+    private func prepareSettingsUpdateEnvelope(_ pending: PendingSettingsUpdate, sent: SettingsUpdateSend) async throws {
+        guard try isCurrentSettingsUpdateOriginal(pending) else { return }
+        guard try await checkSettingsUpdateStore(pending), try isCurrentSettingsUpdateOriginal(pending) else { return }
+        guard let request = pending.request, sent.original === pending, sent.envelope == nil,
+              pending.record.encryptedRequestID == nil, !sent.sendStarted else { throw WireError.unavailable }
+        let envelope = try await identity.sealSettings(request, recipient: pending.scope.host)
+        sent.envelope = envelope
+        pending.record.encryptedRequestID = envelope.header.messageID
+        guard case .update(let registered) = outbound[.update(pending.input.requestID)], registered === sent,
+              !hasConflictingSettingsUpdateMessage(envelope.header.messageID, excluding: sent),
+              !acknowledgements.contains(envelope.header.messageID) else { throw WireError.conflict }
+        guard try isCurrentSettingsUpdateOriginal(pending) else { return }
+        guard try await checkSettingsUpdateStore(pending), try isCurrentSettingsUpdateOriginal(pending) else { return }
+        guard envelope.header.sender == pending.scope.localID, envelope.header.recipient == pending.input.hostID,
+              envelope.header.expires == pending.input.time.expiresAt, envelope.header.created >= pending.wallFloor,
+              envelope.header.expires > envelope.header.created,
+              envelope.header.expires - envelope.header.created <= 30_000 else { throw WireError.identity }
+        _ = try envelope.wire.encoded(maximum: 49_152)
+        pending.phase = .prepared(envelope)
+    }
+
+    private func hasConflictingSettingsUpdateMessage(_ id: UUID, excluding actual: SettingsUpdateSend) -> Bool {
+        if outbound[.ordinary(id)] != nil { return true }
+        return outbound.values.contains { entry in
+            switch entry {
+            case .ordinary: false
+            case .access(let sent): sent.envelope?.header.messageID == id
+            case .bind(let sent): sent.envelope?.header.messageID == id
+            case .snapshot(let sent): sent.envelope?.header.messageID == id
+            case .inspection(let sent): sent.envelope?.header.messageID == id
+            case .update(let sent): sent !== actual && sent.envelope?.header.messageID == id
+            }
+        }
+    }
+
+    private func preparePendingSettingsUpdate(socket: RelayConnection) async throws {
+        guard let pending = pendingSettingsUpdate, pending.scope.socket === socket else { return }
+        guard try isCurrentSettingsUpdateOriginal(pending) else {
+            if pending.record.status == nil { pending.record.status = .expired }
+            retirePendingSettingsUpdate(pending)
+            return
+        }
+        guard case .waiting = pending.phase else { return }
+        guard case .update(let sent) = outbound[.update(pending.input.requestID)], sent.original === pending else {
+            throw WireError.conflict
+        }
+        pending.phase = .preparing
+        do {
+            try await prepareSettingsUpdateEnvelope(pending, sent: sent)
+            if case .preparing = pending.phase { pending.phase = .waiting }
+            if try !isCurrentSettingsUpdateOriginal(pending) || sent.envelope == nil {
+                retirePendingSettingsUpdate(pending)
+            }
+        } catch {
+            pending.phase = .waiting
+            pending.record.status = .interrupted
+            retirePendingSettingsUpdate(pending)
+            retireSettingsScope(socket: pending.scope.socket)
+            throw error
+        }
+    }
+
+    private func retirePendingSettingsUpdate(_ pending: PendingSettingsUpdate) {
+        pending.retired = true
+        switch pending.phase {
+        case .preparing, .receiving: return
+        case .waiting, .prepared: break
+        }
+        if case .update(let sent) = outbound[.update(pending.input.requestID)], sent.original === pending,
+           !sent.sendStarted {
+            outbound.removeValue(forKey: .update(pending.input.requestID))
+        }
+        if pendingSettingsUpdate === pending { pendingSettingsRequest = nil }
+    }
+
+    private func completeSettingsUpdateSend(_ sent: SettingsUpdateSend) throws {
+        let key = OutboundID.update(sent.original.input.requestID)
+        guard case .update(let registered) = outbound[key], registered === sent,
+              outboundSocket === sent.original.scope.socket else { throw WireError.conflict }
+        guard !sent.failed, isCurrentSettingsScope(sent.original.scope),
+              sent.sendReturned, sent.accepted, sent.replyReturned else { return }
+        outbound.removeValue(forKey: key)
+    }
+
+    private func sendPendingSettingsUpdate(socket: RelayConnection) async throws {
+        guard let pending = pendingSettingsUpdate, pending.scope.socket === socket,
+              try isCurrentSettingsUpdateOriginal(pending), case .prepared(let envelope) = pending.phase,
+              case .update(let sent) = outbound[.update(pending.input.requestID)], sent.original === pending,
+              !sent.sendStarted else { return }
+        pending.phase = .preparing
+        do {
+            let current = try await checkSettingsUpdateStore(pending)
+            pending.phase = .prepared(envelope)
+            guard current, try isCurrentSettingsUpdateOriginal(pending),
+                  case .prepared(let retained) = pending.phase, sameSettingsEnvelope(retained, envelope) else {
+                if pending.record.status == nil { pending.record.status = .interrupted }
+                retirePendingSettingsUpdate(pending)
+                return
+            }
+            guard outboundSocket === socket, case .update(let registered) = outbound[.update(pending.input.requestID)],
+                  registered === sent, let bound = sent.envelope, sameSettingsEnvelope(bound, envelope),
+                  !sent.sendStarted, outbound[.ordinary(envelope.header.messageID)] == nil else { throw WireError.conflict }
+        } catch {
+            pending.phase = .prepared(envelope)
+            if pending.record.status == nil { pending.record.status = .interrupted }
+            retirePendingSettingsUpdate(pending)
+            retireSettingsScope(socket: socket)
+            throw error
+        }
+        sent.sendStarted = true
+        do {
+            try await socket.send(.object(["type": .string("send"), "schema_version": .unsigned(1), "envelope": envelope.wire]))
+            sent.sendReturned = true
+            try completeSettingsUpdateSend(sent)
+        } catch {
+            sent.sendReturned = true
+            sent.failed = true
+            retireSettingsScope(socket: socket)
+            throw error
+        }
+    }
+
+    private func beginSettingsUpdateReceive(_ received: ReceivedRelayFrame,
+                                           ticket: SettingsReceiveTicket) throws -> SettingsUpdateReceiveAttempt {
+        try Task.checkCancellation()
+        guard let owner = settingsReceive, owner.ticket === ticket,
+              isCurrentSettingsScope(ticket.scope) else { throw WireError.unavailable }
+        guard owner.attempt == nil else { throw WireError.conflict }
+        guard case .delivery = received.frame else { throw WireError.invalid }
+        let original: SettingsUpdateOriginal
+        if let pending = pendingSettingsUpdate {
+            guard pending.scope === ticket.scope else { throw WireError.conflict }
+            let current = try isCurrentSettingsUpdateOriginal(pending)
+            if case .prepared(let prepared) = pending.phase, current,
+               case .update(let sent) = outbound[.update(pending.input.requestID)], sent.original === pending,
+               sent.sendStarted, let bound = sent.envelope, sameSettingsEnvelope(bound, prepared) {
+                pending.phase = .receiving(prepared)
+                original = .prepared(pending, prepared)
+            } else {
+                if !current { retirePendingSettingsUpdate(pending) }
+                original = .absent
+            }
+        } else {
+            original = .absent
+        }
+        let attempt = SettingsUpdateReceiveAttempt(issuer: ObjectIdentifier(self), ticket: ticket,
+                                                   received: received, original: original)
+        owner.attempt = .update(attempt)
+        return attempt
+    }
+
+    private func checkSettingsUpdateAttempt(_ attempt: SettingsUpdateReceiveAttempt) throws {
+        try Task.checkCancellation()
+        guard attempt.issuer == ObjectIdentifier(self),
+              let owner = settingsReceive, owner.ticket === attempt.ticket,
+              case .update(let registered) = owner.attempt, registered === attempt,
+              isCurrentSettingsScope(attempt.ticket.scope) else {
+            throw WireError.unavailable
+        }
+    }
+
+    private func currentSettingsUpdateOriginal(_ attempt: SettingsUpdateReceiveAttempt) throws -> PendingSettingsUpdate? {
+        guard case .prepared(let pending, let prepared) = attempt.original else { return nil }
+        guard pendingSettingsUpdate === pending, pending.scope === attempt.ticket.scope,
+              case .receiving(let retained) = pending.phase,
+              sameSettingsEnvelope(retained, prepared) else {
+            retireSettingsScope(socket: attempt.ticket.scope.socket)
+            throw WireError.conflict
+        }
+        guard try isCurrentSettingsUpdateOriginal(pending) else {
+            retirePendingSettingsUpdate(pending)
+            return nil
+        }
+        return pending
+    }
+
+    private func checkSettingsUpdateReceiveStore(_ attempt: SettingsUpdateReceiveAttempt) async throws {
+        try checkSettingsUpdateAttempt(attempt)
+        _ = try currentSettingsUpdateOriginal(attempt)
+        let scope = attempt.ticket.scope
+        try await store.checkActive(host: scope.host)
+        try checkSettingsUpdateAttempt(attempt)
+        _ = try currentSettingsUpdateOriginal(attempt)
+        let localID = try await store.identityID()
+        try checkSettingsUpdateAttempt(attempt)
+        _ = try currentSettingsUpdateOriginal(attempt)
+        guard localID == scope.localID else { throw WireError.identity }
+    }
+
+    private func matchesSettingsUpdateOriginal(_ attempt: SettingsUpdateReceiveAttempt,
+                                              metadata: ReplicaSettingsReplyMetadata) throws -> Bool {
+        guard let pending = try currentSettingsUpdateOriginal(attempt),
+              case .prepared(_, let prepared) = attempt.original,
+              case .command(let requestID) = metadata.correlation, let request = pending.request,
+              request.requestID == pending.input.requestID, request.time == pending.input.time,
+              request.expectedSettingsRevision == pending.input.expectedSettingsRevision,
+              request.enabled == pending.input.enabled, request.dimensions == pending.input.dimensions,
+              request.parent.generation == pending.record.generation,
+              pending.record.encryptedRequestID == prepared.header.messageID else { return false }
+        let scope = attempt.ticket.scope
+        return metadata.inReplyTo == prepared.header.messageID && requestID == pending.input.requestID
+            && metadata.generation == request.parent.generation
+            && pending.input.hostID == scope.host.deviceID
+            && metadata.header.sender == scope.host.deviceID && metadata.header.recipient == scope.localID
+            && prepared.header.sender == scope.localID && prepared.header.recipient == scope.host.deviceID
+            && prepared.header.expires == pending.input.time.expiresAt
+            && prepared.header.created >= pending.wallFloor
+            && prepared.header.expires > prepared.header.created
+            && prepared.header.expires - prepared.header.created <= 30_000
+    }
+
+    private func classifySettingsUpdateReceive(_ received: ReceivedRelayFrame,
+                                              ticket: SettingsReceiveTicket) async throws -> SettingsUpdateReceiveResult {
+        let attempt = try beginSettingsUpdateReceive(received, ticket: ticket)
+        try await checkSettingsUpdateReceiveStore(attempt)
+        try checkSettingsUpdateAttempt(attempt)
+        let original: ReplicaSettingsUpdateReplyExpectation?
+        if case .prepared(let pending, let prepared) = attempt.original, let request = pending.request {
+            original = ReplicaSettingsUpdateReplyExpectation(request: request, encryptedRequestID: prepared.header.messageID)
+        } else { original = nil }
+        let classified = try await identity.receiveClassified(received, host: ticket.scope.host, into: store,
+                                                              matchingUpdate: original)
+        attempt.classified = classified
+        try checkSettingsUpdateAttempt(attempt)
+        _ = try currentSettingsUpdateOriginal(attempt)
+        guard classified.matchesReceivedFrame(received) else { throw WireError.identity }
+        try await checkSettingsUpdateReceiveStore(attempt)
+        try checkSettingsUpdateAttempt(attempt)
+        let verified: VerifiedReplicaSettingsReply
+        switch classified.result {
+        case .ordinary, .refused:
+            return .durable(classified)
+        case .settingsUpdate(let proof), .settingsAccess(let proof), .settingsBind(let proof), .settingsSnapshot(let proof), .settingsInspection(let proof):
+            verified = proof
+        }
+        guard verified.matchesVerifiedPeer(ticket.scope.host, localID: ticket.scope.localID) else {
+            throw WireError.identity
+        }
+        let committed = try await verified.commitMetadata(into: store)
+        attempt.committed = committed
+        try checkSettingsUpdateAttempt(attempt)
+        _ = try currentSettingsUpdateOriginal(attempt)
+        try await checkSettingsUpdateReceiveStore(attempt)
+        try checkSettingsUpdateAttempt(attempt)
+        guard committed.matchesVerifiedPeer(ticket.scope.host, localID: ticket.scope.localID) else {
+            throw WireError.identity
+        }
+        guard case .settingsUpdate = classified.result,
+              try matchesSettingsUpdateOriginal(attempt, metadata: verified.metadata),
+              try matchesSettingsUpdateOriginal(attempt, metadata: committed.metadata) else {
+            return .refused(committed)
+        }
+        guard case .fresh = committed.disposition else { return .duplicate(committed) }
+        guard case .unissued = attempt.qualification else { throw WireError.conflict }
+        let qualification = ReplicaSettingsUpdateQualification(attempt: attempt, committed: committed)
+        attempt.qualification = .issued(ObjectIdentifier(qualification))
+        return .qualified(qualification)
+    }
+
+    fileprivate func checkSettingsUpdateQualification(_ qualification: ReplicaSettingsUpdateQualification,
+                                                     committed: CommittedReplicaSettingsReply) throws {
+        let attempt = qualification.attempt
+        try checkSettingsUpdateAttempt(attempt)
+        guard qualification.committed === committed, attempt.committed === committed,
+              case .issued(let identifier) = attempt.qualification,
+              identifier == ObjectIdentifier(qualification),
+              case .fresh = committed.disposition,
+              let classified = attempt.classified, classified.matchesReceivedFrame(attempt.received),
+              case .settingsUpdate(let verified) = classified.result,
+              verified.matchesVerifiedPeer(attempt.ticket.scope.host, localID: attempt.ticket.scope.localID),
+              committed.matchesVerifiedPeer(attempt.ticket.scope.host, localID: attempt.ticket.scope.localID),
+              try matchesSettingsUpdateOriginal(attempt, metadata: verified.metadata),
+              try matchesSettingsUpdateOriginal(attempt, metadata: committed.metadata) else {
+            throw WireError.unavailable
+        }
+    }
+
+    fileprivate func consumeSettingsUpdateQualification(_ qualification: ReplicaSettingsUpdateQualification,
+                                                       committed: CommittedReplicaSettingsReply) throws {
+        try checkSettingsUpdateQualification(qualification, committed: committed)
+        guard let pending = try currentSettingsUpdateOriginal(qualification.attempt) else {
+            throw WireError.unavailable
+        }
+        qualification.attempt.qualification = .consumed
+        pending.consumed = true
+        retirePendingSettingsUpdate(pending)
+    }
+
+    private func recheckSettingsUpdateQualification(_ qualification: ReplicaSettingsUpdateQualification) async throws {
+        try checkSettingsUpdateQualification(qualification, committed: qualification.committed)
+        try await checkSettingsUpdateReceiveStore(qualification.attempt)
+        try checkSettingsUpdateQualification(qualification, committed: qualification.committed)
+    }
+
+    func checkSettingsUpdateProjection(_ qualification: ReplicaSettingsUpdateQualification,
+                                             committed: CommittedReplicaSettingsReply) throws {
+        try checkSettingsUpdateQualification(qualification, committed: committed)
+        guard let pending = try currentSettingsUpdateOriginal(qualification.attempt) else {
+            throw WireError.unavailable
+        }
+        let header = committed.metadata.header
+        guard header.created >= pending.wallFloor, header.expires <= pending.input.time.expiresAt else {
+            throw WireError.invalid
+        }
+    }
+
+    private func adoptSettingsUpdateOutcome(_ qualification: ReplicaSettingsUpdateQualification) async throws {
+        try await recheckSettingsUpdateQualification(qualification)
+        try checkSettingsUpdateProjection(qualification, committed: qualification.committed)
+        guard let pending = try currentSettingsUpdateOriginal(qualification.attempt),
+              settingsUpdateOriginal === pending.record, pending.record.outcome == nil else { throw WireError.unavailable }
+        let outcome = try qualification.committed.projectUpdateOutcome(qualifiedBy: qualification, owner: self)
+        pending.record.outcome = outcome
+        pending.record.status = .received
+        let header = qualification.committed.metadata.header
+        let expiresAt = min(pending.input.time.expiresAt, header.expires)
+        guard expiresAt > pending.wallFloor else { throw WireError.expired }
+        let clip = pending.input.time.expiresAt - expiresAt
+        guard clip <= 30_000 else { throw WireError.expired }
+        let deadline = pending.deadline.advanced(by: .milliseconds(-Int64(clip)))
+        let monotonic = ContinuousClock.now
+        let wall = try WireID.now()
+        guard isCurrentSettingsScope(pending.scope), wall >= pending.wallFloor, wall < expiresAt,
+              monotonic >= pending.monotonicFloor, monotonic < deadline else { throw WireError.expired }
+    }
+
 }
