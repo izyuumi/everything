@@ -42,7 +42,8 @@ pub(crate) use settings_ingress::read::{
 };
 #[cfg(unix)]
 pub(crate) use settings_ingress::work::{
-    OwnedQueuedSettingsReply, PairedWorkAdoption, ReplyBuildPermit, SettingsReplyBuildRequest,
+    OwnedQueuedSettingsReply, PairedWorkAdoption, ReplyBuildPermit, ReturnedSettingsReplySource,
+    SettingsReplyBuildRequest,
 };
 #[cfg(unix)]
 pub(crate) use settings_ingress::{

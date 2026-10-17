@@ -1,7 +1,10 @@
 mod returned;
 mod socket;
 
-pub(in crate::devices) use returned::{OwnedStartedSettingsReturn, SettingsStartedReturnFailure};
+pub(in crate::devices) use returned::{
+    OwnedStartedSettingsReturn, ReturnedSettingsSqlInput, SettingsRemovedSendSlot,
+    SettingsStartedReturnFailure,
+};
 
 pub(super) use socket::SettingsSocketAttempt;
 pub(crate) use socket::{

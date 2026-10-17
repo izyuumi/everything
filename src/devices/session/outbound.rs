@@ -13,7 +13,10 @@ use crate::transport::remote::RelaySocketIdentity;
 #[cfg(unix)]
 use settings::{GuardWait, SettingsPreparationInput, SettingsPreparationOutput};
 #[cfg(unix)]
-pub(in crate::devices) use settings::{OwnedStartedSettingsReturn, SettingsStartedReturnFailure};
+pub(in crate::devices) use settings::{
+    OwnedStartedSettingsReturn, ReturnedSettingsSqlInput, SettingsRemovedSendSlot,
+    SettingsStartedReturnFailure,
+};
 #[cfg(unix)]
 pub(in crate::devices) use settings::{SettingsPreparationStop, SettingsPreparationWorkerFailure};
 #[cfg(unix)]
