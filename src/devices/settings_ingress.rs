@@ -1,5 +1,6 @@
 mod access;
 mod command;
+pub(super) mod read;
 mod wire;
 pub(super) mod work;
 

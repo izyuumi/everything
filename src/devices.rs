@@ -11,6 +11,8 @@ mod settings_ingress;
 #[cfg(unix)]
 mod settings_publication;
 #[cfg(unix)]
+mod settings_read_reply;
+#[cfg(unix)]
 mod settings_reply;
 
 pub use session::RelaySessionStatus;
