@@ -2,9 +2,15 @@
 
 `src/storage.rs` implements durable host storage for issue #3. `Store` owns one SQLite connection behind a shared mutex. Clones share that connection. The API is synchronous: async callers must execute storage calls inside `tokio::task::spawn_blocking` or an equivalent dedicated blocking boundary. Owned asynchronous exclusion guards may remain held through that blocking transaction when the component's lock order requires continuous authority; remote admission transfers those guards and its leased Agent into the actual blocking closure so caller cancellation cannot release them early. Do not block Tokio workers, hold synchronous mutex guards across awaits, or create a dependency cycle in which a storage worker needs a lock held by its waiting caller. The public API exposes no connection or transaction handle. Trusted crate-internal typed repositories may acquire the same mutex-protected connection through `Store::connection`; they must not open a second connection or expose raw SQL publicly.
 
+## Permanent connection quarantine
+
+Every Store clone shares a permanent connection-health latch. `connection()` checks it before and after acquiring the mutex, so a waiter cannot inherit a quarantined connection. `quarantine_connection()` is crate-private and sets the latch without SQL. The Settings Access receipt writer and reply publisher call it while still holding the connection after an observed rollback failure. All later checked borrows return `StorageError::Quarantined`; there is no reset, retry or alternate connection.
+
+The latch protects other Store users from an uncertain transaction. It does not prove whether a commit or rollback occurred, and does not repair data. No forced rollback failure has been executed. See [ADR-0013](../decisions/ADR-0013-permanent-store-quarantine.md).
+
 ## Initialization and migrations
 
-`Store::open(path)` opens or creates a database at an existing parent directory. Startup enables foreign keys, WAL, full synchronous durability, and a five-second busy timeout before applying pending versioned migrations in one immediate transaction. Fresh databases apply migrations `0001_initial.sql` through `0015_settings_grants.sql` in order; existing databases apply only their pending migrations. The current schema version is SQLite `user_version = 15`; newer databases are rejected. The ordered additions are:
+`Store::open(path)` opens or creates a database at an existing parent directory. Startup enables foreign keys, WAL, full synchronous durability, and a five-second busy timeout before applying pending versioned migrations in one immediate transaction. Fresh databases apply migrations `0001_initial.sql` through `0016_settings_transport.sql` in order; existing databases apply only their pending migrations. The current schema version is SQLite `user_version = 16`; newer databases are rejected. The ordered additions are:
 
 | Migration | Addition |
 | --- | --- |
@@ -23,6 +29,7 @@
 | 13 | Revisioned Settings operations, native requests and immutable operation updates |
 | 14 | Restricted Settings namespace, original sessions/turn fences and cleanup attestations |
 | 15 | Immutable scoped Settings grant decisions, current heads and reserved revocation capacity |
+| 16 | Private Settings reply reservations and immutable encrypted outbox associations ([transport storage](settings-transport-storage.md)) |
 
 See [scheduled storage](scheduling-storage.md), [host inbox](host-inbox.md), [schedule admission](scheduling-engine.md), [scheduled execution](scheduled-execution.md), [worker terminal sources](worker-terminal-sources.md) and [remote binding lookup](remote-binding-lookup.md) for component invariants. `open_in_memory` uses the same migrations and constraints, with SQLite's in-memory journal mode because WAL is unavailable for memory databases. There is no backup or restore API.
 
@@ -133,3 +140,7 @@ Schema 15 adds immutable canonical public grant versions and receipts with exact
 ## Metadata-only transport rejection
 
 The crate-private rejection path shares ordinary inbox validation and its immediate transaction. A fresh refused packet inserts `transport_inbox.state=rejected` directly with `payload=NULL`, `command_id=NULL` and a fixed detail; schema15 already permits that terminal shape. It consumes one of the existing100000 replay markers and no pending-payload capacity. Complete pin/local-recipient checks, exact ciphertext replay and duplicate speculative-prune rollback are preserved. A duplicate never rewrites an older pending row or claims historical erasure. See [private packet rejection](private-settings-ingress.md); actual encrypted/storage observations remain separate from source compilation.
+
+## Connection health observations
+
+The crate-private `Store::check_connection_health` reads the shared quarantine flag (Acquire) and the mutex poison state, returning `Quarantined` or `Poisoned`. It takes no lock, runs no SQL and clears nothing. `connection()` calls it before and after acquiring the mutex. It reports health at that instant only. Automated verification is deferred to #32.

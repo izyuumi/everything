@@ -8,12 +8,12 @@ Host configuration has one authority: `SettingsRepository` and its private revis
 
 | Capability | macOS native controls | Ask Settings | Current iOS client |
 | --- | --- | --- | --- |
-| Host Models, Memory and Tool Selection | Typed draft, revision CAS, protected native confirmation | Host-scoped tools and authenticated exact-diff cards | Remote Host Settings unavailable |
+| Host Models, Memory and Tool Selection | Typed draft, revision CAS, protected native confirmation | Host-scoped tools and authenticated exact-diff cards | No Host value display or mutation controls |
 | Credentials | Private SecureField; configured replacement or initial storage, then separate metadata link | No secret/card authority; known-section navigation can lead to native controls | No Host credential route |
 | Devices | Redacted pages, private invitation, explicit identity/access approval, exact-pin revocation | Opaque Pair/Revoke proposals; sealed handoff to the same ceremony | Existing explicit Replica pairing; no remote Settings administration |
 | Appearance and notification preferences | Same local device store, usable without Host/model | No device-store facade adapter | Same strict store bound to actual Replica identity, usable offline |
 | Notification OS interaction/delivery | Fresh foreground permission gesture; preferences do not schedule notices | No authorization card or OS authority | Fresh permission gesture; bounded committed-event attempts while active and sync-enabled |
-| Optional remote Settings | Local-owner grant storage/inspection exists | No remote grant or owner pass-through | Encrypted private Settings lane and grant consumer remain #116 work |
+| Optional remote Settings | Local-owner grant storage/inspection exists | No remote grant or owner pass-through | Explicit Access status check over the relay, answered by the Host; other remote families remain #116 work |
 
 The metadata contract also describes authority ceilings for future clients. The matrix above describes current integrations: the seven-tool model profile is Host-scoped, and only OpenSection is a native action it can request. General workspace/security/service controls remain separate owner controls. Appearance is a local typed extension, not an extra Host key or eighth model tool.
 
@@ -27,7 +27,8 @@ The metadata contract also describes authority ceilings for future clients. The 
 | macOS app ownership | [`HostModel.swift`](../../apps/Apple/macOS/HostModel.swift), `SettingsView`, `SettingsWindowObserver`; one shared client/Store; [composition](../contracts/apple-settings-assistant-composition.md) |
 | Native effects and drafts | `NativeSettingsStore/Session/Lifecycle`, `NativeSettingsControls`, credential and Devices leaves; [controls](../contracts/apple-native-settings-controls.md), [credentials](../contracts/apple-native-credential-entry.md), [Devices](../contracts/apple-native-devices.md) |
 | This-device authority and OS adapter | `Shared/Settings/DevicePreferenceStore`, `DeviceNotificationActions`; [local authority](../contracts/local-device-preferences.md), [appearance](../contracts/device-appearance.md), [iOS attempts](../contracts/ios-notification-delivery.md) |
-| Grant history without remote ingress | `settings/grants.rs`, `storage/settings_grants.rs`; [grant contract](../contracts/settings-grants.md) |
+| Grant history | `settings/grants.rs`, `storage/settings_grants.rs`; [grant contract](../contracts/settings-grants.md) |
+| Remote Access status | `devices/settings_connection.rs`, `devices/settings_ingress*`, `devices/settings_publication.rs`, `settings/service/paired*.rs`, `settings/authority/paired.rs`, `storage/settings_transport.rs`; [Access transport](../contracts/settings-access-transport.md) |
 
 Native proof/credential/invitation and private assistant frames use the existing authenticated pipe-only route. The generic request-file owner bridge carries nonsecret queries/operations, including separate credential-reference linking. Public UUIDs, digests and validated DTOs do not create a trusted caller or consent. Existing pairing supplies no default Settings grant.
 
@@ -41,6 +42,14 @@ Unknown/Applying retains original identity and blocks conflicting fresh work. In
 
 ## Evidence and remaining checkpoint
 
-PR [#163](https://github.com/izyuumi/everything/pull/163) merged the final inspector composition after exact-head Ubuntu fmt/strict Clippy, both real Apple build/analyze jobs and compatibility passed. Its failed first macro-access build is retained; only corrected `81810ec3` has the final pass. PR [#164](https://github.com/izyuumi/everything/pull/164) adds the bounded grant reader with Ubuntu/compatibility success and an actual irrelevant-path SDK skip, not another SDK execution. [Settings](../development/settings-validation.md), [pairing](../development/native-pairing-validation.md) and [restricted-runtime](../development/restricted-settings.md) records retain their own historical artifact identities and limits.
+Source, SDK and historical runtime evidence retain their exact identities in [implementation status](../status/implementation.md) and the [Settings](../development/settings-validation.md), [pairing](../development/native-pairing-validation.md) and [restricted-runtime](../development/restricted-settings.md) records. Compilation does not establish native UI, provider, transport or security acceptance.
 
 Real native dialogs, accessibility/navigation, provider inference, foreground/connection races and quit-with-Host-alive walkthroughs remain unverified. The local iOS preferences/notification path is implemented; remote Host Settings is separate. #118 remains open for manual and remote acceptance. Reuse [ADR-0010](../decisions/ADR-0010-hybrid-settings-contract.md), [ADR-0011](../decisions/ADR-0011-restricted-settings-agent.md) and [ADR-0012](../decisions/ADR-0012-scoped-settings-grants.md); automated/security coverage remains [#32](https://github.com/izyuumi/everything/issues/32).
+
+## Remote Settings transport
+
+One remote family is wired end to end: the read-only Access status query. The iOS Settings screen sends an explicit check through the [Access client](../contracts/apple-settings-access-client.md); the Host [admits, answers and sends the reply](../contracts/settings-access-transport.md) on the same relay socket, using the existing Store, mutation guard and device endpoint. There is no second runtime. Reply capacity is separate from ordinary sending ([transport storage](../contracts/settings-transport-storage.md)).
+
+The Host records every other Settings kind as rejected. Bind, Update and permanent Originals, Snapshot and Original-inspection reads, paired Settings supervision and history, and parent registration are deferred to follow-ups with their callers. Swift clients and codecs for Bind, Snapshot, Inspection and Update exist without a screen control and without a responding Host.
+
+Peer-attributable failures are per-message rejections; only uncertain storage outcomes and broken bookkeeping quarantine Settings receive until restart ([ADR-0013](../decisions/ADR-0013-permanent-store-quarantine.md)). Validation is local compile and static checks; no runtime, device, relay round-trip or security verification has been performed.

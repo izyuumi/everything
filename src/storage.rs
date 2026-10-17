@@ -1,9 +1,21 @@
 mod external;
 pub(crate) mod settings_agent;
 mod settings_grants;
+#[cfg(unix)]
+mod settings_publication;
+mod settings_transport;
 mod transport;
 pub(crate) use external::ExternalTaskStateUpdate;
 pub(crate) use settings_grants::settings_grant_head_on;
+#[cfg(unix)]
+pub(crate) use settings_publication::{
+    CommittedSettingsReply, SettingsCiphertextLoadFailure, SettingsReplyPublishFailure,
+};
+#[cfg(unix)]
+pub(crate) use settings_transport::{
+    ConsumedSettingsReply, SettingsAccessAdmissionError, SettingsAccessReceiptCommit,
+    StoredSettingsAccessReply, consume_settings_reply_in,
+};
 pub use transport::*;
 pub(crate) use transport::{TransportInboxMetadata, TransportInboxRejection};
 
@@ -12,11 +24,12 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 use thiserror::Error;
 
-const SCHEMA_VERSION: i64 = 15;
+const SCHEMA_VERSION: i64 = 16;
 const MAX_JSON_BYTES: usize = 1_048_576;
 const MAX_APPEND_EVENTS: usize = 256;
 const MAX_STATE_BYTES: usize = 8 * MAX_JSON_BYTES;
@@ -32,6 +45,8 @@ pub enum StorageError {
     Json(#[from] serde_json::Error),
     #[error("storage connection lock was poisoned")]
     Poisoned,
+    #[error("storage connection requires restart after an uncertain rollback")]
+    Quarantined,
     #[error("invalid storage input: {0}")]
     InvalidInput(String),
     #[error("read page exceeds the {MAX_PAGE_BYTES}-byte budget; request fewer rows")]
@@ -77,6 +92,7 @@ pub type StorageResult<T> = Result<T, StorageError>;
 #[derive(Clone)]
 pub struct Store {
     connection: Arc<Mutex<Connection>>,
+    quarantined: Arc<AtomicBool>,
     _database_file: Option<Arc<std::fs::File>>,
 }
 
@@ -388,16 +404,44 @@ impl Store {
         if version < 15 {
             transaction.execute_batch(include_str!("../migrations/0015_settings_grants.sql"))?;
         }
+        if version < 16 {
+            transaction.execute_batch(include_str!("../migrations/0016_settings_transport.sql"))?;
+        }
         transaction.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+        if let Some(now) = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .ok()
+            .and_then(|elapsed| i64::try_from(elapsed.as_millis()).ok())
+        {
+            settings_transport::sweep_settings_transport(&transaction, now)?;
+        }
         transaction.commit()?;
         Ok(Self {
             connection: Arc::new(Mutex::new(connection)),
+            quarantined: Arc::new(AtomicBool::new(false)),
             _database_file: None,
         })
     }
 
     pub(crate) fn connection(&self) -> StorageResult<MutexGuard<'_, Connection>> {
-        self.connection.lock().map_err(|_| StorageError::Poisoned)
+        self.check_connection_health()?;
+        let connection = self.connection.lock().map_err(|_| StorageError::Poisoned)?;
+        self.check_connection_health()?;
+        Ok(connection)
+    }
+
+    pub(crate) fn check_connection_health(&self) -> StorageResult<()> {
+        if self.quarantined.load(Ordering::Acquire) {
+            return Err(StorageError::Quarantined);
+        }
+        if self.connection.is_poisoned() {
+            return Err(StorageError::Poisoned);
+        }
+        Ok(())
+    }
+
+    pub(crate) fn quarantine_connection(&self) {
+        self.quarantined.store(true, Ordering::Release);
     }
 
     pub(crate) fn shares_connection(&self, other: &Store) -> bool {
@@ -1313,6 +1357,10 @@ impl Store {
         transaction.execute("UPDATE transport_inbox SET state = 'rejected', detail = 'sender_revoked', payload = NULL WHERE sender = ?1 AND state = 'pending'", [id])?;
         transaction.execute("UPDATE remote_commands SET state = 'rejected', result = '{\"reason\":\"sender_revoked\"}', updated_at = max(updated_at, ?2) WHERE sender = ?1 AND state = 'pending'", params![id, revoked_at])?;
         transaction.execute("DELETE FROM sync_offers WHERE device_id = ?1", [id])?;
+        transaction.execute(
+            "DELETE FROM settings_transport_reply_reservations WHERE peer_device_id = ?1",
+            [id],
+        )?;
         transaction.commit()?;
         Ok(())
     }
@@ -1341,6 +1389,11 @@ impl Store {
             Some(Some(_)) => return Err(StorageError::RevokedDevice(message.device_id.clone())),
             Some(None) => {}
         }
+        settings_transport::check_outbox_capacity(
+            &transaction,
+            &message.device_id,
+            message.envelope.len(),
+        )?;
         transaction.execute(
             "INSERT INTO outbox(id, device_id, envelope, created_at, not_before) VALUES (?1, ?2, ?3, ?4, ?5)",
             params![message.id, message.device_id, message.envelope, message.created_at, message.not_before],
@@ -1354,7 +1407,7 @@ impl Store {
         validate_limit(limit)?;
         let connection = self.connection()?;
         let mut statement = connection.prepare(
-            "SELECT o.id, o.device_id, o.envelope, o.created_at, o.not_before, o.attempts, o.delivered_at FROM outbox o JOIN devices d ON d.id = o.device_id WHERE o.delivered_at IS NULL AND o.not_before <= ?1 AND d.revoked_at IS NULL ORDER BY o.not_before, o.created_at, o.id LIMIT ?2",
+            "SELECT o.id, o.device_id, o.envelope, o.created_at, o.not_before, o.attempts, o.delivered_at FROM outbox o JOIN devices d ON d.id = o.device_id WHERE o.delivered_at IS NULL AND o.not_before <= ?1 AND d.revoked_at IS NULL AND NOT EXISTS (SELECT 1 FROM settings_transport_private_outbox AS p WHERE p.message_id=o.id) ORDER BY o.not_before, o.created_at, o.id LIMIT ?2",
         )?;
         collect_rows(statement.query_map(params![now, limit as i64], outbox_row)?)
     }
@@ -1372,7 +1425,9 @@ impl Store {
     pub fn acknowledge_outbox(&self, id: &str, delivered_at: i64) -> StorageResult<()> {
         validate_id(id)?;
         validate_time(delivered_at)?;
-        let changed = self.connection()?.execute(
+        let connection = self.connection()?;
+        settings_transport::require_ordinary_outbox(&connection, id)?;
+        let changed = connection.execute(
             "UPDATE outbox SET delivered_at = ?2 WHERE id = ?1 AND delivered_at IS NULL AND created_at <= ?2 AND EXISTS (SELECT 1 FROM devices d WHERE d.id = outbox.device_id AND d.revoked_at IS NULL)",
             params![id, delivered_at],
         )?;

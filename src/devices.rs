@@ -1,11 +1,43 @@
 mod routing;
 mod session;
 mod settings;
+#[cfg(unix)]
+mod settings_access_reply;
+mod settings_connection;
+#[cfg(unix)]
+mod settings_ingress;
+#[cfg(unix)]
+mod settings_publication;
 
 pub use session::RelaySessionStatus;
 pub use settings::{
     DeviceSettingsPage, DeviceSettingsSummary, MAX_DEVICE_SETTINGS_PAGE,
     MAX_DEVICE_SETTINGS_PAGE_BYTES, PairingCancellation,
+};
+pub(crate) use settings_connection::{
+    HostSettingsTransport, HostSettingsTransportOwner, SettingsConnectionIdentity,
+    SettingsHostIdentity,
+};
+
+#[cfg(unix)]
+pub(crate) use settings_access_reply::{
+    SettingsAccessReplyContractError, SettingsAccessReplyPacket,
+};
+#[cfg(unix)]
+pub(crate) use settings_ingress::work::{
+    OwnedQueuedSettingsReply, ReplyBuildPermit, SettingsOwnerError, SettingsReplyBuildRequest,
+};
+#[cfg(unix)]
+pub(crate) use settings_ingress::{
+    AccessStatusRejection, AuthenticatedSettingsAccessSource, BindingGeneration,
+    OwnedCommittedSettingsAccess, OwnedVerifiedSettingsAccess, SETTINGS_CLOCK_SKEW_MS,
+    SettingsAccessStatusIntent, SettingsReceiveDrain, SettingsReceiveError, SettingsReceiveWitness,
+};
+
+#[cfg(unix)]
+pub(crate) use settings_publication::{
+    SealedSettingsReply, SettingsReplyPublicationError, SettingsReplyQualification,
+    SettingsReplySealContext,
 };
 
 use crate::crypto::{
@@ -30,6 +62,7 @@ use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::{Read, Write};
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use thiserror::Error;
 use tokio::sync::Notify;
@@ -79,6 +112,8 @@ pub enum DeviceError {
     Worker,
     #[error("a relay session is already running for this endpoint")]
     SessionAlreadyRunning,
+    #[error("relay outbound ownership is quarantined; process restart required")]
+    OutboundQuarantined,
     #[error(transparent)]
     Remote(#[from] crate::transport::remote::RemoteError),
     #[error("device operation was cancelled")]
@@ -261,6 +296,7 @@ struct EndpointInner {
     outbox_ready: Notify,
     inbox_ready: Notify,
     session: tokio::sync::Mutex<()>,
+    outbound_failed: AtomicBool,
 }
 
 impl DeviceEndpoint {
@@ -289,6 +325,7 @@ impl DeviceEndpoint {
                 outbox_ready: Notify::new(),
                 inbox_ready: Notify::new(),
                 session: tokio::sync::Mutex::new(()),
+                outbound_failed: AtomicBool::new(false),
             }),
         })
     }
@@ -298,6 +335,21 @@ impl DeviceEndpoint {
     }
     pub fn role(&self) -> &EndpointRole {
         &self.inner.role
+    }
+    pub(crate) fn shares_store(&self, store: &Store) -> bool {
+        self.inner.store.shares_connection(store)
+    }
+    pub(crate) fn outbound_is_quarantined(&self) -> bool {
+        self.inner.outbound_failed.load(Ordering::Acquire)
+    }
+    fn check_outbound_health(&self) -> Result<(), DeviceError> {
+        if self.outbound_is_quarantined() {
+            return Err(DeviceError::OutboundQuarantined);
+        }
+        Ok(())
+    }
+    fn quarantine_outbound(&self) {
+        self.inner.outbound_failed.store(true, Ordering::Release);
     }
     pub fn identity(&self) -> Arc<DeviceIdentity> {
         Arc::clone(&self.inner.identity)
@@ -468,6 +520,28 @@ impl DeviceEndpoint {
         envelope: &EncryptedEnvelope,
         now: UnixMillis,
     ) -> Result<EnvelopeAcceptance, DeviceError> {
+        let PreparedEnvelope {
+            peer,
+            pinned_identity,
+            digest,
+        } = self.prepare_envelope(envelope)?;
+        let mut guard = DurableInbox {
+            store: self.inner.store.clone(),
+            pinned_identity,
+            envelope_digest: digest,
+            outcome: DurableInboxOutcome::Unobserved,
+        };
+        let opened = self
+            .inner
+            .identity
+            .open(&peer.keys, envelope, now.get(), &mut guard);
+        self.finish_envelope(opened, guard.outcome)
+    }
+
+    fn prepare_envelope(
+        &self,
+        envelope: &EncryptedEnvelope,
+    ) -> Result<PreparedEnvelope, DeviceError> {
         self.ensure_active()?;
         let peer = self.peer(envelope.header.sender)?;
         if matches!(self.inner.role,EndpointRole::Replica{authoritative_host} if authoritative_host!=peer.keys.device_id)
@@ -481,17 +555,19 @@ impl DeviceEndpoint {
             ));
         }
         let digest = format!("{:x}", Sha256::digest(&encoded));
-        let mut guard = DurableInbox {
-            store: self.inner.store.clone(),
+        Ok(PreparedEnvelope {
             pinned_identity: serde_json::to_value(&peer)?,
-            envelope_digest: digest,
-            outcome: DurableInboxOutcome::Unobserved,
-        };
-        let opened = self
-            .inner
-            .identity
-            .open(&peer.keys, envelope, now.get(), &mut guard);
-        match (opened, guard.outcome) {
+            peer,
+            digest,
+        })
+    }
+
+    fn finish_envelope(
+        &self,
+        opened: Result<Zeroizing<Vec<u8>>, CryptoError>,
+        outcome: DurableInboxOutcome,
+    ) -> Result<EnvelopeAcceptance, DeviceError> {
+        match (opened, outcome) {
             (Ok(_plaintext), DurableInboxOutcome::OrdinaryNew) => {
                 self.inner.inbox_ready.notify_one();
                 Ok(EnvelopeAcceptance::New)
@@ -1211,6 +1287,12 @@ impl DeviceEndpoint {
 }
 
 const PRIVATE_INBOX_STORAGE_FAILURE: &str = "private_ingress_storage_failure";
+
+struct PreparedEnvelope {
+    peer: PeerRegistration,
+    pinned_identity: Value,
+    digest: String,
+}
 
 struct DurableInbox {
     store: Store,
