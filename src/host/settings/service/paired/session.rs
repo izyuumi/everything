@@ -279,6 +279,7 @@ fn session_denial(error: &HostError) -> SettingsRemoteDenial {
             SettingsRemoteDenial::Conflict
         }
         HostError::Invalid(_) => SettingsRemoteDenial::OutsideScope,
+        HostError::SettingsService(error) => remote_denial(error),
         _ => SettingsRemoteDenial::Unavailable,
     }
 }
