@@ -106,6 +106,10 @@ pub enum CredentialOperation {
     RemoveMcp {
         binding: McpEnvironmentBinding,
     },
+    RemoveSystemOne {
+        endpoint: String,
+        reference: uuid::Uuid,
+    },
 }
 
 struct EnvironmentCredential {
@@ -300,6 +304,7 @@ impl CredentialVault {
             | CredentialOperation::RemoveMcp { binding } => {
                 binding.scope_key()?;
             }
+            CredentialOperation::RemoveSystemOne { .. } => {}
         }
         match operation {
             CredentialOperation::Store { binding, secret } => match binding.storage {
@@ -364,6 +369,14 @@ impl CredentialVault {
                 }
                 CredentialStorage::Native => self.native.delete(binding.credential_key()?).await,
             },
+            CredentialOperation::RemoveSystemOne {
+                endpoint,
+                reference,
+            } => {
+                self.native
+                    .delete(system_one_key(&endpoint, reference)?)
+                    .await
+            }
         }
     }
 
@@ -398,27 +411,10 @@ impl CredentialVault {
             super::settings::contract::SettingsCredentialBinding::SystemOne {
                 endpoint,
                 reference,
-            } => {
-                if reference.is_nil() {
-                    return Err(CredentialError::InvalidKey);
-                }
-                let configuration = crate::selector::system_one::SelectionConfig::system_one(
-                    endpoint,
-                    "credential-binding",
-                    Some(*reference),
-                )
-                .map_err(|_| CredentialError::InvalidKey)?;
-                let crate::selector::system_one::SelectionConfig::SystemOne(configuration) =
-                    configuration
-                else {
-                    return Err(CredentialError::InvalidKey);
-                };
-                let key = configuration
-                    .credential_key()?
-                    .ok_or(CredentialError::InvalidKey)?;
-                self.native
-                    .store_blocking(key, CredentialSecret::new(secret.0.expose().to_vec())?)
-            }
+            } => self.native.store_blocking(
+                system_one_key(endpoint, *reference)?,
+                CredentialSecret::new(secret.0.expose().to_vec())?,
+            ),
         }
     }
 
@@ -495,6 +491,28 @@ impl CredentialVault {
                 .map(|secret| secret.map(Arc::new)),
         }
     }
+}
+
+fn system_one_key(
+    endpoint: &str,
+    reference: uuid::Uuid,
+) -> Result<crate::credentials::CredentialKey, CredentialError> {
+    if reference.is_nil() {
+        return Err(CredentialError::InvalidKey);
+    }
+    let crate::selector::system_one::SelectionConfig::SystemOne(configuration) =
+        crate::selector::system_one::SelectionConfig::system_one(
+            endpoint,
+            "credential-binding",
+            Some(reference),
+        )
+        .map_err(|_| CredentialError::InvalidKey)?
+    else {
+        return Err(CredentialError::InvalidKey);
+    };
+    configuration
+        .credential_key()?
+        .ok_or(CredentialError::InvalidKey)
 }
 
 fn printable_secret(bytes: Vec<u8>) -> Result<CredentialSecret, CredentialError> {
