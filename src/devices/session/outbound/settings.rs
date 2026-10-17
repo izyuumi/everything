@@ -119,10 +119,8 @@ impl SettingsCustodyState {
                     state => *self = state,
                 }
             }
-            Self::Preparing { stop, .. } | Self::Observed { stop, .. } => {
-                if stop.is_none() {
-                    *stop = Some(cause);
-                }
+            Self::Preparing { stop, .. } | Self::Observed { stop, .. } if stop.is_none() => {
+                *stop = Some(cause);
             }
             _ => {}
         }
