@@ -27,7 +27,8 @@ Scoped Settings transport foundations, with public accepted dispatch still disab
 - [Explicit Apple Bind client](contracts/apple-settings-bind-client.md): a separate user gesture, same-window send and genuine Fresh private parent observation; recovery and the Host private sender remain separate.
 - [Explicit Apple Snapshot client](contracts/apple-settings-snapshot-client.md): genuine current-parent value request, authenticated Fresh display and fixed freshness; Host delivery remains unverified.
 - [Explicit Apple Original inspection](contracts/apple-settings-original-inspection-client.md): exact user-specified target, genuine current parent and endpoint-free Fresh lookup; no mutation retry or recovery.
-- [Apple scoped Update data](contracts/apple-settings-update-wire.md): typed narrow command and matched Original response; live mutation ownership and writable UI remain separate.
+- [Apple scoped Update data](contracts/apple-settings-update-wire.md): typed narrow command and matched Original response.
+- [Apple Update client ownership](contracts/apple-settings-update-client.md): one Service-lifetime Original, genuine Bound capture/send and authenticated Fresh outcome; writable UI and Host activation remain separate.
 - [Apple Bind ownership](contracts/apple-settings-bind-owner.md): the first immutable Bind identity, shared pending/receive custody, fixed clocks and nonresettable association.
 - [Outbound selection](contracts/transport-outbound-selection.md): bounded metadata selection before ciphertext loading.
 - [Private ciphertext loading and preparation](contracts/settings-private-ciphertext-loading.md): exact rows/authentication plus internal counted waiting, original worker joins and Prepared DATA; actual pump invocation remains separate.
