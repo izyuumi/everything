@@ -21,9 +21,9 @@ pub(crate) use paired::{
     OriginalReplySource, PairedParentAdmission, PairedSettingsParent, PairedUpdateOutcome,
     QualifiedBindReply, QualifiedOriginalReply, QualifiedSettingsAccessReply,
     SettingsAccessQualificationError, SettingsAccessReplyFamily, SettingsAccessReservationSpec,
-    SettingsReadQualificationError, SettingsReadQueryDisposition, SettingsReadReplyFamily,
-    SettingsReadReservationSpec, SettingsReceiptAuthority, SettingsReplyComparison,
-    SettingsReplyProjectionError,
+    SettingsQueuedReplyCheckError, SettingsReadQualificationError, SettingsReadQueryDisposition,
+    SettingsReadReplyFamily, SettingsReadReservationSpec, SettingsReceiptAuthority,
+    SettingsReplyComparison, SettingsReplyProjectionError,
 };
 pub use pairing::{
     NativePairingAcceptance, NativePairingAccess, NativePairingApprovalInput,

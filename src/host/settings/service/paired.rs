@@ -16,7 +16,8 @@ pub(crate) use reads::{
 mod replies;
 
 pub(crate) use replies::{
-    QualifiedBindReply, SettingsReplyComparison, SettingsReplyProjectionError,
+    QualifiedBindReply, SettingsQueuedReplyCheckError, SettingsReplyComparison,
+    SettingsReplyProjectionError,
 };
 
 use std::fmt;
