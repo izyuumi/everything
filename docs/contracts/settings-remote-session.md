@@ -37,6 +37,8 @@ Each list/get/update call rereads the grant head; a revoked, reduced, expired or
 
 A turn runs for up to 120 s, beyond one 30 s request. The device polls with `session_poll` (a new `query_id` each time); each poll returns the current status, including after the turn finished. Committed text is paged by `text_offset` (at most 16 KiB escaped per reply). Operation ids in the status identify the turn's Settings writes; the authoritative effect is read back through the scoped `snapshot` and `changes` requests, which only show readable keys. A closed or expired chat's final status can be polled while the Host still retains its parent; a newer Open for the same device replaces the parent and that history.
 
+As for native chats, a turn that ends without completing (for example at the four-attempt model limit) closes the chat; its final status stays pollable and the device opens a new chat to continue.
+
 `session_send` and `session_open` are replay-safe: the same `turn_id` with the same digest and text returns the original `session_accepted`, a changed text is `conflict`, and the same `open_request_id` returns the original Open. A device that lost a reply resends the same identity instead of inventing a new one.
 
 ## Build and guard
