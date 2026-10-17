@@ -66,6 +66,22 @@ struct SettingsView: View {
                     }
                     LabeledContent("Observed") { Text(Date(timeIntervalSince1970: Double(access.observedAt) / 1000), style: .time) }
                 }
+                Button("Request Settings binding") { model.bindHostSettings() }
+                    .disabled(!model.canBindHostSettings)
+                if let binding = model.hostSettingsBinding {
+                    Text(bindingStatus(binding.stage)).font(.footnote).foregroundStyle(.secondary)
+                    if let observed = binding.observedAt, let expires = binding.expiresAt {
+                        Text(model.hostSettingsBindingIsCurrent ? "Current connection binding observation" : "Stale binding observation")
+                            .font(.caption).foregroundStyle(.secondary)
+                        LabeledContent("Binding observed") { Text(Date(timeIntervalSince1970: Double(observed) / 1000), style: .time) }
+                        LabeledContent("Binding expires") { Text(Date(timeIntervalSince1970: Double(expires) / 1000), style: .time) }
+                    }
+                    if binding.stage.blocksNewRequest {
+                        Button("Cancel binding request", role: .cancel) { model.cancelHostSettingsBinding() }
+                    }
+                    Text("This original binding cannot be retried here. Cancelling or disconnecting does not confirm that the Host closed it.").font(.footnote)
+                }
+                Text("Binding requests do not start an assistant or enable Host controls.").font(.footnote)
                 Text("This check reports access metadata only. It does not change Host settings or contact an AI provider. A stale observation grants no access.").font(.footnote)
             }
             Section("This iPhone") {
@@ -100,6 +116,16 @@ struct SettingsView: View {
         case .expired: "The access check expired without a current observation."
         case .interrupted: "The access check was interrupted; current Host access is unknown."
         case nil: "Connect to the Host, then explicitly check its access for this device."
+        }
+    }
+
+    private func bindingStatus(_ stage: ReplicaSettingsBindingStage) -> String {
+        switch stage {
+        case .preparing: "Preparing the original binding request."
+        case .awaitingReply: "Waiting for the Host binding response."
+        case .settling: "Finishing the original binding request."
+        case .observed: "The Host binding response was observed."
+        case .retained: "The original binding is retained; its current Host outcome has not been verified."
         }
     }
 
