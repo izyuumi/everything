@@ -9,17 +9,19 @@ use tokio::sync::OwnedMutexGuard;
 use uuid::Uuid;
 use zeroize::Zeroizing;
 
-use crate::crypto::DevicePublicKeys;
+use crate::crypto::{DevicePublicKeys, EnvelopeHeader};
 use crate::devices::{
     AccessStatusRejection, BindingGeneration, OwnedCommittedSettingsAccess,
-    OwnedVerifiedSettingsAccess, ReplyBuildPermit, SettingsAccessReplyPacket,
-    SettingsReplyPublicationError, SettingsReplyQualification,
+    OwnedQueuedSettingsReply, OwnedVerifiedSettingsAccess, ReplyBuildPermit,
+    SettingsAccessReplyPacket, SettingsReplyBuildRequest, SettingsReplyPublicationError,
+    SettingsReplyQualification,
 };
 use crate::host::settings::{SettingsGrantHead, SettingsGrantReference};
 use crate::protocol::{DeviceId, MessageId, UnixMillis};
 use crate::storage::{ConsumedSettingsReply, Store, settings_grant_head_on};
 
 use super::pins::ReplyPinError;
+use super::replies::SettingsQueuedReplyCheckError;
 use super::{
     SettingsGrantOwner, SettingsGrantState, SettingsReceiptAuthority, SettingsReplyProjectionError,
     SettingsServiceError, original_reply_text,
@@ -526,6 +528,45 @@ impl fmt::Debug for QualifiedSettingsAccessReply<'_> {
 }
 
 impl SettingsReceiptAuthority {
+    pub(super) fn recheck_queued_access_reply_on(
+        &self,
+        store: &Store,
+        connection: &Connection,
+        mutation: &OwnedMutexGuard<()>,
+        queued: &OwnedQueuedSettingsReply,
+        comparison: &AccessReplyComparison,
+    ) -> Result<(), SettingsQueuedReplyCheckError> {
+        let SettingsReplyBuildRequest::Access(request) = queued.request()? else {
+            return Err(SettingsReplyPublicationError::Conflict.into());
+        };
+        let header = queued.committed()?.header();
+        let read = self
+            .read_access_reply_on(store, connection, mutation, request)
+            .map_err(SettingsReplyProjectionError::from)?;
+        check_queued_access_observation(
+            comparison,
+            &read.status,
+            read.reply_deadline,
+            request,
+            header,
+        )
+        .map_err(SettingsReplyProjectionError::from)?;
+        queued.request()?;
+        queued.committed()?;
+        let observed = self
+            .finish_access_reply_observation(store, request, read)
+            .map_err(SettingsReplyProjectionError::from)?;
+        check_queued_access_observation(
+            comparison,
+            &observed.status,
+            observed.reply_deadline,
+            request,
+            header,
+        )
+        .map_err(SettingsReplyProjectionError::from)?;
+        Ok(())
+    }
+
     pub(crate) fn qualify_access_reply_on<'scope>(
         &'scope self,
         store: &Store,
@@ -769,6 +810,42 @@ impl SettingsReceiptAuthority {
             },
             reply_deadline,
         })
+    }
+}
+
+fn check_queued_access_observation(
+    comparison: &AccessReplyComparison,
+    observed: &AccessObservation,
+    reply_deadline: Instant,
+    request: &OwnedCommittedSettingsAccess,
+    header: &EnvelopeHeader,
+) -> Result<(), SettingsAccessQualificationError> {
+    let source = request.verified_request().authority_source();
+    if !Arc::ptr_eq(&comparison.invocation, source.invocation_identity())
+        || !Arc::ptr_eq(&comparison.query, &observed.query)
+        || comparison.family != request.reply_reservation().family
+        || comparison.query_floor != observed.query_floor
+        || comparison.query_deadline != observed.query_deadline
+        || comparison.reply_deadline != reply_deadline
+        || observed.wall < comparison.observed_wall
+        || observed.monotonic < comparison.observed_monotonic
+        || observed.wall.get() < header.created_at_ms
+    {
+        return Err(SettingsServiceError::OutsideScope.into());
+    }
+    match (
+        &observed.decision,
+        comparison.family,
+        comparison.grant.as_ref(),
+    ) {
+        (AccessDecision::GrantUnavailable, SettingsAccessReplyFamily::Denial, None) => Ok(()),
+        (AccessDecision::Active(head), SettingsAccessReplyFamily::Default, Some(grant))
+            if grant.grant_id == head.grant.change.target.grant_id
+                && grant.revision == head.grant.revision =>
+        {
+            Ok(())
+        }
+        _ => Err(SettingsServiceError::OutsideScope.into()),
     }
 }
 
