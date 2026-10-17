@@ -1,6 +1,6 @@
-# AccessStatus qualification
+# Remote request qualification
 
-`src/host/settings/service/paired/access.rs` decides, on a caller-supplied Main transaction, whether an AccessStatus query from a verified peer gets a summary or the fixed denial. It is used at receipt admission ([receipts](settings-access-receipts.md)), at reply publication ([publication](settings-reply-publication.md)) and when a queued reply is loaded for sending. The overall flow is in [the Access transport](settings-access-transport.md).
+`src/host/settings/service/paired/access.rs` decides, on a caller-supplied Main transaction, whether a remote Settings request from a verified peer is served under an Active grant or gets the fixed `grant_unavailable` denial. The same decision applies to every request kind; per-kind key and generation checks follow in `paired/remote.rs` ([reply build](settings-access-transport.md#reply-build)). It is used at receipt admission ([receipts](settings-access-receipts.md)), at reply publication ([publication](settings-reply-publication.md)) and when a queued reply is loaded for sending. The overall flow is in [the Access transport](settings-access-transport.md).
 
 ## Checks
 

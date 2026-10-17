@@ -1,6 +1,6 @@
 # Scoped Settings grant storage
 
-This source implements typed grant records, atomic storage and authenticated local-owner CLI/IPC consumers. It does not admit a remote parent, activate remote Settings authority, resolve credentials, start a model, cancel an existing session or change device trust. Existing paired devices receive no Settings authority. Required compilation, schema preparation and behavior validation remain pending; this increment alone does not complete [#116](https://github.com/izyuumi/everything/issues/116). Deferred automated validation remains [#32](https://github.com/izyuumi/everything/issues/32).
+This source implements typed grant records, atomic storage and authenticated local-owner CLI/IPC consumers. Grant storage itself resolves no credentials, starts no model, cancels no session and changes no device trust. Existing paired devices receive no Settings authority. The [remote Settings transport](settings-access-transport.md) is the remote consumer: it rereads the current head under the Host mutation guard for every request, so an owner reduction or revocation applies to the next remote read or write, including already admitted requests. Deferred automated validation remains [#32](https://github.com/izyuumi/everything/issues/32).
 
 ## Domain and provenance
 

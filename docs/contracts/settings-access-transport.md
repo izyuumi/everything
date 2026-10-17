@@ -1,8 +1,8 @@
-# Remote Settings Access transport (Host)
+# Remote Settings transport (Host)
 
-The Host answers exactly one remote Settings family over the relay: the read-only `AccessStatus` query ([request](settings-access-status.md) and [reply](settings-access-replies.md) DATA). Every other Settings kind is refused. This contract covers the Host path from relay delivery to the sent reply. The Apple side is in [the Access client](apple-settings-access-client.md).
+The Host answers one scoped remote Settings request family over the relay through a single pipeline. Request kinds are `access_status`, `snapshot`, `changes`, `update` and `host_action` ([request DATA](settings-access-status.md)); replies are in [reply DATA](settings-access-replies.md). Authority comes only from the verified envelope sender, the live pin and the owner-created [grant](settings-grants.md). There is no OwnerQuery/OwnerOperation forwarding. The Apple side currently sends only `access_status` ([Access client](apple-settings-access-client.md)).
 
-Owners: `src/devices/session.rs` (`relay_session_loop`), `src/devices/settings_connection.rs`, `src/devices/settings_ingress.rs` and `settings_ingress/{access,wire,work,work/build}.rs`, `src/devices/settings_publication.rs`, `src/host/settings/service/paired*.rs`, `src/host/settings/authority/paired.rs`, `src/storage/settings_transport.rs`, `src/storage/settings_publication.rs`, `src/storage/transport.rs`. Storage tables and quotas are in [transport storage](settings-transport-storage.md).
+Owners: `src/devices/session.rs` (`relay_session_loop`), `src/devices/settings_connection.rs`, `src/devices/settings_ingress.rs` and `settings_ingress/{access,wire,work,work/build}.rs`, `src/devices/settings_publication.rs`, `src/devices/settings_access_reply.rs`, `src/host/settings/service/paired*.rs` (including `paired/remote.rs`), `src/host/settings/authority/paired.rs`, `src/storage/settings_transport.rs`, `src/storage/settings_publication.rs`, `src/storage/transport.rs`. Storage tables and quotas are in [transport storage](settings-transport-storage.md).
 
 ## Startup
 
@@ -18,10 +18,10 @@ Every relay Delivery, ordinary or private, is admitted to Work one frame at a ti
 
 - Ordinary payloads take the existing durable inbox path.
 - A Settings packet over 32 KiB is rejected as `invalid_packet`.
-- Any Settings kind other than `AccessStatus` is rejected as `settings_unavailable`.
-- `AccessStatus` is admitted in one IMMEDIATE transaction: private-request ledger charge, verified source, current authority (pins, grant head, Access query cell), reply reservation and processed inbox marker, with a recheck before COMMIT.
+- A Settings packet that does not decode to one of the five request kinds is rejected as `settings_unavailable`.
+- A decoded request is admitted in one IMMEDIATE transaction: private-request ledger charge, verified source, current authority (pins, grant head, query cell), reply reservation and processed inbox marker, with a recheck before COMMIT. A device without an Active grant gets a `denial` reservation; otherwise `default`.
 
-The relay ACK is sent only after the durable receipt (ordinary, rejected, committed or duplicate) is joined. A delivery that is not ACKed may be redelivered by the relay.
+The relay ACK is sent only after the durable receipt (ordinary, rejected, committed or duplicate) is joined. A delivery that is not ACKed may be redelivered by the relay. A relay ACK is transport receipt, not mutation success.
 
 | Limit | Value |
 | --- | --- |
@@ -29,9 +29,11 @@ The relay ACK is sent only after the durable receipt (ordinary, rejected, commit
 | Private request plaintext | 32 KiB |
 | Request lifetime | at most 30 s |
 | Clock skew | `issued_at` may be up to 5000 ms (`SETTINGS_CLOCK_SKEW_MS`) ahead of the Host wall clock |
-| Access query cells (RAM) | 512 per connection, 64 per peer |
+| Query cells (RAM) | 512 per connection, 64 per peer |
 | Queued published replies | 32 |
 | Reply reservation | default 49,152 bytes (32 KiB plaintext); denial 4,096 bytes (2 KiB plaintext) |
+| Remote change page | at most 64 rows and 24 KiB |
+| Paired-origin journal identities | 32 per device, 128 total |
 
 Query cells whose original deadline has passed are evicted before the capacity check. All cells are cleared when a new connection registers its first query.
 
@@ -46,11 +48,18 @@ Query cells whose original deadline has passed are evicted before the capacity c
 
 Quarantine fails Work, which ends the relay session with an error; the transport drain then reports failure and a process restart is required. A failed rollback also latches the shared Store per [ADR-0013](../decisions/ADR-0013-permanent-store-quarantine.md).
 
-## Reply
+## Reply build
 
-Work builds replies with one build slot; committed queries wait in FIFO order, bounded by the private ledger. The build worker, under the mutation guard, qualifies current access, seals, consumes the reservation, inserts the private outbox row and the outbox row, captures a comparison, rechecks and COMMITs.
+Work builds replies with one build slot; committed requests wait in FIFO order, bounded by the private ledger. The build worker holds the Host mutation guard for the whole build.
 
-- A publication that rolled back cleanly (expired, authority changed) drops that query; its reservation is swept on expiry.
+1. `SettingsReceiptAuthority::prepare_remote_reply` (snapshot, changes, update only) rereads current access with the reservation still present. Without an Active grant it prepares nothing and the reply is the `grant_unavailable` denial. With an Active grant it compares the request `generation` (grant id, grant revision, Host epoch, connection epoch) with the current one; a mismatch becomes `grant_changed`. Otherwise:
+   - Snapshot: every requested key must be readable; the existing Host snapshot is filtered to the requested keys.
+   - Changes: the existing change-hint page, with each hint's keys intersected with the readable set and empty hints skipped.
+   - Update: every changed key must be writable. A paired caller is minted for this one request and the existing update path runs with the already held guard: original request-ID replay first, revision CAS, journal identity, file write and receipt. See [paired authority](paired-settings-authority.md).
+   Service errors become closed denial reasons (`conflict`, `outside_scope`, `write_blocked`, `capacity`, `invalid`, `outcome_unknown`, `unavailable`).
+2. Publication: under the same guard, qualify current access again, project the reply (the prepared payload must carry the current generation), seal, consume the reservation, insert the private outbox and outbox rows, capture a comparison, recheck and COMMIT ([publication](settings-reply-publication.md)).
+
+- A preparation or publication that failed before or rolled back cleanly (expired, authority changed) drops that request; its reservation is swept on expiry. A mutation that already committed stays committed; the client recovers its receipt by resending the same `request_id`.
 - An uncertain or failed rollback or commit, or a panic, quarantines.
 
 A published reply moves into the queued registry and the session is told `ReplyQueued`. The session takes it, acquires the mutation guard and, in a blocking task, loads the private ciphertext in a Deferred transaction that rechecks current authority before and after reading and verifying the stored envelope. It then sends the frame on the same relay socket.
@@ -59,14 +68,21 @@ After the send attempt, successful or not, or immediately when the load fails wi
 
 The relay `Accepted` for a sent Settings message id is consumed (tracked for at most 15 s), not treated as a protocol error. Ordinary messages keep their [send window](ordinary-relay-send-window.md) behaviour.
 
+## Authority boundaries
+
+- Existing pairing grants nothing; only the owner grant routes create, reduce or revoke a grant. A reduction or revocation is visible to the next preparation, including requests already admitted and waiting for the build slot.
+- Writable keys are limited to the grant's writable set, which grant storage limits to `memory.embeddings.enabled` and `memory.embeddings.dimensions`. Protected, read-only, device and OS keys are refused.
+- `host_action` never executes anything: it returns `host_action_required` for credential entry, pairing invitation or approval, device revocation, grant changes, execution policy, recipient consent and lifecycle.
+- Settings remote packets never carry credentials, invitations or secret transfers, and no plaintext request or reply body is persisted.
+
 ## Connection end and shutdown
 
-When the connection ends, the owner is dropped: the connection identity is retired, intake closes, a pending frame is dropped without ACK, and waiting queries and an unstarted build are withdrawn. `drain_connection` joins jobs, retires every queued reply (rows deleted) and requires a complete ledger before the next connect. A failed drain makes the relay report Failed and Host shutdown return an error; shutdown does not hang.
+When the connection ends, the owner is dropped: the connection identity is retired, intake closes, a pending frame is dropped without ACK, and waiting requests and an unstarted build are withdrawn. A live connection is part of the paired caller's validity, so a write that has not yet renamed its file is cancelled by the existing write-origin check. `drain_connection` joins jobs, retires every queued reply (rows deleted) and requires a complete ledger before the next connect. A failed drain makes the relay report Failed and Host shutdown return an error; shutdown does not hang.
 
 ## Not implemented
 
-Bind, Update/command, permanent Originals, Snapshot and Original-inspection reads, paired Settings supervision and history, and parent registration are not in this tree. Their Swift clients exist without a responding Host; the Host records their packets as rejected.
+A remote restricted Settings session (paired chat) is not implemented. The Swift Snapshot, Inspection, Bind and Update codecs predate this Host shape and do not interoperate with it; iOS integration is #117.
 
 ## Validation
 
-Local compile and static checks only. No runtime, device, relay round-trip or security verification has been performed. Deferred automated coverage is tracked in [#32](https://github.com/izyuumi/everything/issues/32).
+Local compile/static checks and one disposable real-relay walkthrough with a scratch Replica helper ([record](../development/settings-validation.md#remote-scoped-settings-walkthrough)). Deferred automated coverage is tracked in [#32](https://github.com/izyuumi/everything/issues/32).
