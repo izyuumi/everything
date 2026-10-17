@@ -4368,11 +4368,26 @@ actor ReplicaService {
               try isCurrentSettingsUpdateOriginal(pending), case .prepared(let envelope) = pending.phase,
               case .update(let sent) = outbound[.update(pending.input.requestID)], sent.original === pending,
               !sent.sendStarted else { return }
-        guard try await checkSettingsUpdateStore(pending), try isCurrentSettingsUpdateOriginal(pending),
-              case .prepared(let retained) = pending.phase, sameSettingsEnvelope(retained, envelope) else { return }
-        guard outboundSocket === socket, case .update(let registered) = outbound[.update(pending.input.requestID)],
-              registered === sent, let bound = sent.envelope, sameSettingsEnvelope(bound, envelope),
-              !sent.sendStarted, outbound[.ordinary(envelope.header.messageID)] == nil else { throw WireError.conflict }
+        pending.phase = .preparing
+        do {
+            let current = try await checkSettingsUpdateStore(pending)
+            pending.phase = .prepared(envelope)
+            guard current, try isCurrentSettingsUpdateOriginal(pending),
+                  case .prepared(let retained) = pending.phase, sameSettingsEnvelope(retained, envelope) else {
+                if pending.record.status == nil { pending.record.status = .interrupted }
+                retirePendingSettingsUpdate(pending)
+                return
+            }
+            guard outboundSocket === socket, case .update(let registered) = outbound[.update(pending.input.requestID)],
+                  registered === sent, let bound = sent.envelope, sameSettingsEnvelope(bound, envelope),
+                  !sent.sendStarted, outbound[.ordinary(envelope.header.messageID)] == nil else { throw WireError.conflict }
+        } catch {
+            pending.phase = .prepared(envelope)
+            if pending.record.status == nil { pending.record.status = .interrupted }
+            retirePendingSettingsUpdate(pending)
+            retireSettingsScope(socket: socket)
+            throw error
+        }
         sent.sendStarted = true
         do {
             try await socket.send(.object(["type": .string("send"), "schema_version": .unsigned(1), "envelope": envelope.wire]))
