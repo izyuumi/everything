@@ -22,6 +22,7 @@ Scoped Settings transport foundations, with public accepted dispatch still disab
 - [Read qualification](contracts/settings-read-qualification.md): one shared query ledger, current parent/full pins/R and fixed deadlines.
 - [Read receipts](contracts/settings-read-receipts.md): sole metadata writer, actual joined ownership and mutex cleanup; Known allocates no response or slot.
 - [Joined Read currentness and Snapshot publication](contracts/settings-read-replies.md): genuine Snapshot-only BUILD, R-before-values capture, checked seal/Main publication and consumed/queued checks; Original inspection and live relay/client integration remain separate.
+- [Live Apple Access client](contracts/apple-settings-access-client.md): explicit metadata-only request/send, authenticated Fresh adoption and iOS display; Bind, Host values and the Host private sender remain separate.
 - [Apple Bind ownership](contracts/apple-settings-bind-owner.md): the first immutable Bind identity, shared pending/receive custody and genuine Fresh projection; live transport and recovery remain separate.
 - [Outbound selection](contracts/transport-outbound-selection.md): bounded metadata selection before ciphertext loading.
 - [Private ciphertext loading](contracts/settings-private-ciphertext-loading.md): exact retained rows, bounded ciphertext authentication and current authority; counted job/socket integration remains separate.
