@@ -10,6 +10,9 @@ mod operations;
 pub mod service;
 pub(super) mod transport;
 
+#[cfg(unix)]
+pub(crate) use transport::SettingsRelayCapability;
+
 pub(crate) use authority::SettingsAgentBinding;
 pub use authority::{
     NativeSessionOpened, NativeSessionProof, SettingsAgentSession, SettingsCaller,

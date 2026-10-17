@@ -538,8 +538,20 @@ impl HostService {
                 Arc::clone(&host.mutation),
             )
             .map_err(HostError::from)
-            .and_then(|(transport, owner)| {
+            .and_then(|(transport, mut owner)| {
                 host.settings_service.bind_paired_transport(&transport)?;
+                let capability = super::settings::SettingsRelayCapability::new(
+                    host.settings_service.clone(),
+                    Arc::clone(&host.settings_agents),
+                    transport.clone(),
+                );
+                owner
+                    .install_settings_capability(capability)
+                    .map_err(|failure| {
+                        let (error, rejected_capability) = *failure;
+                        drop(rejected_capability);
+                        HostError::from(error)
+                    })?;
                 host.settings_transport.set(transport).map_err(|_| {
                     HostError::Invalid("settings transport owner was already registered")
                 })?;

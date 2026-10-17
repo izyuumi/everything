@@ -29,6 +29,8 @@ use crate::crypto::EncryptedEnvelope;
 #[cfg(unix)]
 use crate::devices::session::outbound::RelaySendWindow;
 #[cfg(unix)]
+use crate::host::settings::SettingsRelayCapability;
+#[cfg(unix)]
 use crate::host::settings::agent::{PairedResultHandoff, SettingsAgentRuntime};
 use crate::protocol::DeviceId;
 #[cfg(unix)]
@@ -66,6 +68,8 @@ pub(crate) struct HostSettingsTransportOwner {
     mutation: Arc<Mutex<()>>,
     #[cfg(unix)]
     receive: SettingsReceiveWork,
+    #[cfg(unix)]
+    settings_capability: Option<SettingsRelayCapability>,
 }
 
 pub(super) struct SettingsConnectionOwner<'owner> {
@@ -172,8 +176,39 @@ impl HostSettingsTransportOwner {
                 endpoint,
                 mutation,
                 receive,
+                settings_capability: None,
             },
         ))
+    }
+
+    #[cfg(unix)]
+    pub(crate) fn install_settings_capability(
+        &mut self,
+        capability: SettingsRelayCapability,
+    ) -> Result<(), Box<(DeviceError, SettingsRelayCapability)>> {
+        if !capability.matches_host(&self.identity)
+            || !self.identity.is_live()
+            || self.settings_capability.is_some()
+        {
+            self.identity.close();
+            return Err(Box::new((
+                DeviceError::Invalid(
+                    "settings relay capability does not match its available Host owner",
+                ),
+                capability,
+            )));
+        }
+        self.settings_capability = Some(capability);
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    pub(super) fn settings_capability(&self) -> Result<&SettingsRelayCapability, DeviceError> {
+        self.settings_capability
+            .as_ref()
+            .ok_or(DeviceError::Invalid(
+                "settings relay capability is not installed",
+            ))
     }
 
     pub(super) fn connected_relay<'owner>(
@@ -228,6 +263,11 @@ impl HostSettingsTransportOwner {
 }
 
 impl SettingsConnectionOwner<'_> {
+    #[cfg(unix)]
+    pub(super) fn settings_capability(&self) -> Result<&SettingsRelayCapability, DeviceError> {
+        self.owner.settings_capability()
+    }
+
     #[cfg(unix)]
     pub(super) fn try_receive(
         &mut self,
