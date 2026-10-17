@@ -198,3 +198,56 @@ impl fmt::Debug for OwnedVerifiedSettingsRead {
         formatter.write_str("OwnedVerifiedSettingsRead([private])")
     }
 }
+
+pub(super) enum ReadWorkState {
+    Rejected(super::SettingsReceiveError),
+    Verified {
+        result: Option<
+            Result<
+                crate::storage::SettingsReadReceiptCommit,
+                Arc<crate::storage::SettingsReadAdmissionError>,
+            >,
+        >,
+        verified: Box<OwnedVerifiedSettingsRead>,
+    },
+}
+
+impl ReadWorkState {
+    pub(super) fn verified(&self) -> Option<&OwnedVerifiedSettingsRead> {
+        match self {
+            Self::Verified { verified, .. } => Some(verified),
+            Self::Rejected(_) => None,
+        }
+    }
+
+    pub(super) fn witness(&self) -> Option<&PrivateWitness> {
+        self.verified().map(|owner| &owner._witness)
+    }
+}
+
+pub(super) struct ReadReceiptOutput {
+    pub(super) reply: crate::storage::StoredSettingsReadReply,
+    pub(super) verified: Box<OwnedVerifiedSettingsRead>,
+}
+
+pub(crate) struct OwnedCommittedSettingsRead {
+    reply: crate::storage::StoredSettingsReadReply,
+    verified: Box<OwnedVerifiedSettingsRead>,
+}
+
+impl OwnedCommittedSettingsRead {
+    pub(super) fn from_joined(output: ReadReceiptOutput) -> Self {
+        Self {
+            reply: output.reply,
+            verified: output.verified,
+        }
+    }
+
+    pub(crate) fn verified_request(&self) -> &OwnedVerifiedSettingsRead {
+        &self.verified
+    }
+
+    pub(crate) fn reply_reservation(&self) -> &crate::storage::StoredSettingsReadReply {
+        &self.reply
+    }
+}

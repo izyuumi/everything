@@ -16,6 +16,7 @@ pub(crate) use build::OwnedQueuedSettingsReply;
 use build::{QueuedReplyRegistry, ReplyBuildState, ReplyBuildWorkerOutput};
 
 use super::access::{AccessReceiptOutput, AccessWorkState, OwnedCommittedSettingsAccess};
+use super::read_source::{OwnedCommittedSettingsRead, ReadReceiptOutput, ReadWorkState};
 use super::{
     BindingHistory, CommittedBindSource, CommittedSettingsCommandSource,
     OwnedCommittedSettingsBind, OwnedCommittedSettingsCommand, OwnedHistoricalSettingsCommand,
@@ -120,6 +121,7 @@ struct WorkerOutput {
     retained_command: Option<OwnedVerifiedSettingsCommand>,
     command_outcome: Option<SettingsCommandOutcome>,
     access: Option<AccessWorkState>,
+    read: Option<ReadWorkState>,
     frame: Option<FrameWitness>,
 }
 
@@ -158,11 +160,18 @@ enum AccessJoinedDisposition {
     Capacity,
 }
 
+enum ReadJoinedDisposition {
+    Fresh,
+    Settled,
+    Capacity,
+}
+
 pub(super) struct CommandWorkState {
     pub(super) authority: Option<SettingsReceiptAuthority>,
     pub(super) command: Option<OwnedVerifiedSettingsCommand>,
     pub(super) outcome: Option<SettingsCommandOutcome>,
     pub(super) access: Option<AccessWorkState>,
+    pub(super) read: Option<ReadWorkState>,
 }
 
 pub(super) struct GuardScope {
@@ -1376,6 +1385,9 @@ impl SettingsReceiveWork {
             self.latch_failure();
             return Err(SettingsReceiveError::Bookkeeping);
         };
+        if matches!(self.retained_join.as_ref(), Some(Ok((_, output))) if output.read.is_some()) {
+            return self.finish_read_join(receipt);
+        }
         if matches!(self.retained_join.as_ref(), Some(Ok((_, output))) if output.access.is_some()) {
             return self.finish_access_join(receipt);
         }
@@ -1394,11 +1406,13 @@ impl SettingsReceiveWork {
             retained_command,
             command_outcome,
             access,
+            read,
             guard,
             context,
             frame,
         } = output;
         drop(access);
+        drop(read);
         if frame.is_none() {
             self.failure = Some(self.ledger.fail());
             self.closed = true;
@@ -1482,6 +1496,7 @@ impl SettingsReceiveWork {
         if output.frame.is_none()
             || output.retained_command.is_some()
             || output.command_outcome.is_some()
+            || output.read.is_some()
         {
             return Err(self.ledger.fail());
         }
@@ -1687,6 +1702,244 @@ impl SettingsReceiveWork {
         }
     }
 
+    fn read_join_disposition(&self) -> Result<ReadJoinedDisposition, SettingsReceiveError> {
+        use super::read::SettingsReadRequest;
+        use crate::host::settings::service::SettingsReadReplyFamily;
+        use crate::storage::SettingsReadReceiptCommit;
+
+        let Some(Ok((_, output))) = self.retained_join.as_ref() else {
+            return Err(self.ledger.fail());
+        };
+        let Some(read) = output.read.as_ref() else {
+            return Err(self.ledger.fail());
+        };
+        if output.frame.is_none()
+            || output.retained_command.is_some()
+            || output.command_outcome.is_some()
+            || output.access.is_some()
+        {
+            return Err(self.ledger.fail());
+        }
+        if let Some(verified) = read.verified() {
+            let context = self.context.as_ref().ok_or_else(|| self.ledger.fail())?;
+            let source = verified.authority_source();
+            if output.receipt_authority.is_some()
+                || !source.matches_context(&context.agent, &context.endpoint, &context.mutation)
+            {
+                return Err(self.ledger.fail());
+            }
+            self.check_unjoined_build(
+                read.witness().ok_or_else(|| self.ledger.fail())?,
+                source.connection(),
+                source.verified_peer_keys().device_id,
+            )?;
+            if let Ok(completion) = &output.completion {
+                let id = match &completion.receipt {
+                    SettingsTransportReceipt::PrivateCommitted { message_id }
+                    | SettingsTransportReceipt::PrivateDuplicate { message_id }
+                    | SettingsTransportReceipt::PrivateRejected { message_id, .. } => message_id,
+                    SettingsTransportReceipt::Ordinary { .. } => return Err(self.ledger.fail()),
+                };
+                if source
+                    .receipt_metadata()
+                    .map_err(|error| SettingsReceiveError::ReadSource(Arc::new(error)))?
+                    .message_id
+                    != id.to_string()
+                {
+                    return Err(self.ledger.fail());
+                }
+            }
+        }
+        match (&output.completion, read) {
+            (
+                Ok(WorkCompletion {
+                    receipt: SettingsTransportReceipt::PrivateCommitted { .. },
+                    bind: None,
+                }),
+                ReadWorkState::Verified {
+                    result: Some(Ok(SettingsReadReceiptCommit::Fresh { reply })),
+                    verified,
+                },
+            ) => {
+                let source = verified.authority_source();
+                let (host, expires, family) = match source.request() {
+                    SettingsReadRequest::Snapshot(intent) => (
+                        intent.host_id,
+                        intent.expires_at,
+                        SettingsReadReplyFamily::Default,
+                    ),
+                    SettingsReadRequest::InspectOriginal(intent) => (
+                        intent.host_id,
+                        intent.expires_at,
+                        SettingsReadReplyFamily::Inspection,
+                    ),
+                };
+                if reply.reservation_id.is_nil()
+                    || reply.local_device_id != host
+                    || reply.peer_device_id != source.verified_peer_keys().device_id
+                    || reply.family != family
+                    || reply.created_at < source.receipt_floor().0
+                    || reply.created_at >= reply.expires_at
+                    || reply.expires_at > expires
+                    || reply.provenance.len() > 2048
+                {
+                    return Err(self.ledger.fail());
+                }
+                Ok(ReadJoinedDisposition::Fresh)
+            }
+            (
+                Ok(WorkCompletion {
+                    receipt: SettingsTransportReceipt::PrivateCommitted { .. },
+                    bind: None,
+                }),
+                ReadWorkState::Verified {
+                    result: Some(Ok(SettingsReadReceiptCommit::Known)),
+                    ..
+                },
+            )
+            | (
+                Ok(WorkCompletion {
+                    receipt: SettingsTransportReceipt::PrivateDuplicate { .. },
+                    bind: None,
+                }),
+                ReadWorkState::Verified {
+                    result: Some(Ok(SettingsReadReceiptCommit::Duplicate)),
+                    ..
+                },
+            ) => Ok(ReadJoinedDisposition::Settled),
+            (
+                Ok(WorkCompletion {
+                    receipt: SettingsTransportReceipt::PrivateRejected { .. },
+                    bind: None,
+                }),
+                ReadWorkState::Verified {
+                    result: Some(Err(error)),
+                    ..
+                },
+            ) if error.is_policy_rejection() => Ok(ReadJoinedDisposition::Settled),
+            (
+                Ok(WorkCompletion {
+                    receipt: SettingsTransportReceipt::PrivateRejected { .. },
+                    bind: None,
+                }),
+                ReadWorkState::Rejected(SettingsReceiveError::ReadSource(error)),
+            ) if matches!(
+                error.as_ref(),
+                super::SettingsReadSourceError::Source(
+                    super::BindRejection::Expired | super::BindRejection::OutsideScope
+                )
+            ) =>
+            {
+                Ok(ReadJoinedDisposition::Settled)
+            }
+            (
+                Err(SettingsReceiveError::Capacity),
+                ReadWorkState::Rejected(SettingsReceiveError::Capacity),
+            ) => Ok(ReadJoinedDisposition::Capacity),
+            (
+                Err(SettingsReceiveError::ReadAdmission(error)),
+                ReadWorkState::Verified {
+                    result: Some(Err(original)),
+                    ..
+                },
+            ) if Arc::ptr_eq(error, original) && error.is_capacity() => {
+                Ok(ReadJoinedDisposition::Capacity)
+            }
+            (Err(error), _) => Err(error.clone()),
+            _ => Err(self.ledger.fail()),
+        }
+    }
+
+    fn finish_read_join(
+        &mut self,
+        receipt: oneshot::Sender<Result<SettingsTransportReceipt, SettingsReceiveError>>,
+    ) -> Result<Option<SettingsReceiveEvent>, SettingsReceiveError> {
+        use crate::storage::SettingsReadReceiptCommit;
+
+        let disposition = match self.read_join_disposition() {
+            Ok(disposition) => disposition,
+            Err(error) => {
+                self.ledger.fail();
+                self.failure = Some(error.clone());
+                self.close_intake();
+                let _ = receipt.send(Err(error.clone()));
+                return Err(error);
+            }
+        };
+        match (disposition, self.retained_join.take()) {
+            (
+                ReadJoinedDisposition::Fresh,
+                Some(Ok((
+                    _,
+                    WorkerOutput {
+                        completion:
+                            Ok(WorkCompletion {
+                                receipt: result,
+                                bind: None,
+                            }),
+                        read:
+                            Some(ReadWorkState::Verified {
+                                result: Some(Ok(SettingsReadReceiptCommit::Fresh { reply })),
+                                verified,
+                            }),
+                        frame: Some(frame),
+                        ..
+                    },
+                ))),
+            ) => {
+                let owner =
+                    OwnedCommittedSettingsRead::from_joined(ReadReceiptOutput { reply, verified });
+                let _ = receipt.send(Ok(result));
+                drop(frame);
+                Ok(Some(SettingsReceiveEvent::CommittedRead(owner)))
+            }
+            (
+                ReadJoinedDisposition::Settled,
+                Some(Ok((
+                    _,
+                    WorkerOutput {
+                        completion:
+                            Ok(WorkCompletion {
+                                receipt: result,
+                                bind: None,
+                            }),
+                        read: Some(read),
+                        frame: Some(frame),
+                        ..
+                    },
+                ))),
+            ) => {
+                drop(read);
+                let _ = receipt.send(Ok(result));
+                drop(frame);
+                Ok(Some(SettingsReceiveEvent::ReceiptSettled))
+            }
+            (
+                ReadJoinedDisposition::Capacity,
+                Some(Ok((
+                    _,
+                    WorkerOutput {
+                        completion: Err(error),
+                        read: Some(read),
+                        frame: Some(frame),
+                        ..
+                    },
+                ))),
+            ) => {
+                drop(read);
+                let _ = receipt.send(Err(error.clone()));
+                drop(frame);
+                Err(error)
+            }
+            (_, retained) => {
+                self.retained_join = retained;
+                self.latch_failure();
+                let _ = receipt.send(Err(SettingsReceiveError::Bookkeeping));
+                Err(SettingsReceiveError::Bookkeeping)
+            }
+        }
+    }
+
     pub(in crate::devices) fn close_intake(&mut self) {
         self.closed = true;
         self.ledger.closed.store(true, Ordering::Release);
@@ -1848,6 +2101,7 @@ fn run(mut input: WorkerInput) -> WorkerOutput {
         command: None,
         outcome: None,
         access: None,
+        read: None,
     };
     let completion =
         match std::panic::catch_unwind(AssertUnwindSafe(|| super::execute(&input, &mut command))) {
@@ -1865,6 +2119,7 @@ fn run(mut input: WorkerInput) -> WorkerOutput {
         retained_command: command.command.take(),
         command_outcome: command.outcome.take(),
         access: command.access.take(),
+        read: command.read.take(),
         frame: input.frame.take(),
     }
 }
