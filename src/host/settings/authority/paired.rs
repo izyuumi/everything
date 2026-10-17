@@ -11,9 +11,9 @@ use crate::crypto::DevicePublicKeys;
 use crate::devices::{
     AuthenticatedSettingsAccessSource, AuthenticatedSettingsCommandSource,
     AuthenticatedSettingsReadSource, BindingHistoryState, BindingIntent, BindingLifetime,
-    OwnedCommittedSettingsBind, SettingsAccessStatusIntent, SettingsConnectionIdentity,
-    SettingsHostIdentity, SettingsOriginalInspectionIntent, SettingsParentReference,
-    SettingsReadRequest, SettingsSnapshotReadIntent,
+    OwnedCommittedSettingsBind, OwnedCommittedSettingsRead, SettingsAccessStatusIntent,
+    SettingsConnectionIdentity, SettingsHostIdentity, SettingsOriginalInspectionIntent,
+    SettingsParentReference, SettingsReadRequest, SettingsSnapshotReadIntent,
 };
 use crate::protocol::{DeviceId, UnixMillis};
 use crate::storage::Store;
@@ -1181,5 +1181,93 @@ fn read_request_parts(
             intent.issued_at,
             intent.expires_at,
         ),
+    }
+}
+
+impl Authority {
+    pub(in crate::host::settings) fn observe_committed_read_query(
+        &self,
+        host: &Arc<SettingsHostIdentity>,
+        request: &OwnedCommittedSettingsRead,
+        stop: &CancellationToken,
+    ) -> Result<ReadQueryObservation, SettingsServiceError> {
+        let source = request.verified_request().authority_source();
+        let mut sessions = self
+            .sessions
+            .lock()
+            .map_err(|_| SettingsServiceError::Poisoned)?;
+        check_read_host(self, &sessions, host, source, stop)?;
+        let wall = UnixMillis::now()?;
+        let monotonic = Instant::now();
+        let (host_id, query_id, parent, issued_at, expires_at) =
+            read_request_parts(source.request());
+        let paired = &mut sessions.paired;
+        if paired
+            .access_connection
+            .as_ref()
+            .is_none_or(|original| !Arc::ptr_eq(original, source.connection()))
+        {
+            return Err(SettingsServiceError::OutsideScope);
+        }
+        let entry = paired
+            .entries
+            .values_mut()
+            .find(|entry| entry.record.id == parent.parent_id)
+            .ok_or(SettingsServiceError::OutsideScope)?;
+        let record = &entry.record;
+        if record.intent.host_id != host_id
+            || record.intent.generation != parent.generation
+            || record.peer != *source.verified_peer_keys()
+            || !Arc::ptr_eq(&record.connection, source.connection())
+            || !record.connection.is_live()
+            || record.cancellation.is_cancelled()
+            || wall < entry.observed_wall
+            || monotonic < entry.observed_monotonic
+        {
+            return Err(SettingsServiceError::OutsideScope);
+        }
+        let query = paired
+            .access_queries
+            .get_mut(&(source.verified_peer_keys().device_id, query_id))
+            .ok_or(SettingsServiceError::NotFound)?;
+        if query.intent != SettingsQueryIntent::from_read(source.request())
+            || query.peer != *source.verified_peer_keys()
+        {
+            return Err(SettingsServiceError::Conflict);
+        }
+        let floor = source.receipt_floor();
+        if query.floor != floor
+            || wall < query.floor.0
+            || monotonic < query.floor.1
+            || wall < query.observed_wall
+            || monotonic < query.observed_monotonic
+            || wall < issued_at
+        {
+            return Err(SettingsServiceError::OutsideScope);
+        }
+        if wall >= expires_at
+            || monotonic >= query.deadline
+            || monotonic >= source.original_deadline()
+            || wall >= record.lifetime.expires_at
+            || monotonic >= record.lifetime.deadline
+        {
+            return Err(SettingsServiceError::Expired);
+        }
+        entry.observed_wall = wall;
+        entry.observed_monotonic = monotonic;
+        query.observed_wall = wall;
+        query.observed_monotonic = monotonic;
+        Ok(ReadQueryObservation {
+            owner: SettingsGrantOwner {
+                host_id: self.host_id,
+                principal_id: self.owner_principal,
+            },
+            query: Arc::clone(&query.identity),
+            floor: query.floor,
+            deadline: query.deadline,
+            parent_lifetime: record.lifetime,
+            wall,
+            monotonic,
+        })
     }
 }
