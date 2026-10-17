@@ -1,0 +1,39 @@
+# Explicit Apple Bind client
+
+The iOS Connected Host access section can explicitly request one Bind after a genuine current AccessStatus observation. It uses the existing [Bind wire and owner](apple-settings-bind-owner.md), CryptoKit factories, ReplicaService, relay pump and AppModel control Task. Only an authenticated Fresh Bound response creates a private parent observation. The Host private sender remains incomplete at this source freeze; no actual Host/device roundtrip or issue completion is claimed.
+
+## Original gesture and eligibility
+
+The MainActor Bind gesture captures ContinuousClock before wall time, one Bind UUID, the actual Service, its opaque displayed scope token and the exact originating Access handle before the owned Button Task. Its take method is one-use; its immutable Sendable input has no caller-settable constructor. Service intake requires that same Service/current scope and genuine private cache/projection/origin handle. UI labels, copied generation, IDs and booleans cannot supply this association or authority.
+
+The actual available Access summary may contain consent none or configuredProvider. Both can request a management Bind: [paired Authority](paired-settings-authority.md) distinguishes a management parent from provider consent and Settings chat admission. The exact reported provider/model/recipient/revision remains metadata. Bind performs no provider lookup, paid request, consent expansion, native Owner operation, Snapshot, update or chat.
+
+One original Access-or-Bind pending cell and the same total16 outbound map exclude concurrent private requests. Binding intake reserves its first lean association and actual outbound cell before request construction or crypto preparation. A currently retained identical capture returns its existing handle; a different capture cannot replace that association. The first association is never removed/reset by construction error, cancellation, lost reply, expiry, disconnect, new Access observation or reconnect. No retry, rebind, Host parent Close or NoEffects is inferred.
+
+The lean association retains immutable original request/time metadata, opaque original handles, the optional private parent/expiry and weak actual connection/capture references. It has no strong Service, socket, cache, frame or proof backedge. The pending/send owner separately retains the real full capture, scope and cache until preparation/receiving/send helpers actually return. Weak capture identity supports exact retained-input lookup without reconstructing it from public IDs.
+
+## Fixed clocks
+
+Let Wa/Ma and E/De be the original Access floors and clipped observation fence. Bind gesture captures Wb/Mb, not actor-intake time. With actual grant expiry G, Qb=min(Wb+30000,E), Db=min(Mb+(Qb-Wb),De), P=min(Wb+300000,G) and Dp=min(Mb+(P-Wb),Ma+(P-Wa)). Arithmetic and positive signed-range intervals are checked; P-Wa is at most330000ms. Intake checks its actual current clocks against those fixed original bounds.
+
+A genuine Bound expiry B must be current and no later than P/G. The adopted parent deadline remains exactly Dp-(P-B). No preparation, response, reconnect or UI observation creates now-plus-remaining. Access must remain current through Bind qualification. Once genuinely adopted, the longer parent observation may remain current until its original clipped deadline; that does not renew bootstrap Access metadata or authorize an operation.
+
+## Send, authenticated receive and ownership
+
+The once-prepared actual encrypted message ID is distinct from the Bind UUID and collision-checked against every registered ordinary/private message ID and pending incoming acknowledgement. The same pump repeats actual full Store Host/local/disabled checks and current scope/original clocks before a once-only send. Bind uses no ordinary durable outbox row, additional map, queue, task, socket or retry loop. Ordinary preparation, post-attempted15s timing, send-return plus persisted-Accepted release and all existing limits remain shared with the [live Access client](apple-settings-access-client.md).
+
+The Bind cell records send-started, actual send return, Accepted, reply-helper return and one-way send failure separately. Reply adoption does not erase a message ID needed by late Accepted. Private Accepted touches only that exact original RAM owner, never ordinary relayAccepted SQL, and is not Saved or parent adoption. Normal release requires all original return/disposition facts and no send failure. Sent cancellation/expiry/error or missing disposition retains its full cell through actual old socket-group return; close/cancel/retire flags are not joins. Unsent preparation retirement releases only after its original helper returns. The first lean association remains after heavy work settles.
+
+The existing receive child selects Access or Bind from its actual pending owner before invoking the existing strict classifier. Bind qualification additionally requires the exact registered ciphertext and actual send-started state. It matches full authenticated Host/local identity, actual received frame, encrypted in_reply_to, separate Bind UUID and full generation. Only real Fresh metadata plus exact Verified/Committed/qualification object identities can expose the private Bound body once. Duplicate, unrelated or expired packets cannot adopt.
+
+The actual metadata commit precedes adoption and the single ACK/drain tail. Ordinary/refused traffic is not re-decrypted or re-admitted. Storage, quarantine, capacity, crypto, size or ownership failure never creates Bound/denial or an ACK. The outer receive settlement keeps its original frame/proofs through actual helper/ACK return or unwind, then records reply return. The existing task-group/runner join remains the only uncertain window cleanup boundary; no extra task or background owner is introduced.
+
+## UI observation and retirement
+
+AppModel extends its existing single interaction/control Task with a closed Access-or-Bind input. The same synchronous surface/scene/platform/tab/path/cover/connection retirement stales both observations, permanently retires that UI generation and cancels the original Task. Cleanup snapshots and cancels only the original returned Access/Bind handles. Existing scene/disconnect/disable paths join that actual captured Task after real Service stop; the independent Host lifetime and local This iPhone preferences/OS notification owners are unchanged.
+
+The observable Bind view contains only preparing/awaitingReply/settling/observed/retained stage, optional actual observation/expiry, opaque request handle and freshness. No parent ID, generation, raw body, native proof or provider session escapes. The UI requires its same original Bind handle/capture, actual current surface/scope and fixed wall/monotonic parent clip before labeling an observation current. A later genuine Access replacement/denial conservatively retires binding usability without clearing its association or claiming Host Close. Stale/retained is never a permission label, successful cleanup, reset or new mutation identity.
+
+There is no retry/reset/recovery UI or enabled Host control. Lost-reply known-parent/Close recovery, actual scoped Snapshot adoption, remote mutations and restricted chat remain separate implementation gates. System-owned dialogs, first-frame timing, suspension, ARC/COW erasure and exact memory release are not guaranteed.
+
+Direct official Swift grammar, static preservation, links and diff checks are source validation only. Independent review and supported current-head Apple SDK build/analyze plus Rust CI remain required. Actual codec/crypto/SQLite/relay execution, grant revocation, lost reply, cancellation, native UI and security acceptance have not been observed. #116/#117 remain open; automated verification remains deferred in [#32](https://github.com/izyuumi/everything/issues/32).
