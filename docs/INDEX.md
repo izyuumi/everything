@@ -24,7 +24,8 @@ Scoped Settings transport foundations, with public accepted dispatch still disab
 - [Joined Read currentness and Snapshot publication](contracts/settings-read-replies.md): genuine Snapshot BUILD, R-before-values capture and checked seal/Main publication.
 - [Permanent Original inspection publication](contracts/settings-original-inspection-publication.md): sixth counted BUILD family, own-peer provenance, current-R disclosure and consumed/queued checks; live Host relay/client integration remains separate.
 - [Live Apple Access client](contracts/apple-settings-access-client.md): explicit metadata-only request/send, authenticated Fresh adoption and iOS display.
-- [Explicit Apple Bind client](contracts/apple-settings-bind-client.md): a separate user gesture, same-window send and genuine Fresh private parent observation; Host values, recovery and the Host private sender remain separate.
+- [Explicit Apple Bind client](contracts/apple-settings-bind-client.md): a separate user gesture, same-window send and genuine Fresh private parent observation; recovery and the Host private sender remain separate.
+- [Explicit Apple Snapshot client](contracts/apple-settings-snapshot-client.md): genuine current-parent value request, authenticated Fresh display and fixed freshness; Host delivery remains unverified.
 - [Apple Bind ownership](contracts/apple-settings-bind-owner.md): the first immutable Bind identity, shared pending/receive custody, fixed clocks and nonresettable association.
 - [Outbound selection](contracts/transport-outbound-selection.md): bounded metadata selection before ciphertext loading.
 - [Private ciphertext loading and preparation](contracts/settings-private-ciphertext-loading.md): exact rows/authentication plus internal counted waiting, original worker joins and Prepared DATA; actual pump/final socket/send integration remains separate.
