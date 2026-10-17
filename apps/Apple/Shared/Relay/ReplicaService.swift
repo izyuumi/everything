@@ -11,6 +11,76 @@ struct ReplicaViewState: Sendable {
     let identity: DevicePublicKeys
     let connection: String
     let settingsAccess: ReplicaSettingsAccessDisplayView?
+    let settingsAccessRequest: ReplicaSettingsAccessRequestStatus?
+    let settingsScope: ReplicaSettingsScopeToken?
+}
+
+final class ReplicaSettingsScopeToken: Sendable, CustomStringConvertible, CustomDebugStringConvertible {
+    fileprivate init() {}
+
+    var description: String { "ReplicaSettingsScopeToken([redacted])" }
+    var debugDescription: String { description }
+}
+
+final class ReplicaSettingsAccessInput: Sendable, CustomStringConvertible, CustomDebugStringConvertible {
+    fileprivate let service: ReplicaService
+    fileprivate let scope: ReplicaSettingsScopeToken
+    fileprivate let queryID: UUID
+    let wallFloor: UInt64
+    let monotonicFloor: ContinuousClock.Instant
+    let expiresAt: UInt64
+    let deadline: ContinuousClock.Instant
+
+    fileprivate init(service: ReplicaService, scope: ReplicaSettingsScopeToken,
+                     wallFloor: UInt64, monotonicFloor: ContinuousClock.Instant, expiresAt: UInt64) {
+        self.service = service
+        self.scope = scope
+        queryID = UUID()
+        self.wallFloor = wallFloor
+        self.monotonicFloor = monotonicFloor
+        self.expiresAt = expiresAt
+        deadline = monotonicFloor.advanced(by: .milliseconds(Int64(expiresAt - wallFloor)))
+    }
+
+    var description: String { "ReplicaSettingsAccessInput([redacted])" }
+    var debugDescription: String { description }
+}
+
+@MainActor
+final class ReplicaSettingsAccessGesture {
+    private var input: ReplicaSettingsAccessInput?
+
+    init(service: ReplicaService, scope: ReplicaSettingsScopeToken) throws {
+        let monotonic = ContinuousClock.now
+        let wall = try WireID.now()
+        let expiry = wall.addingReportingOverflow(30_000)
+        guard !expiry.overflow, expiry.partialValue <= UInt64(Int64.max) else { throw WireError.expired }
+        input = ReplicaSettingsAccessInput(service: service, scope: scope, wallFloor: wall,
+                                           monotonicFloor: monotonic, expiresAt: expiry.partialValue)
+    }
+
+    func take() throws -> ReplicaSettingsAccessInput {
+        guard let captured = input else { throw WireError.conflict }
+        input = nil
+        return captured
+    }
+}
+
+enum ReplicaSettingsAccessRequestStatus: Sendable, Equatable {
+    case preparing
+    case awaitingReply
+    case settling
+    case received
+    case cancelled
+    case expired
+    case interrupted
+
+    var blocksNewRequest: Bool {
+        switch self {
+        case .preparing, .awaitingReply, .settling: true
+        case .received, .cancelled, .expired, .interrupted: false
+        }
+    }
 }
 
 enum ReplicaSettingsAccessDisplayFreshness: Sendable, CustomStringConvertible, CustomDebugStringConvertible {
@@ -26,13 +96,16 @@ struct ReplicaSettingsAccessDisplayView: Sendable, CustomStringConvertible, Cust
     let observedAt: UInt64
     let expiresAt: UInt64
     let freshness: ReplicaSettingsAccessDisplayFreshness
+    let requestHandle: ReplicaSettingsRequestHandle
 
     fileprivate init(display: ReplicaSettingsAccessDisplay, observedAt: UInt64,
-                     expiresAt: UInt64, freshness: ReplicaSettingsAccessDisplayFreshness) {
+                     expiresAt: UInt64, freshness: ReplicaSettingsAccessDisplayFreshness,
+                     requestHandle: ReplicaSettingsRequestHandle) {
         self.display = display
         self.observedAt = observedAt
         self.expiresAt = expiresAt
         self.freshness = freshness
+        self.requestHandle = requestHandle
     }
 
     var description: String { "ReplicaSettingsAccessDisplayView([redacted])" }
@@ -152,7 +225,37 @@ actor ReplicaService {
     private var pendingCompletion: PairingInvitation?
     private var pairingEpoch = UUID()
     private var processingInbox = false
-    private var inflight: [UUID: ContinuousClock.Instant] = [:]
+    private var outbound: [OutboundID: OutboundSend] = [:]
+    private var outboundSocket: RelayConnection?
+    private var settingsAccessOutcome: ReplicaSettingsAccessRequestStatus?
+    private var lastSettingsAccessInput: ReplicaSettingsAccessInput?
+
+    private enum OutboundID: Hashable {
+        case ordinary(UUID)
+        case access(UUID)
+    }
+
+    private enum OutboundSend {
+        case ordinary(OrdinarySend)
+        case access(SettingsAccessSend)
+    }
+
+    private final class OrdinarySend {
+        var started: ContinuousClock.Instant?
+    }
+
+    private final class SettingsAccessSend {
+        let original: PendingSettingsAccess
+        var envelope: EncryptedEnvelope?
+        var sendStarted = false
+        var sendReturned = false
+        var accepted = false
+        var replyReturned = false
+
+        init(original: PendingSettingsAccess) {
+            self.original = original
+        }
+    }
     private var acknowledgements = Set<UUID>()
     private var settingsScope: SettingsConnectionScope?
     private var pendingSettingsRequest: PendingSettingsRequest?
@@ -175,6 +278,7 @@ actor ReplicaService {
         let host: DevicePublicKeys
         let localID: UUID
         let projection: ReplicaSettingsAccessProjection
+        let requestHandle: ReplicaSettingsRequestHandle
         let wallFloor: UInt64
         let monotonicFloor: ContinuousClock.Instant
         let queryExpiresAt: UInt64
@@ -186,6 +290,7 @@ actor ReplicaService {
         let observedAt: UInt64
 
         init(scope: SettingsConnectionScope, projection: ReplicaSettingsAccessProjection,
+             requestHandle: ReplicaSettingsRequestHandle,
              wallFloor: UInt64, monotonicFloor: ContinuousClock.Instant,
              queryExpiresAt: UInt64, queryDeadline: ContinuousClock.Instant,
              packetExpiresAt: UInt64, grantExpiresAt: UInt64?, expiresAt: UInt64,
@@ -194,6 +299,7 @@ actor ReplicaService {
             host = scope.host
             localID = scope.localID
             self.projection = projection
+            self.requestHandle = requestHandle
             self.wallFloor = wallFloor
             self.monotonicFloor = monotonicFloor
             self.queryExpiresAt = queryExpiresAt
@@ -211,6 +317,7 @@ actor ReplicaService {
 
     fileprivate final class SettingsConnectionScope: Sendable, CustomStringConvertible, CustomDebugStringConvertible {
         let socket: RelayConnection
+        let token = ReplicaSettingsScopeToken()
         let host: DevicePublicKeys
         let localID: UUID
         let epoch: UUID
@@ -246,6 +353,7 @@ actor ReplicaService {
 
     fileprivate final class PendingSettingsAccess: CustomStringConvertible, CustomDebugStringConvertible {
         let handle: ReplicaSettingsRequestHandle
+        let input: ReplicaSettingsAccessInput
         let scope: SettingsConnectionScope
         let request: RemoteSettingsAccessRequest
         let wallFloor: UInt64
@@ -255,10 +363,11 @@ actor ReplicaService {
         var retired = false
         var consumed = false
 
-        init(handle: ReplicaSettingsRequestHandle, scope: SettingsConnectionScope,
+        init(handle: ReplicaSettingsRequestHandle, input: ReplicaSettingsAccessInput, scope: SettingsConnectionScope,
              request: RemoteSettingsAccessRequest, wallFloor: UInt64,
              monotonicFloor: ContinuousClock.Instant, deadline: ContinuousClock.Instant) {
             self.handle = handle
+            self.input = input
             self.scope = scope
             self.request = request
             self.wallFloor = wallFloor
@@ -458,6 +567,7 @@ actor ReplicaService {
     }
 
     func viewState() async throws -> ReplicaViewState {
+        let scope = settingsScope
         let cache = settingsAccessDisplayCache
         let initiallyCurrent: Bool
         if let cache { initiallyCurrent = try isCurrentSettingsAccessDisplay(cache) }
@@ -465,25 +575,45 @@ actor ReplicaService {
         let snapshot = try await store.snapshot()
         guard settingsAccessDisplayCache === cache else { throw WireError.unavailable }
         let settingsAccess = try await settingsAccessDisplayView(cache, snapshot: snapshot, initiallyCurrent: initiallyCurrent)
+        let scopeToken: ReplicaSettingsScopeToken?
+        if let scope, settingsScope === scope, isCurrentSettingsScope(scope), !snapshot.revoked,
+           snapshot.host == scope.host, identity.publicKeys.deviceID == scope.localID {
+            scopeToken = scope.token
+        } else {
+            scopeToken = nil
+        }
         return ReplicaViewState(snapshot: snapshot, identity: identity.publicKeys,
-                                connection: status, settingsAccess: settingsAccess)
+                                connection: status, settingsAccess: settingsAccess,
+                                settingsAccessRequest: settingsAccessRequestStatus(), settingsScope: scopeToken)
     }
 
-    func requestSettingsAccess() throws -> ReplicaSettingsRequestHandle {
+    func requestSettingsAccess(_ input: ReplicaSettingsAccessInput) throws -> ReplicaSettingsRequestHandle {
         try Task.checkCancellation()
-        guard let scope = settingsScope, isCurrentSettingsScope(scope) else { throw WireError.unavailable }
-        guard pendingSettingsRequest == nil else { throw WireError.queueFull }
-        let monotonicFloor = ContinuousClock.now
-        let wallFloor = try WireID.now()
-        let expires = wallFloor.addingReportingOverflow(30_000)
-        guard !expires.overflow, expires.partialValue <= UInt64(Int64.max) else { throw WireError.expired }
-        let time = try RemoteSettingsRequestTime(issuedAt: wallFloor, expiresAt: expires.partialValue)
-        let request = try RemoteSettingsAccessRequest(hostID: scope.host.deviceID, queryID: UUID(), time: time)
+        guard input.service === self, let scope = settingsScope, scope.token === input.scope,
+              isCurrentSettingsScope(scope) else { throw WireError.unavailable }
+        if let pending = pendingSettingsAccess, pending.input === input { return pending.handle }
+        for entry in outbound.values {
+            if case .access(let sent) = entry, sent.original.input === input { return sent.original.handle }
+        }
+        guard pendingSettingsRequest == nil, !hasSettingsAccessSend, outbound.count < 16,
+              outboundSocket === scope.socket, lastSettingsAccessInput !== input else { throw WireError.queueFull }
+        let monotonic = ContinuousClock.now
+        let wall = try WireID.now()
+        guard monotonic >= input.monotonicFloor, monotonic < input.deadline,
+              wall >= input.wallFloor, wall < input.expiresAt else { throw WireError.expired }
+        let time = try RemoteSettingsRequestTime(issuedAt: input.wallFloor, expiresAt: input.expiresAt)
+        let request = try RemoteSettingsAccessRequest(hostID: scope.host.deviceID, queryID: input.queryID, time: time)
         let handle = ReplicaSettingsRequestHandle()
-        pendingSettingsRequest = .access(PendingSettingsAccess(
-            handle: handle, scope: scope, request: request, wallFloor: wallFloor,
-            monotonicFloor: monotonicFloor, deadline: monotonicFloor.advanced(by: .milliseconds(30_000))
-        ))
+        let pending = PendingSettingsAccess(
+            handle: handle, input: input, scope: scope, request: request, wallFloor: input.wallFloor,
+            monotonicFloor: input.monotonicFloor, deadline: input.deadline
+        )
+        let key = OutboundID.access(request.queryID)
+        guard outbound[key] == nil else { throw WireError.conflict }
+        outbound[key] = .access(SettingsAccessSend(original: pending))
+        pendingSettingsRequest = .access(pending)
+        lastSettingsAccessInput = input
+        settingsAccessOutcome = nil
         return handle
     }
 
@@ -542,9 +672,16 @@ actor ReplicaService {
 
     func cancelSettings(_ handle: ReplicaSettingsRequestHandle) {
         if let pending = pendingSettingsAccess, pending.handle === handle {
+            settingsAccessOutcome = .cancelled
             retirePendingSettingsAccess(pending)
         } else if let pending = pendingSettingsBind, pending.association.handle === handle {
             retirePendingSettingsBind(pending)
+        }
+        for entry in outbound.values {
+            if case .access(let sent) = entry, sent.original.handle === handle {
+                settingsAccessOutcome = .cancelled
+                retirePendingSettingsAccess(sent.original)
+            }
         }
         if let association = settingsBindingAssociation, association.handle === handle {
             association.retired = true
@@ -744,7 +881,9 @@ actor ReplicaService {
         guard stopping?.id == id else { return }
         runner = nil
         connection = nil
-        inflight.removeAll()
+        outbound.removeAll()
+        outboundSocket = nil
+        lastSettingsAccessInput = nil
         acknowledgements.removeAll()
         reconnectForCapacity = false
         status = "Disconnected"
@@ -776,48 +915,9 @@ actor ReplicaService {
                 }
                 connection = socket
                 try await installSettingsScope(socket: socket, epoch: captured)
-                inflight.removeAll()
-                acknowledgements.removeAll()
                 reconnectForCapacity = false
                 status = "Connected"
-                try await withThrowingTaskGroup(of: Void.self) { group in
-                    group.addTask { [weak self] in
-                        while !Task.isCancelled {
-                            guard let self else { throw CancellationError() }
-                            let ticket = try await self.claimSettingsReceive(socket: socket)
-                            do {
-                                try await self.receiveSettingsOwnedFrame(socket: socket, ticket: ticket)
-                            } catch {
-                                await self.retireSettingsScope(socket: socket)
-                                do { try await self.finishSettingsReceive(ticket) }
-                                catch let settlement { throw SettingsReceiveFailure(receive: error, settlement: settlement) }
-                                throw error
-                            }
-                            try await self.finishSettingsReceive(ticket)
-                        }
-                    }
-                    group.addTask { [weak self] in
-                        var seconds = 0
-                        while !Task.isCancelled {
-                            guard let self else { throw CancellationError() }
-                            try await self.pump(socket: socket, synchronize: seconds % 5 == 0)
-                            if seconds % 30 == 0 { try await socket.send(.object(["type": .string("ping"), "schema_version": .unsigned(1)])) }
-                            seconds += 1
-                            try await Task.sleep(for: .seconds(1))
-                        }
-                    }
-                    do {
-                        _ = try await group.next()
-                        retireSettingsScope(socket: socket)
-                        group.cancelAll()
-                        await socket.close()
-                    } catch {
-                        retireSettingsScope(socket: socket)
-                        group.cancelAll()
-                        await socket.close()
-                        throw error
-                    }
-                }
+                try await runConnection(socket)
                 attempt = 0
             } catch is CancellationError {
                 break
@@ -852,6 +952,116 @@ actor ReplicaService {
         if epoch == captured { status = "Disconnected"; runner = nil }
     }
 
+    private func runConnection(_ socket: RelayConnection) async throws {
+        guard outbound.isEmpty, outboundSocket == nil else { throw WireError.conflict }
+        outboundSocket = socket
+        acknowledgements.removeAll()
+        defer { finishOutbound(socket: socket) }
+        try await withThrowingTaskGroup(of: Void.self) { group in
+            group.addTask { [weak self] in
+                while !Task.isCancelled {
+                    guard let self else { throw CancellationError() }
+                    let ticket = try await self.claimSettingsReceive(socket: socket)
+                    do {
+                        try await self.receiveSettingsOwnedFrame(socket: socket, ticket: ticket)
+                    } catch {
+                        await self.retireSettingsScope(socket: socket)
+                        do { try await self.finishSettingsReceive(ticket) }
+                        catch let settlement { throw SettingsReceiveFailure(receive: error, settlement: settlement) }
+                        throw error
+                    }
+                    try await self.finishSettingsReceive(ticket)
+                }
+            }
+            group.addTask { [weak self] in
+                var seconds = 0
+                while !Task.isCancelled {
+                    guard let self else { throw CancellationError() }
+                    try await self.pump(socket: socket, synchronize: seconds % 5 == 0)
+                    if seconds % 30 == 0 { try await socket.send(.object(["type": .string("ping"), "schema_version": .unsigned(1)])) }
+                    seconds += 1
+                    try await Task.sleep(for: .seconds(1))
+                }
+            }
+            do {
+                _ = try await group.next()
+                retireSettingsScope(socket: socket)
+                group.cancelAll()
+                await socket.close()
+            } catch {
+                retireSettingsScope(socket: socket)
+                group.cancelAll()
+                await socket.close()
+                throw error
+            }
+        }
+    }
+
+    private func finishOutbound(socket: RelayConnection) {
+        guard outboundSocket === socket else { return }
+        if hasSettingsAccessSend, settingsAccessOutcome == nil { settingsAccessOutcome = .interrupted }
+        outbound.removeAll()
+        outboundSocket = nil
+        lastSettingsAccessInput = nil
+    }
+
+    private var hasSettingsAccessSend: Bool {
+        outbound.values.contains { if case .access = $0 { true } else { false } }
+    }
+
+    private func settingsAccessRequestStatus() -> ReplicaSettingsAccessRequestStatus? {
+        if let sent = outbound.values.compactMap({ entry -> SettingsAccessSend? in
+            if case .access(let sent) = entry { return sent }
+            return nil
+        }).first {
+            if !sent.sendStarted, !sent.original.retired { return .preparing }
+            if !sent.original.retired { return .awaitingReply }
+            return .settling
+        }
+        if let pending = pendingSettingsAccess {
+            return pending.retired ? settingsAccessOutcome ?? .interrupted : .preparing
+        }
+        return settingsAccessOutcome
+    }
+
+    private func completeSettingsAccessSend(_ sent: SettingsAccessSend) throws {
+        let key = OutboundID.access(sent.original.request.queryID)
+        guard case .access(let registered) = outbound[key], registered === sent,
+              outboundSocket === sent.original.scope.socket else { throw WireError.conflict }
+        guard sent.sendReturned, sent.accepted, sent.replyReturned else { return }
+        outbound.removeValue(forKey: key)
+    }
+
+    private func hasOutboundMessage(_ id: UUID) -> Bool {
+        if outbound[.ordinary(id)] != nil { return true }
+        return outbound.values.contains {
+            if case .access(let sent) = $0 { return sent.envelope?.header.messageID == id }
+            return false
+        }
+    }
+
+    private func sendPendingSettingsAccess(socket: RelayConnection) async throws {
+        guard let pending = pendingSettingsAccess, pending.scope.socket === socket,
+              try isCurrentSettingsOriginal(pending), case .prepared(let envelope) = pending.phase,
+              case .access(let sent) = outbound[.access(pending.request.queryID)], sent.original === pending,
+              !sent.sendStarted else { return }
+        guard try await checkSettingsStore(pending), try isCurrentSettingsOriginal(pending),
+              case .prepared(let retained) = pending.phase, sameSettingsEnvelope(retained, envelope) else { return }
+        guard outboundSocket === socket, case .access(let registered) = outbound[.access(pending.request.queryID)],
+              registered === sent, let bound = sent.envelope, sameSettingsEnvelope(bound, envelope),
+              !sent.sendStarted, outbound[.ordinary(envelope.header.messageID)] == nil else { throw WireError.conflict }
+        sent.sendStarted = true
+        do {
+            try await socket.send(.object(["type": .string("send"), "schema_version": .unsigned(1), "envelope": envelope.wire]))
+            sent.sendReturned = true
+            try completeSettingsAccessSend(sent)
+        } catch {
+            sent.sendReturned = true
+            retireSettingsScope(socket: socket)
+            throw error
+        }
+    }
+
     private func pump(socket: RelayConnection, synchronize refresh: Bool) async throws {
         try Task.checkCancellation()
         try await preparePendingSettingsAccess(socket: socket)
@@ -862,18 +1072,43 @@ actor ReplicaService {
             do { try await synchronizeOne() }
             catch WireError.queueFull { status = "Local queue is full; preserving pending work" }
         }
-        if inflight.values.contains(where: { $0.duration(to: .now) > .seconds(15) }) { throw WireError.timeout }
+        for entry in outbound.values {
+            switch entry {
+            case .ordinary(let ordinary):
+                if let started = ordinary.started, started.duration(to: .now) > .seconds(15) { throw WireError.timeout }
+            case .access(let sent):
+                guard try isCurrentSettingsOriginal(sent.original) || sent.original.consumed else {
+                    if settingsAccessOutcome == nil { settingsAccessOutcome = .expired }
+                    throw WireError.timeout
+                }
+                if ContinuousClock.now >= sent.original.deadline {
+                    if settingsAccessOutcome == nil { settingsAccessOutcome = .expired }
+                    throw WireError.timeout
+                }
+            }
+        }
+        try await sendPendingSettingsAccess(socket: socket)
         let now = try WireID.now()
-        let rows = try await store.outbound(now: now, excluding: Set(inflight.keys))
-        for row in rows.prefix(max(0, 16 - inflight.count)) {
+        let ordinaryIDs = Set(outbound.keys.compactMap { key -> UUID? in
+            if case .ordinary(let id) = key { return id }
+            return nil
+        })
+        let rows = try await store.outbound(now: now, excluding: ordinaryIDs)
+        for row in rows.prefix(max(0, 16 - outbound.count)) {
             try Task.checkCancellation()
             try await store.checkActive()
             try row.envelope.header.validate(now: WireID.now())
+            guard outbound.count < 16 else { break }
+            guard outboundSocket === socket, !hasOutboundMessage(row.id) else { throw WireError.conflict }
+            let ordinary = OrdinarySend()
+            outbound[.ordinary(row.id)] = .ordinary(ordinary)
             try await store.attempted(row.id, now: now)
-            inflight[row.id] = .now
+            guard outboundSocket === socket, case .ordinary(let registered) = outbound[.ordinary(row.id)],
+                  registered === ordinary else { throw WireError.conflict }
+            ordinary.started = .now
             try await socket.send(.object(["type": .string("send"), "schema_version": .unsigned(1), "envelope": row.envelope.wire]))
         }
-        if reconnectForCapacity && inflight.isEmpty && inboxDrained && rows.isEmpty { throw WireError.network }
+        if reconnectForCapacity && outbound.isEmpty && inboxDrained && rows.isEmpty { throw WireError.network }
     }
 
     private func synchronizeOne() async throws {
@@ -896,9 +1131,20 @@ actor ReplicaService {
     private func handle(_ frame: RelayFrame, socket: RelayConnection) async throws {
         switch frame {
         case .accepted(let id):
-            guard inflight[id] != nil else { throw WireError.conflict }
-            try await store.relayAccepted(id)
-            inflight.removeValue(forKey: id)
+            guard outboundSocket === socket else { throw WireError.conflict }
+            if case .ordinary(let ordinary) = outbound[.ordinary(id)] {
+                guard ordinary.started != nil else { throw WireError.conflict }
+                try await store.relayAccepted(id)
+                outbound.removeValue(forKey: .ordinary(id))
+            } else {
+                guard let access = outbound.values.compactMap({ entry -> SettingsAccessSend? in
+                    if case .access(let sent) = entry, sent.envelope?.header.messageID == id { return sent }
+                    return nil
+                }).first, access.sendStarted, !access.accepted,
+                      access.original.scope.socket === socket else { throw WireError.conflict }
+                access.accepted = true
+                try completeSettingsAccessSend(access)
+            }
         case .acknowledged(let id):
             guard acknowledgements.remove(id) != nil else { throw WireError.conflict }
         case .pong: break
@@ -1004,6 +1250,10 @@ actor ReplicaService {
         case .preparing, .receiving: return
         case .waiting, .prepared: break
         }
+        if case .access(let sent) = outbound[.access(pending.request.queryID)], sent.original === pending,
+           !sent.sendStarted {
+            outbound.removeValue(forKey: .access(pending.request.queryID))
+        }
         if pendingSettingsAccess === pending { pendingSettingsRequest = nil }
     }
 
@@ -1071,6 +1321,7 @@ actor ReplicaService {
     private func preparePendingSettingsAccess(socket: RelayConnection) async throws {
         guard let pending = pendingSettingsAccess, pending.scope.socket === socket else { return }
         guard try isCurrentSettingsOriginal(pending) else {
+            if settingsAccessOutcome == nil { settingsAccessOutcome = .expired }
             retirePendingSettingsAccess(pending)
             return
         }
@@ -1080,6 +1331,12 @@ actor ReplicaService {
             do {
                 let envelope = try await prepareSettingsAccessEnvelope(pending)
                 if let envelope, try isCurrentSettingsOriginal(pending) {
+                    guard case .access(let sent) = outbound[.access(pending.request.queryID)],
+                          sent.original === pending, sent.envelope == nil, !sent.sendStarted,
+                          envelope.header.messageID != pending.request.queryID,
+                          !hasOutboundMessage(envelope.header.messageID),
+                          !acknowledgements.contains(envelope.header.messageID) else { throw WireError.conflict }
+                    sent.envelope = envelope
                     pending.phase = .prepared(envelope)
                 }
             }
@@ -1089,7 +1346,9 @@ actor ReplicaService {
             }
         } catch {
             pending.phase = .waiting
+            settingsAccessOutcome = .interrupted
             retirePendingSettingsAccess(pending)
+            retireSettingsScope(socket: pending.scope.socket)
             throw error
         }
     }
@@ -1174,7 +1433,26 @@ actor ReplicaService {
         let received = try await socket.receive()
         guard settingsReceive?.ticket === ticket, ticket.scope.socket === socket,
               isCurrentSettingsScope(ticket.scope) else { throw WireError.unavailable }
-        try await handle(received.frame, socket: socket)
+        guard case .delivery(let envelope) = received.frame else {
+            try await handle(received.frame, socket: socket)
+            return
+        }
+        guard acknowledgements.count < 128 else { throw WireError.identity }
+        do {
+            let result = try await classifySettingsAccessReceive(received, ticket: ticket)
+            switch result {
+            case .qualified(let qualification):
+                try await adoptSettingsAccessDisplay(qualification)
+            case .durable, .duplicate, .refused: break
+            }
+        } catch WireError.queueFull {
+            status = "Local inbox is full; delivery remains on the relay"
+            reconnectForCapacity = true
+            return
+        }
+        acknowledgements.insert(envelope.header.messageID)
+        try await socket.send(.object(["type": .string("acknowledge"), "schema_version": .unsigned(1), "message_id": .id(envelope.header.messageID)]))
+        _ = try await drainInbox()
     }
 
     private func sameSettingsEnvelope(_ lhs: EncryptedEnvelope, _ rhs: EncryptedEnvelope) -> Bool {
@@ -1193,7 +1471,9 @@ actor ReplicaService {
         if let pending = pendingSettingsAccess {
             guard pending.scope === ticket.scope else { throw WireError.conflict }
             let current = try isCurrentSettingsOriginal(pending)
-            if case .prepared(let prepared) = pending.phase, current {
+            if case .prepared(let prepared) = pending.phase, current,
+               case .access(let sent) = outbound[.access(pending.request.queryID)], sent.original === pending,
+               sent.sendStarted, let bound = sent.envelope, sameSettingsEnvelope(bound, prepared) {
                 pending.phase = .receiving(prepared)
                 original = .prepared(pending, prepared)
             } else {
@@ -1379,7 +1659,8 @@ actor ReplicaService {
         guard isCurrentSettingsScope(scope), wall >= wallFloor, wall < expiresAt,
               monotonic >= monotonicFloor, monotonic < deadline else { throw WireError.expired }
         settingsAccessDisplayCache = SettingsAccessDisplayCache(
-            scope: scope, projection: projection, wallFloor: wallFloor, monotonicFloor: monotonicFloor,
+            scope: scope, projection: projection, requestHandle: pending.handle,
+            wallFloor: wallFloor, monotonicFloor: monotonicFloor,
             queryExpiresAt: queryExpiresAt, queryDeadline: queryDeadline,
             packetExpiresAt: header.expires, grantExpiresAt: projection.grantExpiresAt,
             expiresAt: expiresAt, deadline: deadline, observedAt: header.created
@@ -1424,7 +1705,8 @@ actor ReplicaService {
         }
         return ReplicaSettingsAccessDisplayView(display: cache.projection.display, observedAt: cache.observedAt,
                                                expiresAt: cache.expiresAt,
-                                               freshness: current ? .currentConnectionObservation : .stale)
+                                               freshness: current ? .currentConnectionObservation : .stale,
+                                               requestHandle: cache.requestHandle)
     }
 
     private func beginSettingsBindReceive(_ received: ReceivedRelayFrame,
@@ -1664,6 +1946,13 @@ actor ReplicaService {
             owner.attempt = nil
         }
         if let (pending, prepared, current) = accessCompletion {
+            if pending.consumed {
+                settingsAccessOutcome = .received
+                if case .access(let sent) = outbound[.access(pending.request.queryID)], sent.original === pending {
+                    sent.replyReturned = true
+                    try completeSettingsAccessSend(sent)
+                }
+            }
             if current {
                 pending.phase = .prepared(prepared)
             } else {
