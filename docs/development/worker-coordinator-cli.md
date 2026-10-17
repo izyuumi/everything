@@ -57,6 +57,14 @@ Jobs use exclusive ascending delegation UUID pagination, one through 32 records 
 
 Cancellation requires the exact immutable WorkerJobBinding as well as the local native task ID. Reuse those original delegation/attempt/digest values, not a newer attempt. Cancellation and purpose revocation record intent and retained state; neither proves remote effects stopped. Revocation is sticky and distinct from ordinary device revocation. There is no provider retry, cleanup attestation or artifact-apply action in this command group. Unknown remote results remain Unknown and retain their original charge/authority boundary.
 
+## Owner release of an unresolved reservation
+
+```sh
+everything --state-dir STATE worker coordinator release --task LOCAL_TASK_UUID --delegation-id DELEGATION_UUID --attempt-id ATTEMPT_UUID --manifest-digest MANIFEST_SHA256 --expected-phase outcome-unknown --operator NAME --reason TEXT --request-id RELEASE_REQUEST_UUID
+```
+
+Use `--expected-phase cancellation-requested` for a cancelled reservation that never received a result. `--request-id` is required. Rerun with the same ID and arguments to get the stored release back. A different ID after a release, a changed binding or a phase other than the expected one is rejected. Release frees the Host slot. It keeps the charge and any Unknown report, and makes later worker results for that task unacceptable. It does not prove the remote work stopped; confirm that out of band first.
+
 ## Request identity, errors and validation
 
 Every mutation accepts `--request-id`; Delegate requires it. Other mutations generate a non-nil ID once only when it is omitted. Immediately before dispatch, stderr prints that stable identity and a small nonsecret operation summary. Prepare logs only kind and executor, never objective/context/input bytes. Cancel logs the original task/binding; Delegate logs the exact ticket/digest/fingerprint. Preserve the original selected file and argument values when considering an explicit replay. A request ID identifies the request but does not make every mutation replayable or grant renewed consent. The CLI performs no automatic retry, revision refresh or new identity substitution.
