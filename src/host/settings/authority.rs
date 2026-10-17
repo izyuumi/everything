@@ -2,7 +2,9 @@
 mod paired;
 
 #[cfg(unix)]
-pub(crate) use paired::PairedSettingsParent;
+pub(crate) use paired::{
+    OwnedWithdrawnSettingsParent, PairedParentWithdrawalFailure, PairedSettingsParent,
+};
 
 use std::collections::BTreeMap;
 use std::fmt;
