@@ -13,6 +13,7 @@ use crate::storage::{CommittedSettingsReply, SettingsReplyPublishFailure};
 
 pub(crate) use queued::OwnedQueuedSettingsReply;
 pub(super) use queued::QueuedReplyRegistry;
+pub(in crate::devices) use queued::SettingsStartedReturnAdoption;
 pub(in crate::devices) use queued::{
     PendingSettingsSend, SettingsSendAdmissionError, SettingsSendLoanAssociation,
     SettingsSendReturnFailure, SettingsSendReturnReason, SettingsSendSource,
