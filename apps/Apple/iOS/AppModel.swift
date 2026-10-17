@@ -161,11 +161,13 @@ final class AppModel {
         } catch is CancellationError {
             hostSettingsAccessFresh = false
             hostSettingsBindingFresh = false
+            hostSettingsSnapshot = nil
             hostSettingsSnapshotFresh = false
             return
         } catch {
             hostSettingsAccessFresh = false
             hostSettingsBindingFresh = false
+            hostSettingsSnapshot = nil
             hostSettingsSnapshotFresh = false
             present(error)
         }
