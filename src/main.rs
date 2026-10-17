@@ -988,12 +988,17 @@ async fn proxy_chat(
                 )
                 .await;
             }
-            OwnerQueryResult::Task { task, .. }
+            OwnerQueryResult::Task { task, execution }
                 if matches!(
                     task.status,
                     everything::protocol::TaskStatus::Queued
                         | everything::protocol::TaskStatus::Running
-                ) => {}
+                ) || (task.status == everything::protocol::TaskStatus::WaitingForChildren
+                    && !execution.cancel_requested
+                    && matches!(
+                        execution.waiting,
+                        Some(everything::scheduler::WaitingReason::Children { .. })
+                    )) => {}
             OwnerQueryResult::Task { task, .. } => {
                 eprintln!(
                     "host task {task_id} stopped at {:?}; inspect owner task/approval metadata before an explicit resume",
