@@ -1,3 +1,6 @@
+#[cfg(unix)]
+mod settings;
+
 use super::*;
 #[cfg(unix)]
 use crate::devices::settings_ingress::work::{
@@ -7,6 +10,10 @@ use crate::devices::settings_ingress::work::{
 use crate::storage::{TransportOutboundCandidate, TransportOutboundRouting};
 #[cfg(unix)]
 use crate::transport::remote::RelaySocketIdentity;
+#[cfg(unix)]
+use settings::{GuardWait, SettingsPreparationInput, SettingsPreparationOutput};
+#[cfg(unix)]
+pub(in crate::devices) use settings::{SettingsPreparationStop, SettingsPreparationWorkerFailure};
 #[cfg(unix)]
 use std::collections::btree_map::Entry;
 use tokio::task::{Id, JoinError, JoinHandle};
@@ -59,6 +66,31 @@ struct SettingsSendCell {
 enum SettingsCustodyState {
     Provisional,
     LoanedUnstarted(Arc<SettingsSendSource>),
+    Waiting {
+        waiting: GuardWait,
+        input: Arc<SettingsPreparationInput>,
+    },
+    Preparing {
+        task: Id,
+        handle: JoinHandle<SettingsPreparationOutput>,
+        input: Arc<SettingsPreparationInput>,
+        stop: Option<SettingsPreparationStop>,
+    },
+    Observed {
+        expected: Id,
+        joined: Result<SettingsPreparationOutput, JoinError>,
+        input: Arc<SettingsPreparationInput>,
+        stop: Option<SettingsPreparationStop>,
+        issue: Option<settings::SettingsPreparationObserveFailure>,
+    },
+    Prepared {
+        frame: Box<RelayClientMessage>,
+        input: Arc<SettingsPreparationInput>,
+    },
+    Stopped {
+        cause: SettingsPreparationStop,
+        input: Arc<SettingsPreparationInput>,
+    },
 }
 
 #[cfg(unix)]
@@ -83,12 +115,12 @@ impl SettingsSendCell {
                         association.matches_slot(window, &self.slot.identity)
                     })
                 }
-                SettingsCustodyState::LoanedUnstarted(source) => {
-                    self.association.as_ref().is_some_and(|association| {
-                        association.matches_slot(window, &self.slot.identity)
-                            && source.matches_association(association)
-                    })
-                }
+                state => self.association.as_ref().is_some_and(|association| {
+                    association.matches_slot(window, &self.slot.identity)
+                        && state
+                            .source()
+                            .is_some_and(|source| source.matches_association(association))
+                }),
             }
     }
 
@@ -230,6 +262,12 @@ enum OrdinaryEntry {
     Retained {
         input: Arc<OrdinaryInput>,
     },
+}
+
+enum ActivePreparation {
+    Ordinary(MessageId),
+    #[cfg(unix)]
+    Settings(MessageId),
 }
 
 enum OrdinaryIssue {
@@ -669,12 +707,48 @@ impl RelaySendWindow {
         outcome: Result<(), DeviceError>,
     ) -> Result<(), DeviceError> {
         self.completion = Some(outcome);
+        #[cfg(unix)]
+        self.stop_settings_waiters();
         let associations_ok = self.check_associations().is_ok();
-        while let Some(id) = self.entries.iter().find_map(|(id, entry)| {
-            matches!(entry.ordinary(), Some(OrdinaryEntry::Preparing { .. })).then_some(*id)
-        }) {
-            if self.observe_preparation(id).await.is_err() || self.check_observed(id).is_err() {
-                break;
+        loop {
+            let preparing = {
+                self.entries.iter().find_map(|(id, entry)| match entry {
+                    RelaySendEntry::Ordinary(OrdinaryEntry::Preparing { .. }) => {
+                        Some(ActivePreparation::Ordinary(*id))
+                    }
+                    #[cfg(unix)]
+                    RelaySendEntry::Settings(SettingsSendCell {
+                        state: SettingsCustodyState::Preparing { .. },
+                        ..
+                    }) => Some(ActivePreparation::Settings(*id)),
+                    _ => None,
+                })
+            };
+            match preparing {
+                Some(ActivePreparation::Ordinary(id)) => {
+                    let complete = self.observe_preparation(id).await.is_ok()
+                        && self.check_observed(id).is_ok();
+                    if !complete && self.failure.is_none() {
+                        self.failure = Some(OrdinaryFailureBundle {
+                            _primary: None,
+                            _cleanup: OrdinaryIssue::Bookkeeping {
+                                _reason: "ordinary cleanup could not observe preparation",
+                            },
+                        });
+                    }
+                }
+                #[cfg(unix)]
+                Some(ActivePreparation::Settings(id)) => {
+                    if self.observe_settings_preparation(id).await.is_err()
+                        && self.failure.is_none()
+                    {
+                        self.failure = Some(OrdinaryFailureBundle {
+                            _primary: None,
+                            _cleanup: OrdinaryIssue::PrivateCustodyOutstanding,
+                        });
+                    }
+                }
+                None => break,
             }
         }
         if (!associations_ok
@@ -745,6 +819,8 @@ impl RelaySendWindow {
     }
 
     fn retain(&mut self, failure: OrdinaryFailureBundle) {
+        #[cfg(unix)]
+        self.stop_settings_waiters();
         let retained = AbandonedOrdinaryWindow {
             _completion: self.completion.take(),
             _entries: std::mem::take(&mut self.entries),
