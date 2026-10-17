@@ -14,6 +14,10 @@ struct NativeCredentialEntryControls: View {
             if let metadata = store.metadata, metadata.revision == store.snapshot?.revision {
                 switch purpose {
                 case .model:
+                    if metadata.defaultModel == nil {
+                        Text("No default model is saved. Save and confirm a model above; its credential can then be added for that exact saved endpoint.")
+                            .foregroundStyle(.secondary)
+                    }
                     if let selected = metadata.defaultModel,
                        !metadata.modelCredentials.contains(where: { $0.provider == selected.provider && $0.endpoint == selected.endpoint }) {
                         Picker("Storage for new credential", selection: $storage) {
@@ -44,13 +48,18 @@ struct NativeCredentialEntryControls: View {
                             store.beginCredentialEntry(.systemOne)
                         }
                         .disabled(!store.canEnterCredential || connectionEdited)
+                    } else {
+                        Text("No System One endpoint is saved. Save and confirm one above before adding its credential.")
+                            .foregroundStyle(.secondary)
                     }
                 }
+            } else if store.snapshot != nil {
+                Text("Credential reference metadata is unavailable for the observed revision. Refresh before entering a key.")
+                    .foregroundStyle(.secondary)
             }
-            if let issue = store.credentialIssue { Text(issue.message).foregroundStyle(.red) }
+            if let issue = store.credentialIssue { NativeSettingsNotice(issue.message) }
             if store.capacityReached {
-                Text("The eight retained-owner limit is reached. Original cleanup and historical unlinked references are preserved; a new Host session cannot be opened.")
-                    .foregroundStyle(.orange)
+                NativeSettingsNotice("The eight retained-owner limit is reached. Original cleanup and historical unlinked references are preserved; a new Host session cannot be opened.", kind: .warning)
             }
             Text("Save or discard configuration drafts first. Key entry uses the exact saved binding and a separate native action; it does not change a provider, endpoint or enable state.")
                 .font(.caption).foregroundStyle(.secondary)
@@ -100,8 +109,8 @@ struct NativeCredentialEntryControls: View {
                 Text("This historical receipt does not establish current credential presence. Session credentials can be lost on Host restart.")
                     .font(.caption).foregroundStyle(.secondary)
             }
-            if let issue = operation.issue { Text(issue.message).foregroundStyle(.red) }
-            if let issue = operation.operation.issue { Text(issue.errorDescription ?? "Inspect the original storage operation.").foregroundStyle(.red) }
+            if let issue = operation.issue { NativeSettingsNotice(issue.message) }
+            if let issue = operation.operation.issue { NativeSettingsNotice(issue.errorDescription ?? "Inspect the original storage operation.") }
             linkControls(operation)
             Text("Reference and original result are metadata. No key deletion or presence query is provided.").font(.caption).foregroundStyle(.secondary)
         }
@@ -120,18 +129,18 @@ struct NativeCredentialEntryControls: View {
         switch operation.linkState {
         case .notRequested:
             if operation.initial && operation.storageCompleted {
-                Text("Stored, not linked. The key may remain stored if metadata cannot be linked.").foregroundStyle(.orange)
+                NativeSettingsNotice("Stored, not linked. The key may remain stored if metadata cannot be linked.", kind: .warning)
                 Button("Link this stored reference to original revision") { store.linkCredentialMetadata(operation.handle) }
                     .disabled(!store.canLinkCredential(operation.handle) || connectionEdited)
             }
         case .notSubmitted:
-            Text("The original metadata candidate was not submitted. The stored key has not been rolled back.").foregroundStyle(.orange)
+            NativeSettingsNotice("The original metadata candidate was not submitted. The stored key has not been rolled back.", kind: .warning)
         case .working: ProgressView("Waiting for the original metadata operation…")
-        case .unconfirmed: Text("Metadata outcome is unconfirmed. Inspect the original owner operation; do not submit another key.").foregroundStyle(.orange)
+        case .unconfirmed: NativeSettingsNotice("Metadata outcome is unconfirmed. Inspect the original owner operation; do not submit another key.", kind: .warning)
         case .observed(let receipt):
             switch receipt.fileOutcome {
-            case .unsettled: Text("The original metadata file outcome remains unknown.").foregroundStyle(.orange)
-            case .notApplied: Text("The metadata link was not applied. The stored key may remain unlinked.").foregroundStyle(.orange)
+            case .unsettled: NativeSettingsNotice("The original metadata file outcome remains unknown.", kind: .warning)
+            case .notApplied: NativeSettingsNotice("The metadata link was not applied. The stored key may remain unlinked.", kind: .warning)
             case .applied(let revision): Text("Original reference metadata linked at revision \(revision).")
             }
             if let application = receipt.application { Text(NativeSettingsText.application(application)).font(.caption) }
@@ -184,7 +193,7 @@ private struct NativeCredentialEntrySheet: View {
                 .onSubmit { submit() }
             Text("The field is masked. Submission uses the original native action and private pipe. Clearing the field does not guarantee erasure of Swift or OS memory.")
                 .font(.caption).foregroundStyle(.secondary)
-            if let issue = store.credentialPresentationIssue { Text(issue.message).foregroundStyle(.red) }
+            if let issue = store.credentialPresentationIssue { NativeSettingsNotice(issue.message) }
             HStack {
                 Button("Cancel", role: .cancel) { field.clear(); store.dismissCredential(presentation) }.keyboardShortcut(.cancelAction)
                 Spacer()
@@ -193,7 +202,7 @@ private struct NativeCredentialEntrySheet: View {
             }
         }
         .padding(24)
-        .frame(width: 570)
+        .frame(minWidth: 570)
         .onAppear { store.attachCredentialField(field, to: presentation); focused = true }
         .onDisappear { field.clear(); store.dismissCredential(presentation) }
         .background {

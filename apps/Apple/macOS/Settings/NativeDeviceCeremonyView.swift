@@ -12,9 +12,9 @@ struct NativeDeviceCeremonyView: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 16) {
                     content
-                    if let issue = ceremony.issue { Text(issue).foregroundStyle(.red) }
+                    if let issue = ceremony.issue { NativeSettingsNotice(issue) }
                     if ceremony.retirementUncertain {
-                        Text("The native sheet has not confirmed that it is hidden. Original cleanup remains owned.").foregroundStyle(.orange)
+                        NativeSettingsNotice("The native sheet has not confirmed that it is hidden. Original cleanup remains owned.", kind: .warning)
                     }
                 }.frame(maxWidth: .infinity, alignment: .leading)
             }
@@ -29,7 +29,7 @@ struct NativeDeviceCeremonyView: View {
             }
         }
         .padding(24)
-        .frame(width: 620, height: 680)
+        .frame(minWidth: 620, minHeight: 680)
         .background {
             TimelineView(.periodic(from: Date(), by: 1)) { context in
                 Color.clear.onChange(of: context.date) { _, _ in ceremony.expireIfNeeded() }
@@ -45,7 +45,7 @@ struct NativeDeviceCeremonyView: View {
         case .confirmation: confirmation
         case .confirming: ProgressView("Waiting for the original native device effect…")
         case .unconfirmed:
-            Text("The original result or private delivery is unconfirmed. Inspect the original identity; no effect is retried.").foregroundStyle(.orange)
+            NativeSettingsNotice("The original result or private delivery is unconfirmed. Inspect the original identity; no effect is retried.", kind: .warning)
             Button("Inspect original device operation") { ceremony.inspectOriginal() }
             Button("Inspect original final approval") { ceremony.inspectApproval() }
         case .invitation, .review: invitation
@@ -74,8 +74,7 @@ struct NativeDeviceCeremonyView: View {
             Text("Confirm the exact public identity").font(.headline)
             publicIdentity(keys)
             if id == ceremony.request.scope.identifier {
-                Text("This is the Host's own device identity. Revocation can remove endpoint authority and disconnect clients; it does not stop the independent Host process.")
-                    .foregroundStyle(.orange)
+                NativeSettingsNotice("This is the Host's own device identity. Revocation can remove endpoint authority and disconnect clients; it does not stop the independent Host process.", kind: .warning)
             }
             Toggle("I checked this device's identity and intend to revoke it", isOn: $ceremony.compared)
             Button("Revoke this exact device", role: .destructive) { ceremony.confirm() }
@@ -104,7 +103,7 @@ struct NativeDeviceCeremonyView: View {
             }
             Text("Paste the requesting device's signed request. Scanning the invitation does not approve that device.")
             TextEditor(text: Binding(get: { ceremony.requestText }, set: { ceremony.setRequestText($0) }))
-                .font(.caption.monospaced()).frame(height: 90)
+                .font(.caption.monospaced()).frame(minHeight: 90)
                 .accessibilityLabel("Private signed pairing request, at most 4096 bytes")
             Button("Review this signed request") { ceremony.reviewRequest() }.disabled(ceremony.requestText.isEmpty)
             if let review = ceremony.review {
@@ -115,11 +114,11 @@ struct NativeDeviceCeremonyView: View {
                 TextField("Device label", text: Binding(get: { ceremony.label }, set: { if $0.utf8.count <= 256 { ceremony.label = $0 } }))
                 Toggle("Allow all conversations", isOn: $ceremony.allConversations)
                 if ceremony.allConversations {
-                    Text("All includes future conversations. This is an explicit broad grant.").foregroundStyle(.orange)
+                    NativeSettingsNotice("All includes future conversations. This is an explicit broad grant.", kind: .warning)
                 } else {
                     Text("Selected conversation UUIDs; leave empty for no conversations.").font(.caption)
                     TextEditor(text: Binding(get: { ceremony.conversationIDs }, set: { if $0.utf8.count <= 4096 { ceremony.conversationIDs = $0 } }))
-                        .font(.caption.monospaced()).frame(height: 70)
+                        .font(.caption.monospaced()).frame(minHeight: 70)
                         .accessibilityLabel("Up to 64 distinct conversation UUIDs, separated by spaces or commas")
                 }
                 Toggle("Allow command submission", isOn: $ceremony.submitCommands)

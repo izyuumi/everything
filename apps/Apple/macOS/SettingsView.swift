@@ -53,7 +53,7 @@ struct SettingsView: View {
             .onAppear { model.settingsNavigation.destinationAppeared(.notifications) }
             .onDisappear { model.settingsNavigation.destinationDisappeared(.notifications) }
         }
-        .frame(minWidth: 700, minHeight: 800)
+        .frame(minWidth: 700, minHeight: 600)
         .inspector(isPresented: Binding(get: { model.settingsAssistant.expanded }, set: { model.settingsAssistant.setExpanded($0) })) {
             SettingsAssistantView(controller: model.settingsAssistant)
         }
@@ -93,6 +93,9 @@ struct SettingsView: View {
                     .font(.caption).foregroundStyle(.secondary)
             }
             Section("Defaults for new tasks") {
+                if !model.connected && model.settings != .null {
+                    NativeSettingsNotice("Host offline: showing the last loaded defaults. Changes are not queued; reconnect and reload before saving.", kind: .warning)
+                }
                 TextField("Workspace", text: $model.workspace)
                 Picker("Execution mode", selection: $model.executionMode) {
                     Text("Read only").tag("read_only")
@@ -127,7 +130,7 @@ struct SettingsView: View {
             if let message = model.message { Text(message).font(.caption).textSelection(.enabled) }
         }
         .formStyle(.grouped)
-        .padding(12).frame(width: 660, height: 740)
+        .padding(12)
         .confirmationDialog("Stop the per-user background service?", isPresented: Binding(get: { confirmingStop }, set: { setStopConfirmation($0) }), titleVisibility: .visible) {
             Button("Stop service", role: .destructive) { Task { await model.manageService("stop") } }
         } message: {
@@ -197,7 +200,7 @@ private struct NativeHostSettingsPane: View {
                 if store.isOpening { ProgressView("Opening the original native session…") }
                 if store.isRefreshing { ProgressView("Reading Host settings…") }
                 if connectionEdited { Text("Apply connection edits with Connect in General before opening Host settings.").foregroundStyle(.secondary) }
-                if let issue = store.issue { Text(issue.errorDescription ?? "Native Host settings are unavailable.").foregroundStyle(.red) }
+                if let issue = store.issue { NativeSettingsNotice(issue.errorDescription ?? "Native Host settings are unavailable.") }
                 if let information = store.information {
                     LabeledContent("Host", value: information.hostID.uuidString.lowercased())
                     LabeledContent("Original session expiry", value: Date(timeIntervalSince1970: Double(information.expiresAt) / 1000).formatted())
@@ -228,7 +231,7 @@ private struct NativeHostSettingsPane: View {
                     ForEach(registry.descriptors.filter { $0.scope == .host }, id: \.key.rawValue) { descriptor in
                         DisclosureGroup(label(descriptor.key)) {
                             LabeledContent("Default", value: value(descriptor.defaultValue))
-                            LabeledContent("Application", value: descriptor.applyBehavior.rawValue.replacingOccurrences(of: "_", with: " "))
+                            LabeledContent("Application", value: NativeSettingsText.applyBehavior(descriptor.applyBehavior))
                             if case .optionalDimensions(let choices) = descriptor.constraints {
                                 if let choices { Text("Allowed dimensions: \(choices.map { String($0) }.joined(separator: ", "))") }
                                 else { Text("Embedding model metadata is unavailable.") }
