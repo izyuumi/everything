@@ -63,6 +63,10 @@ struct SettingsAssistantView: View {
             Text(verbatim: phaseDescription).font(.subheadline.bold())
             Text("Ask Settings is optional. Native Settings controls remain available independently.")
                 .font(.caption).foregroundStyle(.secondary)
+            if controller.phase == .unavailable {
+                Text("The Host reported Ask Settings unavailable: no usable model and credential are configured, or it cannot start another Settings chat now. No other provider is selected automatically. Check Models, then open Ask Settings again.")
+                    .font(.caption).foregroundStyle(.orange)
+            }
             Button("Open Ask Settings") { controller.open() }
                 .disabled(!controller.canOpen)
             Text("Open reads the configured recipient and tools without sending a question or starting inference. First open Host settings using the conventional controls.")

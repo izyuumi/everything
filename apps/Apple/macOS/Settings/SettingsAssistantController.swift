@@ -56,6 +56,7 @@ final class SettingsAssistantController {
         fileprivate(set) var target: SettingsActionTarget?
         fileprivate(set) var issue: NativeSettingsSessionError?
         fileprivate(set) var isWorking = false
+        @ObservationIgnored fileprivate var autoInspected = false
 
         fileprivate init(original: NativeSettingsSession.AssistantOperationHandle, contextID: UUID) {
             self.original = original
@@ -387,8 +388,24 @@ final class SettingsAssistantController {
             }
             card.isWorking = false
             context.cardTask = nil
+            inspectNewCards(context)
             releaseIfSettled(context)
         }
+    }
+
+    func conflictRevision(_ card: Card) -> UInt64? {
+        if case .finished(let result) = card.inspection?.phase, case .conflict(let revision) = result.state { return revision }
+        guard let operation = nativeOperation(card), case .patch = operation.target, operation.confirmation != nil,
+              !store.snapshotIsStale, let revision = store.snapshot?.revision,
+              operation.target.expectedRevision != revision else { return nil }
+        return revision
+    }
+
+    func requestReproposal(_ card: Card) {
+        guard canReview, cardContext(card) != nil, let revision = conflictRevision(card) else { return }
+        composer = "My earlier proposal conflicted with Settings revision \(revision). Read the current settings again, explain what changed, and propose the change again only if it still applies."
+        if case .review = question { question = .none }
+        inputIssue = nil
     }
 
     func nativeOperation(_ card: Card) -> NativeSettingsOperation? {
@@ -639,7 +656,13 @@ final class SettingsAssistantController {
         case .completed:
             context.phase = .completed
             if let turn = status.turnID, context.turns[turn] != nil {
-                if context.pendingTurn == turn { context.pendingTurn = nil }
+                if context.pendingTurn == turn {
+                    context.pendingTurn = nil
+                    for card in context.cards.values where card.original.turnID == turn {
+                        if case .finished = card.inspection?.phase { continue }
+                        card.autoInspected = false
+                    }
+                }
                 if !context.archivedTurns.contains(turn), case .submitted(let text, let originalTurn) = question, originalTurn == turn {
                     recent.append(RecentTurn(id: turn, question: text, answer: status.assistantText))
                     if recent.count > 4 { recent.removeFirst(recent.count - 4) }
@@ -657,6 +680,16 @@ final class SettingsAssistantController {
         context.issue = nil
         issue = nil
         phase = context.phase
+        inspectNewCards(context)
+    }
+
+    private func inspectNewCards(_ context: Context) {
+        guard current === context, context.cardTask == nil,
+              let card = context.cards.values.sorted(by: { $0.id.uuidString < $1.id.uuidString }).first(where: { !$0.autoInspected })
+        else { return }
+        card.autoInspected = true
+        inspect(card)
+        if context.cardTask == nil { card.autoInspected = false }
     }
 
     private func pausePublication() {
