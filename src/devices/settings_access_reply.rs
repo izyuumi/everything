@@ -5,6 +5,10 @@ use thiserror::Error;
 use uuid::Uuid;
 use zeroize::Zeroizing;
 
+use crate::host::settings::agent::{
+    SettingsChatContextObservation, SettingsChatOpened, SettingsChatPhase, SettingsChatStatus,
+    SettingsProvisionalState,
+};
 use crate::host::settings::contract::{SettingKey, SettingsContractError, SettingsSnapshot};
 use crate::host::settings::service::SettingsChangePage;
 use crate::host::settings::{
@@ -17,6 +21,7 @@ use super::{BindingGeneration, SettingsHostAction};
 
 const MAX_ACCESS_PACKET_BYTES: usize = 32_768;
 const MAX_DENIAL_PACKET_BYTES: usize = 2048;
+const MAX_REMOTE_TEXT_BYTES: usize = 16 * 1024;
 
 #[derive(Serialize)]
 pub(crate) struct SettingsAccessReplyPacket {
@@ -70,6 +75,16 @@ enum AccessReplyBody {
     HostActionRequired {
         action: SettingsHostAction,
     },
+    SessionOpened {
+        chat: Box<SettingsChatOpened>,
+    },
+    SessionAccepted {
+        chat_id: Uuid,
+        turn_id: CommandId,
+    },
+    SessionStatus {
+        status: Box<SettingsRemoteChatStatus>,
+    },
     Denied {
         reason: SettingsRemoteDenial,
     },
@@ -83,7 +98,72 @@ pub(crate) enum SettingsRemoteReply {
         request_id: CommandId,
         operation: SettingsRemoteOperation,
     },
+    SessionOpened(Box<SettingsChatOpened>),
+    SessionAccepted {
+        chat_id: Uuid,
+        turn_id: CommandId,
+    },
+    SessionStatus(Box<SettingsRemoteChatStatus>),
     Denied(SettingsRemoteDenial),
+}
+
+#[derive(Clone, Serialize)]
+pub(crate) struct SettingsRemoteChatStatus {
+    chat_id: Uuid,
+    phase: SettingsChatPhase,
+    turn_id: Option<CommandId>,
+    text_revision: u64,
+    text_offset: usize,
+    text_bytes: usize,
+    text: String,
+    provisional: Option<SettingsProvisionalState>,
+    context: Option<SettingsChatContextObservation>,
+    operation_ids: Vec<CommandId>,
+    model_attempts: u32,
+    charged_tokens: u64,
+    reserved_output_tokens: u64,
+    provider_complete: bool,
+    usage_complete: bool,
+}
+
+impl SettingsRemoteChatStatus {
+    pub(crate) fn project(status: &SettingsChatStatus, text_offset: usize) -> Option<Self> {
+        let rest = status.assistant_text.get(text_offset..)?;
+        let mut encoded = 0;
+        let mut end = 0;
+        for (index, character) in rest.char_indices() {
+            let width = match character {
+                '"' | '\\' | '\u{8}' | '\u{c}' | '\n' | '\r' | '\t' => 2,
+                character if u32::from(character) < 0x20 => 6,
+                character => character.len_utf8(),
+            };
+            if encoded + width > MAX_REMOTE_TEXT_BYTES {
+                break;
+            }
+            encoded += width;
+            end = index + character.len_utf8();
+        }
+        Some(Self {
+            chat_id: status.chat_id,
+            phase: status.phase,
+            turn_id: status.turn_id,
+            text_revision: status.text_revision,
+            text_offset,
+            text_bytes: status.assistant_text.len(),
+            text: rest[..end].to_owned(),
+            provisional: status
+                .provisional
+                .as_ref()
+                .map(|provisional| provisional.state),
+            context: status.context.clone(),
+            operation_ids: status.operation_ids.clone(),
+            model_attempts: status.model_attempts,
+            charged_tokens: status.charged_tokens,
+            reserved_output_tokens: status.reserved_output_tokens,
+            provider_complete: status.provider_complete,
+            usage_complete: status.usage_complete,
+        })
+    }
 }
 
 #[derive(Clone, Serialize)]
@@ -224,6 +304,16 @@ impl SettingsAccessReplyPacket {
                     operation,
                 },
             ),
+            SettingsRemoteReply::SessionOpened(chat) => {
+                (Some(generation), AccessReplyBody::SessionOpened { chat })
+            }
+            SettingsRemoteReply::SessionAccepted { chat_id, turn_id } => (
+                Some(generation),
+                AccessReplyBody::SessionAccepted { chat_id, turn_id },
+            ),
+            SettingsRemoteReply::SessionStatus(status) => {
+                (Some(generation), AccessReplyBody::SessionStatus { status })
+            }
             SettingsRemoteReply::Denied(reason) => (None, AccessReplyBody::Denied { reason }),
         };
         Self::new(host_id, in_reply_to, query_id, generation, body)
@@ -322,7 +412,10 @@ impl SettingsAccessReplyPacket {
             AccessReplyBody::Snapshot { .. }
             | AccessReplyBody::Changes { .. }
             | AccessReplyBody::Update { .. }
-            | AccessReplyBody::HostActionRequired { .. } => {
+            | AccessReplyBody::HostActionRequired { .. }
+            | AccessReplyBody::SessionOpened { .. }
+            | AccessReplyBody::SessionAccepted { .. }
+            | AccessReplyBody::SessionStatus { .. } => {
                 let generation = generation
                     .as_ref()
                     .ok_or(SettingsAccessReplyContractError::Invalid)?;

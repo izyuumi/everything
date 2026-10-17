@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use tokio::sync::OwnedMutexGuard;
 
 use crate::devices::{
@@ -5,17 +7,25 @@ use crate::devices::{
     SettingsRemoteDenial, SettingsRemoteOperation, SettingsRemoteReply, SettingsRemoteRequest,
 };
 use crate::host::settings::contract::{SETTINGS_CONTRACT_VERSION, SettingsPatch, SettingsScope};
-use crate::host::settings::{SettingsGrantHead, SettingsGrantState};
+use crate::host::settings::grants::SettingsGrantReference;
+use crate::host::settings::{SettingsGrantConsent, SettingsGrantHead, SettingsGrantState};
 use crate::storage::Store;
 
 use super::access::{AccessDecision, SettingsAccessQualificationError};
+use super::session::SettingsRemoteSessionPlan;
 use super::{SettingsReceiptAuthority, SettingsServiceError};
 
 const MAX_REMOTE_CHANGE_BYTES: usize = 24 * 1024;
+const SESSION_PUBLICATION_MARGIN: Duration = Duration::from_secs(2);
 
 pub(crate) struct SettingsRemotePayload {
     pub(super) generation: BindingGeneration,
     pub(super) reply: SettingsRemoteReply,
+}
+
+pub(crate) enum SettingsRemotePreparation {
+    Reply(Option<SettingsRemotePayload>),
+    Session(Box<SettingsRemoteSessionPlan>),
 }
 
 impl SettingsReceiptAuthority {
@@ -24,24 +34,27 @@ impl SettingsReceiptAuthority {
         store: &Store,
         mutation: &OwnedMutexGuard<()>,
         request: &OwnedCommittedSettingsAccess,
-    ) -> Result<Option<SettingsRemotePayload>, SettingsAccessQualificationError> {
+    ) -> Result<SettingsRemotePreparation, SettingsAccessQualificationError> {
         let source = request.verified_request().authority_source();
         let intent = source.intent();
         let Some(requested) = intent.request.generation() else {
-            return Ok(None);
+            return Ok(SettingsRemotePreparation::Reply(None));
         };
         let observed = {
             let connection = store.connection().map_err(SettingsServiceError::from)?;
             self.observe_access_reply_on(store, &connection, mutation, request)?
         };
         let AccessDecision::Active(head) = &observed.status.decision else {
-            return Ok(None);
+            self.core
+                .authority
+                .retire_paired_sessions(source.verified_peer_keys().device_id)?;
+            return Ok(SettingsRemotePreparation::Reply(None));
         };
         let generation = remote_generation(source, head);
         let SettingsGrantState::Active {
             readable_keys,
             writable_keys,
-            ..
+            session_consent,
         } = &head.grant.change.target.state
         else {
             return Err(SettingsServiceError::OutsideScope.into());
@@ -50,6 +63,39 @@ impl SettingsReceiptAuthority {
             SettingsRemoteReply::Denied(SettingsRemoteDenial::GrantChanged)
         } else {
             match &intent.request {
+                SettingsRemoteRequest::SessionOpen { .. }
+                | SettingsRemoteRequest::SessionSend { .. }
+                | SettingsRemoteRequest::SessionPoll { .. }
+                | SettingsRemoteRequest::SessionClose { .. } => match session_consent {
+                    SettingsGrantConsent::ConfiguredProvider {
+                        provider,
+                        model,
+                        recipient,
+                    } => {
+                        return Ok(SettingsRemotePreparation::Session(Box::new(
+                            SettingsRemoteSessionPlan {
+                                generation,
+                                peer: source.verified_peer_keys().clone(),
+                                grant: SettingsGrantReference {
+                                    grant_id: head.grant.change.target.grant_id,
+                                    revision: head.grant.revision,
+                                },
+                                grant_expires_at: head.grant.change.target.expires_at,
+                                provider: *provider,
+                                model: model.clone(),
+                                recipient: recipient.clone(),
+                                request: intent.request.clone(),
+                                deadline: source
+                                    .original_deadline()
+                                    .checked_sub(SESSION_PUBLICATION_MARGIN)
+                                    .ok_or(SettingsServiceError::Expired)?,
+                            },
+                        )));
+                    }
+                    SettingsGrantConsent::None => {
+                        SettingsRemoteReply::Denied(SettingsRemoteDenial::OutsideScope)
+                    }
+                },
                 SettingsRemoteRequest::Snapshot { keys, .. } => {
                     if keys.iter().all(|key| readable_keys.contains(key)) {
                         match self.core.host_snapshot(SettingsScope::Host {
@@ -132,11 +178,13 @@ impl SettingsReceiptAuthority {
                     }
                 }
                 SettingsRemoteRequest::AccessStatus | SettingsRemoteRequest::HostAction { .. } => {
-                    return Ok(None);
+                    return Ok(SettingsRemotePreparation::Reply(None));
                 }
             }
         };
-        Ok(Some(SettingsRemotePayload { generation, reply }))
+        Ok(SettingsRemotePreparation::Reply(Some(
+            SettingsRemotePayload { generation, reply },
+        )))
     }
 }
 
@@ -152,7 +200,7 @@ pub(super) fn remote_generation(
     }
 }
 
-fn remote_denial(error: &SettingsServiceError) -> SettingsRemoteDenial {
+pub(super) fn remote_denial(error: &SettingsServiceError) -> SettingsRemoteDenial {
     match error {
         SettingsServiceError::Conflict => SettingsRemoteDenial::Conflict,
         SettingsServiceError::OutsideScope => SettingsRemoteDenial::OutsideScope,

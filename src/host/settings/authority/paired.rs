@@ -1,7 +1,9 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
-use std::time::Instant;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::{Duration, Instant};
 
+use rand_core::{OsRng, RngCore};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
@@ -12,12 +14,19 @@ use crate::devices::{
 };
 use crate::protocol::{DeviceId, UnixMillis};
 
-use super::super::grants::SettingsGrantOwner;
+use super::super::grants::{SettingsGrantOwner, SettingsGrantReference};
 use super::super::service::SettingsServiceError;
-use super::{Authority, CallerSource, SettingsCaller};
+use super::{Authority, CallerSource, SettingsAgentSession, SettingsCaller};
 
 const MAX_ACCESS_QUERIES: usize = 512;
 const MAX_PEER_ACCESS_QUERIES: usize = 64;
+const MAX_PAIRED_SESSION_PARENTS: usize = 4;
+const PAIRED_SESSION_LIFETIME_MS: u64 = 300_000;
+
+pub(super) struct PairedSessionParent {
+    peer: DevicePublicKeys,
+    grant: SettingsGrantReference,
+}
 
 #[derive(Default)]
 pub(super) struct PairedTransport {
@@ -364,6 +373,214 @@ impl Authority {
             wall,
             monotonic,
         })
+    }
+}
+
+impl Authority {
+    pub(in crate::host::settings) fn paired_session_parent(
+        &self,
+        peer: &DevicePublicKeys,
+        grant: SettingsGrantReference,
+        grant_expires_at: UnixMillis,
+    ) -> Result<Uuid, SettingsServiceError> {
+        let mut sessions = self
+            .sessions
+            .lock()
+            .map_err(|_| SettingsServiceError::Poisoned)?;
+        if sessions.closed {
+            return Err(SettingsServiceError::Stopped);
+        }
+        let now = UnixMillis::now()?;
+        if let Some((id, session)) = sessions.values.iter().find(|(_, session)| {
+            session
+                .device
+                .as_ref()
+                .is_some_and(|parent| parent.peer.device_id == peer.device_id)
+        }) && !session.closed
+            && session.live(now)
+            && session
+                .device
+                .as_ref()
+                .is_some_and(|parent| parent.peer == *peer && parent.grant == grant)
+            && sessions
+                .agents
+                .values()
+                .any(|agent| agent.native_session_id == *id && !agent.cancellation.is_cancelled())
+        {
+            return Ok(*id);
+        }
+        retire_device(&mut sessions, peer.device_id);
+        sessions.values.retain(|_, session| {
+            session.admitted.load(Ordering::Acquire) != 0 || (!session.closed && session.live(now))
+        });
+        if sessions.values.len() >= super::MAX_NATIVE_SESSIONS
+            || sessions
+                .values
+                .values()
+                .filter(|session| session.paired())
+                .count()
+                >= MAX_PAIRED_SESSION_PARENTS
+        {
+            return Err(SettingsServiceError::Capacity);
+        }
+        let remaining = grant_expires_at
+            .get()
+            .checked_sub(now.get())
+            .filter(|remaining| *remaining > 0)
+            .ok_or(SettingsServiceError::Expired)?
+            .min(PAIRED_SESSION_LIFETIME_MS);
+        let expires_at = UnixMillis::try_from(
+            now.get()
+                .checked_add(remaining)
+                .ok_or(SettingsServiceError::Invalid("session expiry"))?,
+        )?;
+        let mut secret_hash = [0; 32];
+        OsRng
+            .try_fill_bytes(&mut secret_hash)
+            .map_err(|_| SettingsServiceError::Entropy)?;
+        let id = Uuid::new_v4();
+        match sessions.values.entry(id) {
+            std::collections::btree_map::Entry::Vacant(entry) => {
+                entry.insert(super::Session {
+                    secret_hash,
+                    expires_at,
+                    deadline: Instant::now() + Duration::from_millis(remaining),
+                    closed: false,
+                    cancellation: CancellationToken::new(),
+                    admitted: Arc::new(AtomicUsize::new(0)),
+                    device: Some(PairedSessionParent {
+                        peer: peer.clone(),
+                        grant,
+                    }),
+                });
+            }
+            std::collections::btree_map::Entry::Occupied(_) => {
+                return Err(SettingsServiceError::Conflict);
+            }
+        }
+        Ok(id)
+    }
+
+    pub(in crate::host::settings) fn current_paired_session_parent(
+        &self,
+        device_id: DeviceId,
+        grant: SettingsGrantReference,
+    ) -> Result<Uuid, SettingsServiceError> {
+        let sessions = self
+            .sessions
+            .lock()
+            .map_err(|_| SettingsServiceError::Poisoned)?;
+        if sessions.closed {
+            return Err(SettingsServiceError::Stopped);
+        }
+        sessions
+            .values
+            .iter()
+            .find(|(_, session)| {
+                session.device.as_ref().is_some_and(|parent| {
+                    parent.peer.device_id == device_id && parent.grant == grant
+                })
+            })
+            .map(|(id, _)| *id)
+            .ok_or(SettingsServiceError::NotFound)
+    }
+
+    pub(in crate::host::settings) fn begin_paired_agent(
+        self: &Arc<Self>,
+        parent: Uuid,
+    ) -> Result<SettingsAgentSession, SettingsServiceError> {
+        let mut sessions = self
+            .sessions
+            .lock()
+            .map_err(|_| SettingsServiceError::Poisoned)?;
+        if !sessions
+            .values
+            .get(&parent)
+            .ok_or(SettingsServiceError::OutsideScope)?
+            .paired()
+        {
+            return Err(SettingsServiceError::OutsideScope);
+        }
+        sessions
+            .agents
+            .retain(|_, session| !session.cancellation.is_cancelled());
+        if sessions
+            .agents
+            .values()
+            .any(|agent| agent.native_session_id == parent)
+        {
+            return Err(SettingsServiceError::Capacity);
+        }
+        self.insert_agent(&mut sessions, parent)
+    }
+
+    pub(in crate::host::settings) fn paired_agent_grant(
+        &self,
+        caller: &SettingsCaller,
+    ) -> Result<Option<(DevicePublicKeys, SettingsGrantReference)>, SettingsServiceError> {
+        if !std::ptr::eq(self, Arc::as_ptr(&caller.authority)) {
+            return Err(SettingsServiceError::OutsideScope);
+        }
+        let CallerSource::SettingsAgent {
+            native_session_id, ..
+        } = caller.source
+        else {
+            return Ok(None);
+        };
+        let sessions = self
+            .sessions
+            .lock()
+            .map_err(|_| SettingsServiceError::Poisoned)?;
+        Ok(sessions
+            .values
+            .get(&native_session_id)
+            .ok_or(SettingsServiceError::OutsideScope)?
+            .device
+            .as_ref()
+            .map(|parent| (parent.peer.clone(), parent.grant)))
+    }
+
+    pub(in crate::host::settings) fn paired_agent_session(
+        &self,
+        session: &SettingsAgentSession,
+    ) -> Result<bool, SettingsServiceError> {
+        if !std::ptr::eq(self, Arc::as_ptr(&session.authority)) {
+            return Err(SettingsServiceError::OutsideScope);
+        }
+        let sessions = self
+            .sessions
+            .lock()
+            .map_err(|_| SettingsServiceError::Poisoned)?;
+        Ok(sessions
+            .values
+            .get(&session.native_session_id)
+            .ok_or(SettingsServiceError::OutsideScope)?
+            .paired())
+    }
+
+    pub(in crate::host::settings) fn retire_paired_sessions(
+        &self,
+        device_id: DeviceId,
+    ) -> Result<(), SettingsServiceError> {
+        let mut sessions = self
+            .sessions
+            .lock()
+            .map_err(|_| SettingsServiceError::Poisoned)?;
+        retire_device(&mut sessions, device_id);
+        Ok(())
+    }
+}
+
+fn retire_device(sessions: &mut super::Sessions, device_id: DeviceId) {
+    for session in sessions.values.values_mut() {
+        if session
+            .device
+            .as_ref()
+            .is_some_and(|parent| parent.peer.device_id == device_id)
+        {
+            session.closed = true;
+            session.cancellation.cancel();
+        }
     }
 }
 

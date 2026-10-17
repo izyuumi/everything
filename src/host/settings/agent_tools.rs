@@ -253,6 +253,18 @@ impl Tool for SettingsTool {
         {
             return Err(stopped());
         }
+        #[cfg(unix)]
+        if !matches!(
+            self.tool,
+            SettingsToolName::List | SettingsToolName::Get | SettingsToolName::Update
+        ) && self
+            .owner
+            .service
+            .paired_settings_session(&session)
+            .map_err(|_| rejected(self.tool))?
+        {
+            return Err(rejected(self.tool));
+        }
         let operation_id: CommandId = context.request_id().parse().map_err(|_| stopped())?;
         let scope = SettingsScope::Host {
             host_id: binding.host_id,

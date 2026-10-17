@@ -19,7 +19,8 @@ pub use devices::NativeDeviceActionResult;
 pub(crate) use paired::{
     QualifiedSettingsAccessReply, SettingsAccessQualificationError, SettingsAccessReplyFamily,
     SettingsAccessReservationSpec, SettingsQueuedReplyCheckError, SettingsReceiptAuthority,
-    SettingsRemotePayload, SettingsReplyComparison, SettingsReplyProjectionError,
+    SettingsRemotePayload, SettingsRemotePreparation, SettingsReplyComparison,
+    SettingsReplyProjectionError,
 };
 pub use pairing::{
     NativePairingAcceptance, NativePairingAccess, NativePairingApprovalInput,
@@ -190,6 +191,8 @@ struct ServiceCore {
     applications: Mutex<BTreeMap<CommandId, writes::ApplicationCapture>>,
     application_stop: CancellationToken,
     agent: Agent,
+    #[cfg(unix)]
+    agents: std::sync::OnceLock<std::sync::Weak<super::agent::SettingsAgentRuntime>>,
 }
 
 impl SettingsService {
@@ -222,6 +225,8 @@ impl SettingsService {
                 applications: Mutex::new(BTreeMap::new()),
                 application_stop: CancellationToken::new(),
                 agent,
+                #[cfg(unix)]
+                agents: std::sync::OnceLock::new(),
             }),
             invocation: None,
         };

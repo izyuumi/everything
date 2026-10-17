@@ -21,8 +21,8 @@ pub(crate) use settings_connection::{
 
 #[cfg(unix)]
 pub(crate) use settings_access_reply::{
-    SettingsAccessReplyContractError, SettingsAccessReplyPacket, SettingsRemoteDenial,
-    SettingsRemoteOperation, SettingsRemoteReply,
+    SettingsAccessReplyContractError, SettingsAccessReplyPacket, SettingsRemoteChatStatus,
+    SettingsRemoteDenial, SettingsRemoteOperation, SettingsRemoteReply,
 };
 #[cfg(unix)]
 pub(crate) use settings_ingress::work::{

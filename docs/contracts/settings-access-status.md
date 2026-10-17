@@ -1,6 +1,6 @@
 # Remote Settings request DATA
 
-The Host decoder is `src/devices/settings_ingress/access.rs`. Reply DATA is in [replies](settings-access-replies.md); the transport path is in [the transport](settings-access-transport.md). The Apple encoder `apps/Apple/Shared/Settings/RemoteSettingsWire.swift` produces only `access_status` in this shape ([Apple wire](apple-remote-settings-wire.md)).
+The Host decoder is `src/devices/settings_ingress/access.rs`. Reply DATA is in [replies](settings-access-replies.md); the transport path is in [the transport](settings-access-transport.md); the remote chat is in [the remote Settings session](settings-remote-session.md). The Apple encoder `apps/Apple/Shared/Settings/RemoteSettingsWire.swift` produces only `access_status` in this shape ([Apple wire](apple-remote-settings-wire.md)).
 
 ## Shape
 
@@ -19,6 +19,10 @@ The Host decoder is `src/devices/settings_ingress/access.rs`. Reply DATA is in [
 | `changes` | `generation`, `after_sequence`, `limit`, `time` |
 | `update` | `generation`, `request_id`, `expected_revision`, `changes`, `time` |
 | `host_action` | `action`, `time` |
+| `session_open` | `generation`, `open_request_id`, `time` |
+| `session_send` | `generation`, `chat_id`, `turn_id`, `provider_binding_sha256`, `text`, `time` |
+| `session_poll` | `generation`, `chat_id`, `text_offset`, `time` |
+| `session_close` | `generation`, `chat_id`, `time` |
 
 ## Rules
 
@@ -30,7 +34,10 @@ The Host decoder is `src/devices/settings_ingress/access.rs`. Reply DATA is in [
 - `changes`: `limit` 1–64, `after_sequence` 0 or a durable sequence cursor.
 - `update.changes`: the existing typed `SettingChange` list; together with `request_id`, `expected_revision` and this Host it must form a valid `SettingsPatch` without confirmation. `request_id` is the immutable mutation identity; `query_id` only correlates one exchange.
 - `host_action.action`: one of `credential_entry`, `pairing_invitation`, `pairing_approval`, `device_revocation`, `grant_change`, `execution_policy`, `recipient_consent`, `lifecycle`.
-- A request carries no grant authority, parent, caller, credential, invitation or free text. A generation is a freshness check, not authority.
+- `session_open.open_request_id`, `session_send.turn_id` and `chat_id` are canonical UUIDs. `open_request_id` and `turn_id` are the immutable Open and turn identities: resending the same value replays the original outcome instead of creating a new chat or turn.
+- `session_send.provider_binding_sha256` is 64 lower-case hex characters and must echo the digest from the `session_opened` reply. `text` is non-empty after trimming, has no NUL and is at most 8 KiB (the restricted runtime's input limit).
+- `session_poll.text_offset` is a byte offset into the committed assistant text, at most 16 KiB.
+- Apart from `session_send.text` (the user's chat input, which goes to the consented model), a request carries no grant authority, parent, caller, credential, invitation or free text. A generation is a freshness check, not authority.
 
 Decoding returns only the typed intent or Invalid, with no diagnostics. A decoded intent is neither authenticated nor authorized.
 

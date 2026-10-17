@@ -83,6 +83,7 @@ pub struct SettingsChatStatus {
 }
 
 pub(crate) const MAX_CHAT_STATUS_BYTES: usize = 200_704;
+pub(crate) const SETTINGS_TURN_CONFLICT: &str = "Settings turn conflicts with its original input";
 pub(crate) const MAX_OPEN_STATE_BYTES: usize = 32 * 1024;
 pub(crate) const MAX_SCOPED_DETAILS_BYTES: usize = 64 * 1024;
 const MAX_OPEN_REQUESTS: usize = 1024;
@@ -179,6 +180,10 @@ pub struct SettingsUncertaintyAcknowledgement {
 pub(crate) enum SettingsAgentCommand {
     Open {
         caller: SettingsCaller,
+        open_request_id: CommandId,
+    },
+    OpenPaired {
+        native_session_id: Uuid,
         open_request_id: CommandId,
     },
     OpenStatus {
@@ -485,7 +490,18 @@ impl SettingsAgentSupervisor {
             SettingsAgentCommand::Open {
                 caller,
                 open_request_id,
-            } => self.open(caller, open_request_id).await,
+            } => {
+                let super::authority::CallerSource::NativeUi(parent) = caller.source else {
+                    return Err(HostError::Invalid(
+                        "Settings Open requires the actual native parent",
+                    ));
+                };
+                self.open(parent, Some(caller), open_request_id).await
+            }
+            SettingsAgentCommand::OpenPaired {
+                native_session_id,
+                open_request_id,
+            } => self.open(native_session_id, None, open_request_id).await,
             SettingsAgentCommand::OpenStatus {
                 native_session_id,
                 open_request_id,
@@ -684,14 +700,10 @@ impl SettingsAgentSupervisor {
 
     async fn open(
         &mut self,
-        caller: SettingsCaller,
+        parent: Uuid,
+        caller: Option<SettingsCaller>,
         id: CommandId,
     ) -> Result<SettingsAssistantReply, HostError> {
-        let super::authority::CallerSource::NativeUi(parent) = caller.source else {
-            return Err(HostError::Invalid(
-                "Settings Open requires the actual native parent",
-            ));
-        };
         if self.opens.contains_key(&id) {
             return match self.open_status(parent, id)? {
                 SettingsAssistantReply::OpenState {
@@ -718,7 +730,10 @@ impl SettingsAgentSupervisor {
             return Ok(SettingsAssistantReply::Unavailable);
         }
         self.quiescent.store(false, Ordering::Release);
-        let child = match self.core.service.begin_settings_session(caller) {
+        let child = match match caller {
+            Some(caller) => self.core.service.begin_settings_session(caller),
+            None => self.begin_paired_session(parent),
+        } {
             Ok(child) => Arc::new(child),
             Err(error) => {
                 self.opens
@@ -981,6 +996,22 @@ impl SettingsAgentSupervisor {
         Ok(SettingsAssistantReply::Opened { chat: opened })
     }
 
+    #[cfg(unix)]
+    fn begin_paired_session(
+        &self,
+        parent: Uuid,
+    ) -> Result<SettingsAgentSession, super::service::SettingsServiceError> {
+        self.core.service.begin_paired_settings_session(parent)
+    }
+
+    #[cfg(not(unix))]
+    fn begin_paired_session(
+        &self,
+        _parent: Uuid,
+    ) -> Result<SettingsAgentSession, super::service::SettingsServiceError> {
+        Err(super::service::SettingsServiceError::OutsideScope)
+    }
+
     fn session(&self, parent: Uuid, id: Uuid) -> Result<Arc<Session>, HostError> {
         let entry = self
             .sessions
@@ -1017,9 +1048,7 @@ impl SettingsAgentSupervisor {
         let entry = self.sessions.get_mut(&id).ok_or(HostError::Worker)?;
         if let Some(original) = entry.seen.iter().find(|original| original.id == turn_id) {
             if original.digest != request_digest {
-                return Err(HostError::Invalid(
-                    "Settings turn conflicts with its original input",
-                ));
+                return Err(HostError::Invalid(SETTINGS_TURN_CONFLICT));
             }
             return Ok(match original.disposition {
                 SendDisposition::Accepted => SettingsAssistantReply::Accepted {

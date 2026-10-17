@@ -96,3 +96,33 @@ Dated 2026-10-17, macOS Apple Silicon, debug builds of the #116 branch implement
 | Owner `settings_operation` query for the paired update | Origin `paired_device` with the device id as client session, Finished `pending_application` revision 4 |
 
 The Host log showed no Settings errors or quarantine. Not observed: revocation racing an in-progress write, a pending request waiting behind another build, capacity limits, Host restart while a paired write is applying, graceful shutdown with queued replies, an Apple client, any provider request, or security properties. The helper and runtime data are scratch artifacts, not repository files.
+
+## Remote Settings session walkthrough
+
+Dated 2026-10-18, macOS Apple Silicon, debug Host/relay built from source `987b4e1` (the later commits on the branch change documentation only). Three runs on fresh disposable state under the scratch artifacts directory; the observations below are from the second and third runs (the first run was invalidated by a helper bug that put `loopback` instead of the URL in the consent recipient, so every consented step was refused as an invalid grant). Each run started a fresh Host (`serve`, cleared environment) and `everything-relay` on `ws://127.0.0.1:28117`, set the relay origin with owner `replace_settings`, restarted the Host, and paired a scratch Replica through owner `BeginPairing`/`ApprovePairing` (invitation kept in process memory). The model was a scripted Anthropic Messages SSE listener on a `127.0.0.1` ephemeral port inside the helper: it returned scripted tool calls/text or held a stream open. This is adversarial scripted output, not inference; no hosted provider, real credential or user state was used. Model setup used the native protected `models.selection` patch plus exact `confirm_patch`, owner `replace_settings` for the Session credential metadata, and owner credential Store of a generated dummy Session secret held only in helper memory. Grants were set through owner `set_settings_grant`. Every row is a real relay round trip of a sealed Settings packet.
+
+| Step | Observed |
+| --- | --- |
+| No grant: `session_open` | `denied/grant_unavailable` |
+| Grant r1 with `session_consent: none`: `session_open` | `denied/outside_scope` |
+| Grant r2 with `configured_provider` (anthropic, `stub-model`, the loopback URL): `session_open` | `session_opened`: chat id, provider/model/recipient equal to the consent, binding digest, the seven provider tool names, expiry 300 s ahead. No model request during Open |
+| Same `open_request_id` again | Same chat id and digest |
+| New `open_request_id` while that chat is live | `denied/capacity` |
+| `session_send` with a zero digest | `denied/outside_scope` |
+| `session_send` with the disclosed digest; script `settings_get`, `settings_list`, `settings_update` (embeddings enabled, expected revision 4), text | `session_accepted`; polls reached `completed` with text "Embeddings are now enabled.", one operation id, four model attempts. Owner settings went 4→5; owner `settings_operation` showed origin `settings_agent` with the paired parent as `native_session_id`, Finished `pending_application` r5 (later application `unavailable/embedding_boundary_unavailable`). Remote `snapshot` showed desired `true` at r5 and `changes` carried the r5 hints |
+| Model requests in that turn | Each advertised exactly the seven tools; the `settings_get`/`settings_list` results only contained the three readable keys; no body contained the dummy credential |
+| Script `devices_list`, `settings_request_action`, `devices_pair` (run 2) | Each tool result was `failed_without_side_effects` ("rejected before Settings mutation admission") |
+| Script `settings_update` of non-writable `memory.embeddings.dimensions` (run 3) | Turn `completed`; settings stayed at r5 with dimensions `inherit` |
+| Exact `session_send` replay of an earlier turn on the live chat | Same `session_accepted`; no model request |
+| Same `turn_id`, changed text | `denied/conflict` |
+| Long reply: stream held 33 s after `session_send` | Polls at ~0 s and ~33 s (separate requests past one 30 s request window) returned `running`; after release the turn completed |
+| Paging the 12000-byte reply (`a"b\n` repeated) | Page 1: offset 0, 10923 raw / 16384 escaped bytes; page 2: offset 10923, 1077 bytes; reassembled text identical. Offset past the end: `denied/invalid` |
+| Replica-only reconnect | Same generation; chat still answered |
+| Relay restart | New connection epoch; poll with old generation `denied/grant_changed`, with the new one the same chat status |
+| Owner grant change r3 (fewer readable keys): poll with old generation, then with new generation | `denied/grant_changed`, then `denied/outside_scope` for poll and send (parent retired) |
+| New chat; model stream held before a scripted `settings_update` (embeddings → false); owner revokes the grant (r4) during the hold, then the stream is released | Poll during the hold showed `running`. After revocation the Host had closed the model connection (no further events could be written); settings stayed r5 with embeddings `true`; `access_status` and `session_poll` answered `denied/grant_unavailable` |
+| New rotated grant with consent `stub-model`, then the configured model changed natively to `stub-model-b`: `session_open` | `denied/outside_scope`; no model request |
+| Grant r6 with consent `stub-model-b`; open, model stream held before a scripted `settings_update`; owner `RevokeDevice` during the hold, then release | Same as revocation: the model connection was closed, settings stayed r6 unchanged. A later poll from the revoked device got no reply (packets from a revoked pin are refused) |
+| Model-attempt limit (run 2, five scripted tool calls) | After the fourth attempt the turn ended `unavailable` and the runtime closed the chat; later sends to it answered `denied/outside_scope` while its final status stayed pollable |
+
+Host and relay joined after SIGINT with exit 0 in every run; the Host log was empty. A byte scan of the run directory (13 files) found no copy of the dummy credential. Not observed: an Apple client or UI, a hosted provider, Open replay after the parent was replaced, Host restart with a live chat, two devices at once, parent capacity (four), a turn longer than 120 s, write-in-progress interleaving at the exact moment of revocation (the hold was before the tool call), or any security review.

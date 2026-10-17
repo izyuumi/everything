@@ -559,7 +559,10 @@ impl HostInner {
                 let _mutation = self.mutation.lock().await;
                 self.ensure_accepting()?;
                 self.blocking(move |host| {
-                    Ok(host.devices.revoke_device(device_id, UnixMillis::now()?)?)
+                    host.devices.revoke_device(device_id, UnixMillis::now()?)?;
+                    #[cfg(unix)]
+                    host.settings_service.retire_paired_sessions(device_id)?;
+                    Ok(())
                 })
                 .await?;
                 self.changed.notify_one();

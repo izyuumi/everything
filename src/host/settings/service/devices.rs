@@ -237,6 +237,8 @@ impl ServiceCore {
                 now
             };
             self.endpoint.revoke_device_exact(public_keys, now)?;
+            #[cfg(unix)]
+            self.authority.retire_paired_sessions(*device_id)?;
             let inspection = self.repository.finish(
                 &effect.claim.identity,
                 effect.claim.native.native_request_id,
