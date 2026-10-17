@@ -428,7 +428,8 @@ enum RemoteSettingsReadWire {
                 guard generation == request.parent.generation else { throw WireError.invalid }
                 let fields = try object(bodyValue, ["kind", "snapshot"])
                 let snapshot = try decodeSnapshot(fields.required("snapshot"))
-                guard snapshot.entries.map(\.key) == request.keys else { throw WireError.invalid }
+                guard snapshot.observedAt >= request.time.issuedAt, snapshot.observedAt < request.time.expiresAt,
+                      snapshot.entries.map(\.key) == request.keys else { throw WireError.invalid }
                 body = .snapshot(snapshot)
             case "original_inspection":
                 guard case .inspection(let request) = expectation else { throw WireError.invalid }
@@ -439,8 +440,11 @@ enum RemoteSettingsReadWire {
                 let operationID = try optionalIdentifier(fields.required("operation_id"))
                 guard requestID == request.requestID, operationID == request.operationID else { throw WireError.invalid }
                 let observedAt = try positive(fields.required("observed_at"))
+                guard observedAt >= request.time.issuedAt, observedAt < request.time.expiresAt else { throw WireError.invalid }
                 let lookup = try decodeOriginalLookup(fields.required("lookup"))
-                if case .recorded(_, let view) = lookup { try matchInspection(view, operationID: operationID) }
+                if case .recorded(_, let view) = lookup {
+                    try matchInspection(view, requestID: request.requestID, operationID: request.operationID)
+                }
                 body = .originalInspection(requestID: requestID, operationID: operationID, observedAt: observedAt, lookup: lookup)
             default: throw WireError.invalid
             }
@@ -841,7 +845,10 @@ enum RemoteSettingsReadWire {
         }
     }
 
-    private static func matchInspection(_ view: RemoteSettingsOriginalView, operationID: UUID?) throws {
+    private static func matchInspection(_ view: RemoteSettingsOriginalView, requestID: UUID, operationID: UUID?) throws {
+        if view.originalKind == .update, case .operation(let linkedID) = view.link {
+            guard linkedID == requestID else { throw WireError.invalid }
+        }
         if let operationID {
             guard view.originalKind == .send, view.mutationOperationIDs.contains(operationID) else { throw WireError.invalid }
             switch view.service {
