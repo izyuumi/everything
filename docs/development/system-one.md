@@ -6,7 +6,13 @@ The Host does not read a TOML file. Its selection configuration is the `selectio
 
 With remote selection enabled, `prepare_selection` returns the exact disclosure without contacting the endpoint. Only `approve_selection` for that ticket sends one POST. The identical domain command then consumes the result, and the model receives the selected definitions plus `search_tools`. Declining with `discard_selection`, or never approving, keeps the ordinary local selection for that command. Approved or local tickets that are never submitted keep their reservation until discarded or expired. When the preflight budget is full, `prepare_selection` fails with code `busy` and "selection preflight capacity is exhausted; discard unused selection tickets". A consumed, discarded, expired or changed ticket fails with `invalid_request` and asks for a new preparation.
 
-The macOS Settings app requests System One key entry as a native credential action bound to the configured endpoint and a reference UUID. The secret travels only over the private native pipe into the platform store. On macOS that store is the user's login Keychain.
+The macOS Settings app requests System One key entry as a native credential action bound to the configured endpoint and a reference UUID. The secret travels only over the private native pipe into the platform store. On macOS that store is the user's login Keychain. The sequence is: native `request_action` (credential entry), then `details`, then `submit_credential`. A separate revision-checked owner settings write then sets `selection.credential_reference`. The key is bound to the exact endpoint plus reference. Changing the endpoint through native update clears the reference. Attaching the old reference to a new endpoint finds no key, so selection falls back locally and nothing is sent. To delete the key, send the credential operation below over `owner --sensitive-stdin`:
+
+```json
+{"kind":"credential","request_id":"UNIQUE_UUID","operation":{"kind":"remove_system_one","endpoint":"https://exact.configured/endpoint","reference":"REFERENCE_UUID"}}
+```
+
+Removal derives the same endpoint-bound key and deletes it from the native store. Deleting an absent entry also returns `applied`.
 
 ## Library configuration document
 
@@ -44,7 +50,7 @@ fallback = "local"
 
 Plain HTTP requires a literal loopback IP such as `127.0.0.1` or `[::1]`; `localhost`, abbreviated numeric hosts, LAN addresses and public HTTP are rejected. HTTPS uses normal TLS certificate verification. Every destination, including loopback and TypeSafe, still requires a trusted owner disclosure approval for the exact payload. Custom HTTPS may refer to internal networks only after that explicit approval; configuration does not silently authorize a request.
 
-Embedders using the library directly set up keys through the host integration API; there is no plain CLI key command. The owner surface creates a UUID reference, builds validated settings, obtains `SystemOneSettings::credential_key`, collects the bearer secret through ephemeral secure input, and calls `NativeCredentialStore::store` with a `CredentialSecret`. It reports the actual completion or sanitized failure, retaining only the reference in configuration. It shares that native store with the selector. Deletion uses the same derived key. Changing the canonical endpoint or its query requires setting a new endpoint-bound entry. Never route secret setup through the durable conversation/remote-command pipeline or shell arguments.
+Embedders using the library directly set up keys through the host integration API. The owner surface creates a UUID reference, builds validated settings, obtains `SystemOneSettings::credential_key`, collects the bearer secret through ephemeral secure input, and calls `NativeCredentialStore::store` with a `CredentialSecret`. It reports the actual completion or sanitized failure, retaining only the reference in configuration. It shares that native store with the selector. Deletion uses the same derived key. Changing the canonical endpoint or its query requires setting a new endpoint-bound entry. Never route secret setup through the durable conversation/remote-command pipeline or shell arguments.
 
 On Linux, use a real unlocked Secret Service implementation on session D-Bus. On macOS, use the user's Keychain and supported OS permission prompts. A headless host without a native store can continue offline or use an explicitly approved unauthenticated compatible endpoint. A configured reference whose entry is missing fails locally; it does not silently send an unauthenticated request.
 
@@ -64,4 +70,14 @@ On 2026-10-17 a debug build of the branch ran on macOS (Apple Silicon) as a real
 - A discarded ticket could not be approved, made no POST, and its command later ran with local tools plus `search_tools`. A second approval of the same ticket made no extra POST. Killing the approving CLI during a held request left zero tickets and active requests. Five unsubmitted tickets filled the 8 MiB budget, the sixth preparation returned the new `busy` message, and discarding them restored zero reservation.
 - With an approved request held open, SIGINT stopped the Host with exit 0 in about 0.02 s. The held client received `cancelled`. The disposable model key did not appear in any state, settings or temporary file afterwards.
 
-The TypeSafe endpoint was never approved or contacted. Not exercised: native Keychain store/read with a configured `credential_reference`, the macOS Settings UI itself, HTTPS endpoints, and an actual successful model turn. This walkthrough is not automated coverage. The Host's `lsof` snapshots sample socket state at a few points; they are not a full network trace.
+A second fresh-state run used the dummy key `dummy-sysone-key-20` and the Host with the real user `HOME` so it could reach the login Keychain. Observed:
+
+- Native credential entry completed: `request_action`, `details`, then `submit_credential`, with a `completed` receipt. Linking the reference through the owner settings write was applied.
+- An approved classification to `/v1/systemone` carried `Authorization: Bearer` with the dummy key.
+- A ticket prepared before a native endpoint change to `/v2/systemone` could no longer be approved and sent nothing. The endpoint change cleared the reference, so the next approved request to `/v2` had no `Authorization` header.
+- Attaching the same reference to `/v2` through an owner write fell back with "System One credential is missing" and sent no request.
+- `remove_system_one` returned `applied`. After relinking on `/v1`, selection fell back with "credential is missing" and sent nothing. A second removal also returned `applied`.
+- With a private temporary `HOME` in an earlier run, the native lookup failed and selection fell back locally without sending anything.
+- The dummy key appeared in no file under the disposable state, temporary or log directories, and in no captured CLI stdout/stderr. Keychain contents were not read independently.
+
+The TypeSafe endpoint was never approved or contacted. Not exercised: the macOS Settings UI itself, HTTPS endpoints, and an actual successful model turn. This walkthrough is not automated coverage. The Host's `lsof` snapshots sample socket state at a few points; they are not a full network trace.
