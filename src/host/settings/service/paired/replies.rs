@@ -19,8 +19,9 @@ use crate::devices::{
     OwnedCommittedSettingsBind, RemoteOperationPhase, RemoteOperationState, RemoteServiceReceipt,
     ReplyBuildPermit, ServiceLookup, SettingsAccessReplyContractError,
     SettingsBindReplyContractError, SettingsBindReplyPacket, SettingsOriginalReplyPacket,
-    SettingsParentReference, SettingsReceiveError, SettingsReplyContractError,
-    SettingsReplyPublicationError, SettingsReplyQualification,
+    SettingsParentReference, SettingsReadContractError, SettingsReadSourceError,
+    SettingsReceiveError, SettingsReplyContractError, SettingsReplyPublicationError,
+    SettingsReplyQualification,
 };
 use crate::host::settings::SettingsGrantReference;
 use crate::host::settings::agent::PairedHandoffReadError;
@@ -32,6 +33,7 @@ use crate::storage::settings_originals::{
 use crate::storage::{ConsumedSettingsReply, Store, settings_grant_head_on};
 
 use super::access::SettingsAccessQualificationError;
+use super::read_replies::SettingsReadReplyError;
 use super::{
     OriginalReplySource, PairedSettingsParent, QualifiedOriginalReply, SettingsGrantOwner,
     SettingsGrantState, SettingsOperationPhase, SettingsReceiptAuthority, SettingsServiceError,
@@ -56,6 +58,12 @@ pub(crate) enum SettingsReplyProjectionError {
     AccessQualification(#[from] SettingsAccessQualificationError),
     #[error("Settings Access reply data is invalid")]
     AccessData(#[from] SettingsAccessReplyContractError),
+    #[error("Settings Snapshot current authority check failed")]
+    ReadQualification(#[from] SettingsReadReplyError),
+    #[error("Settings Snapshot original source metadata check failed")]
+    ReadSource(#[from] SettingsReadSourceError),
+    #[error("Settings Snapshot reply data is invalid")]
+    ReadData(#[from] SettingsReadContractError),
     #[error("Settings reply provenance encoding failed")]
     Provenance(#[source] serde_json::Error),
 }
@@ -174,6 +182,9 @@ impl SettingsReceiptAuthority {
             }
             SettingsReplyQualification::Access(_) => {
                 self.recheck_consumed_access_reply_on(store, transaction, consumed)?;
+            }
+            SettingsReplyQualification::Snapshot(_) => {
+                self.recheck_consumed_snapshot_reply_on(store, transaction, consumed)?;
             }
         }
         Ok(())

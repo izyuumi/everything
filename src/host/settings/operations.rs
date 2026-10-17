@@ -1582,3 +1582,54 @@ pub(super) fn validate_digest(value: &str) -> Result<(), SettingsServiceError> {
     }
     Ok(())
 }
+
+pub(super) struct SettingsSnapshotApplicationState {
+    pub pending_semantics: bool,
+    pub pending_selection: bool,
+    pub unresolved: bool,
+}
+
+pub(super) fn snapshot_application_state_on(
+    connection: &rusqlite::Connection,
+    fingerprint: &SettingsFileFingerprint,
+) -> Result<SettingsSnapshotApplicationState, SettingsServiceError> {
+    let mut statement = connection.prepare("SELECT o.request_id FROM settings_operations o WHERE EXISTS(SELECT 1 FROM settings_operation_updates h WHERE h.request_id=o.request_id AND json_type(h.record,'$.write')='object') ORDER BY o.request_id LIMIT 1025")?;
+    let mut rows = statement.query([])?;
+    let mut count = 0;
+    let mut state = SettingsSnapshotApplicationState {
+        pending_semantics: false,
+        pending_selection: false,
+        unresolved: false,
+    };
+    while let Some(row) = rows.next()? {
+        if count == MAX_IDENTITIES {
+            return Err(SettingsServiceError::CorruptJournal);
+        }
+        count += 1;
+        let request_id = bounded_text(row, 0, 36)?.parse()?;
+        let record = read(connection, request_id)?.ok_or(SettingsServiceError::CorruptJournal)?;
+        let write = record.write().ok_or(SettingsServiceError::CorruptJournal)?;
+        if write.resolution.is_none() {
+            if state.unresolved {
+                return Err(SettingsServiceError::CorruptJournal);
+            }
+            state.unresolved = true;
+        }
+        if record.application().is_none()
+            && matches!(
+                record.phase(),
+                SettingsOperationPhase::Finished {
+                    result: SettingsOperationResult {
+                        state: SettingsOperationState::PendingApplication { .. },
+                        ..
+                    }
+                }
+            )
+            && write.intent.after == *fingerprint
+        {
+            state.pending_semantics |= write.intent.memory_changed;
+            state.pending_selection |= write.intent.selection_changed;
+        }
+    }
+    Ok(state)
+}

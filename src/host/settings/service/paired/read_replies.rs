@@ -1,3 +1,5 @@
+mod snapshot;
+
 use std::fmt;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -7,21 +9,24 @@ use serde::Serialize;
 use thiserror::Error;
 use tokio::sync::OwnedMutexGuard;
 use uuid::Uuid;
+use zeroize::Zeroizing;
 
 use crate::crypto::DevicePublicKeys;
 use crate::devices::{
-    BindingLifetime, EndpointRole, OwnedCommittedSettingsRead, SettingsParentReference,
-    SettingsReadRequest,
+    BindingLifetime, EndpointRole, OwnedCommittedSettingsRead, OwnedCommittedSettingsSnapshot,
+    OwnedQueuedSettingsReply, ReplyBuildPermit, SettingsHostSnapshot, SettingsParentReference,
+    SettingsReadReplyPacket, SettingsReadRequest, SettingsReplyBuildRequest,
+    SettingsReplyPublicationError, SettingsReplyQualification,
 };
 use crate::host::settings::SettingsGrantReference;
 use crate::host::settings::contract::SettingKey;
-use crate::protocol::{DeviceId, UnixMillis};
-use crate::storage::{Store, settings_grant_head_on};
+use crate::protocol::{DeviceId, MessageId, UnixMillis};
+use crate::storage::{ConsumedSettingsReply, Store, settings_grant_head_on};
 
 use super::pins::ReplyPinError;
 use super::{
     SettingsGrantOwner, SettingsGrantState, SettingsReadReplyFamily, SettingsReceiptAuthority,
-    SettingsServiceError, original_reply_text,
+    SettingsReplyProjectionError, SettingsServiceError, original_reply_text,
 };
 
 #[derive(Error)]
@@ -123,34 +128,10 @@ impl SettingsReceiptAuthority {
         transaction: &Transaction<'_>,
         qualified: &QualifiedSettingsReadReply<'_, '_, '_>,
     ) -> Result<(), SettingsReadReplyError> {
-        if !std::ptr::eq(self, qualified.authority)
-            || !std::ptr::eq(transaction, qualified.transaction)
-            || !Arc::ptr_eq(
-                &qualified.invocation,
-                qualified
-                    .request
-                    .verified_request()
-                    .authority_source()
-                    .invocation_identity(),
-            )
-        {
-            return Err(SettingsServiceError::OutsideScope.into());
-        }
+        self.check_read_reply_association(transaction, qualified)?;
         let observed =
             self.observe_read_reply_on(store, transaction, qualified.mutation, qualified.request)?;
-        if observed.owner != qualified.owner
-            || !Arc::ptr_eq(&observed.query, &qualified.query)
-            || observed.floor != qualified.floor
-            || observed.query_deadline != qualified.query_deadline
-            || observed.parent_lifetime.expires_at != qualified.parent_lifetime.expires_at
-            || observed.parent_lifetime.deadline != qualified.parent_lifetime.deadline
-            || observed.grant != qualified.grant
-            || observed.reply_deadline != qualified.reply_deadline
-            || observed.wall < qualified.observed_wall
-            || observed.monotonic < qualified.observed_monotonic
-        {
-            return Err(SettingsServiceError::OutsideScope.into());
-        }
+        check_read_reply_observation(qualified, &observed)?;
         Ok(())
     }
 
@@ -187,6 +168,18 @@ impl SettingsReceiptAuthority {
     }
 
     fn observe_read_reply_on(
+        &self,
+        store: &Store,
+        connection: &Connection,
+        mutation: &OwnedMutexGuard<()>,
+        request: &OwnedCommittedSettingsRead,
+    ) -> Result<ReadReplyObservation, SettingsReadReplyError> {
+        let read = self.read_read_reply_on(store, connection, mutation, request)?;
+        check_read_reply_reservation(connection, request)?;
+        self.finish_read_reply_observation(store, mutation, request, read)
+    }
+
+    fn read_read_reply_on(
         &self,
         store: &Store,
         connection: &Connection,
@@ -296,28 +289,47 @@ impl SettingsReceiptAuthority {
         {
             return Err(SettingsServiceError::OutsideScope.into());
         }
-        check_read_reply_reservation(connection, request)?;
+        Ok(ReadReplyObservation {
+            owner: first.owner,
+            query: first.query,
+            floor: first.floor,
+            query_deadline: first.deadline,
+            parent_lifetime: first.parent_lifetime,
+            grant,
+            reply_deadline,
+            wall: first.wall,
+            monotonic: first.monotonic,
+        })
+    }
+
+    fn finish_read_reply_observation(
+        &self,
+        store: &Store,
+        mutation: &OwnedMutexGuard<()>,
+        request: &OwnedCommittedSettingsRead,
+        read: ReadReplyObservation,
+    ) -> Result<ReadReplyObservation, SettingsReadReplyError> {
         self.check_joined_read_context(store, mutation, request)?;
         let observed = self.core.authority.observe_committed_read_query(
             &self.host,
             request,
             &self.core.application_stop,
         )?;
-        if observed.owner != first.owner
-            || !Arc::ptr_eq(&observed.query, &first.query)
-            || observed.floor != first.floor
-            || observed.deadline != first.deadline
-            || observed.parent_lifetime.expires_at != first.parent_lifetime.expires_at
-            || observed.parent_lifetime.deadline != first.parent_lifetime.deadline
-            || observed.wall < first.wall
-            || observed.monotonic < first.monotonic
-            || observed.wall < reply.created_at
+        if observed.owner != read.owner
+            || !Arc::ptr_eq(&observed.query, &read.query)
+            || observed.floor != read.floor
+            || observed.deadline != read.query_deadline
+            || observed.parent_lifetime.expires_at != read.parent_lifetime.expires_at
+            || observed.parent_lifetime.deadline != read.parent_lifetime.deadline
+            || observed.wall < read.wall
+            || observed.monotonic < read.monotonic
+            || observed.wall < request.reply_reservation().created_at
         {
             return Err(SettingsServiceError::OutsideScope.into());
         }
-        if observed.wall >= reply.expires_at
-            || observed.monotonic >= reply_deadline
-            || observed.wall >= grant.expires_at
+        if observed.wall >= request.reply_reservation().expires_at
+            || observed.monotonic >= read.reply_deadline
+            || observed.wall >= read.grant.expires_at
         {
             return Err(SettingsServiceError::Expired.into());
         }
@@ -327,11 +339,32 @@ impl SettingsReceiptAuthority {
             floor: observed.floor,
             query_deadline: observed.deadline,
             parent_lifetime: observed.parent_lifetime,
-            grant,
-            reply_deadline,
+            grant: read.grant,
+            reply_deadline: read.reply_deadline,
             wall: observed.wall,
             monotonic: observed.monotonic,
         })
+    }
+
+    fn check_read_reply_association(
+        &self,
+        transaction: &Transaction<'_>,
+        qualified: &QualifiedSettingsReadReply<'_, '_, '_>,
+    ) -> Result<(), SettingsReadReplyError> {
+        if !std::ptr::eq(self, qualified.authority)
+            || !std::ptr::eq(transaction, qualified.transaction)
+            || !Arc::ptr_eq(
+                &qualified.invocation,
+                qualified
+                    .request
+                    .verified_request()
+                    .authority_source()
+                    .invocation_identity(),
+            )
+        {
+            return Err(SettingsServiceError::OutsideScope.into());
+        }
+        Ok(())
     }
 }
 
@@ -412,4 +445,245 @@ impl fmt::Debug for QualifiedSettingsReadReply<'_, '_, '_> {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str("QualifiedSettingsReadReply([joined currentness only])")
     }
+}
+
+fn check_read_reply_observation(
+    qualified: &QualifiedSettingsReadReply<'_, '_, '_>,
+    observed: &ReadReplyObservation,
+) -> Result<(), SettingsReadReplyError> {
+    if observed.owner != qualified.owner
+        || !Arc::ptr_eq(&observed.query, &qualified.query)
+        || observed.floor != qualified.floor
+        || observed.query_deadline != qualified.query_deadline
+        || observed.parent_lifetime.expires_at != qualified.parent_lifetime.expires_at
+        || observed.parent_lifetime.deadline != qualified.parent_lifetime.deadline
+        || observed.grant != qualified.grant
+        || observed.reply_deadline != qualified.reply_deadline
+        || observed.wall < qualified.observed_wall
+        || observed.monotonic < qualified.observed_monotonic
+    {
+        return Err(SettingsServiceError::OutsideScope.into());
+    }
+    Ok(())
+}
+
+pub(crate) struct SettingsSnapshotReplyProjection {
+    plaintext: Zeroizing<Vec<u8>>,
+    floor: (UnixMillis, Instant),
+    deadline: Instant,
+}
+
+impl SettingsSnapshotReplyProjection {
+    pub(crate) fn into_parts(self) -> (Zeroizing<Vec<u8>>, (UnixMillis, Instant), Instant) {
+        (self.plaintext, self.floor, self.deadline)
+    }
+}
+
+pub(super) struct SnapshotReplyComparison {
+    invocation: Arc<()>,
+    query: Arc<()>,
+    floor: (UnixMillis, Instant),
+    query_deadline: Instant,
+    parent_lifetime: BindingLifetime,
+    grant: ReadReplyGrantFacts,
+    reply_deadline: Instant,
+    wall: UnixMillis,
+    monotonic: Instant,
+}
+
+impl SettingsReceiptAuthority {
+    pub(crate) fn project_snapshot_reply_on(
+        &self,
+        store: &Store,
+        transaction: &Transaction<'_>,
+        qualified: &QualifiedSettingsReadReply<'_, '_, '_>,
+        request: &OwnedCommittedSettingsSnapshot,
+        permit: &ReplyBuildPermit,
+    ) -> Result<SettingsSnapshotReplyProjection, SettingsReplyProjectionError> {
+        permit.check_snapshot(request)?;
+        self.check_read_reply_association(transaction, qualified)?;
+        if !std::ptr::eq(request.read_owner(), qualified.request) {
+            return Err(SettingsServiceError::OutsideScope.into());
+        }
+        self.recheck_read_reply_on(store, transaction, qualified)?;
+        let captured = snapshot::capture(&self.core, transaction, request)?;
+        let source = request.read_owner().verified_request().authority_source();
+        let in_reply_to: MessageId = source
+            .receipt_metadata()?
+            .message_id
+            .parse()
+            .map_err(SettingsServiceError::from)?;
+        let observed =
+            self.observe_read_reply_on(store, transaction, qualified.mutation, qualified.request)?;
+        check_read_reply_observation(qualified, &observed)?;
+        let packet = SettingsReadReplyPacket::snapshot(
+            source.request(),
+            in_reply_to,
+            SettingsHostSnapshot {
+                revision: captured.revision,
+                observed_at: observed.wall,
+                stale: captured.stale,
+                entries: captured.entries,
+            },
+        )?;
+        Ok(SettingsSnapshotReplyProjection {
+            plaintext: packet.encode_checked()?,
+            floor: (observed.wall, observed.monotonic),
+            deadline: observed.reply_deadline,
+        })
+    }
+
+    pub(super) fn recheck_consumed_snapshot_reply_on(
+        &self,
+        store: &Store,
+        transaction: &Transaction<'_>,
+        consumed: &ConsumedSettingsReply<'_, '_, '_, '_>,
+    ) -> Result<(), SettingsReplyPublicationError> {
+        consumed.check_on(transaction)?;
+        let SettingsReplyQualification::Snapshot(qualified) = consumed.sealed().qualification()
+        else {
+            return Err(SettingsReplyPublicationError::Conflict);
+        };
+        self.check_read_reply_association(transaction, qualified)
+            .map_err(SettingsReplyProjectionError::from)?;
+        let sealed_created_at = consumed.sealed().header().created_at_ms;
+        let read = self
+            .read_read_reply_on(store, transaction, qualified.mutation, qualified.request)
+            .map_err(SettingsReplyProjectionError::from)?;
+        let observed = self
+            .finish_read_reply_observation(store, qualified.mutation, qualified.request, read)
+            .map_err(SettingsReplyProjectionError::from)?;
+        check_read_reply_observation(qualified, &observed)
+            .map_err(SettingsReplyProjectionError::from)?;
+        if observed.wall.get() < sealed_created_at {
+            return Err(SettingsReplyPublicationError::Conflict);
+        }
+        Ok(())
+    }
+
+    pub(super) fn capture_snapshot_reply_comparison(
+        &self,
+        transaction: &Transaction<'_>,
+        qualified: &QualifiedSettingsReadReply<'_, '_, '_>,
+    ) -> Result<SnapshotReplyComparison, SettingsReadReplyError> {
+        self.check_read_reply_association(transaction, qualified)?;
+        Ok(SnapshotReplyComparison {
+            invocation: Arc::clone(&qualified.invocation),
+            query: Arc::clone(&qualified.query),
+            floor: qualified.floor,
+            query_deadline: qualified.query_deadline,
+            parent_lifetime: qualified.parent_lifetime,
+            grant: ReadReplyGrantFacts {
+                reference: qualified.grant.reference,
+                issued_at: qualified.grant.issued_at,
+                expires_at: qualified.grant.expires_at,
+                readable_keys: qualified.grant.readable_keys.clone(),
+            },
+            reply_deadline: qualified.reply_deadline,
+            wall: qualified.observed_wall,
+            monotonic: qualified.observed_monotonic,
+        })
+    }
+
+    pub(super) fn recheck_queued_snapshot_reply_on(
+        &self,
+        store: &Store,
+        transaction: &Transaction<'_>,
+        mutation: &OwnedMutexGuard<()>,
+        queued: &OwnedQueuedSettingsReply,
+        comparison: &SnapshotReplyComparison,
+    ) -> Result<(), super::replies::SettingsQueuedReplyCheckError> {
+        let request = checked_snapshot_owner(queued, comparison)?;
+        let read = self
+            .read_read_reply_on(store, transaction, mutation, request.read_owner())
+            .map_err(SettingsReplyProjectionError::from)?;
+        queued.request()?;
+        let header = queued.committed()?.header();
+        let observed = self
+            .finish_read_reply_observation(store, mutation, request.read_owner(), read)
+            .map_err(SettingsReplyProjectionError::from)?;
+        check_snapshot_comparison(comparison, &observed)?;
+        if observed.wall.get() < header.created_at_ms {
+            return Err(SettingsReplyPublicationError::Conflict.into());
+        }
+        Ok(())
+    }
+
+    pub(super) fn recheck_queued_snapshot_socket_lifetime(
+        &self,
+        store: &Store,
+        mutation: &OwnedMutexGuard<()>,
+        queued: &OwnedQueuedSettingsReply,
+        comparison: &SnapshotReplyComparison,
+    ) -> Result<(), super::replies::SettingsQueuedReplyCheckError> {
+        let request = checked_snapshot_owner(queued, comparison)?;
+        self.check_joined_read_context(store, mutation, request.read_owner())
+            .map_err(SettingsReplyProjectionError::from)?;
+        queued.request()?;
+        let header = queued.committed()?.header();
+        let observed = self
+            .core
+            .authority
+            .observe_committed_read_query(
+                &self.host,
+                request.read_owner(),
+                &self.core.application_stop,
+            )
+            .map_err(SettingsReplyProjectionError::from)?;
+        if !Arc::ptr_eq(&observed.query, &comparison.query)
+            || observed.floor != comparison.floor
+            || observed.deadline != comparison.query_deadline
+            || observed.parent_lifetime.expires_at != comparison.parent_lifetime.expires_at
+            || observed.parent_lifetime.deadline != comparison.parent_lifetime.deadline
+            || observed.wall < comparison.wall
+            || observed.monotonic < comparison.monotonic
+            || observed.wall < request.read_owner().reply_reservation().created_at
+            || observed.wall.get() < header.created_at_ms
+        {
+            return Err(SettingsReplyPublicationError::Conflict.into());
+        }
+        if observed.wall >= request.read_owner().reply_reservation().expires_at
+            || observed.wall >= comparison.grant.expires_at
+            || observed.monotonic >= comparison.reply_deadline
+        {
+            return Err(SettingsReplyPublicationError::Expired.into());
+        }
+        Ok(())
+    }
+}
+
+fn checked_snapshot_owner<'owner>(
+    queued: &'owner OwnedQueuedSettingsReply,
+    comparison: &SnapshotReplyComparison,
+) -> Result<&'owner OwnedCommittedSettingsSnapshot, super::replies::SettingsQueuedReplyCheckError> {
+    let SettingsReplyBuildRequest::Snapshot(request) = queued.request()? else {
+        return Err(SettingsReplyPublicationError::Conflict.into());
+    };
+    let source = request.read_owner().verified_request().authority_source();
+    if !Arc::ptr_eq(source.invocation_identity(), &comparison.invocation)
+        || source.receipt_floor() != comparison.floor
+        || !matches!(source.request(), SettingsReadRequest::Snapshot(_))
+    {
+        return Err(SettingsReplyPublicationError::Conflict.into());
+    }
+    Ok(request)
+}
+
+fn check_snapshot_comparison(
+    comparison: &SnapshotReplyComparison,
+    observed: &ReadReplyObservation,
+) -> Result<(), SettingsReplyPublicationError> {
+    if !Arc::ptr_eq(&observed.query, &comparison.query)
+        || observed.floor != comparison.floor
+        || observed.query_deadline != comparison.query_deadline
+        || observed.parent_lifetime.expires_at != comparison.parent_lifetime.expires_at
+        || observed.parent_lifetime.deadline != comparison.parent_lifetime.deadline
+        || observed.grant != comparison.grant
+        || observed.reply_deadline != comparison.reply_deadline
+        || observed.wall < comparison.wall
+        || observed.monotonic < comparison.monotonic
+    {
+        return Err(SettingsReplyPublicationError::Conflict);
+    }
+    Ok(())
 }

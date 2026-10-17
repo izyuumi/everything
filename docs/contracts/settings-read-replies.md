@@ -56,9 +56,62 @@ perform no SQL write, rollback or commit and do not reinterpret writer uncertain
 
 The full gate requires its reservation to exist. It cannot be used after exact
 DELETE/transfer or for queued send; those phases need their genuine consumed and
-queued associations. Counted Snapshot capture, permanent Original lookup and
-all disclosed-key checks, Read BUILD eligibility/permit, projection/seal/send,
-lender/retirement, Root pump and client adoption remain separate source gates.
+queued associations. The Snapshot-only producer below supplies those phases
+for that closed family. Permanent Original lookup and all disclosed-key checks,
+inspection BUILD/projection/seal, Root pump and client adoption remain separate
+source gates.
 No native settings snapshot or OwnerIPC forwarding is added. Source formatting
 and preservation prove no compiler, SQL/crypto/runtime, security acceptance or
 #116/#117 completion; automated validation remains deferred in #32.
+
+## Snapshot BUILD and publication
+
+A genuine joined Snapshot owner can be moved, once, from the committed Read
+owner. A mismatch returns the complete original owner in a Box;
+InspectOriginal cannot make a Snapshot owner. Before the retained receive
+result is extracted, Work stamps its existing final witness with the actual
+Snapshot invocation and Default49152 reservation. The new closed BUILD arm uses
+the existing one build slot, original JoinSet, complete-owner Busy return and
+claim/permit machinery. Duplicate and Known never receive an eligibility stamp.
+The permit is required before any settings values are captured, and remains
+owned by the registered job until every projected, plaintext, sealed and
+returned build buffer has been consumed or destroyed and the real job joined.
+
+The same Main Immediate publisher checks the current Read qualifier and every
+requested key in current R before capture. Capture uses the actual observed
+Host settings and current composition metadata, never native Get or a nested
+Main acquisition. It constructs only endpoint-free remote values for the exact
+requested keys. Tool Selection compares the configured endpoint and model
+internally before endpoint redaction. Memory state follows the actual generation,
+profile, worker and application facts; missing metadata remains unavailable.
+A supplied-Connection write-history reader retains the 1025-row sentinel and
+rejects duplicate unresolved writes as CorruptJournal. It changes no history.
+
+After capture and all SQL/locking checks, a final actual Authority observation
+provides observed_at with the original fixed clocks and current scope. Checked
+DATA serialization enforces the complete 32768-byte Snapshot packet limit.
+The actual sealer projects that packet itself, seals exactly once and checks
+actual encrypted/relay bounds against the original Default49152 reservation.
+The response message ID differs from both the query and original encrypted ID.
+The common sole writer performs exact reservation consumption, quota-checked
+ciphertext insertion and provenance/readback in the same transaction. Its
+existing consumed proof drives a row-free current Source/pin/grant/R check after
+those writes, with final Authority observation at or after the actual sealed
+header creation before the unchanged COMMIT.
+All rollback, commit-uncertainty, health and true-join rules remain those of the
+[common publisher](settings-reply-publication.md).
+
+The queued association retains only the genuine request owner, existing sealed
+header/signature/encrypted-byte digest and finite invocation/query/grant/clock
+comparison facts. It retains no Snapshot values, packet, plaintext or copied
+native settings. Current SQL admission and the separate socket-lifetime gate
+check the original physical connection, parent and fixed clocks, including the
+actual sealed-header creation floor. The actual ciphertext loader derives the
+Default49152 stamp from the genuine Snapshot reservation. No inspection arm,
+new queue/window, reseal, retry, Source renewal or raw row authority is added.
+
+These are internal producers and currentness gates. OrdinaryOnly relay mode,
+public private-delivery refusal, Root pump integration, actual job start/send,
+retirement, final drain and client adoption are not activated by this source.
+Formatting and static preservation are not compiler, crypto, SQL or runtime
+validation, and do not establish #116/#117 acceptance.
