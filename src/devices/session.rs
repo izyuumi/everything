@@ -76,7 +76,10 @@ impl DeviceEndpoint {
             status.send_replace(RelaySessionStatus::Failed {
                 reason: "Settings transport ownership is quarantined; process restart required",
             });
-            std::future::pending::<()>().await;
+            return Err(match result {
+                Err(error) => error,
+                Ok(()) => DeviceError::Worker,
+            });
         }
         if let Ok(_session) = &session {
             self.check_outbound_health()?;

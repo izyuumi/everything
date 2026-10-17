@@ -569,7 +569,15 @@ impl HostService {
                         )
                         .await
                         .map_err(HostError::from),
-                    Err(error) => Err(error),
+                    Err(_) => {
+                        tracing::warn!(
+                            "settings transport setup failed; ordinary relay runs without paired Settings"
+                        );
+                        host.devices
+                            .run_relay(origin, relay_stop, host.relay_updates.clone())
+                            .await
+                            .map_err(HostError::from)
+                    }
                 };
                 HostWorker::Relay(outcome)
             });
@@ -600,6 +608,7 @@ impl HostService {
             }
             HostWorker::Publication(outcome)
         });
+        let mut relay_running = inner.relay_origin.is_some();
         let mut handlers = JoinSet::new();
         tokio::pin!(initial_pass);
         let activation = loop {
@@ -619,6 +628,7 @@ impl HostService {
                         if outcome.is_err() { tracing::warn!("optional worker coordinator stopped; inspect its actual status"); }
                     }
                     Some(Ok(HostWorker::Relay(outcome))) => {
+                        relay_running = false;
                         if outcome.is_err() {
                             inner.relay_updates.send_replace(crate::devices::RelaySessionStatus::Failed { reason: "relay operation requires operator action" });
                             tracing::warn!("optional relay stopped during initial metadata reconciliation");
@@ -649,6 +659,7 @@ impl HostService {
                         if outcome.is_err() { tracing::warn!("optional worker coordinator stopped; inspect its actual status"); }
                     }
                     Some(Ok(HostWorker::Relay(outcome))) => {
+                            relay_running = false;
                             if outcome.is_err() {
                                 inner.relay_updates.send_replace(crate::devices::RelaySessionStatus::Failed { reason: "relay operation requires operator action" });
                                 tracing::warn!("optional relay stopped; local host remains available");
@@ -756,10 +767,26 @@ impl HostService {
         let mut quiescence_proved = false;
         let mut composition_shutdown = None;
         let mut composition_stopped = false;
+        let mut settings_transport_failure_reported = false;
         loop {
+            let settings_transport_failed = inner.settings_transport_failed();
+            let settings_transport_settled =
+                inner.settings_transport_drained() || (!relay_running && settings_transport_failed);
+            if settings_transport_settled
+                && settings_transport_failed
+                && !settings_transport_failure_reported
+            {
+                settings_transport_failure_reported = true;
+                tracing::error!(
+                    "settings transport or relay outbound is quarantined; host shutdown reports failure"
+                );
+                if result.is_ok() {
+                    result = Err(DeviceError::OutboundQuarantined.into());
+                }
+            }
             if inner.workers_drained.load(Ordering::Acquire)
                 && inner.settings_agents.is_quiescent()
-                && inner.settings_transport_drained()
+                && settings_transport_settled
                 && !quiescence_proved
                 && quiescence.is_none()
             {
@@ -789,7 +816,7 @@ impl HostService {
                 let running = inner
                     .blocking(|host| global_running(&host.agent.store()))
                     .await;
-                if matches!((&report,&running), (Ok(report),Ok(false)) if report.running_count == 0 && report.unresolved_count == 0 && report.settings_unresolved_count == 0 && report.requirements.is_empty() && inner.settings_agents.is_quiescent() && inner.settings_transport_drained())
+                if matches!((&report,&running), (Ok(report),Ok(false)) if report.running_count == 0 && report.unresolved_count == 0 && report.settings_unresolved_count == 0 && report.requirements.is_empty() && inner.settings_agents.is_quiescent() && settings_transport_settled)
                 {
                     if composition_stopped
                         && service_work_stopped
@@ -854,7 +881,7 @@ impl HostService {
                     let failure = match joined {
                         Some(Ok(HostWorker::Local(outcome) | HostWorker::Dispatcher(outcome) | HostWorker::Publication(outcome) | HostWorker::Settings(outcome) | HostWorker::SettingsAgent(outcome))) => outcome.err(),
                         Some(Ok(HostWorker::Coordinator(outcome))) => { if outcome.is_err() { tracing::warn!("optional worker coordinator ended during host drain"); } None },
-                        Some(Ok(HostWorker::Relay(outcome))) => { if outcome.is_err() { tracing::warn!("optional relay stopped during host drain"); } None },
+                        Some(Ok(HostWorker::Relay(outcome))) => { relay_running = false; if outcome.is_err() { tracing::warn!("optional relay stopped during host drain"); } None },
                         _ => Some(HostError::Worker),
                     };
                     if result.is_ok() && let Some(error) = failure { result = Err(error); }
@@ -929,6 +956,14 @@ impl HostService {
 }
 
 impl HostInner {
+    fn settings_transport_failed(&self) -> bool {
+        self.devices.outbound_is_quarantined()
+            || self.settings_transport.get().is_some_and(|transport| {
+                let report = transport.receive_witness().snapshot();
+                !report.bookkeeping_ok || report.terminal_quarantine
+            })
+    }
+
     pub(super) fn settings_transport_drained(&self) -> bool {
         !self.devices.outbound_is_quarantined()
             && self
