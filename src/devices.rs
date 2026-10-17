@@ -32,6 +32,10 @@ pub(crate) use settings_access_reply::{
 #[cfg(unix)]
 pub(crate) use settings_bind_reply::{SettingsBindReplyContractError, SettingsBindReplyPacket};
 #[cfg(unix)]
+pub(crate) use settings_ingress::read::{
+    SettingsOriginalInspectionIntent, SettingsReadRequest, SettingsSnapshotReadIntent,
+};
+#[cfg(unix)]
 pub(crate) use settings_ingress::work::{
     OwnedQueuedSettingsReply, PairedWorkAdoption, ReplyBuildPermit, SettingsReplyBuildRequest,
 };
@@ -50,6 +54,8 @@ pub(crate) use settings_ingress::{
     SettingsCommandIntent, SettingsParentReference, SettingsReceiveDrain, SettingsReceiveError,
     SettingsReceiveEvent, SettingsReceiveWitness, SettingsTransportReceipt, SettingsUpdateIntent,
 };
+#[cfg(unix)]
+pub(crate) use settings_ingress::{AuthenticatedSettingsReadSource, SettingsReadSourceError};
 
 #[cfg(unix)]
 pub(crate) use settings_reply::{
