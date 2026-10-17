@@ -855,6 +855,23 @@ impl WorkerCoordinator {
             .ok_or(WorkerError::UntrustedPeer)?
             .revoked_at
             .is_some();
+        if native.task.cancel_requested
+            && !job.cancellation_requested
+            && !revoked
+            && !job.state.is_terminal()
+            && job.result.is_none()
+            && job.rejection.is_none()
+            && native.result.is_none()
+        {
+            let _operation = self.begin_cleanup_operation().await?;
+            if cancellation.is_cancelled() {
+                return Err(WorkerError::Cancelled);
+            }
+            self.endpoint
+                .cancel(job.binding.clone(), CommandId::new(), UnixMillis::now()?)
+                .await?;
+            return Ok(());
+        }
         if (job.cancellation_requested || revoked)
             && !native.task.cancel_requested
             && !native.task.task.status.is_terminal()

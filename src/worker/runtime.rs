@@ -286,6 +286,7 @@ async fn supervise(
     if startup.is_ok() {
         phase.send_replace(WorkerRuntimePhase::Running);
         let mut changes = core.scheduler.subscribe();
+        let mut ledger = core.endpoint.subscribe();
         let mut interval = tokio::time::interval(Duration::from_millis(500));
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         while !cancellation.is_cancelled() {
@@ -296,7 +297,7 @@ async fn supervise(
                     failures.send_replace(Some(Arc::new(WorkerError::Scheduler(SchedulerError::Stopped))));
                     break;
                 },
-                _ = core.endpoint.changed.notified() => {}
+                _ = ledger.changed() => {}
                 _ = interval.tick() => {}
             }
             if cancellation.is_cancelled() {

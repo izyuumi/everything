@@ -196,10 +196,24 @@ impl HostInner {
                     ));
                 }
                 drop(mutation);
-                coordinator
+                let job = coordinator
                     .endpoint()
-                    .cancel(binding.clone(), request_id, UnixMillis::now()?)
-                    .await?;
+                    .snapshot(binding.delegation_id)
+                    .await?
+                    .ok_or(HostError::Invalid(
+                        "worker cancellation delegation is unknown",
+                    ))?;
+                if job.binding != *binding {
+                    return Err(HostError::Invalid(
+                        "worker cancellation binding differs from delegation",
+                    ));
+                }
+                if !job.cancellation_requested {
+                    coordinator
+                        .endpoint()
+                        .cancel(binding.clone(), request_id, UnixMillis::now()?)
+                        .await?;
+                }
                 {
                     let _mutation = self.mutation.lock().await;
                     self.scheduler.cancel(*task_id).await?;
