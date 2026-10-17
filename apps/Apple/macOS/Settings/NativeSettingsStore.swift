@@ -1525,7 +1525,7 @@ final class NativeSettingsStore {
         if isCurrent(owner) {
             isOpening = false
             isRefreshing = false
-            if owner.refreshRequested && issue == nil {
+            if owner.refreshRequested {
                 owner.refreshRequested = false
                 requestRefresh()
             } else { updateObserver() }

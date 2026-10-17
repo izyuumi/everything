@@ -134,6 +134,17 @@ enum NativeSettingsText {
         }
     }
 
+    static func applyBehavior(_ behavior: SettingApplyBehavior) -> String {
+        switch behavior {
+        case .subsequentRun: "Subsequent runs"
+        case .subsequentSelection: "Subsequent tool selection"
+        case .stopNewWorkThenApply: "After new work stops"
+        case .rebuildRequired: "Index rebuild required"
+        case .readOnly: "Read-only observation"
+        case .thisDevice: "This device"
+        }
+    }
+
     static func result(_ state: SettingsOperationState) -> String {
         switch state {
         case .applied(let revision): "Saved revision \(revision); application acknowledged"

@@ -21,7 +21,7 @@ struct NativeDevicesControls: View {
                     Text("Host: \(host.uuidString.lowercased())").font(.caption.monospaced()).textSelection(.enabled)
                 }
                 if connectionEdited { Text("Apply connection edits in General first.").foregroundStyle(.secondary) }
-                if let issue = store.issue { Text(issue.errorDescription ?? "The original Host session is unavailable.").foregroundStyle(.red) }
+                if let issue = store.issue { NativeSettingsNotice(issue.errorDescription ?? "The original Host session is unavailable.") }
                 Text("Devices belong to this Host. This list is separate from This Mac's offline notification preferences. Open and pairing are explicit; neither requires a model.")
                     .font(.caption).foregroundStyle(.secondary)
             }
@@ -32,11 +32,11 @@ struct NativeDevicesControls: View {
                         .disabled(!store.canRefreshDevices || store.devicesAreStale || store.devicePage?.nextAfter == nil || connectionEdited)
                 }
                 if store.devicesLoading { ProgressView("Reading one bounded device page…") }
-                if let issue = store.deviceIssue { Text(issue.errorDescription ?? "The original device request is unconfirmed.").foregroundStyle(.red) }
+                if let issue = store.deviceIssue { NativeSettingsNotice(issue.errorDescription ?? "The original device request is unconfirmed.") }
                 if let page = store.devicePage {
                     Text("Page observed \(Date(timeIntervalSince1970: Double(page.observedAt) / 1000).formatted())")
                         .font(.caption).foregroundStyle(.secondary)
-                    if store.devicesAreStale { Text("Cached page: stale or offline. Refresh the original session before using a row.").foregroundStyle(.orange) }
+                    if store.devicesAreStale { NativeSettingsNotice("Cached page: stale or offline. Refresh the original session before using a row.", kind: .warning) }
                     if page.devices.isEmpty { Text("This observed page contains no devices.") }
                     ForEach(page.devices, id: \.deviceID) { row in
                         VStack(alignment: .leading, spacing: 6) {
@@ -91,9 +91,9 @@ struct NativeDevicesControls: View {
             if let lifecycle = value.pairingLifecycle {
                 Text("Last Host invitation state: " + lifecycle.rawValue.replacingOccurrences(of: "_", with: " ")).font(.caption)
             }
-            if let issue = value.issue ?? value.operation.issue { Text(issue.errorDescription ?? "Inspect the original operation.").foregroundStyle(.red) }
+            if let issue = value.issue ?? value.operation.issue { NativeSettingsNotice(issue.errorDescription ?? "Inspect the original operation.") }
             if let cleanup = value.cleanupIssue {
-                Text("Original native cleanup remains unconfirmed: " + (cleanup.errorDescription ?? "Original cleanup is uncertain.")).foregroundStyle(.orange)
+                NativeSettingsNotice("Original native cleanup remains unconfirmed: " + (cleanup.errorDescription ?? "Original cleanup is uncertain."), kind: .warning)
             }
             Button("Inspect original device operation") { store.inspectDeviceOperation(value.handle) }
                 .disabled(!store.canInspectDeviceOperation(value.handle) || connectionEdited)
@@ -102,12 +102,12 @@ struct NativeDevicesControls: View {
                 if value.approvalWorking { ProgressView("Original approval or private delivery is owned…") }
                 if let status = value.approval {
                     if case .finished(let result) = status.operation.phase { Text(NativeSettingsText.result(result.state)) }
-                    else { Text("Original final approval is unresolved.").foregroundStyle(.orange) }
+                    else { NativeSettingsNotice("Original final approval is unresolved.", kind: .warning) }
                     switch status.hostPin {
                     case .notEstablished: Text("No committed Host pin observed.")
                     case .committed(let label, let pinned, _, let revoked):
                         Text("Historical Host pin: \(label) · \(Date(timeIntervalSince1970: Double(pinned) / 1000).formatted())")
-                        if revoked != nil { Text("The Host pin is observed revoked.").foregroundStyle(.orange) }
+                        if revoked != nil { NativeSettingsNotice("The Host pin is observed revoked.", kind: .warning) }
                         Text("This receipt does not prove the requesting device completed pairing.").font(.caption).foregroundStyle(.secondary)
                     }
                 }

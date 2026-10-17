@@ -36,7 +36,7 @@ struct ThisMacSettingsView: View {
                     }
                 }
                 if let message = store.appearanceStatus { Text(message) }
-                if let error = store.appearanceError { Text(error.errorDescription ?? "Local appearance is unavailable.").foregroundStyle(.red) }
+                if let error = store.appearanceError { NativeSettingsNotice(error.errorDescription ?? "Local appearance is unavailable.") }
                 if let patch = store.pendingAppearancePatch {
                     Text("Appearance save reference: \(patch.requestID.uuidString.lowercased())")
                         .font(.caption)
@@ -78,7 +78,7 @@ struct ThisMacSettingsView: View {
                     }
                 }
                 if let message = store.preferenceStatus { Text(message) }
-                if let error = store.preferenceError { Text(error.errorDescription ?? "Local preferences are unavailable.").foregroundStyle(.red) }
+                if let error = store.preferenceError { NativeSettingsNotice(error.errorDescription ?? "Local preferences are unavailable.") }
                 if let patch = store.pendingPatch {
                     Text("Save reference: \(patch.requestID.uuidString.lowercased())")
                         .font(.caption)
@@ -108,7 +108,7 @@ struct ThisMacSettingsView: View {
                         .disabled(!store.isForeground || store.isObservingAuthorization || store.isRefreshing)
                 }
                 if let message = store.notificationStatus { Text(message) }
-                if let issue = store.notificationIssue { Text(issue.message).foregroundStyle(.red) }
+                if let issue = store.notificationIssue { NativeSettingsNotice(issue.message) }
                 if let instructions = store.notificationGuidance.instructions { Text(instructions) }
                 if store.notificationObservation?.authorization == .denied {
                     Text("Open System Settings, choose Notifications, then Everything to review permissions. A denied request cannot show another permission prompt.")

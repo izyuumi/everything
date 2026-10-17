@@ -1,5 +1,26 @@
 import SwiftUI
 
+struct NativeSettingsNotice: View {
+    enum Kind {
+        case error
+        case warning
+    }
+
+    let text: String
+    let kind: Kind
+
+    init(_ text: String, kind: Kind = .error) {
+        self.text = text
+        self.kind = kind
+    }
+
+    var body: some View {
+        Label(text, systemImage: kind == .error ? "exclamationmark.octagon" : "exclamationmark.triangle")
+            .foregroundStyle(kind == .error ? Color.red : Color.orange)
+            .accessibilityLabel((kind == .error ? "Error: " : "Warning: ") + text)
+    }
+}
+
 @MainActor
 struct NativeSettingsControls: View {
     enum SectionKind {
@@ -59,7 +80,7 @@ struct NativeSettingsControls: View {
                 Button("Close session") { store.close() }.disabled(!store.sessionPresent)
             }
             if store.isOpening || store.isRefreshing { ProgressView("Reading the original Host session…") }
-            if let issue = store.issue { Text(issue.errorDescription ?? "Host settings are unavailable.").foregroundStyle(.red) }
+            if let issue = store.issue { NativeSettingsNotice(issue.errorDescription ?? "Host settings are unavailable.") }
             if connectionEdited { Text("Apply connection edits with Connect in General before accessing Host settings.").foregroundStyle(.secondary) }
             if let snapshot = store.snapshot {
                 LabeledContent("Observed revision", value: String(snapshot.revision))
@@ -121,7 +142,10 @@ struct NativeSettingsControls: View {
                 LabeledContent("Dimensions", value: draft.dimensions.map { String($0) } ?? "Model default")
                 Text("The Host has not reported model metadata. Dimension changes are unavailable.").foregroundStyle(.secondary)
             }
-            Text("Embeddings are off by default. EmbeddingGemma 2 runs locally in the isolated helper; lexical retrieval remains available when the semantic backend is unavailable. Dimension changes can rebuild the semantic index.")
+            if let behavior = draft.registry.descriptors.first(where: { $0.key == .embeddingsDimensions })?.applyBehavior {
+                LabeledContent("Dimension change", value: NativeSettingsText.applyBehavior(behavior))
+            }
+            Text("Embeddings are off by default. When enabled, the Host uses its optional local embedding helper only if it is available; the states below report actual readiness. Lexical retrieval remains available when the semantic backend is unavailable.")
                 .font(.caption).foregroundStyle(.secondary)
             observed(.embeddingsEnabled)
             observed(.embeddingsDimensions)
@@ -133,6 +157,11 @@ struct NativeSettingsControls: View {
     private func tools(_ draft: NativeSettingsDraft) -> some View {
         Section("Tool discovery and selection") {
             Toggle("Use System One", isOn: binding(\.systemOneEnabled, fallback: false))
+                .disabled(systemOneConfigurationUnknown(draft))
+            if systemOneConfigurationUnknown(draft) {
+                Text("The retained System One configuration was not observed for this draft's revision. Reload before enabling it so a saved endpoint and its credential reference are not replaced.")
+                    .foregroundStyle(.secondary)
+            }
             Text("Local selection is the default. System One is optional remote tool selection; enabling it configures an external endpoint.")
                 .font(.caption).foregroundStyle(.secondary)
             Group {
@@ -163,9 +192,9 @@ struct NativeSettingsControls: View {
     private func saveControls(_ draft: NativeSettingsDraft) -> some View {
         Section("Shared Host draft") {
             LabeledContent("Draft baseline", value: String(draft.baseline.revision))
-            if store.draftConflict { Text("Host settings or descriptors changed since these edits began. Reload and review; these drafts have not been rebased or submitted.").foregroundStyle(.orange) }
-            if let message = draft.validationMessage, draft.isDirty { Text(message).foregroundStyle(.orange) }
-            if let message = store.draftMessage { Text(message).foregroundStyle(.red) }
+            if store.draftConflict { NativeSettingsNotice("Host settings or descriptors changed since these edits began. Reload and review; these drafts have not been rebased or submitted.", kind: .warning) }
+            if let message = draft.validationMessage, draft.isDirty { NativeSettingsNotice(message, kind: .warning) }
+            if let message = store.draftMessage { NativeSettingsNotice(message) }
             if draft.baseline.revision == UInt64(Int64.max) { Text("The settings revision is exhausted; further saves are unavailable.").foregroundStyle(.secondary) }
             if store.actionCapacityReached { Text("The original operation limit is reached. Retained operations are preserved; fresh requests require a new explicit session after cleanup.").foregroundStyle(.secondary) }
             HStack {
@@ -191,7 +220,7 @@ struct NativeSettingsControls: View {
                         }
                     }
                     if let application = operation.inspection?.application { Text(NativeSettingsText.application(application)).font(.caption) }
-                    if let issue = operation.issue { Text(issue.errorDescription ?? "Inspect the original operation.").foregroundStyle(.red) }
+                    if let issue = operation.issue { NativeSettingsNotice(issue.errorDescription ?? "Inspect the original operation.") }
                     if operation.isWorking { ProgressView("Waiting for the original operation…") }
                     HStack {
                         if operation.confirmation != nil {
@@ -224,6 +253,13 @@ struct NativeSettingsControls: View {
             }
             .padding(.vertical, 4)
         }
+    }
+
+    private func systemOneConfigurationUnknown(_ draft: NativeSettingsDraft) -> Bool {
+        guard !draft.systemOneEnabled, draft.baseline.entry(.toolSelection)?.desired == .toolSelection(selection: .local) else { return false }
+        guard let metadata = store.metadata, metadata.revision == draft.baseline.revision else { return true }
+        return (metadata.systemOne?.endpoint ?? "https://api.typesafe.ai/v1/systemone") != draft.systemOneEndpoint
+            || (metadata.systemOne?.model ?? "jev-latest") != draft.systemOneModel
     }
 
     private func binding<Value>(_ keyPath: WritableKeyPath<NativeSettingsDraft, Value>, fallback: Value) -> Binding<Value> {
