@@ -25,7 +25,7 @@ Scoped Settings transport foundations, with public accepted dispatch still disab
 - [Live Apple Access client](contracts/apple-settings-access-client.md): explicit metadata-only request/send, authenticated Fresh adoption and iOS display; Bind, Host values and the Host private sender remain separate.
 - [Apple Bind ownership](contracts/apple-settings-bind-owner.md): the first immutable Bind identity, shared pending/receive custody and genuine Fresh projection; live transport and recovery remain separate.
 - [Outbound selection](contracts/transport-outbound-selection.md): bounded metadata selection before ciphertext loading.
-- [Private ciphertext loading](contracts/settings-private-ciphertext-loading.md): exact retained rows, bounded ciphertext authentication and current authority; counted job/socket integration remains separate.
+- [Private ciphertext loading and preparation](contracts/settings-private-ciphertext-loading.md): exact rows/authentication plus internal counted waiting, original worker joins and Prepared DATA; actual pump/final socket/send integration remains separate.
 - [Ordinary send window](contracts/ordinary-relay-send-window.md): actual shared16-cell preparation/join/send/acceptance custody and cleanup.
 - [Physical socket identity](contracts/relay-socket-identity.md): actual authenticated connection capture and monotonic cancellation/closure liveness.
 - [Ordinary relay health](contracts/ordinary-relay-health.md): endpoint quarantine is a negative Host drain fence; actual joins and send cleanup remain necessary.
