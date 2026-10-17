@@ -65,7 +65,7 @@ pub fn lexical_search(
     if cancellation.is_cancelled() {
         return Err(SearchError::Cancelled);
     }
-    let hits = index.search(query, limit)?;
+    let hits = index.search_any(query, limit)?;
     if cancellation.is_cancelled() {
         return Err(SearchError::Cancelled);
     }
@@ -371,7 +371,7 @@ mod hybrid {
                 .into());
             }
             wiki.synchronize()?;
-            let lexical = wiki.search(query, 100)?;
+            let lexical = wiki.index().search_any(query, 100)?;
             if cancellation.is_cancelled() {
                 return Err(SearchError::Cancelled);
             }
@@ -435,7 +435,7 @@ mod hybrid {
         ) -> Result<SearchResponse, WikiError> {
             wiki.synchronize()?;
             Ok(lexical_response(
-                wiki.search(query, limit)?,
+                wiki.index().search_any(query, limit)?,
                 reason,
                 diagnostic,
             ))
