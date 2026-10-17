@@ -234,6 +234,7 @@ pub(crate) enum SettingsReplyBuildRequest {
     },
     Fresh(Box<OwnedCommittedSettingsCommand>),
     Historical(Box<OwnedHistoricalSettingsCommand>),
+    Access(Box<OwnedCommittedSettingsAccess>),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -446,6 +447,7 @@ impl SettingsReplyBuildRequest {
             Self::Bind { request, .. } => &request.verified._witness,
             Self::Fresh(request) => request.reply_build_witness(),
             Self::Historical(request) => request.reply_build_witness(),
+            Self::Access(request) => request.reply_build_witness(),
         }
     }
 
@@ -454,6 +456,7 @@ impl SettingsReplyBuildRequest {
             Self::Bind { request, .. } => &mut request.verified._witness,
             Self::Fresh(request) => request.reply_build_witness_mut(),
             Self::Historical(request) => request.reply_build_witness_mut(),
+            Self::Access(request) => request.reply_build_witness_mut(),
         }
     }
 
@@ -476,6 +479,11 @@ impl SettingsReplyBuildRequest {
             }
             Self::Historical(request) => {
                 let source = request.authority_source();
+                Arc::ptr_eq(source.connection(), connection)
+                    && source.matches_context(&context.agent, &context.endpoint, &context.mutation)
+            }
+            Self::Access(request) => {
+                let source = request.verified_request().authority_source();
                 Arc::ptr_eq(source.connection(), connection)
                     && source.matches_context(&context.agent, &context.endpoint, &context.mutation)
             }
@@ -504,6 +512,14 @@ impl SettingsReplyBuildRequest {
                 ReplyBuildFamily::CommandInspection90112,
                 request.authority_source().invocation_identity(),
                 ReplyBuildStamp::command(request.reply_reservation()),
+            ),
+            Self::Access(request) => association.matches(
+                ReplyBuildFamily::access(request.reply_reservation()),
+                request
+                    .verified_request()
+                    .authority_source()
+                    .invocation_identity(),
+                ReplyBuildStamp::access(request.reply_reservation()),
             ),
         }
     }

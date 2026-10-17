@@ -312,6 +312,12 @@ fn run_reply_build(
                 SettingsReplyBuildRequest::Bind { .. } => {
                     publish_request(&input, &guard, request, &input.authority)
                 }
+                SettingsReplyBuildRequest::Access(access) => publish_request(
+                    &input,
+                    &guard,
+                    request,
+                    access.verified_request().receipt_authority(),
+                ),
             };
             ReplyBuildWorkerOutcome::Publication(result.map(Box::new))
         }
