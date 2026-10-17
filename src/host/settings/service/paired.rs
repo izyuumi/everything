@@ -8,7 +8,8 @@ pub(crate) use access::{
     SettingsAccessReservationSpec,
 };
 pub(crate) use reads::{
-    QualifiedSettingsReadQuery, SettingsReadQualificationError, SettingsReadQueryDisposition,
+    SettingsReadQualificationError, SettingsReadQueryDisposition, SettingsReadReplyFamily,
+    SettingsReadReservationSpec,
 };
 
 mod replies;

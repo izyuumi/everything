@@ -20,9 +20,10 @@ pub(super) use paired::PairedWriteAdmission;
 pub(crate) use paired::{
     OriginalReplySource, PairedParentAdmission, PairedSettingsParent, PairedUpdateOutcome,
     QualifiedBindReply, QualifiedOriginalReply, QualifiedSettingsAccessReply,
-    QualifiedSettingsReadQuery, SettingsAccessQualificationError, SettingsAccessReplyFamily,
-    SettingsAccessReservationSpec, SettingsReadQualificationError, SettingsReadQueryDisposition,
-    SettingsReceiptAuthority, SettingsReplyComparison, SettingsReplyProjectionError,
+    SettingsAccessQualificationError, SettingsAccessReplyFamily, SettingsAccessReservationSpec,
+    SettingsReadQualificationError, SettingsReadQueryDisposition, SettingsReadReplyFamily,
+    SettingsReadReservationSpec, SettingsReceiptAuthority, SettingsReplyComparison,
+    SettingsReplyProjectionError,
 };
 pub use pairing::{
     NativePairingAcceptance, NativePairingAccess, NativePairingApprovalInput,

@@ -55,7 +55,9 @@ pub(crate) use settings_ingress::{
     SettingsReceiveEvent, SettingsReceiveWitness, SettingsTransportReceipt, SettingsUpdateIntent,
 };
 #[cfg(unix)]
-pub(crate) use settings_ingress::{AuthenticatedSettingsReadSource, SettingsReadSourceError};
+pub(crate) use settings_ingress::{
+    AuthenticatedSettingsReadSource, OwnedVerifiedSettingsRead, SettingsReadSourceError,
+};
 
 #[cfg(unix)]
 pub(crate) use settings_reply::{

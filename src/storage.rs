@@ -15,7 +15,8 @@ pub(crate) use settings_transport::{
     ConsumedSettingsReply, SettingsAccessAdmissionError, SettingsAccessReceiptCommit,
     SettingsBindAdmission, SettingsBindAdmissionError, SettingsBindReceiptCommit,
     SettingsCommandAdmission, SettingsCommandAdmissionError, SettingsCommandReceiptCommit,
-    StoredSettingsAccessReply, StoredSettingsBindReply, StoredSettingsCommandReply,
+    SettingsReadAdmissionError, SettingsReadReceiptCommit, StoredSettingsAccessReply,
+    StoredSettingsBindReply, StoredSettingsCommandReply, StoredSettingsReadReply,
     consume_settings_reply_in,
 };
 pub use transport::*;
