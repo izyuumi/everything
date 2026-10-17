@@ -51,4 +51,4 @@ Chat text, tool data and model output stay in the restricted runtime's fileless 
 
 ## Limits and validation
 
-Restricted-runtime limits apply unchanged: two live chats Host-wide (native and paired together), eight turns per chat, one running turn at a time. Validation evidence is in [Settings validation](../development/settings-validation.md#remote-settings-session-walkthrough). No Apple client sends these requests yet (#117). Deferred automated coverage is tracked in [#32](https://github.com/izyuumi/everything/issues/32).
+Restricted-runtime limits apply unchanged: two live chats Host-wide (native and paired together), eight turns per chat, one running turn at a time. Validation evidence is in [Settings validation](../development/settings-validation.md#remote-settings-session-walkthrough). The iOS Ask Settings pane sends them through the [query client](apple-settings-access-client.md). Deferred automated coverage is tracked in [#32](https://github.com/izyuumi/everything/issues/32).

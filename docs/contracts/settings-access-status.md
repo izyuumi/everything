@@ -1,6 +1,6 @@
 # Remote Settings request DATA
 
-The Host decoder is `src/devices/settings_ingress/access.rs`. Reply DATA is in [replies](settings-access-replies.md); the transport path is in [the transport](settings-access-transport.md); the remote chat is in [the remote Settings session](settings-remote-session.md). The Apple encoder `apps/Apple/Shared/Settings/RemoteSettingsWire.swift` produces only `access_status` in this shape ([Apple wire](apple-remote-settings-wire.md)).
+The Host decoder is `src/devices/settings_ingress/access.rs`. Reply DATA is in [replies](settings-access-replies.md); the transport path is in [the transport](settings-access-transport.md); the remote chat is in [the remote Settings session](settings-remote-session.md). The Apple encoder `apps/Apple/Shared/Settings/RemoteSettingsWire.swift` produces every kind in this shape ([Apple wire](apple-remote-settings-wire.md)).
 
 ## Shape
 

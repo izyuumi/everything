@@ -1,6 +1,6 @@
 # Apple Bind requester and reply owner
 
-Status: Swift source only, without a Settings screen caller. The iOS Settings screen exposes only the explicit [Access check](apple-settings-access-client.md). The Host in this tree answers only `AccessStatus` and records Bind packets as rejected ([Host Access transport](settings-access-transport.md)).
+Status: superseded Swift source without a Settings screen caller. The Host rejects Bind packets ([Host transport](settings-access-transport.md)); iOS uses the [query client](apple-settings-access-client.md).
 
 This owner extends the [Access owner and cache](apple-remote-settings-wire.md) with one Bind original and private Bound qualification/adoption, used by the [Bind client](apple-settings-bind-client.md).
 

@@ -1,6 +1,6 @@
 # Apple Update client
 
-Status: Swift source only. The iOS Settings screen exposes only the explicit [Access check](apple-settings-access-client.md). `ReplicaSettingsUpdateGesture` and `ReplicaService.requestSettingsUpdate` have no AppModel or SettingsView caller. The Host in this tree answers only `AccessStatus` and records Update commands as rejected ([Host Access transport](settings-access-transport.md)). The request/response codec is in [Update wire data](apple-settings-update-wire.md).
+Status: superseded Swift source. `ReplicaSettingsUpdateGesture` and `ReplicaService.requestSettingsUpdate` have no caller, and the Host rejects their parent-bound command shape ([Host transport](settings-access-transport.md)). iOS writes through the generation-scoped `update` query of the [query client](apple-settings-access-client.md). The legacy codec is in [Update wire data](apple-settings-update-wire.md); the notes below describe the legacy source only.
 
 ## Intended behaviour of the source
 

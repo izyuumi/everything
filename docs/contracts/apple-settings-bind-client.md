@@ -1,6 +1,6 @@
 # Apple Bind client
 
-Status: Swift source only. The iOS Settings screen exposes only the explicit [Access check](apple-settings-access-client.md); it has no Bind control. `AppModel` and `ReplicaService.requestSettingsBind` remain in the tree without a screen caller. The Host in this tree answers only `AccessStatus` and records Bind packets as rejected ([Host Access transport](settings-access-transport.md)), so no Bound reply can arrive.
+Status: superseded Swift source with no screen caller. The Host has no Bind request; it rejects Bind packets ([Host transport](settings-access-transport.md)), so no Bound reply can arrive. Generation-bearing requests now take their generation from the current Access summary in the [query client](apple-settings-access-client.md); the notes below describe the legacy source only.
 
 ## Intended behaviour of the source
 

@@ -1,6 +1,6 @@
 # Apple Original inspection client
 
-Status: Swift source only. The iOS Settings screen exposes only the explicit [Access check](apple-settings-access-client.md); it has no Original inspection control. `ReplicaService.requestSettingsInspection` and its [Read codec](settings-scoped-reads.md) remain without a screen caller. The Host in this tree has no permanent Originals and answers only `AccessStatus`; inspection reads are recorded as rejected ([Host Access transport](settings-access-transport.md)).
+Status: superseded Swift source with no caller. The Host has no permanent Originals and rejects this read shape ([Host transport](settings-access-transport.md)). iOS recovers an uncertain change by resending the same Update `request_id` through the [query client](apple-settings-access-client.md); the notes below describe the legacy source only.
 
 ## Original target and genuine parent
 

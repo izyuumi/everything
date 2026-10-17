@@ -1,6 +1,6 @@
 # Apple Snapshot client
 
-Status: Swift source only. The iOS Settings screen exposes only the explicit [Access check](apple-settings-access-client.md); it has no Host values control. `ReplicaService.requestSettingsSnapshot` and its [Read codec](settings-scoped-reads.md) remain without a screen caller. The Host in this tree answers only `AccessStatus` and records Snapshot reads as rejected ([Host Access transport](settings-access-transport.md)).
+Status: superseded Swift source with no caller. Its parent-bound read shape is rejected by the Host ([Host transport](settings-access-transport.md)). Host values on iOS are read with the generation-scoped `snapshot` query of the [query client](apple-settings-access-client.md); the notes below describe the legacy source only.
 
 ## Intended behaviour of the source
 
