@@ -1,7 +1,6 @@
 mod external;
 pub(crate) mod settings_agent;
 mod settings_grants;
-pub(crate) mod settings_originals;
 #[cfg(unix)]
 mod settings_publication;
 mod settings_transport;
@@ -10,17 +9,12 @@ pub(crate) use external::ExternalTaskStateUpdate;
 pub(crate) use settings_grants::settings_grant_head_on;
 #[cfg(unix)]
 pub(crate) use settings_publication::{
-    CommittedSettingsReply, SettingsCiphertextLoadFailure, SettingsPrivateOutboxDisposition,
-    SettingsPrivateOutboxFailure, SettingsReplyPublishFailure, SettingsSocketCheckFailure,
+    CommittedSettingsReply, SettingsCiphertextLoadFailure, SettingsReplyPublishFailure,
 };
 #[cfg(unix)]
 pub(crate) use settings_transport::{
     ConsumedSettingsReply, SettingsAccessAdmissionError, SettingsAccessReceiptCommit,
-    SettingsBindAdmission, SettingsBindAdmissionError, SettingsBindReceiptCommit,
-    SettingsCommandAdmission, SettingsCommandAdmissionError, SettingsCommandReceiptCommit,
-    SettingsReadAdmissionError, SettingsReadReceiptCommit, StoredSettingsAccessReply,
-    StoredSettingsBindReply, StoredSettingsCommandReply, StoredSettingsReadReply,
-    consume_settings_reply_in,
+    StoredSettingsAccessReply, consume_settings_reply_in,
 };
 pub use transport::*;
 pub(crate) use transport::{TransportInboxMetadata, TransportInboxRejection};
@@ -35,7 +29,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 use thiserror::Error;
 
-const SCHEMA_VERSION: i64 = 17;
+const SCHEMA_VERSION: i64 = 16;
 const MAX_JSON_BYTES: usize = 1_048_576;
 const MAX_APPEND_EVENTS: usize = 256;
 const MAX_STATE_BYTES: usize = 8 * MAX_JSON_BYTES;
@@ -411,10 +405,7 @@ impl Store {
             transaction.execute_batch(include_str!("../migrations/0015_settings_grants.sql"))?;
         }
         if version < 16 {
-            transaction.execute_batch(include_str!("../migrations/0016_settings_originals.sql"))?;
-        }
-        if version < 17 {
-            transaction.execute_batch(include_str!("../migrations/0017_settings_transport.sql"))?;
+            transaction.execute_batch(include_str!("../migrations/0016_settings_transport.sql"))?;
         }
         transaction.pragma_update(None, "user_version", SCHEMA_VERSION)?;
         if let Some(now) = std::time::SystemTime::now()

@@ -170,9 +170,7 @@ impl AuthenticatedSettingsAccessSource {
     pub(crate) fn receipt_metadata(
         &self,
     ) -> Result<TransportInboxMetadata<'_>, AccessStatusRejection> {
-        self.envelope
-            .receipt_metadata()
-            .map_err(|_| AccessStatusRejection::Expired)
+        self.envelope.receipt_metadata()
     }
 
     pub(crate) fn pinned_identity(&self) -> &Value {
@@ -204,17 +202,16 @@ impl AuthenticatedSettingsAccessSource {
         {
             return Err(AccessStatusRejection::OutsideScope);
         }
-        let observed = self
-            .envelope
-            .clock
-            .observe()
-            .map_err(|_| AccessStatusRejection::Unavailable)?;
+        let observed = self.envelope.clock.observe()?;
         let outer_deadline = self
             .envelope
             .clock
-            .deadline(self.envelope.outer_expires_at)
-            .map_err(|_| AccessStatusRejection::Expired)?;
-        if observed.0 < self.intent.issued_at
+            .deadline(self.envelope.outer_expires_at)?;
+        if observed
+            .0
+            .get()
+            .saturating_add(super::SETTINGS_CLOCK_SKEW_MS)
+            < self.intent.issued_at.get()
             || observed.0 >= self.intent.expires_at
             || observed.0.get() >= self.envelope.outer_expires_at
             || observed.1 >= self.deadline
@@ -245,8 +242,7 @@ impl OwnedVerifiedSettingsAccess {
         let deadline = input
             .envelope
             .clock
-            .deadline(input.intent.expires_at.get())
-            .map_err(|_| AccessStatusRejection::Expired)?;
+            .deadline(input.intent.expires_at.get())?;
         let invocation = Arc::new(());
         let owner = Self {
             authority: input.authority,

@@ -10,20 +10,17 @@ use uuid::Uuid;
 
 use crate::crypto::{EncryptedEnvelope, EnvelopeHeader};
 use crate::devices::{
-    DeviceEndpoint, EndpointRole, OwnedQueuedSettingsReply, ReturnedSettingsReplySource,
-    SealedSettingsReply, SettingsReplyBuildRequest, SettingsReplyPublicationError,
-    SettingsReplySealContext,
+    DeviceEndpoint, EndpointRole, OwnedQueuedSettingsReply, SealedSettingsReply,
+    SettingsReplyBuildRequest, SettingsReplyPublicationError, SettingsReplySealContext,
 };
 use crate::host::settings::service::{
-    OriginalReplySource, SettingsAccessReplyFamily, SettingsQueuedReplyCheckError,
-    SettingsReceiptAuthority, SettingsReplyComparison, SettingsReplyProjectionError,
+    SettingsAccessReplyFamily, SettingsQueuedReplyCheckError, SettingsReceiptAuthority,
+    SettingsReplyComparison, SettingsReplyProjectionError,
 };
 use crate::protocol::{DeviceId, UnixMillis};
 use crate::relay_protocol::{RELAY_SCHEMA_VERSION, RelayClientMessage, RelayProtocolError};
 
-use super::{
-    Store, TransportOutboundCandidate, TransportOutboundRouting, consume_settings_reply_in,
-};
+use super::{Store, consume_settings_reply_in};
 
 pub(crate) struct CommittedSettingsReply {
     header: EnvelopeHeader,
@@ -62,6 +59,15 @@ pub(crate) enum SettingsReplyPublishFailure {
         payload: Box<dyn Any + Send>,
         rollback: Result<(), rusqlite::Error>,
     },
+}
+
+impl SettingsReplyPublishFailure {
+    pub(crate) fn rolled_back(&self) -> bool {
+        matches!(
+            self,
+            Self::BeforeTransaction { .. } | Self::RolledBack { .. }
+        )
+    }
 }
 
 enum PublicationAttemptFailure {
@@ -148,97 +154,16 @@ fn publish_on(
     context: SettingsReplySealContext<'_>,
     request: &SettingsReplyBuildRequest,
 ) -> Result<CommittedSettingsReply, PublicationAttemptFailure> {
-    match request {
-        SettingsReplyBuildRequest::Fresh(request) => {
-            let source = request.committed_source();
-            let authority = source.receipt_authority();
-            if !std::ptr::eq(context.authority, authority) {
-                return Err(SettingsReplyPublicationError::Conflict.into());
-            }
-            let qualified = authority
-                .qualify_original_reply_on(
-                    store,
-                    transaction,
-                    context.mutation,
-                    OriginalReplySource::Fresh(request.committed_source()),
-                )
-                .map_err(SettingsReplyProjectionError::from)?;
-            let sealed = SealedSettingsReply::original(
-                context,
-                transaction,
-                &qualified,
-                OriginalReplySource::Fresh(request.committed_source()),
-            )?;
-            commit_sealed_on(store, transaction, authority, &sealed)
-        }
-        SettingsReplyBuildRequest::Historical(request) => {
-            let authority = request.receipt_authority();
-            if !std::ptr::eq(context.authority, authority) {
-                return Err(SettingsReplyPublicationError::Conflict.into());
-            }
-            let qualified = authority
-                .qualify_original_reply_on(
-                    store,
-                    transaction,
-                    context.mutation,
-                    OriginalReplySource::Historical(request),
-                )
-                .map_err(SettingsReplyProjectionError::from)?;
-            let sealed = SealedSettingsReply::original(
-                context,
-                transaction,
-                &qualified,
-                OriginalReplySource::Historical(request),
-            )?;
-            commit_sealed_on(store, transaction, authority, &sealed)
-        }
-        SettingsReplyBuildRequest::Bind { parent, request } => {
-            let authority = context.authority;
-            let qualified = authority.qualify_bind_reply_on(
-                store,
-                transaction,
-                context.mutation,
-                request,
-                parent,
-            )?;
-            let sealed = SealedSettingsReply::bind(context, transaction, &qualified, request)?;
-            commit_sealed_on(store, transaction, authority, &sealed)
-        }
-        SettingsReplyBuildRequest::Access(request) => {
-            let authority = request.verified_request().receipt_authority();
-            if !std::ptr::eq(context.authority, authority) {
-                return Err(SettingsReplyPublicationError::Conflict.into());
-            }
-            let qualified = authority
-                .qualify_access_reply_on(store, transaction, context.mutation, request)
-                .map_err(SettingsReplyProjectionError::from)?;
-            let sealed = SealedSettingsReply::access(context, transaction, &qualified, request)?;
-            commit_sealed_on(store, transaction, authority, &sealed)
-        }
-        SettingsReplyBuildRequest::Snapshot(request) => {
-            let authority = request.read_owner().verified_request().receipt_authority();
-            if !std::ptr::eq(context.authority, authority) {
-                return Err(SettingsReplyPublicationError::Conflict.into());
-            }
-            let qualified = authority
-                .qualify_read_reply_on(store, transaction, context.mutation, request.read_owner())
-                .map_err(SettingsReplyProjectionError::from)?;
-            let sealed = SealedSettingsReply::snapshot(context, transaction, &qualified, request)?;
-            commit_sealed_on(store, transaction, authority, &sealed)
-        }
-        SettingsReplyBuildRequest::Inspection(request) => {
-            let authority = request.read_owner().verified_request().receipt_authority();
-            if !std::ptr::eq(context.authority, authority) {
-                return Err(SettingsReplyPublicationError::Conflict.into());
-            }
-            let qualified = authority
-                .qualify_inspection_reply_on(store, transaction, context.mutation, request)
-                .map_err(SettingsReplyProjectionError::from)?;
-            let sealed =
-                SealedSettingsReply::inspection(context, transaction, &qualified, request)?;
-            commit_sealed_on(store, transaction, authority, &sealed)
-        }
+    let SettingsReplyBuildRequest::Access(request) = request;
+    let authority = request.verified_request().receipt_authority();
+    if !std::ptr::eq(context.authority, authority) {
+        return Err(SettingsReplyPublicationError::Conflict.into());
     }
+    let qualified = authority
+        .qualify_access_reply_on(store, transaction, context.mutation, request)
+        .map_err(SettingsReplyProjectionError::from)?;
+    let sealed = SealedSettingsReply::access(context, transaction, &qualified, request)?;
+    commit_sealed_on(store, transaction, authority, &sealed)
 }
 
 fn commit_sealed_on(
@@ -341,6 +266,15 @@ pub(crate) enum SettingsCiphertextLoadFailure {
     },
 }
 
+impl SettingsCiphertextLoadFailure {
+    pub(crate) fn rolled_back(&self) -> bool {
+        matches!(
+            self,
+            Self::BeforeTransaction { .. } | Self::RolledBack { .. }
+        )
+    }
+}
+
 enum CiphertextLoadAttemptFailure {
     Load(Box<SettingsCiphertextLoadCause>),
     Commit(rusqlite::Error),
@@ -365,7 +299,6 @@ impl Store {
         endpoint: &DeviceEndpoint,
         authority: &SettingsReceiptAuthority,
         mutation: &OwnedMutexGuard<()>,
-        candidate: &TransportOutboundCandidate,
         queued: &OwnedQueuedSettingsReply,
     ) -> Result<RelayClientMessage, Box<SettingsCiphertextLoadFailure>> {
         if endpoint.role() != &EndpointRole::Host || !endpoint.shares_store(self) {
@@ -386,15 +319,7 @@ impl Store {
                 })
             })?;
         let attempt = catch_unwind(AssertUnwindSafe(|| {
-            load_private_ciphertext_on(
-                self,
-                &transaction,
-                endpoint,
-                authority,
-                mutation,
-                candidate,
-                queued,
-            )
+            load_private_ciphertext_on(self, &transaction, endpoint, authority, mutation, queued)
         }));
         match attempt {
             Ok(Ok(frame)) => {
@@ -427,6 +352,31 @@ impl Store {
             }
         }
     }
+
+    pub(crate) fn retire_private_settings_reply(
+        &self,
+        queued: &OwnedQueuedSettingsReply,
+    ) -> Result<(), SettingsReplyPublicationError> {
+        let mut main = self.connection()?;
+        let transaction = main.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let attempt = catch_unwind(AssertUnwindSafe(|| {
+            retire_private_reply_on(&transaction, queued)
+        }));
+        match attempt {
+            Ok(Ok(())) => {
+                drop(transaction);
+                Ok(())
+            }
+            Ok(Err(cause)) => {
+                rollback_publication(self, transaction)?;
+                Err(cause)
+            }
+            Err(_) => {
+                rollback_publication(self, transaction)?;
+                Err(SettingsReplyPublicationError::Conflict)
+            }
+        }
+    }
 }
 
 fn load_private_ciphertext_on(
@@ -435,7 +385,6 @@ fn load_private_ciphertext_on(
     endpoint: &DeviceEndpoint,
     authority: &SettingsReceiptAuthority,
     mutation: &OwnedMutexGuard<()>,
-    candidate: &TransportOutboundCandidate,
     queued: &OwnedQueuedSettingsReply,
 ) -> Result<RelayClientMessage, CiphertextLoadAttemptFailure> {
     authority.recheck_queued_reply_on(store, transaction, mutation, queued)?;
@@ -444,29 +393,12 @@ fn load_private_ciphertext_on(
         .map_err(SettingsQueuedReplyCheckError::from)?;
     let stamp = queued_reply_stamp(queued)?;
     let header = committed.header();
-    let created_at =
-        i64::try_from(header.created_at_ms).map_err(|_| SettingsReplyPublicationError::Conflict)?;
-    if !matches!(candidate.routing, TransportOutboundRouting::PrivateSettings)
-        || candidate.message_id != header.message_id
-        || candidate.recipient != header.recipient
-        || candidate.created_at != created_at
-        || candidate.not_before < created_at
-        || stamp.reservation_id.is_nil()
-        || stamp.provenance.len() > 2048
-        || stamp.local_device_id != endpoint.public_keys().device_id
-        || stamp.local_device_id != header.sender
-        || stamp.peer_device_id != header.recipient
-        || stamp.created_at.get() > header.created_at_ms
-        || stamp.expires_at.get() != header.expires_at_ms
-        || header
-            .expires_at_ms
-            .checked_sub(header.created_at_ms)
-            .is_none_or(|lifetime| lifetime == 0 || lifetime > 60_000)
-    {
+    if stamp.local_device_id != endpoint.public_keys().device_id {
         return Err(SettingsReplyPublicationError::Conflict.into());
     }
+    check_stamp(&stamp, header)?;
     let now = UnixMillis::now().map_err(SettingsReplyPublicationError::from)?;
-    let frame = read_private_ciphertext_on(transaction, candidate, committed, &stamp, now)?;
+    let frame = read_private_ciphertext_on(transaction, committed, &stamp, now)?;
     if let RelayClientMessage::Send { envelope, .. } = &frame {
         envelope
             .verify_authenticated_sender(&endpoint.public_keys(), header.created_at_ms)
@@ -485,138 +417,93 @@ fn load_private_ciphertext_on(
     Ok(frame)
 }
 
+fn retire_private_reply_on(
+    transaction: &Transaction<'_>,
+    queued: &OwnedQueuedSettingsReply,
+) -> Result<(), SettingsReplyPublicationError> {
+    let committed = queued
+        .committed()
+        .map_err(|_| SettingsReplyPublicationError::Conflict)?;
+    let stamp = queued_reply_stamp(queued).map_err(|_| SettingsReplyPublicationError::Conflict)?;
+    let header = committed.header();
+    check_stamp(&stamp, header)?;
+    let roots: (bool, bool, bool, bool, bool) = transaction.query_row(
+        "SELECT EXISTS(SELECT 1 FROM outbox WHERE id=?1),EXISTS(SELECT 1 FROM transport_outbox WHERE message_id=?1),EXISTS(SELECT 1 FROM settings_transport_private_outbox WHERE message_id=?1),EXISTS(SELECT 1 FROM settings_transport_private_outbox WHERE reservation_id=?2),EXISTS(SELECT 1 FROM settings_transport_reply_reservations WHERE reservation_id=?2)",
+        rusqlite::params![header.message_id.to_string(), stamp.reservation_id.to_string()],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
+    )?;
+    match roots {
+        (false, false, false, false, false) => {}
+        (true, true, true, true, false) => {
+            let mut statement = transaction.prepare(PRIVATE_CIPHERTEXT_QUERY)?;
+            let mut rows = statement.query([header.message_id.to_string()])?;
+            let row = rows
+                .next()?
+                .ok_or(SettingsReplyPublicationError::Conflict)?;
+            let bytes = checked_private_ciphertext_row(row, committed, &stamp)?;
+            drop(checked_private_envelope(bytes, committed)?);
+            drop(rows);
+            drop(statement);
+            if transaction.execute(
+                "DELETE FROM outbox WHERE id=?1",
+                [header.message_id.to_string()],
+            )? != 1
+            {
+                return Err(SettingsReplyPublicationError::Conflict);
+            }
+        }
+        _ => return Err(SettingsReplyPublicationError::Conflict),
+    }
+    transaction.execute_batch("COMMIT")?;
+    Ok(())
+}
+
+fn check_stamp(
+    stamp: &QueuedReplyStamp,
+    header: &EnvelopeHeader,
+) -> Result<(), SettingsReplyPublicationError> {
+    if stamp.reservation_id.is_nil()
+        || stamp.provenance.len() > 2048
+        || stamp.local_device_id != header.sender
+        || stamp.peer_device_id != header.recipient
+        || stamp.created_at.get() > header.created_at_ms
+        || stamp.expires_at.get() != header.expires_at_ms
+        || header
+            .expires_at_ms
+            .checked_sub(header.created_at_ms)
+            .is_none_or(|lifetime| lifetime == 0 || lifetime > 60_000)
+    {
+        return Err(SettingsReplyPublicationError::Conflict);
+    }
+    Ok(())
+}
+
 fn queued_reply_stamp(
     queued: &OwnedQueuedSettingsReply,
 ) -> Result<QueuedReplyStamp, SettingsQueuedReplyCheckError> {
-    reply_request_stamp(queued.request()?).map_err(Into::into)
-}
-
-fn reply_request_stamp(
-    request: &SettingsReplyBuildRequest,
-) -> Result<QueuedReplyStamp, SettingsReplyPublicationError> {
-    let (
-        reservation_id,
-        local_device_id,
-        peer_device_id,
-        provenance,
-        family,
-        maximum_bytes,
-        created_at,
-        expires_at,
-    ) = match request {
-        SettingsReplyBuildRequest::Fresh(request) => {
-            let source = request.committed_source();
-            let reply = source.reply_reservation();
-            (
-                reply.reservation_id,
-                reply.local_device_id,
-                reply.peer_device_id,
-                bounded_reply_provenance(&reply.provenance)?,
-                "inspection",
-                90_112,
-                reply.created_at,
-                reply.expires_at,
-            )
-        }
-        SettingsReplyBuildRequest::Historical(request) => {
-            let reply = request.reply_reservation();
-            (
-                reply.reservation_id,
-                reply.local_device_id,
-                reply.peer_device_id,
-                bounded_reply_provenance(&reply.provenance)?,
-                "inspection",
-                90_112,
-                reply.created_at,
-                reply.expires_at,
-            )
-        }
-        SettingsReplyBuildRequest::Bind { request, .. } => {
-            let source = request.committed_source();
-            let reply = source.reply_reservation();
-            (
-                reply.reservation_id,
-                reply.local_device_id,
-                reply.peer_device_id,
-                bounded_reply_provenance(&reply.provenance)?,
-                "default",
-                49_152,
-                reply.created_at,
-                reply.expires_at,
-            )
-        }
-        SettingsReplyBuildRequest::Access(request) => {
-            let reply = request.reply_reservation();
-            let (family, maximum_bytes) = match reply.family {
-                SettingsAccessReplyFamily::Default => ("default", 49_152),
-                SettingsAccessReplyFamily::Denial => ("denial", 4_096),
-            };
-            (
-                reply.reservation_id,
-                reply.local_device_id,
-                reply.peer_device_id,
-                bounded_reply_provenance(&reply.provenance)?,
-                family,
-                maximum_bytes,
-                reply.created_at,
-                reply.expires_at,
-            )
-        }
-        SettingsReplyBuildRequest::Snapshot(request) => {
-            let reply = request.read_owner().reply_reservation();
-            if reply.family != crate::host::settings::service::SettingsReadReplyFamily::Default {
-                return Err(SettingsReplyPublicationError::Conflict);
-            }
-            (
-                reply.reservation_id,
-                reply.local_device_id,
-                reply.peer_device_id,
-                bounded_reply_provenance(&reply.provenance)?,
-                "default",
-                49_152,
-                reply.created_at,
-                reply.expires_at,
-            )
-        }
-        SettingsReplyBuildRequest::Inspection(request) => {
-            let reply = request.read_owner().reply_reservation();
-            if reply.family != crate::host::settings::service::SettingsReadReplyFamily::Inspection {
-                return Err(SettingsReplyPublicationError::Conflict);
-            }
-            (
-                reply.reservation_id,
-                reply.local_device_id,
-                reply.peer_device_id,
-                bounded_reply_provenance(&reply.provenance)?,
-                "inspection",
-                90_112,
-                reply.created_at,
-                reply.expires_at,
-            )
-        }
+    let SettingsReplyBuildRequest::Access(request) = queued.request()?;
+    let reply = request.reply_reservation();
+    let (family, maximum_bytes) = match reply.family {
+        SettingsAccessReplyFamily::Default => ("default", 49_152),
+        SettingsAccessReplyFamily::Denial => ("denial", 4_096),
     };
+    if reply.provenance.len() > 2048 {
+        return Err(SettingsReplyPublicationError::Conflict.into());
+    }
     Ok(QueuedReplyStamp {
-        reservation_id,
-        local_device_id,
-        peer_device_id,
-        provenance,
+        reservation_id: reply.reservation_id,
+        local_device_id: reply.local_device_id,
+        peer_device_id: reply.peer_device_id,
+        provenance: reply.provenance.clone(),
         family,
         maximum_bytes,
-        created_at,
-        expires_at,
+        created_at: reply.created_at,
+        expires_at: reply.expires_at,
     })
-}
-
-fn bounded_reply_provenance(provenance: &str) -> Result<String, SettingsReplyPublicationError> {
-    if provenance.len() > 2048 {
-        return Err(SettingsReplyPublicationError::Conflict);
-    }
-    Ok(provenance.to_owned())
 }
 
 fn read_private_ciphertext_on(
     transaction: &Transaction<'_>,
-    candidate: &TransportOutboundCandidate,
     committed: &CommittedSettingsReply,
     stamp: &QueuedReplyStamp,
     now: UnixMillis,
@@ -631,22 +518,75 @@ fn read_private_ciphertext_on(
     let mut statement = transaction.prepare(PRIVATE_CIPHERTEXT_QUERY)?;
     let message_id = committed.header.message_id.to_string();
     let mut rows = statement.query([&message_id])?;
-    let row = rows
-        .next()?
-        .ok_or(SettingsReplyPublicationError::Conflict)?;
-    let bytes = checked_private_ciphertext_row(row, candidate, committed, stamp)?;
-    if candidate.not_before
-        > i64::try_from(now.get()).map_err(|_| SettingsReplyPublicationError::Conflict)?
-        || now.get() < committed.header.created_at_ms
-        || now.get() >= committed.header.expires_at_ms
-    {
-        return Err(SettingsReplyPublicationError::Conflict.into());
+    let row = rows.next()?.ok_or(SettingsReplyPublicationError::Expired)?;
+    let bytes = checked_private_ciphertext_row(row, committed, stamp)?;
+    if now.get() < committed.header.created_at_ms || now.get() >= committed.header.expires_at_ms {
+        return Err(SettingsReplyPublicationError::Expired.into());
     }
     let envelope = checked_private_envelope(bytes, committed)?;
     Ok(RelayClientMessage::Send {
         schema_version: RELAY_SCHEMA_VERSION,
         envelope,
     })
+}
+
+fn checked_private_ciphertext_row<'row>(
+    row: &'row Row<'_>,
+    committed: &CommittedSettingsReply,
+    stamp: &QueuedReplyStamp,
+) -> Result<&'row [u8], SettingsReplyPublicationError> {
+    let message = committed.header.message_id.to_string();
+    let peer = stamp.peer_device_id.to_string();
+    let created_at = i64::try_from(committed.header.created_at_ms)
+        .map_err(|_| SettingsReplyPublicationError::Conflict)?;
+    let expiry = i64::try_from(stamp.expires_at.get())
+        .map_err(|_| SettingsReplyPublicationError::Conflict)?;
+    let rusqlite::types::ValueRef::Blob(bytes) = row.get_ref(2)? else {
+        return Err(SettingsReplyPublicationError::Conflict);
+    };
+    if bytes.is_empty()
+        || bytes.len() != committed.envelope_bytes
+        || bytes.len() > stamp.maximum_bytes
+        || bytes.len() > 2 * super::MAX_JSON_BYTES
+    {
+        return Err(SettingsReplyPublicationError::TooLarge);
+    }
+    if ciphertext_text(row, 0, 36)? != message
+        || ciphertext_text(row, 1, 36)? != peer
+        || row.get::<_, i64>(3)? != created_at
+        || row.get::<_, i64>(4)? != created_at
+        || row.get::<_, i64>(5)? < 0
+        || row.get::<_, i64>(5)? > i64::from(u32::MAX)
+        || !matches!(row.get_ref(6)?, rusqlite::types::ValueRef::Null)
+        || ciphertext_text(row, 7, 36)? != message
+        || row.get::<_, i64>(8)? != expiry
+        || ciphertext_text(row, 9, 36)? != message
+        || ciphertext_text(row, 10, 36)? != stamp.reservation_id.to_string()
+        || ciphertext_text(row, 11, 36)? != stamp.local_device_id.to_string()
+        || ciphertext_text(row, 12, 36)? != peer
+        || ciphertext_text(row, 13, 2048)? != stamp.provenance.as_str()
+        || ciphertext_text(row, 14, 10)? != stamp.family
+        || row.get::<_, i64>(15)?
+            != i64::try_from(bytes.len()).map_err(|_| SettingsReplyPublicationError::Conflict)?
+        || row.get::<_, i64>(16)? != created_at
+        || row.get::<_, i64>(17)? != expiry
+        || <[u8; 32]>::from(Sha256::digest(bytes)) != committed.encrypted_sha256
+    {
+        return Err(SettingsReplyPublicationError::Conflict);
+    }
+    Ok(bytes)
+}
+
+fn checked_private_envelope(
+    bytes: &[u8],
+    committed: &CommittedSettingsReply,
+) -> Result<EncryptedEnvelope, SettingsReplyPublicationError> {
+    let envelope: EncryptedEnvelope =
+        serde_json::from_slice(bytes).map_err(SettingsReplyPublicationError::Encoding)?;
+    if envelope.header != committed.header || envelope.signature != committed.signature {
+        return Err(SettingsReplyPublicationError::Conflict);
+    }
+    Ok(envelope)
 }
 
 fn ciphertext_text<'row>(
@@ -696,413 +636,5 @@ impl fmt::Debug for SettingsCiphertextLoadCause {
 impl fmt::Debug for SettingsCiphertextLoadFailure {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str("SettingsCiphertextLoadFailure([retained cause])")
-    }
-}
-
-#[derive(Error)]
-pub(crate) enum SettingsSocketCheckFailure {
-    #[error("Settings socket check failed before opening its transaction")]
-    BeforeTransaction {
-        #[source]
-        cause: SettingsQueuedReplyCheckError,
-    },
-    #[error("Settings socket check failed and was rolled back")]
-    RolledBack {
-        #[source]
-        cause: SettingsQueuedReplyCheckError,
-    },
-    #[error("Settings socket check failed and rollback failed")]
-    RollbackFailed {
-        #[source]
-        cause: SettingsQueuedReplyCheckError,
-        rollback: rusqlite::Error,
-    },
-    #[error("Settings socket check commit outcome is uncertain")]
-    CommitUncertain {
-        #[source]
-        commit: rusqlite::Error,
-        rollback: Result<(), rusqlite::Error>,
-    },
-    #[error("Settings socket check panicked and its outcome is uncertain")]
-    Panicked {
-        payload: Box<dyn Any + Send>,
-        rollback: Result<(), rusqlite::Error>,
-    },
-}
-
-enum SocketCheckAttemptFailure {
-    Check(SettingsQueuedReplyCheckError),
-    Commit(rusqlite::Error),
-}
-
-impl Store {
-    pub(crate) fn recheck_private_settings_socket(
-        &self,
-        authority: &SettingsReceiptAuthority,
-        mutation: &OwnedMutexGuard<()>,
-        queued: &OwnedQueuedSettingsReply,
-    ) -> Result<(), Box<SettingsSocketCheckFailure>> {
-        let before = |cause: rusqlite::Error| {
-            Box::new(SettingsSocketCheckFailure::BeforeTransaction {
-                cause: SettingsReplyPublicationError::from(cause).into(),
-            })
-        };
-        let mut main = self.connection().map_err(|cause| {
-            Box::new(SettingsSocketCheckFailure::BeforeTransaction {
-                cause: SettingsReplyPublicationError::from(cause).into(),
-            })
-        })?;
-        let transaction = main
-            .transaction_with_behavior(TransactionBehavior::Deferred)
-            .map_err(before)?;
-        let attempt = catch_unwind(AssertUnwindSafe(|| {
-            authority
-                .recheck_queued_reply_on(self, &transaction, mutation, queued)
-                .map_err(SocketCheckAttemptFailure::Check)?;
-            transaction
-                .execute_batch("COMMIT")
-                .map_err(SocketCheckAttemptFailure::Commit)
-        }));
-        match attempt {
-            Ok(Ok(())) => {
-                drop(transaction);
-                Ok(())
-            }
-            Ok(Err(SocketCheckAttemptFailure::Check(cause))) => {
-                let rollback = rollback_publication(self, transaction);
-                Err(Box::new(match rollback {
-                    Ok(()) => SettingsSocketCheckFailure::RolledBack { cause },
-                    Err(rollback) => SettingsSocketCheckFailure::RollbackFailed { cause, rollback },
-                }))
-            }
-            Ok(Err(SocketCheckAttemptFailure::Commit(commit))) => {
-                let rollback = rollback_publication(self, transaction);
-                Err(Box::new(SettingsSocketCheckFailure::CommitUncertain {
-                    commit,
-                    rollback,
-                }))
-            }
-            Err(payload) => {
-                let rollback = rollback_publication(self, transaction);
-                Err(Box::new(SettingsSocketCheckFailure::Panicked {
-                    payload,
-                    rollback,
-                }))
-            }
-        }
-    }
-}
-
-impl fmt::Debug for SettingsSocketCheckFailure {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("SettingsSocketCheckFailure([retained cause])")
-    }
-}
-
-pub(crate) struct SettingsPrivateOutboxDisposition {
-    _kind: PrivateOutboxDispositionKind,
-    slot: std::sync::Arc<()>,
-    message_id: crate::protocol::MessageId,
-    reservation_id: Uuid,
-}
-
-enum PrivateOutboxDispositionKind {
-    Removed,
-    AlreadyAbsent,
-}
-
-#[derive(Error)]
-pub(crate) enum SettingsPrivateOutboxFailure {
-    #[error("Settings disposition failed before its transaction")]
-    BeforeTransaction {
-        #[source]
-        cause: SettingsReplyPublicationError,
-    },
-    #[error("Settings disposition failed and was rolled back")]
-    RolledBack {
-        #[source]
-        cause: SettingsReplyPublicationError,
-    },
-    #[error("Settings disposition failed and rollback failed")]
-    RollbackFailed {
-        #[source]
-        cause: SettingsReplyPublicationError,
-        rollback: rusqlite::Error,
-    },
-    #[error("Settings disposition commit outcome is uncertain")]
-    CommitUncertain {
-        #[source]
-        commit: rusqlite::Error,
-        rollback: Result<(), rusqlite::Error>,
-    },
-    #[error("Settings disposition panicked and its outcome is uncertain")]
-    Panicked {
-        payload: Box<dyn Any + Send>,
-        rollback: Result<(), rusqlite::Error>,
-    },
-}
-
-enum PrivateDispositionAttemptFailure {
-    Checked(Box<SettingsReplyPublicationError>),
-    Commit(rusqlite::Error),
-}
-
-struct PrivateOutboxRoots {
-    outbox: bool,
-    transport: bool,
-    private_message: bool,
-    private_reservation: bool,
-    reservation: bool,
-}
-
-impl PrivateOutboxRoots {
-    fn absent(&self) -> bool {
-        !self.outbox
-            && !self.transport
-            && !self.private_message
-            && !self.private_reservation
-            && !self.reservation
-    }
-
-    fn present(&self) -> bool {
-        self.outbox
-            && self.transport
-            && self.private_message
-            && self.private_reservation
-            && !self.reservation
-    }
-}
-
-impl Store {
-    pub(crate) fn dispose_returned_settings_reply(
-        &self,
-        source: &ReturnedSettingsReplySource<'_>,
-    ) -> Result<SettingsPrivateOutboxDisposition, Box<SettingsPrivateOutboxFailure>> {
-        if !source.shares_store(self) {
-            return Err(Box::new(SettingsPrivateOutboxFailure::BeforeTransaction {
-                cause: SettingsReplyPublicationError::Conflict,
-            }));
-        }
-        let mut main = self.connection().map_err(|cause| {
-            Box::new(SettingsPrivateOutboxFailure::BeforeTransaction {
-                cause: cause.into(),
-            })
-        })?;
-        let transaction = main
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(|cause| {
-                Box::new(SettingsPrivateOutboxFailure::BeforeTransaction {
-                    cause: cause.into(),
-                })
-            })?;
-        let attempt = catch_unwind(AssertUnwindSafe(|| {
-            dispose_private_outbox_on(&transaction, source)
-        }));
-        match attempt {
-            Ok(Ok(disposition)) => {
-                drop(transaction);
-                Ok(disposition)
-            }
-            Ok(Err(PrivateDispositionAttemptFailure::Checked(cause))) => {
-                let rollback = rollback_publication(self, transaction);
-                Err(Box::new(match rollback {
-                    Ok(()) => SettingsPrivateOutboxFailure::RolledBack { cause: *cause },
-                    Err(rollback) => SettingsPrivateOutboxFailure::RollbackFailed {
-                        cause: *cause,
-                        rollback,
-                    },
-                }))
-            }
-            Ok(Err(PrivateDispositionAttemptFailure::Commit(commit))) => {
-                let rollback = rollback_publication(self, transaction);
-                Err(Box::new(SettingsPrivateOutboxFailure::CommitUncertain {
-                    commit,
-                    rollback,
-                }))
-            }
-            Err(payload) => {
-                let rollback = rollback_publication(self, transaction);
-                Err(Box::new(SettingsPrivateOutboxFailure::Panicked {
-                    payload,
-                    rollback,
-                }))
-            }
-        }
-    }
-}
-
-fn dispose_private_outbox_on(
-    transaction: &Transaction<'_>,
-    source: &ReturnedSettingsReplySource<'_>,
-) -> Result<SettingsPrivateOutboxDisposition, PrivateDispositionAttemptFailure> {
-    let stamp = reply_request_stamp(source.request())?;
-    let committed = source.committed();
-    let header = committed.header();
-    let candidate = source.candidate();
-    let created_at =
-        i64::try_from(header.created_at_ms).map_err(|_| SettingsReplyPublicationError::Conflict)?;
-    if !matches!(candidate.routing, TransportOutboundRouting::PrivateSettings)
-        || candidate.message_id != header.message_id
-        || candidate.recipient != header.recipient
-        || candidate.created_at != created_at
-        || candidate.not_before < created_at
-        || stamp.reservation_id.is_nil()
-        || stamp.provenance.len() > 2048
-        || stamp.local_device_id != header.sender
-        || stamp.peer_device_id != header.recipient
-        || stamp.created_at.get() > header.created_at_ms
-        || stamp.expires_at.get() != header.expires_at_ms
-        || header
-            .expires_at_ms
-            .checked_sub(header.created_at_ms)
-            .is_none_or(|lifetime| lifetime == 0 || lifetime > 60_000)
-    {
-        return Err(SettingsReplyPublicationError::Conflict.into());
-    }
-    let roots = private_outbox_roots(transaction, header.message_id, stamp.reservation_id)?;
-    let kind = if roots.absent() {
-        PrivateOutboxDispositionKind::AlreadyAbsent
-    } else if roots.present() {
-        check_disposed_ciphertext_on(transaction, candidate, committed, &stamp)?;
-        let removed = transaction.execute(
-            "DELETE FROM outbox WHERE id=?1",
-            [header.message_id.to_string()],
-        )?;
-        if removed != 1
-            || !private_outbox_roots(transaction, header.message_id, stamp.reservation_id)?.absent()
-        {
-            return Err(SettingsReplyPublicationError::Conflict.into());
-        }
-        PrivateOutboxDispositionKind::Removed
-    } else {
-        return Err(SettingsReplyPublicationError::Conflict.into());
-    };
-    transaction
-        .execute_batch("COMMIT")
-        .map_err(PrivateDispositionAttemptFailure::Commit)?;
-    Ok(SettingsPrivateOutboxDisposition {
-        _kind: kind,
-        slot: std::sync::Arc::clone(source.slot_identity()),
-        message_id: header.message_id,
-        reservation_id: stamp.reservation_id,
-    })
-}
-
-fn private_outbox_roots(
-    transaction: &Transaction<'_>,
-    message_id: crate::protocol::MessageId,
-    reservation_id: Uuid,
-) -> Result<PrivateOutboxRoots, rusqlite::Error> {
-    transaction.query_row(
-        "SELECT EXISTS(SELECT 1 FROM outbox WHERE id=?1),EXISTS(SELECT 1 FROM transport_outbox WHERE message_id=?1),EXISTS(SELECT 1 FROM settings_transport_private_outbox WHERE message_id=?1),EXISTS(SELECT 1 FROM settings_transport_private_outbox WHERE reservation_id=?2),EXISTS(SELECT 1 FROM settings_transport_reply_reservations WHERE reservation_id=?2)",
-        rusqlite::params![message_id.to_string(), reservation_id.to_string()],
-        |row| Ok(PrivateOutboxRoots { outbox: row.get(0)?, transport: row.get(1)?, private_message: row.get(2)?, private_reservation: row.get(3)?, reservation: row.get(4)? }),
-    )
-}
-
-fn check_disposed_ciphertext_on(
-    transaction: &Transaction<'_>,
-    candidate: &TransportOutboundCandidate,
-    committed: &CommittedSettingsReply,
-    stamp: &QueuedReplyStamp,
-) -> Result<(), SettingsReplyPublicationError> {
-    let mut statement = transaction.prepare(PRIVATE_CIPHERTEXT_QUERY)?;
-    let mut rows = statement.query([committed.header.message_id.to_string()])?;
-    let row = rows
-        .next()?
-        .ok_or(SettingsReplyPublicationError::Conflict)?;
-    let bytes = checked_private_ciphertext_row(row, candidate, committed, stamp)?;
-    drop(checked_private_envelope(bytes, committed)?);
-    Ok(())
-}
-
-fn checked_private_ciphertext_row<'row>(
-    row: &'row Row<'_>,
-    candidate: &TransportOutboundCandidate,
-    committed: &CommittedSettingsReply,
-    stamp: &QueuedReplyStamp,
-) -> Result<&'row [u8], SettingsReplyPublicationError> {
-    let message = committed.header.message_id.to_string();
-    let peer = stamp.peer_device_id.to_string();
-    let expiry = i64::try_from(stamp.expires_at.get())
-        .map_err(|_| SettingsReplyPublicationError::Conflict)?;
-    let rusqlite::types::ValueRef::Blob(bytes) = row.get_ref(2)? else {
-        return Err(SettingsReplyPublicationError::Conflict);
-    };
-    if bytes.is_empty()
-        || bytes.len() != committed.envelope_bytes
-        || bytes.len() > stamp.maximum_bytes
-        || bytes.len() > 2 * super::MAX_JSON_BYTES
-    {
-        return Err(SettingsReplyPublicationError::TooLarge);
-    }
-    if ciphertext_text(row, 0, 36)? != message
-        || ciphertext_text(row, 1, 36)? != peer
-        || row.get::<_, i64>(3)? != candidate.created_at
-        || row.get::<_, i64>(4)? != candidate.not_before
-        || row.get::<_, i64>(5)? < 0
-        || row.get::<_, i64>(5)? > i64::from(u32::MAX)
-        || !matches!(row.get_ref(6)?, rusqlite::types::ValueRef::Null)
-        || ciphertext_text(row, 7, 36)? != message
-        || row.get::<_, i64>(8)? != expiry
-        || ciphertext_text(row, 9, 36)? != message
-        || ciphertext_text(row, 10, 36)? != stamp.reservation_id.to_string()
-        || ciphertext_text(row, 11, 36)? != stamp.local_device_id.to_string()
-        || ciphertext_text(row, 12, 36)? != peer
-        || ciphertext_text(row, 13, 2048)? != stamp.provenance.as_str()
-        || ciphertext_text(row, 14, 10)? != stamp.family
-        || row.get::<_, i64>(15)?
-            != i64::try_from(bytes.len()).map_err(|_| SettingsReplyPublicationError::Conflict)?
-        || row.get::<_, i64>(16)? != candidate.created_at
-        || row.get::<_, i64>(17)? != expiry
-        || <[u8; 32]>::from(Sha256::digest(bytes)) != committed.encrypted_sha256
-    {
-        return Err(SettingsReplyPublicationError::Conflict);
-    }
-    Ok(bytes)
-}
-
-fn checked_private_envelope(
-    bytes: &[u8],
-    committed: &CommittedSettingsReply,
-) -> Result<EncryptedEnvelope, SettingsReplyPublicationError> {
-    let envelope: EncryptedEnvelope =
-        serde_json::from_slice(bytes).map_err(SettingsReplyPublicationError::Encoding)?;
-    if envelope.header != committed.header || envelope.signature != committed.signature {
-        return Err(SettingsReplyPublicationError::Conflict);
-    }
-    Ok(envelope)
-}
-
-impl SettingsPrivateOutboxDisposition {
-    pub(crate) fn matches_source(&self, source: &ReturnedSettingsReplySource<'_>) -> bool {
-        std::sync::Arc::ptr_eq(&self.slot, source.slot_identity())
-            && self.message_id == source.committed().header().message_id
-            && reply_request_stamp(source.request())
-                .is_ok_and(|stamp| stamp.reservation_id == self.reservation_id)
-    }
-}
-
-impl From<SettingsReplyPublicationError> for PrivateDispositionAttemptFailure {
-    fn from(cause: SettingsReplyPublicationError) -> Self {
-        Self::Checked(Box::new(cause))
-    }
-}
-
-impl From<rusqlite::Error> for PrivateDispositionAttemptFailure {
-    fn from(cause: rusqlite::Error) -> Self {
-        SettingsReplyPublicationError::from(cause).into()
-    }
-}
-
-impl fmt::Debug for SettingsPrivateOutboxFailure {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("SettingsPrivateOutboxFailure([retained cause])")
-    }
-}
-
-impl fmt::Debug for SettingsPrivateOutboxDisposition {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("SettingsPrivateOutboxDisposition([observed Main commit only])")
     }
 }

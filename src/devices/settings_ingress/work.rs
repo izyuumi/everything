@@ -1,9 +1,6 @@
 mod build;
-mod disposition;
 
-use disposition::{ReturnedDispositionOutput, ReturnedDispositionState};
-
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fmt;
 use std::future::Future;
 use std::panic::AssertUnwindSafe;
@@ -11,43 +8,20 @@ use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
-use tokio::sync::{Notify, OwnedMutexGuard, oneshot};
+use tokio::sync::{Notify, OwnedMutexGuard};
 use tokio::task::{Id, JoinSet};
 use uuid::Uuid;
 
 pub(crate) use build::OwnedQueuedSettingsReply;
-pub(crate) use build::ReturnedSettingsReplySource;
-pub(in crate::devices) use build::SettingsStartedReturnAdoption;
-pub(in crate::devices) use build::{
-    PendingSettingsSend, SettingsSendAdmissionError, SettingsSendLoanAssociation,
-    SettingsSendReturnFailure, SettingsSendReturnReason, SettingsSendSource,
-};
-use build::{QueuedReplyRegistry, ReplyBuildState, ReplyBuildWorkerOutput};
+use build::{ReplyBuildState, ReplyBuildWorkerOutput};
 
 use super::access::{AccessReceiptOutput, AccessWorkState, OwnedCommittedSettingsAccess};
-use super::read_source::{
-    OwnedCommittedSettingsInspection, OwnedCommittedSettingsRead, OwnedCommittedSettingsSnapshot,
-    ReadReceiptOutput, ReadWorkState,
-};
-use super::{
-    BindingHistory, CommittedBindSource, CommittedSettingsCommandSource,
-    OwnedCommittedSettingsBind, OwnedCommittedSettingsCommand, OwnedHistoricalSettingsCommand,
-    OwnedVerifiedSettingsCommand, ReceiveContext, SettingsCommandOutcome, SettingsReceiveError,
-    SettingsReceiveEvent, SettingsTransportReceipt, WorkCompletion,
-};
+use super::{ReceiveContext, SettingsReceiveError, SettingsTransportReceipt, WorkCompletion};
 use crate::crypto::EncryptedEnvelope;
 use crate::devices::SettingsConnectionIdentity;
-use crate::host::settings::agent::{
-    PairedControlSendError, PairedHandoffReadError, PairedResultCorrelation, PairedResultHandoff,
-    SettingsAgentRuntime,
-};
-use crate::host::settings::service::{
-    PairedSettingsParent, SettingsAccessReplyFamily, SettingsReceiptAuthority,
-};
-use crate::protocol::{DeviceId, UnixMillis};
-use crate::storage::{
-    StoredSettingsAccessReply, StoredSettingsBindReply, StoredSettingsCommandReply,
-};
+use crate::host::settings::service::{SettingsAccessReplyFamily, SettingsReceiptAuthority};
+use crate::protocol::{DeviceId, MessageId, UnixMillis};
+use crate::storage::StoredSettingsAccessReply;
 
 #[derive(Default)]
 struct Counts {
@@ -84,19 +58,23 @@ pub(crate) struct SettingsReceiveDrain {
     pub(crate) terminal_quarantine: bool,
 }
 
-pub(crate) struct PendingSettingsReceipt {
-    receiver: oneshot::Receiver<Result<SettingsTransportReceipt, SettingsReceiveError>>,
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct SettingsOwnerError;
+
+pub(in crate::devices) enum SettingsReceiveWorkEvent {
+    Received(Result<SettingsTransportReceipt, SettingsReceiveError>),
+    ReplyQueued(MessageId),
 }
 
 pub(in crate::devices) struct SettingsReceiveWork {
     ledger: Arc<Ledger>,
     jobs: JoinSet<RegisteredJobOutput>,
-    receipts: BTreeMap<Id, oneshot::Sender<Result<SettingsTransportReceipt, SettingsReceiveError>>>,
+    receive_tasks: BTreeSet<Id>,
     pending: Option<PendingInput>,
     build: Option<ReplyBuildState>,
-    disposition: Option<ReturnedDispositionState>,
-    queued: QueuedReplyRegistry,
-    history: Option<Arc<BindingHistory>>,
+    waiting: VecDeque<OwnedCommittedSettingsAccess>,
+    queued: BTreeMap<MessageId, OwnedQueuedSettingsReply>,
+    connection: Option<Arc<SettingsConnectionIdentity>>,
     context: Option<Arc<ReceiveContext>>,
     closed: bool,
     failure: Option<SettingsReceiveError>,
@@ -109,20 +87,8 @@ struct PendingInput {
     envelope: EncryptedEnvelope,
     context: Arc<ReceiveContext>,
     connection: Arc<SettingsConnectionIdentity>,
-    history: Arc<BindingHistory>,
     waiting: Pin<Box<dyn Future<Output = OwnedMutexGuard<()>> + Send>>,
-    receipt: oneshot::Sender<Result<SettingsTransportReceipt, SettingsReceiveError>>,
     frame: FrameWitness,
-}
-
-struct TerminalPendingInput {
-    _receipt_authority: SettingsReceiptAuthority,
-    _envelope: EncryptedEnvelope,
-    _context: Arc<ReceiveContext>,
-    _connection: Arc<SettingsConnectionIdentity>,
-    _history: Arc<BindingHistory>,
-    _receipt: oneshot::Sender<Result<SettingsTransportReceipt, SettingsReceiveError>>,
-    _frame: FrameWitness,
 }
 
 pub(super) struct WorkerInput {
@@ -130,7 +96,6 @@ pub(super) struct WorkerInput {
     pub(super) envelope: EncryptedEnvelope,
     pub(super) context: Arc<ReceiveContext>,
     pub(super) connection: Arc<SettingsConnectionIdentity>,
-    pub(super) history: Arc<BindingHistory>,
     pub(super) ledger: Arc<Ledger>,
     pub(super) guard: GuardScope,
     frame: Option<FrameWitness>,
@@ -141,10 +106,7 @@ struct WorkerOutput {
     guard: GuardScope,
     context: Arc<ReceiveContext>,
     completion: Result<WorkCompletion, SettingsReceiveError>,
-    retained_command: Option<OwnedVerifiedSettingsCommand>,
-    command_outcome: Option<SettingsCommandOutcome>,
     access: Option<AccessWorkState>,
-    read: Option<ReadWorkState>,
     frame: Option<FrameWitness>,
 }
 
@@ -154,28 +116,17 @@ type JoinedRegisteredJob = Result<(Id, RegisteredJobOutput), tokio::task::JoinEr
 enum RegisteredJobOutput {
     Receive(Box<WorkerOutput>),
     ReplyBuild(Box<ReplyBuildWorkerOutput>),
-    Disposition(Box<ReturnedDispositionOutput>),
 }
 
 enum RegisteredProgress {
     Receive,
     ReplyBuild,
-    Disposition,
 }
 
 enum ReadyWork {
     ReceiveGuard(OwnedMutexGuard<()>),
     ReplyBuildGuard(OwnedMutexGuard<()>),
-    DispositionGuard(OwnedMutexGuard<()>),
     Joined(JoinedRegisteredJob),
-}
-
-pub(in crate::devices) enum SettingsReceiveWorkEvent {
-    Receive(Box<SettingsReceiveEvent>),
-    ReplyBuildJoined,
-    ReplyDispositionJoined {
-        message_id: crate::protocol::MessageId,
-    },
 }
 
 struct UnmatchedRegisteredJoin {
@@ -189,18 +140,9 @@ enum AccessJoinedDisposition {
     Capacity,
 }
 
-enum ReadJoinedDisposition {
-    Fresh,
-    Settled,
-    Capacity,
-}
-
 pub(super) struct CommandWorkState {
     pub(super) authority: Option<SettingsReceiptAuthority>,
-    pub(super) command: Option<OwnedVerifiedSettingsCommand>,
-    pub(super) outcome: Option<SettingsCommandOutcome>,
     pub(super) access: Option<AccessWorkState>,
-    pub(super) read: Option<ReadWorkState>,
 }
 
 pub(super) struct GuardScope {
@@ -221,12 +163,8 @@ pub(super) struct PrivateWitness {
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum ReplyBuildFamily {
-    BindDefault49152,
-    CommandInspection90112,
     AccessDefault49152,
     AccessDenial4096,
-    SnapshotDefault49152,
-    ReadInspection90112,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -268,70 +206,21 @@ pub(crate) struct ReplyBuildPermit {
 }
 
 pub(crate) enum SettingsReplyBuildRequest {
-    Bind {
-        parent: PairedSettingsParent,
-        request: Box<OwnedCommittedSettingsBind>,
-    },
-    Fresh(Box<OwnedCommittedSettingsCommand>),
-    Historical(Box<OwnedHistoricalSettingsCommand>),
     Access(Box<OwnedCommittedSettingsAccess>),
-    Snapshot(Box<OwnedCommittedSettingsSnapshot>),
-    Inspection(Box<OwnedCommittedSettingsInspection>),
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(in crate::devices) enum ReplyBuildAdmissionReason {
-    Busy,
-    Closed,
-    AlreadyClaimed,
-    Bookkeeping,
-}
-
-pub(in crate::devices) struct ReplyBuildAdmissionFailure {
-    pub(in crate::devices) reason: ReplyBuildAdmissionReason,
-    pub(in crate::devices) request: SettingsReplyBuildRequest,
-}
-
-pub(in crate::devices) struct PendingSettingsReplyBuild {
-    slot: Arc<()>,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(in crate::devices) enum PairedResultAdmissionReason {
-    Receive(ReplyBuildAdmissionReason),
-    RejectedBind,
-}
-
-pub(in crate::devices) struct PairedResultAdmissionFailure {
-    pub(in crate::devices) reason: PairedResultAdmissionReason,
-    pub(in crate::devices) handoff: PairedResultHandoff,
-}
-
-pub(crate) struct PairedWorkAdoption {
-    correlation: PairedResultCorrelation,
-}
-
-enum RegisteredReplyBuildOwner {
-    Direct(SettingsReplyBuildRequest),
-    Supervised(Box<PairedResultHandoff>),
 }
 
 struct RegisteredReplyBuild {
-    adoption: Option<PairedWorkAdoption>,
-    adoption_sent: bool,
-    request: RegisteredReplyBuildOwner,
+    request: SettingsReplyBuildRequest,
     permit: ReplyBuildPermit,
 }
 
 type TerminalQuarantine = (
     JoinSet<RegisteredJobOutput>,
-    Option<TerminalPendingInput>,
+    Option<PendingInput>,
     Option<ReplyBuildState>,
-    Option<ReturnedDispositionState>,
-    QueuedReplyRegistry,
-    BTreeMap<Id, oneshot::Sender<Result<SettingsTransportReceipt, SettingsReceiveError>>>,
+    VecDeque<OwnedCommittedSettingsAccess>,
+    BTreeMap<MessageId, OwnedQueuedSettingsReply>,
     Option<Arc<ReceiveContext>>,
-    Option<Arc<BindingHistory>>,
     Arc<Ledger>,
     Option<SettingsReceiveError>,
     Option<JoinedReceiveWork>,
@@ -357,36 +246,6 @@ impl ReplyBuildStamp {
             expires_at: reply.expires_at,
         }
     }
-
-    fn bind(reply: &StoredSettingsBindReply) -> Self {
-        Self {
-            reservation_id: reply.reservation_id,
-            local_device_id: reply.local_device_id,
-            peer_device_id: reply.peer_device_id,
-            created_at: reply.created_at,
-            expires_at: reply.expires_at,
-        }
-    }
-
-    fn snapshot(reply: &crate::storage::StoredSettingsReadReply) -> Self {
-        Self {
-            reservation_id: reply.reservation_id,
-            local_device_id: reply.local_device_id,
-            peer_device_id: reply.peer_device_id,
-            created_at: reply.created_at,
-            expires_at: reply.expires_at,
-        }
-    }
-
-    fn command(reply: &StoredSettingsCommandReply) -> Self {
-        Self {
-            reservation_id: reply.reservation_id,
-            local_device_id: reply.local_device_id,
-            peer_device_id: reply.peer_device_id,
-            created_at: reply.created_at,
-            expires_at: reply.expires_at,
-        }
-    }
 }
 
 impl ReplyBuildAssociation {
@@ -401,93 +260,13 @@ impl ReplyBuildAssociation {
 }
 
 impl ReplyBuildPermit {
-    pub(crate) fn check_snapshot(
-        &self,
-        request: &OwnedCommittedSettingsSnapshot,
-    ) -> Result<(), SettingsReceiveError> {
-        let read = request.read_owner();
-        self.check(
-            request.reply_build_witness(),
-            ReplyBuildFamily::SnapshotDefault49152,
-            read.verified_request()
-                .authority_source()
-                .invocation_identity(),
-            ReplyBuildStamp::snapshot(read.reply_reservation()),
-        )
-    }
-
-    pub(crate) fn check_inspection(
-        &self,
-        request: &OwnedCommittedSettingsInspection,
-    ) -> Result<(), SettingsReceiveError> {
-        let read = request.read_owner();
-        self.check(
-            request.reply_build_witness(),
-            ReplyBuildFamily::ReadInspection90112,
-            read.verified_request()
-                .authority_source()
-                .invocation_identity(),
-            ReplyBuildStamp::snapshot(read.reply_reservation()),
-        )
-    }
-
     pub(crate) fn check_access(
         &self,
         request: &OwnedCommittedSettingsAccess,
     ) -> Result<(), SettingsReceiveError> {
         let source = request.verified_request().authority_source();
         let reply = request.reply_reservation();
-        self.check(
-            request.reply_build_witness(),
-            ReplyBuildFamily::access(reply),
-            source.invocation_identity(),
-            ReplyBuildStamp::access(reply),
-        )
-    }
-
-    pub(crate) fn check_bind(
-        &self,
-        source: &CommittedBindSource<'_>,
-    ) -> Result<(), SettingsReceiveError> {
-        self.check(
-            &source.request.verified._witness,
-            ReplyBuildFamily::BindDefault49152,
-            source.creation_identity(),
-            ReplyBuildStamp::bind(source.reply_reservation()),
-        )
-    }
-
-    pub(crate) fn check_fresh(
-        &self,
-        source: &CommittedSettingsCommandSource<'_>,
-    ) -> Result<(), SettingsReceiveError> {
-        self.check(
-            source.reply_build_witness(),
-            ReplyBuildFamily::CommandInspection90112,
-            source.authority_source().invocation_identity(),
-            ReplyBuildStamp::command(source.reply_reservation()),
-        )
-    }
-
-    pub(crate) fn check_historical(
-        &self,
-        request: &OwnedHistoricalSettingsCommand,
-    ) -> Result<(), SettingsReceiveError> {
-        self.check(
-            request.reply_build_witness(),
-            ReplyBuildFamily::CommandInspection90112,
-            request.authority_source().invocation_identity(),
-            ReplyBuildStamp::command(request.reply_reservation()),
-        )
-    }
-
-    fn check(
-        &self,
-        witness: &PrivateWitness,
-        family: ReplyBuildFamily,
-        original: &Arc<()>,
-        reply: ReplyBuildStamp,
-    ) -> Result<(), SettingsReceiveError> {
+        let witness = request.reply_build_witness();
         self.ledger.check_admission()?;
         if self.ledger.closed.load(Ordering::Acquire) {
             return Err(SettingsReceiveError::Closed);
@@ -497,7 +276,11 @@ impl ReplyBuildPermit {
             || !Arc::ptr_eq(&self.ledger, &witness.ledger)
             || !Arc::ptr_eq(&self.association, &joined.association)
             || joined.claim != ReplyBuildClaim::Claimed
-            || !self.association.matches(family, original, reply)
+            || !self.association.matches(
+                ReplyBuildFamily::access(reply),
+                source.invocation_identity(),
+                ReplyBuildStamp::access(reply),
+            )
         {
             return Err(self.ledger.fail());
         }
@@ -525,26 +308,9 @@ impl Drop for ReplyBuildPermit {
 }
 
 impl SettingsReplyBuildRequest {
-    fn witness(&self) -> &PrivateWitness {
-        match self {
-            Self::Bind { request, .. } => &request.verified._witness,
-            Self::Fresh(request) => request.reply_build_witness(),
-            Self::Historical(request) => request.reply_build_witness(),
-            Self::Access(request) => request.reply_build_witness(),
-            Self::Snapshot(request) => request.reply_build_witness(),
-            Self::Inspection(request) => request.reply_build_witness(),
-        }
-    }
-
-    fn witness_mut(&mut self) -> &mut PrivateWitness {
-        match self {
-            Self::Bind { request, .. } => &mut request.verified._witness,
-            Self::Fresh(request) => request.reply_build_witness_mut(),
-            Self::Historical(request) => request.reply_build_witness_mut(),
-            Self::Access(request) => request.reply_build_witness_mut(),
-            Self::Snapshot(request) => request.reply_build_witness_mut(),
-            Self::Inspection(request) => request.reply_build_witness_mut(),
-        }
+    fn access(&self) -> &OwnedCommittedSettingsAccess {
+        let Self::Access(request) = self;
+        request
     }
 
     fn matches_context(
@@ -552,91 +318,21 @@ impl SettingsReplyBuildRequest {
         context: &ReceiveContext,
         connection: &Arc<SettingsConnectionIdentity>,
     ) -> bool {
-        match self {
-            Self::Bind { request, .. } => {
-                let source = request.authority_source();
-                Arc::ptr_eq(source.connection(), connection)
-                    && source.matches_context(&context.agent, &context.endpoint, &context.mutation)
-            }
-            Self::Fresh(request) => {
-                let committed = request.committed_source();
-                let source = committed.authority_source();
-                Arc::ptr_eq(source.connection(), connection)
-                    && source.matches_context(&context.agent, &context.endpoint, &context.mutation)
-            }
-            Self::Historical(request) => {
-                let source = request.authority_source();
-                Arc::ptr_eq(source.connection(), connection)
-                    && source.matches_context(&context.agent, &context.endpoint, &context.mutation)
-            }
-            Self::Access(request) => {
-                let source = request.verified_request().authority_source();
-                Arc::ptr_eq(source.connection(), connection)
-                    && source.matches_context(&context.agent, &context.endpoint, &context.mutation)
-            }
-            Self::Snapshot(request) => {
-                let source = request.read_owner().verified_request().authority_source();
-                Arc::ptr_eq(source.connection(), connection)
-                    && source.matches_context(&context.agent, &context.endpoint, &context.mutation)
-            }
-            Self::Inspection(request) => {
-                let source = request.read_owner().verified_request().authority_source();
-                Arc::ptr_eq(source.connection(), connection)
-                    && source.matches_context(&context.agent, &context.endpoint, &context.mutation)
-            }
-        }
+        let source = self.access().verified_request().authority_source();
+        Arc::ptr_eq(source.connection(), connection)
+            && source.matches_context(&context.agent, &context.endpoint, &context.mutation)
     }
 
     fn matches_association(&self, association: &ReplyBuildAssociation) -> bool {
-        match self {
-            Self::Bind { request, .. } => {
-                let source = request.committed_source();
-                association.matches(
-                    ReplyBuildFamily::BindDefault49152,
-                    source.creation_identity(),
-                    ReplyBuildStamp::bind(source.reply_reservation()),
-                )
-            }
-            Self::Fresh(request) => {
-                let source = request.committed_source();
-                association.matches(
-                    ReplyBuildFamily::CommandInspection90112,
-                    source.authority_source().invocation_identity(),
-                    ReplyBuildStamp::command(source.reply_reservation()),
-                )
-            }
-            Self::Historical(request) => association.matches(
-                ReplyBuildFamily::CommandInspection90112,
-                request.authority_source().invocation_identity(),
-                ReplyBuildStamp::command(request.reply_reservation()),
-            ),
-            Self::Access(request) => association.matches(
-                ReplyBuildFamily::access(request.reply_reservation()),
-                request
-                    .verified_request()
-                    .authority_source()
-                    .invocation_identity(),
-                ReplyBuildStamp::access(request.reply_reservation()),
-            ),
-            Self::Snapshot(request) => association.matches(
-                ReplyBuildFamily::SnapshotDefault49152,
-                request
-                    .read_owner()
-                    .verified_request()
-                    .authority_source()
-                    .invocation_identity(),
-                ReplyBuildStamp::snapshot(request.read_owner().reply_reservation()),
-            ),
-            Self::Inspection(request) => association.matches(
-                ReplyBuildFamily::ReadInspection90112,
-                request
-                    .read_owner()
-                    .verified_request()
-                    .authority_source()
-                    .invocation_identity(),
-                ReplyBuildStamp::snapshot(request.read_owner().reply_reservation()),
-            ),
-        }
+        let request = self.access();
+        association.matches(
+            ReplyBuildFamily::access(request.reply_reservation()),
+            request
+                .verified_request()
+                .authority_source()
+                .invocation_identity(),
+            ReplyBuildStamp::access(request.reply_reservation()),
+        )
     }
 }
 
@@ -649,36 +345,6 @@ impl fmt::Debug for ReplyBuildPermit {
 impl fmt::Debug for SettingsReplyBuildRequest {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str("SettingsReplyBuildRequest([owned])")
-    }
-}
-
-impl fmt::Debug for ReplyBuildAdmissionFailure {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("ReplyBuildAdmissionFailure([retained input])")
-    }
-}
-
-impl fmt::Debug for PendingSettingsReplyBuild {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("PendingSettingsReplyBuild([retained work])")
-    }
-}
-
-impl fmt::Debug for PairedResultAdmissionFailure {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("PairedResultAdmissionFailure([retained handoff])")
-    }
-}
-
-impl PairedWorkAdoption {
-    pub(crate) fn correlation(&self) -> &PairedResultCorrelation {
-        &self.correlation
-    }
-}
-
-impl fmt::Debug for PairedWorkAdoption {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("PairedWorkAdoption([registered custody])")
     }
 }
 
@@ -769,16 +435,6 @@ impl SettingsReceiveWitness {
     }
 }
 
-impl PendingSettingsReceipt {
-    pub(in crate::devices) async fn joined_receipt(
-        self,
-    ) -> Result<SettingsTransportReceipt, SettingsReceiveError> {
-        self.receiver
-            .await
-            .map_err(|_| SettingsReceiveError::Closed)?
-    }
-}
-
 impl SettingsReceiveWork {
     pub(in crate::devices) fn new() -> Self {
         Self {
@@ -790,12 +446,12 @@ impl SettingsReceiveWork {
                 changed: Notify::new(),
             }),
             jobs: JoinSet::new(),
-            receipts: BTreeMap::new(),
+            receive_tasks: BTreeSet::new(),
             pending: None,
             build: None,
-            disposition: None,
-            queued: QueuedReplyRegistry::default(),
-            history: None,
+            waiting: VecDeque::new(),
+            queued: BTreeMap::new(),
+            connection: None,
             context: None,
             closed: true,
             failure: None,
@@ -818,21 +474,17 @@ impl SettingsReceiveWork {
         if !self.report().complete() || self.failure.is_some() {
             return Err(SettingsReceiveError::Bookkeeping);
         }
-        self.history = Some(Arc::new(BindingHistory::new(
-            connection,
-            Arc::clone(&self.ledger),
-        )));
+        self.connection = Some(connection);
         self.context = Some(context);
         self.closed = false;
         self.ledger.closed.store(false, Ordering::Release);
         Ok(())
     }
 
-    pub(in crate::devices) fn context(&self) -> Result<Arc<ReceiveContext>, SettingsReceiveError> {
-        self.context
+    fn owns_connection(&self, connection: &Arc<SettingsConnectionIdentity>) -> bool {
+        self.connection
             .as_ref()
-            .cloned()
-            .ok_or(SettingsReceiveError::Closed)
+            .is_some_and(|owned| Arc::ptr_eq(owned, connection))
     }
 
     fn check_unjoined_build(
@@ -845,119 +497,10 @@ impl SettingsReceiveWork {
         if !Arc::ptr_eq(&witness.ledger, &self.ledger)
             || witness.peer != peer
             || witness.build.is_some()
-            || self
-                .history
-                .as_ref()
-                .is_none_or(|history| !Arc::ptr_eq(&history.connection, connection))
+            || !self.owns_connection(connection)
         {
             return Err(self.ledger.fail());
         }
-        Ok(())
-    }
-
-    fn seal_snapshot_join(&mut self) -> Result<(), SettingsReceiveError> {
-        let Some(Ok((_, output))) = self.retained_join.as_ref() else {
-            return Err(self.ledger.fail());
-        };
-        let Some(
-            read @ ReadWorkState::Verified {
-                result: Some(Ok(crate::storage::SettingsReadReceiptCommit::Fresh { reply })),
-                verified,
-            },
-        ) = output.read.as_ref()
-        else {
-            return Err(self.ledger.fail());
-        };
-        let source = verified.authority_source();
-        if !matches!(
-            source.request(),
-            super::read::SettingsReadRequest::Snapshot(_)
-        ) {
-            return Ok(());
-        }
-        let context = self.context.as_ref().ok_or_else(|| self.ledger.fail())?;
-        if !source.matches_context(&context.agent, &context.endpoint, &context.mutation)
-            || reply.family != crate::host::settings::service::SettingsReadReplyFamily::Default
-        {
-            return Err(self.ledger.fail());
-        }
-        self.check_unjoined_build(
-            read.witness().ok_or_else(|| self.ledger.fail())?,
-            source.connection(),
-            source.verified_peer_keys().device_id,
-        )?;
-        let association = Arc::new(ReplyBuildAssociation {
-            family: ReplyBuildFamily::SnapshotDefault49152,
-            original: Arc::clone(source.invocation_identity()),
-            reply: ReplyBuildStamp::snapshot(reply),
-        });
-        let witness = self
-            .retained_join
-            .as_mut()
-            .and_then(|joined| joined.as_mut().ok())
-            .and_then(|(_, output)| output.read.as_mut())
-            .and_then(ReadWorkState::witness_mut)
-            .ok_or_else(|| self.ledger.fail())?;
-        if witness.build.is_some() {
-            return Err(self.ledger.fail());
-        }
-        witness.build = Some(JoinedReplyBuild {
-            association,
-            claim: ReplyBuildClaim::Unclaimed,
-        });
-        Ok(())
-    }
-
-    fn seal_inspection_join(&mut self) -> Result<(), SettingsReceiveError> {
-        let Some(Ok((_, output))) = self.retained_join.as_ref() else {
-            return Err(self.ledger.fail());
-        };
-        let Some(
-            read @ ReadWorkState::Verified {
-                result: Some(Ok(crate::storage::SettingsReadReceiptCommit::Fresh { reply })),
-                verified,
-            },
-        ) = output.read.as_ref()
-        else {
-            return Err(self.ledger.fail());
-        };
-        let source = verified.authority_source();
-        if !matches!(
-            source.request(),
-            super::read::SettingsReadRequest::InspectOriginal(_)
-        ) {
-            return Ok(());
-        }
-        let context = self.context.as_ref().ok_or_else(|| self.ledger.fail())?;
-        if !source.matches_context(&context.agent, &context.endpoint, &context.mutation)
-            || reply.family != crate::host::settings::service::SettingsReadReplyFamily::Inspection
-        {
-            return Err(self.ledger.fail());
-        }
-        self.check_unjoined_build(
-            read.witness().ok_or_else(|| self.ledger.fail())?,
-            source.connection(),
-            source.verified_peer_keys().device_id,
-        )?;
-        let association = Arc::new(ReplyBuildAssociation {
-            family: ReplyBuildFamily::ReadInspection90112,
-            original: Arc::clone(source.invocation_identity()),
-            reply: ReplyBuildStamp::snapshot(reply),
-        });
-        let witness = self
-            .retained_join
-            .as_mut()
-            .and_then(|joined| joined.as_mut().ok())
-            .and_then(|(_, output)| output.read.as_mut())
-            .and_then(ReadWorkState::witness_mut)
-            .ok_or_else(|| self.ledger.fail())?;
-        if witness.build.is_some() {
-            return Err(self.ledger.fail());
-        }
-        witness.build = Some(JoinedReplyBuild {
-            association,
-            claim: ReplyBuildClaim::Unclaimed,
-        });
         Ok(())
     }
 
@@ -1007,247 +550,48 @@ impl SettingsReceiveWork {
         Ok(())
     }
 
-    fn seal_bind_join(
-        &self,
-        request: &mut OwnedCommittedSettingsBind,
-    ) -> Result<(), SettingsReceiveError> {
-        let source = request.authority_source();
-        let context = self.context.as_ref().ok_or_else(|| self.ledger.fail())?;
-        if !source.matches_context(&context.agent, &context.endpoint, &context.mutation) {
-            return Err(self.ledger.fail());
-        }
-        self.check_unjoined_build(
-            &request.verified._witness,
-            source.connection(),
-            source.verified_peer_keys().device_id,
-        )?;
-        let committed = request.committed_source();
-        let association = Arc::new(ReplyBuildAssociation {
-            family: ReplyBuildFamily::BindDefault49152,
-            original: Arc::clone(committed.creation_identity()),
-            reply: ReplyBuildStamp::bind(committed.reply_reservation()),
-        });
-        request.verified._witness.build = Some(JoinedReplyBuild {
-            association,
-            claim: ReplyBuildClaim::Unclaimed,
-        });
-        Ok(())
-    }
-
-    fn seal_fresh_join(
-        &self,
-        request: &mut OwnedCommittedSettingsCommand,
-    ) -> Result<(), SettingsReceiveError> {
-        let committed = request.committed_source();
-        let source = committed.authority_source();
-        let context = self.context.as_ref().ok_or_else(|| self.ledger.fail())?;
-        if !source.matches_context(&context.agent, &context.endpoint, &context.mutation) {
-            return Err(self.ledger.fail());
-        }
-        self.check_unjoined_build(
-            request.reply_build_witness(),
-            source.connection(),
-            source.verified_peer_keys().device_id,
-        )?;
-        let association = Arc::new(ReplyBuildAssociation {
-            family: ReplyBuildFamily::CommandInspection90112,
-            original: Arc::clone(source.invocation_identity()),
-            reply: ReplyBuildStamp::command(committed.reply_reservation()),
-        });
-        request.reply_build_witness_mut().build = Some(JoinedReplyBuild {
-            association,
-            claim: ReplyBuildClaim::Unclaimed,
-        });
-        Ok(())
-    }
-
-    fn seal_historical_join(
-        &self,
-        request: &mut OwnedHistoricalSettingsCommand,
-    ) -> Result<(), SettingsReceiveError> {
-        let source = request.authority_source();
-        let context = self.context.as_ref().ok_or_else(|| self.ledger.fail())?;
-        if !source.matches_context(&context.agent, &context.endpoint, &context.mutation) {
-            return Err(self.ledger.fail());
-        }
-        self.check_unjoined_build(
-            request.reply_build_witness(),
-            source.connection(),
-            source.verified_peer_keys().device_id,
-        )?;
-        let association = Arc::new(ReplyBuildAssociation {
-            family: ReplyBuildFamily::CommandInspection90112,
-            original: Arc::clone(source.invocation_identity()),
-            reply: ReplyBuildStamp::command(request.reply_reservation()),
-        });
-        request.reply_build_witness_mut().build = Some(JoinedReplyBuild {
-            association,
-            claim: ReplyBuildClaim::Unclaimed,
-        });
-        Ok(())
-    }
-
-    pub(in crate::devices) fn try_register_reply_build(
-        &mut self,
-        connection: &Arc<SettingsConnectionIdentity>,
-        mut request: SettingsReplyBuildRequest,
-    ) -> Result<PendingSettingsReplyBuild, ReplyBuildAdmissionFailure> {
-        let permit = match self.reserve_reply_build(connection, &mut request) {
-            Ok(permit) => permit,
-            Err(reason) => return Err(ReplyBuildAdmissionFailure { reason, request }),
-        };
-        let slot = Arc::clone(&permit.slot);
-        self.build = Some(ReplyBuildState::Unstarted(RegisteredReplyBuild {
-            adoption: None,
-            adoption_sent: true,
-            request: RegisteredReplyBuildOwner::Direct(request),
-            permit,
-        }));
-        Ok(PendingSettingsReplyBuild { slot })
-    }
-
-    pub(in crate::devices) fn try_adopt_paired_result(
-        &mut self,
-        connection: &Arc<SettingsConnectionIdentity>,
-        mut handoff: PairedResultHandoff,
-    ) -> Result<PendingSettingsReplyBuild, Box<PairedResultAdmissionFailure>> {
-        let request = match handoff.reply_request_mut() {
-            Ok(request) => request,
-            Err(error) => {
-                let reason = match error {
-                    PairedHandoffReadError::Closed => {
-                        PairedResultAdmissionReason::Receive(ReplyBuildAdmissionReason::Closed)
-                    }
-                    PairedHandoffReadError::RejectedBind => {
-                        PairedResultAdmissionReason::RejectedBind
-                    }
-                    PairedHandoffReadError::Bookkeeping => {
-                        self.ledger.fail();
-                        PairedResultAdmissionReason::Receive(ReplyBuildAdmissionReason::Bookkeeping)
-                    }
-                };
-                return Err(Box::new(PairedResultAdmissionFailure { reason, handoff }));
-            }
-        };
-        let permit = match self.reserve_reply_build(connection, request) {
-            Ok(permit) => permit,
-            Err(reason) => {
-                return Err(Box::new(PairedResultAdmissionFailure {
-                    reason: PairedResultAdmissionReason::Receive(reason),
-                    handoff,
-                }));
-            }
-        };
-        let slot = Arc::clone(&permit.slot);
-        self.build = Some(ReplyBuildState::Unstarted(RegisteredReplyBuild {
-            adoption: None,
-            adoption_sent: false,
-            request: RegisteredReplyBuildOwner::Supervised(Box::new(handoff)),
-            permit,
-        }));
-        Ok(PendingSettingsReplyBuild { slot })
-    }
-
-    pub(in crate::devices) fn try_ack_paired_adoption(
-        &mut self,
-        runtime: &SettingsAgentRuntime,
-    ) -> Result<bool, SettingsReceiveError> {
-        self.ledger.check_admission()?;
-        let Some(state) = self.build.as_mut() else {
-            return Ok(true);
-        };
-        let ReplyBuildState::Unstarted(record) = state else {
-            return Ok(true);
-        };
-        if record.adoption_sent {
-            return Ok(true);
-        }
-        let RegisteredReplyBuildOwner::Supervised(handoff) = &record.request else {
-            return Err(self.ledger.fail());
-        };
-        let proof = match record.adoption.take() {
-            Some(proof) => proof,
-            None => {
-                let correlation = handoff
-                    .adoption_correlation()
-                    .ok_or_else(|| self.ledger.fail())?;
-                PairedWorkAdoption { correlation }
-            }
-        };
-        match runtime.try_ack_paired_adoption(proof) {
-            Ok(()) => {
-                record.adoption_sent = true;
-                Ok(true)
-            }
-            Err(PairedControlSendError::Full(proof)) => {
-                record.adoption = Some(proof);
-                Ok(false)
-            }
-            Err(PairedControlSendError::Closed(proof)) => {
-                record.adoption = Some(proof);
-                Err(SettingsReceiveError::Closed)
-            }
-        }
-    }
-
     fn reserve_reply_build(
         &self,
         connection: &Arc<SettingsConnectionIdentity>,
         request: &mut SettingsReplyBuildRequest,
-    ) -> Result<ReplyBuildPermit, ReplyBuildAdmissionReason> {
-        let bookkeeping = || {
-            self.ledger.fail();
-            ReplyBuildAdmissionReason::Bookkeeping
-        };
-        self.ledger.check_admission().map_err(|_| bookkeeping())?;
+    ) -> Result<ReplyBuildPermit, SettingsReceiveError> {
+        self.ledger.check_admission()?;
         if self.failure.is_some() {
-            return Err(bookkeeping());
+            return Err(self.ledger.fail());
         }
         if self.closed || self.ledger.closed.load(Ordering::Acquire) || !connection.is_live() {
-            return Err(ReplyBuildAdmissionReason::Closed);
+            return Err(SettingsReceiveError::Closed);
         }
-        let context = self.context.as_ref().ok_or_else(bookkeeping)?;
-        if self
-            .history
-            .as_ref()
-            .is_none_or(|history| !Arc::ptr_eq(&history.connection, connection))
-            || !request.matches_context(context, connection)
-        {
-            return Err(bookkeeping());
+        let context = self.context.as_ref().ok_or_else(|| self.ledger.fail())?;
+        if !self.owns_connection(connection) || !request.matches_context(context, connection) {
+            return Err(self.ledger.fail());
         }
-        let witness = request.witness();
-        let joined = witness.build.as_ref().ok_or_else(bookkeeping)?;
+        let witness = request.access().reply_build_witness();
+        let joined = witness.build.as_ref().ok_or_else(|| self.ledger.fail())?;
         if !Arc::ptr_eq(&witness.ledger, &self.ledger)
             || witness.peer != joined.association.reply.peer_device_id
             || !request.matches_association(&joined.association)
+            || joined.claim != ReplyBuildClaim::Unclaimed
         {
-            return Err(bookkeeping());
-        }
-        if joined.claim == ReplyBuildClaim::Claimed {
-            return Err(ReplyBuildAdmissionReason::AlreadyClaimed);
+            return Err(self.ledger.fail());
         }
         let association = Arc::clone(&joined.association);
         let slot = Arc::new(());
-        let mut counts = self.ledger.counts.lock().map_err(|_| bookkeeping())?;
-        self.ledger.check_admission().map_err(|_| bookkeeping())?;
-        if self.closed || self.ledger.closed.load(Ordering::Acquire) || !connection.is_live() {
-            return Err(ReplyBuildAdmissionReason::Closed);
+        let mut counts = self.ledger.counts.lock().map_err(|_| self.ledger.fail())?;
+        self.ledger.check_admission()?;
+        if self.build.is_some() || counts.build.is_some() {
+            return Err(self.ledger.fail());
         }
-        if self.build.is_some() != counts.build.is_some() {
-            return Err(bookkeeping());
-        }
-        if counts.build.is_some() {
-            return Err(ReplyBuildAdmissionReason::Busy);
-        }
-        let joined = request
-            .witness_mut()
+        let SettingsReplyBuildRequest::Access(owner) = request;
+        let joined = owner
+            .reply_build_witness_mut()
             .build
             .as_mut()
-            .ok_or_else(bookkeeping)?;
+            .ok_or_else(|| self.ledger.fail())?;
         if !Arc::ptr_eq(&joined.association, &association)
             || joined.claim != ReplyBuildClaim::Unclaimed
         {
-            return Err(bookkeeping());
+            return Err(self.ledger.fail());
         }
         joined.claim = ReplyBuildClaim::Claimed;
         counts.build = Some(ReplyBuildSlot {
@@ -1262,67 +606,12 @@ impl SettingsReceiveWork {
         })
     }
 
-    fn withdraw_unstarted_build(
-        &mut self,
-    ) -> Result<Option<SettingsReplyBuildRequest>, SettingsReceiveError> {
-        let mut counts = self.ledger.counts.lock().map_err(|_| self.ledger.fail())?;
-        self.ledger.check_admission()?;
-        let Some(state) = self.build.as_ref() else {
-            return if counts.build.is_none() {
-                Ok(None)
-            } else {
-                Err(self.ledger.fail())
-            };
-        };
-        let ReplyBuildState::Unstarted(record) = state else {
-            return Err(SettingsReceiveError::Closed);
-        };
-        let RegisteredReplyBuildOwner::Direct(request) = &record.request else {
-            return Err(self.ledger.fail());
-        };
-        let witness = request.witness();
-        let joined = witness.build.as_ref().ok_or_else(|| self.ledger.fail())?;
-        if !record.permit.armed
-            || !Arc::ptr_eq(&record.permit.ledger, &self.ledger)
-            || !Arc::ptr_eq(&witness.ledger, &self.ledger)
-            || !Arc::ptr_eq(&joined.association, &record.permit.association)
-            || joined.claim != ReplyBuildClaim::Claimed
-            || !request.matches_association(&joined.association)
-            || counts.build.as_ref().is_none_or(|slot| {
-                !Arc::ptr_eq(&slot.identity, &record.permit.slot)
-                    || !Arc::ptr_eq(&slot.association, &record.permit.association)
-            })
-        {
-            return Err(self.ledger.fail());
-        }
-        let record = self.build.take().ok_or_else(|| self.ledger.fail())?;
-        match record {
-            ReplyBuildState::Unstarted(RegisteredReplyBuild {
-                request: RegisteredReplyBuildOwner::Direct(request),
-                mut permit,
-                ..
-            }) => {
-                counts.build = None;
-                permit.armed = false;
-                drop(counts);
-                drop(permit);
-                self.ledger.changed.notify_waiters();
-                Ok(Some(request))
-            }
-            record => {
-                self.build = Some(record);
-                Err(self.ledger.fail())
-            }
-        }
-    }
-
     pub(in crate::devices) fn admit(
         &mut self,
-        context: Arc<ReceiveContext>,
         connection: Arc<SettingsConnectionIdentity>,
         envelope: EncryptedEnvelope,
         receipt_authority: SettingsReceiptAuthority,
-    ) -> Result<PendingSettingsReceipt, SettingsReceiveError> {
+    ) -> Result<(), SettingsReceiveError> {
         self.ledger.check_admission()?;
         if self.closed || self.failure.is_some() || !connection.is_live() {
             return Err(SettingsReceiveError::Closed);
@@ -1330,20 +619,13 @@ impl SettingsReceiveWork {
         if envelope.ciphertext.len() > crate::crypto::MAX_CIPHERTEXT_BYTES {
             return Err(SettingsReceiveError::Capacity);
         }
-        if self
-            .context
-            .as_ref()
-            .is_none_or(|original| !Arc::ptr_eq(original, &context))
-        {
+        let Some(context) = self.context.clone() else {
             self.latch_failure();
             return Err(SettingsReceiveError::Bookkeeping);
+        };
+        if !self.owns_connection(&connection) {
+            return Err(SettingsReceiveError::Closed);
         }
-        let history = self
-            .history
-            .as_ref()
-            .filter(|history| Arc::ptr_eq(&history.connection, &connection))
-            .cloned()
-            .ok_or(SettingsReceiveError::Closed)?;
         let mut counts = self.ledger.counts.lock().map_err(|_| self.ledger.fail())?;
         self.ledger.check_admission()?;
         if counts.frame {
@@ -1355,18 +637,22 @@ impl SettingsReceiveWork {
             ledger: Arc::clone(&self.ledger),
         };
         let waiting = Box::pin(Arc::clone(&context.mutation).lock_owned());
-        let (receipt, receiver) = oneshot::channel();
         self.pending = Some(PendingInput {
             receipt_authority,
             envelope,
             context,
             connection,
-            history,
             waiting,
-            receipt,
             frame,
         });
-        Ok(PendingSettingsReceipt { receiver })
+        Ok(())
+    }
+
+    pub(in crate::devices) fn busy(&self) -> bool {
+        !self.jobs.is_empty()
+            || self.pending.is_some()
+            || self.build.is_some()
+            || (!self.waiting.is_empty() && !self.closed && self.failure.is_none())
     }
 
     pub(in crate::devices) async fn next(
@@ -1382,13 +668,13 @@ impl SettingsReceiveWork {
             self.close_intake();
         }
         loop {
+            if let Err(error) = self.start_next_build() {
+                self.failure = Some(error.clone());
+                self.close_intake();
+                return Err(error);
+            }
             let build_waiting = matches!(self.build, Some(ReplyBuildState::Waiting { .. }));
-            let disposition_waiting = self.disposition_waiting();
-            if self.jobs.is_empty()
-                && self.pending.is_none()
-                && !build_waiting
-                && !disposition_waiting
-            {
+            if self.jobs.is_empty() && self.pending.is_none() && !build_waiting {
                 return match &self.failure {
                     Some(error) => Err(error.clone()),
                     None => Ok(None),
@@ -1397,7 +683,6 @@ impl SettingsReceiveWork {
             let has_jobs = !self.jobs.is_empty();
             let receive = &mut self.pending;
             let build = &mut self.build;
-            let disposition = &mut self.disposition;
             let receive_ready = async {
                 match receive {
                     Some(pending) => pending.waiting.as_mut().await,
@@ -1407,14 +692,6 @@ impl SettingsReceiveWork {
             let build_ready = async {
                 match build {
                     Some(ReplyBuildState::Waiting { waiting, .. }) => waiting.as_mut().await,
-                    _ => std::future::pending().await,
-                }
-            };
-            let disposition_ready = async {
-                match disposition {
-                    Some(ReturnedDispositionState::Waiting { waiting, .. }) => {
-                        waiting.as_mut().await
-                    }
                     _ => std::future::pending().await,
                 }
             };
@@ -1428,7 +705,6 @@ impl SettingsReceiveWork {
                 }
                 guard = receive_ready => ReadyWork::ReceiveGuard(guard),
                 guard = build_ready => ReadyWork::ReplyBuildGuard(guard),
-                guard = disposition_ready => ReadyWork::DispositionGuard(guard),
             };
             match ready {
                 ReadyWork::ReceiveGuard(guard) => {
@@ -1445,34 +721,53 @@ impl SettingsReceiveWork {
                         return Err(error);
                     }
                 }
-                ReadyWork::DispositionGuard(guard) => {
-                    if let Err(error) = self.spawn_disposition(guard) {
-                        self.stop_disposition_waiter();
-                        self.latch_failure();
-                        return Err(error);
-                    }
-                }
                 ReadyWork::Joined(joined) => match self.register_join(joined)? {
                     RegisteredProgress::Receive => {
-                        return self.finish_receive_join().map(|event| {
-                            event.map(|event| SettingsReceiveWorkEvent::Receive(Box::new(event)))
-                        });
+                        return match self.finish_receive_join() {
+                            Ok(receipt) => {
+                                Ok(Some(SettingsReceiveWorkEvent::Received(Ok(receipt))))
+                            }
+                            Err(error) if self.failure.is_none() => {
+                                Ok(Some(SettingsReceiveWorkEvent::Received(Err(error))))
+                            }
+                            Err(error) => Err(error),
+                        };
                     }
                     RegisteredProgress::ReplyBuild => {
-                        self.finish_reply_build_join()?;
-                        return Ok(Some(SettingsReceiveWorkEvent::ReplyBuildJoined));
-                    }
-                    RegisteredProgress::Disposition => {
-                        let message_id = self
-                            .finish_disposition_join()
-                            .inspect_err(|_| self.latch_failure())?;
-                        return Ok(Some(SettingsReceiveWorkEvent::ReplyDispositionJoined {
-                            message_id,
-                        }));
+                        if let Some(message_id) = self.finish_reply_build_join()? {
+                            return Ok(Some(SettingsReceiveWorkEvent::ReplyQueued(message_id)));
+                        }
                     }
                 },
             }
         }
+    }
+
+    fn start_next_build(&mut self) -> Result<(), SettingsReceiveError> {
+        if self.build.is_some() || self.closed || self.failure.is_some() {
+            return Ok(());
+        }
+        let Some(connection) = self.connection.clone() else {
+            return Ok(());
+        };
+        let Some(owner) = self.waiting.pop_front() else {
+            return Ok(());
+        };
+        let mut request = SettingsReplyBuildRequest::Access(Box::new(owner));
+        let permit = match self.reserve_reply_build(&connection, &mut request) {
+            Ok(permit) => permit,
+            Err(SettingsReceiveError::Closed) => {
+                drop(request);
+                return Ok(());
+            }
+            Err(error) => {
+                drop(request);
+                return Err(error);
+            }
+        };
+        let context = self.context.clone().ok_or_else(|| self.ledger.fail())?;
+        self.begin_reply_build(context, RegisteredReplyBuild { request, permit });
+        Ok(())
     }
 
     fn spawn_receive(&mut self, guard: OwnedMutexGuard<()>) -> Result<(), SettingsReceiveError> {
@@ -1488,9 +783,7 @@ impl SettingsReceiveWork {
             envelope,
             context,
             connection,
-            history,
             waiting,
-            receipt,
             frame,
         } = pending;
         drop(waiting);
@@ -1499,7 +792,6 @@ impl SettingsReceiveWork {
             envelope,
             context,
             connection,
-            history,
             ledger: Arc::clone(&self.ledger),
             guard: GuardScope {
                 guard: Some(guard),
@@ -1518,7 +810,7 @@ impl SettingsReceiveWork {
         let task = self
             .jobs
             .spawn_blocking(move || RegisteredJobOutput::Receive(Box::new(run(input))));
-        if self.receipts.insert(task.id(), receipt).is_some() {
+        if !self.receive_tasks.insert(task.id()) {
             self.failure = Some(self.ledger.fail());
             self.closed = true;
         }
@@ -1530,7 +822,9 @@ impl SettingsReceiveWork {
         joined: JoinedRegisteredJob,
     ) -> Result<RegisteredProgress, SettingsReceiveError> {
         let unexpected = match joined {
-            Ok((id, RegisteredJobOutput::Receive(output))) if self.retained_join.is_none() => {
+            Ok((id, RegisteredJobOutput::Receive(output)))
+                if self.retained_join.is_none() && self.receive_tasks.remove(&id) =>
+            {
                 self.retained_join = Some(Ok((id, *output)));
                 return Ok(RegisteredProgress::Receive);
             }
@@ -1539,28 +833,6 @@ impl SettingsReceiveWork {
                     Ok(()) => return Ok(RegisteredProgress::ReplyBuild),
                     Err(Ok((id, output))) => {
                         Ok((id, RegisteredJobOutput::ReplyBuild(Box::new(output))))
-                    }
-                    Err(Err(error)) => Err(error),
-                }
-            }
-            Ok((id, RegisteredJobOutput::Disposition(output))) => {
-                match self.register_disposition_join(Ok((id, *output))) {
-                    Ok(()) => return Ok(RegisteredProgress::Disposition),
-                    Err(Ok((id, output))) => {
-                        Ok((id, RegisteredJobOutput::Disposition(Box::new(output))))
-                    }
-                    Err(Err(error)) => Err(error),
-                }
-            }
-            Err(error)
-                if self
-                    .disposition_task()
-                    .is_some_and(|task| task == error.id()) =>
-            {
-                match self.register_disposition_join(Err(error)) {
-                    Ok(()) => return Ok(RegisteredProgress::Disposition),
-                    Err(Ok((id, output))) => {
-                        Ok((id, RegisteredJobOutput::Disposition(Box::new(output))))
                     }
                     Err(Err(error)) => Err(error),
                 }
@@ -1579,7 +851,7 @@ impl SettingsReceiveWork {
                 }
             }
             Err(error)
-                if self.retained_join.is_none() && self.receipts.contains_key(&error.id()) =>
+                if self.retained_join.is_none() && self.receive_tasks.remove(&error.id()) =>
             {
                 self.retained_join = Some(Err(error));
                 return Ok(RegisteredProgress::Receive);
@@ -1610,9 +882,7 @@ impl SettingsReceiveWork {
         Err(SettingsReceiveError::Bookkeeping)
     }
 
-    fn finish_receive_join(
-        &mut self,
-    ) -> Result<Option<SettingsReceiveEvent>, SettingsReceiveError> {
+    fn finish_receive_join(&mut self) -> Result<SettingsTransportReceipt, SettingsReceiveError> {
         if let Some(Ok((_, output))) = self.retained_join.as_mut() {
             output.guard.active.store(false, Ordering::Release);
             drop(output.guard.guard.take());
@@ -1630,12 +900,9 @@ impl SettingsReceiveWork {
             self.close_intake();
             return Err(error);
         }
-        let id = match self.retained_join.as_ref() {
-            Some(Ok((id, _))) => *id,
-            Some(Err(error)) => {
-                if let Some(receipt) = self.receipts.remove(&error.id()) {
-                    let _ = receipt.send(Err(SettingsReceiveError::Worker));
-                }
+        match self.retained_join.as_ref() {
+            Some(Ok(_)) => {}
+            Some(Err(_)) => {
                 self.failure = Some(SettingsReceiveError::Worker);
                 self.ledger.fail();
                 self.close_intake();
@@ -1645,110 +912,48 @@ impl SettingsReceiveWork {
                 self.latch_failure();
                 return Err(SettingsReceiveError::Bookkeeping);
             }
-        };
-        let Some(receipt) = self.receipts.remove(&id) else {
-            self.latch_failure();
-            return Err(SettingsReceiveError::Bookkeeping);
-        };
-        if matches!(self.retained_join.as_ref(), Some(Ok((_, output))) if output.read.is_some()) {
-            return self.finish_read_join(receipt);
         }
         if matches!(self.retained_join.as_ref(), Some(Ok((_, output))) if output.access.is_some()) {
-            return self.finish_access_join(receipt);
+            return self.finish_access_join();
         }
         let output = match self.retained_join.take() {
             Some(Ok((_, output))) => output,
             retained => {
                 self.retained_join = retained;
                 self.latch_failure();
-                let _ = receipt.send(Err(SettingsReceiveError::Bookkeeping));
                 return Err(SettingsReceiveError::Bookkeeping);
             }
         };
         let WorkerOutput {
             receipt_authority,
             completion,
-            retained_command,
-            command_outcome,
             access,
-            read,
             guard,
             context,
             frame,
         } = output;
         drop(access);
-        drop(read);
-        if frame.is_none() {
-            self.failure = Some(self.ledger.fail());
-            self.closed = true;
-            let _ = receipt.send(Err(SettingsReceiveError::Bookkeeping));
-            drop(receipt_authority);
-            drop(guard);
-            drop(context);
-            drop(retained_command);
-            drop(completion);
-            drop(command_outcome);
-            return Err(SettingsReceiveError::Bookkeeping);
-        }
         drop(receipt_authority);
         drop(guard);
         drop(context);
-        drop(retained_command);
-        match completion {
-            Ok(WorkCompletion {
-                receipt: result,
-                mut bind,
-            }) => {
-                let mut command_outcome = command_outcome;
-                let sealed = match (&mut bind, &mut command_outcome) {
-                    (Some(bind), None) => self.seal_bind_join(bind),
-                    (None, Some(SettingsCommandOutcome::Fresh(command))) => {
-                        self.seal_fresh_join(command)
-                    }
-                    (None, Some(SettingsCommandOutcome::Historical(command))) => {
-                        self.seal_historical_join(command)
-                    }
-                    _ => Ok(()),
-                };
-                if let Err(error) = sealed {
-                    let error = self.failure.clone().unwrap_or(error);
-                    self.failure = Some(error.clone());
-                    self.ledger.fail();
-                    self.close_intake();
-                    let _ = receipt.send(Err(error.clone()));
-                    return Err(error);
-                }
-                let event = match (bind, command_outcome) {
-                    (Some(bind), None) => SettingsReceiveEvent::CommittedBind(bind),
-                    (None, Some(SettingsCommandOutcome::Fresh(command))) => {
-                        SettingsReceiveEvent::CommittedCommand(command)
-                    }
-                    (None, Some(SettingsCommandOutcome::Historical(command))) => {
-                        SettingsReceiveEvent::HistoricalCommand(command)
-                    }
-                    (None, None) => SettingsReceiveEvent::ReceiptSettled,
-                    (Some(_), Some(_)) => {
-                        self.failure = Some(self.ledger.fail());
-                        self.closed = true;
-                        return Err(SettingsReceiveError::Bookkeeping);
-                    }
-                };
-                let _ = receipt.send(Ok(result));
-                drop(frame);
-                Ok(Some(event))
-            }
+        if frame.is_none() {
+            self.failure = Some(self.ledger.fail());
+            self.closed = true;
+            return Err(SettingsReceiveError::Bookkeeping);
+        }
+        let result = match completion {
+            Ok(WorkCompletion { receipt }) => Ok(receipt),
             Err(error) => {
-                drop(command_outcome);
                 if error.quarantines() {
                     self.ledger.fail();
                     self.failure = Some(error.clone());
                     self.closed = true;
                 }
-                let _ = receipt.send(Err(error.clone()));
-                drop(frame);
                 Err(error)
             }
-        }
+        };
+        drop(frame);
+        result
     }
 
     fn access_join_disposition(&self) -> Result<AccessJoinedDisposition, SettingsReceiveError> {
@@ -1758,11 +963,7 @@ impl SettingsReceiveWork {
         let Some(access) = output.access.as_ref() else {
             return Err(self.ledger.fail());
         };
-        if output.frame.is_none()
-            || output.retained_command.is_some()
-            || output.command_outcome.is_some()
-            || output.read.is_some()
-        {
+        if output.frame.is_none() {
             return Err(self.ledger.fail());
         }
         if let Some(verified) = access.verified() {
@@ -1799,7 +1000,6 @@ impl SettingsReceiveWork {
             (
                 Ok(WorkCompletion {
                     receipt: SettingsTransportReceipt::PrivateCommitted { .. },
-                    bind: None,
                 }),
                 AccessWorkState::Verified {
                     issue: None,
@@ -1822,7 +1022,6 @@ impl SettingsReceiveWork {
             (
                 Ok(WorkCompletion {
                     receipt: SettingsTransportReceipt::PrivateDuplicate { .. },
-                    bind: None,
                 }),
                 AccessWorkState::Verified {
                     issue: None,
@@ -1833,23 +1032,18 @@ impl SettingsReceiveWork {
             (
                 Ok(WorkCompletion {
                     receipt: SettingsTransportReceipt::PrivateRejected { .. },
-                    bind: None,
                 }),
                 AccessWorkState::Verified {
                     issue: Some(SettingsReceiveError::AccessAdmission(error)),
                     reply: None,
                     ..
                 },
-            ) if error.is_policy_rejection() => Ok(AccessJoinedDisposition::Settled),
+            ) if error.rejects_message() => Ok(AccessJoinedDisposition::Settled),
             (
                 Ok(WorkCompletion {
                     receipt: SettingsTransportReceipt::PrivateRejected { .. },
-                    bind: None,
                 }),
-                AccessWorkState::Rejected(SettingsReceiveError::AccessSource(
-                    super::AccessStatusRejection::Expired
-                    | super::AccessStatusRejection::OutsideScope,
-                )),
+                AccessWorkState::Rejected(SettingsReceiveError::AccessSource(_)),
             ) => Ok(AccessJoinedDisposition::Settled),
             (
                 Err(SettingsReceiveError::Capacity),
@@ -1870,10 +1064,7 @@ impl SettingsReceiveWork {
         }
     }
 
-    fn finish_access_join(
-        &mut self,
-        receipt: oneshot::Sender<Result<SettingsTransportReceipt, SettingsReceiveError>>,
-    ) -> Result<Option<SettingsReceiveEvent>, SettingsReceiveError> {
+    fn finish_access_join(&mut self) -> Result<SettingsTransportReceipt, SettingsReceiveError> {
         let disposition = self.access_join_disposition().and_then(|disposition| {
             if matches!(&disposition, AccessJoinedDisposition::Fresh) {
                 self.seal_access_join()?;
@@ -1886,7 +1077,6 @@ impl SettingsReceiveWork {
                 self.ledger.fail();
                 self.failure = Some(error.clone());
                 self.close_intake();
-                let _ = receipt.send(Err(error.clone()));
                 return Err(error);
             }
         };
@@ -1896,11 +1086,7 @@ impl SettingsReceiveWork {
                 Some(Ok((
                     _,
                     WorkerOutput {
-                        completion:
-                            Ok(WorkCompletion {
-                                receipt: result,
-                                bind: None,
-                            }),
+                        completion: Ok(WorkCompletion { receipt }),
                         access:
                             Some(AccessWorkState::Verified {
                                 issue: None,
@@ -1912,24 +1098,19 @@ impl SettingsReceiveWork {
                     },
                 ))),
             ) => {
-                let owner = OwnedCommittedSettingsAccess::from_joined(AccessReceiptOutput {
-                    reply,
-                    verified,
-                });
-                let _ = receipt.send(Ok(result));
+                self.waiting
+                    .push_back(OwnedCommittedSettingsAccess::from_joined(
+                        AccessReceiptOutput { reply, verified },
+                    ));
                 drop(frame);
-                Ok(Some(SettingsReceiveEvent::CommittedAccess(owner)))
+                Ok(receipt)
             }
             (
                 AccessJoinedDisposition::Settled,
                 Some(Ok((
                     _,
                     WorkerOutput {
-                        completion:
-                            Ok(WorkCompletion {
-                                receipt: result,
-                                bind: None,
-                            }),
+                        completion: Ok(WorkCompletion { receipt }),
                         access: Some(access),
                         frame: Some(frame),
                         ..
@@ -1937,9 +1118,8 @@ impl SettingsReceiveWork {
                 ))),
             ) => {
                 drop(access);
-                let _ = receipt.send(Ok(result));
                 drop(frame);
-                Ok(Some(SettingsReceiveEvent::ReceiptSettled))
+                Ok(receipt)
             }
             (
                 AccessJoinedDisposition::Capacity,
@@ -1954,275 +1134,30 @@ impl SettingsReceiveWork {
                 ))),
             ) => {
                 drop(access);
-                let _ = receipt.send(Err(error.clone()));
                 drop(frame);
                 Err(error)
             }
             (_, retained) => {
                 self.retained_join = retained;
                 self.latch_failure();
-                let _ = receipt.send(Err(SettingsReceiveError::Bookkeeping));
                 Err(SettingsReceiveError::Bookkeeping)
             }
         }
     }
 
-    fn read_join_disposition(&self) -> Result<ReadJoinedDisposition, SettingsReceiveError> {
-        use super::read::SettingsReadRequest;
-        use crate::host::settings::service::SettingsReadReplyFamily;
-        use crate::storage::SettingsReadReceiptCommit;
-
-        let Some(Ok((_, output))) = self.retained_join.as_ref() else {
-            return Err(self.ledger.fail());
-        };
-        let Some(read) = output.read.as_ref() else {
-            return Err(self.ledger.fail());
-        };
-        if output.frame.is_none()
-            || output.retained_command.is_some()
-            || output.command_outcome.is_some()
-            || output.access.is_some()
-        {
-            return Err(self.ledger.fail());
-        }
-        if let Some(verified) = read.verified() {
-            let context = self.context.as_ref().ok_or_else(|| self.ledger.fail())?;
-            let source = verified.authority_source();
-            if output.receipt_authority.is_some()
-                || !source.matches_context(&context.agent, &context.endpoint, &context.mutation)
-            {
-                return Err(self.ledger.fail());
-            }
-            self.check_unjoined_build(
-                read.witness().ok_or_else(|| self.ledger.fail())?,
-                source.connection(),
-                source.verified_peer_keys().device_id,
-            )?;
-            if let Ok(completion) = &output.completion {
-                let id = match &completion.receipt {
-                    SettingsTransportReceipt::PrivateCommitted { message_id }
-                    | SettingsTransportReceipt::PrivateDuplicate { message_id }
-                    | SettingsTransportReceipt::PrivateRejected { message_id, .. } => message_id,
-                    SettingsTransportReceipt::Ordinary { .. } => return Err(self.ledger.fail()),
-                };
-                if source
-                    .receipt_metadata()
-                    .map_err(|error| SettingsReceiveError::ReadSource(Arc::new(error)))?
-                    .message_id
-                    != id.to_string()
-                {
-                    return Err(self.ledger.fail());
-                }
-            }
-        }
-        match (&output.completion, read) {
-            (
-                Ok(WorkCompletion {
-                    receipt: SettingsTransportReceipt::PrivateCommitted { .. },
-                    bind: None,
-                }),
-                ReadWorkState::Verified {
-                    result: Some(Ok(SettingsReadReceiptCommit::Fresh { reply })),
-                    verified,
-                },
-            ) => {
-                let source = verified.authority_source();
-                let (host, expires, family) = match source.request() {
-                    SettingsReadRequest::Snapshot(intent) => (
-                        intent.host_id,
-                        intent.expires_at,
-                        SettingsReadReplyFamily::Default,
-                    ),
-                    SettingsReadRequest::InspectOriginal(intent) => (
-                        intent.host_id,
-                        intent.expires_at,
-                        SettingsReadReplyFamily::Inspection,
-                    ),
-                };
-                if reply.reservation_id.is_nil()
-                    || reply.local_device_id != host
-                    || reply.peer_device_id != source.verified_peer_keys().device_id
-                    || reply.family != family
-                    || reply.created_at < source.receipt_floor().0
-                    || reply.created_at >= reply.expires_at
-                    || reply.expires_at > expires
-                    || reply.provenance.len() > 2048
-                {
-                    return Err(self.ledger.fail());
-                }
-                Ok(ReadJoinedDisposition::Fresh)
-            }
-            (
-                Ok(WorkCompletion {
-                    receipt: SettingsTransportReceipt::PrivateCommitted { .. },
-                    bind: None,
-                }),
-                ReadWorkState::Verified {
-                    result: Some(Ok(SettingsReadReceiptCommit::Known)),
-                    ..
-                },
-            )
-            | (
-                Ok(WorkCompletion {
-                    receipt: SettingsTransportReceipt::PrivateDuplicate { .. },
-                    bind: None,
-                }),
-                ReadWorkState::Verified {
-                    result: Some(Ok(SettingsReadReceiptCommit::Duplicate)),
-                    ..
-                },
-            ) => Ok(ReadJoinedDisposition::Settled),
-            (
-                Ok(WorkCompletion {
-                    receipt: SettingsTransportReceipt::PrivateRejected { .. },
-                    bind: None,
-                }),
-                ReadWorkState::Verified {
-                    result: Some(Err(error)),
-                    ..
-                },
-            ) if error.is_policy_rejection() => Ok(ReadJoinedDisposition::Settled),
-            (
-                Ok(WorkCompletion {
-                    receipt: SettingsTransportReceipt::PrivateRejected { .. },
-                    bind: None,
-                }),
-                ReadWorkState::Rejected(SettingsReceiveError::ReadSource(error)),
-            ) if matches!(
-                error.as_ref(),
-                super::SettingsReadSourceError::Source(
-                    super::BindRejection::Expired | super::BindRejection::OutsideScope
-                )
-            ) =>
-            {
-                Ok(ReadJoinedDisposition::Settled)
-            }
-            (
-                Err(SettingsReceiveError::Capacity),
-                ReadWorkState::Rejected(SettingsReceiveError::Capacity),
-            ) => Ok(ReadJoinedDisposition::Capacity),
-            (
-                Err(SettingsReceiveError::ReadAdmission(error)),
-                ReadWorkState::Verified {
-                    result: Some(Err(original)),
-                    ..
-                },
-            ) if Arc::ptr_eq(error, original) && error.is_capacity() => {
-                Ok(ReadJoinedDisposition::Capacity)
-            }
-            (Err(error), _) => Err(error.clone()),
-            _ => Err(self.ledger.fail()),
-        }
-    }
-
-    fn finish_read_join(
+    pub(in crate::devices) fn take_queued_reply(
         &mut self,
-        receipt: oneshot::Sender<Result<SettingsTransportReceipt, SettingsReceiveError>>,
-    ) -> Result<Option<SettingsReceiveEvent>, SettingsReceiveError> {
-        use crate::storage::SettingsReadReceiptCommit;
-
-        let disposition = match self.read_join_disposition() {
-            Ok(disposition) => disposition,
-            Err(error) => {
-                self.ledger.fail();
-                self.failure = Some(error.clone());
-                self.close_intake();
-                let _ = receipt.send(Err(error.clone()));
-                return Err(error);
-            }
-        };
-        if matches!(&disposition, ReadJoinedDisposition::Fresh)
-            && let Err(error) = self
-                .seal_snapshot_join()
-                .and_then(|()| self.seal_inspection_join())
-        {
-            self.ledger.fail();
-            self.failure = Some(error.clone());
-            self.close_intake();
-            let _ = receipt.send(Err(error.clone()));
-            return Err(error);
-        }
-        match (disposition, self.retained_join.take()) {
-            (
-                ReadJoinedDisposition::Fresh,
-                Some(Ok((
-                    _,
-                    WorkerOutput {
-                        completion:
-                            Ok(WorkCompletion {
-                                receipt: result,
-                                bind: None,
-                            }),
-                        read:
-                            Some(ReadWorkState::Verified {
-                                result: Some(Ok(SettingsReadReceiptCommit::Fresh { reply })),
-                                verified,
-                            }),
-                        frame: Some(frame),
-                        ..
-                    },
-                ))),
-            ) => {
-                let owner =
-                    OwnedCommittedSettingsRead::from_joined(ReadReceiptOutput { reply, verified });
-                let _ = receipt.send(Ok(result));
-                drop(frame);
-                Ok(Some(SettingsReceiveEvent::CommittedRead(owner)))
-            }
-            (
-                ReadJoinedDisposition::Settled,
-                Some(Ok((
-                    _,
-                    WorkerOutput {
-                        completion:
-                            Ok(WorkCompletion {
-                                receipt: result,
-                                bind: None,
-                            }),
-                        read: Some(read),
-                        frame: Some(frame),
-                        ..
-                    },
-                ))),
-            ) => {
-                drop(read);
-                let _ = receipt.send(Ok(result));
-                drop(frame);
-                Ok(Some(SettingsReceiveEvent::ReceiptSettled))
-            }
-            (
-                ReadJoinedDisposition::Capacity,
-                Some(Ok((
-                    _,
-                    WorkerOutput {
-                        completion: Err(error),
-                        read: Some(read),
-                        frame: Some(frame),
-                        ..
-                    },
-                ))),
-            ) => {
-                drop(read);
-                let _ = receipt.send(Err(error.clone()));
-                drop(frame);
-                Err(error)
-            }
-            (_, retained) => {
-                self.retained_join = retained;
-                self.latch_failure();
-                let _ = receipt.send(Err(SettingsReceiveError::Bookkeeping));
-                Err(SettingsReceiveError::Bookkeeping)
-            }
-        }
+        message_id: MessageId,
+    ) -> Option<OwnedQueuedSettingsReply> {
+        self.queued.remove(&message_id)
     }
 
     pub(in crate::devices) fn close_intake(&mut self) {
         self.closed = true;
         self.ledger.closed.store(true, Ordering::Release);
-        if let Some(pending) = self.pending.take() {
-            let _ = pending.receipt.send(Err(SettingsReceiveError::Closed));
-        }
-        self.stop_waiting_reply_build(SettingsReceiveError::Closed);
+        drop(self.pending.take());
+        self.waiting.clear();
+        self.withdraw_waiting_reply_build();
     }
 
     pub(in crate::devices) fn latch_failure(&mut self) {
@@ -2236,18 +1171,12 @@ impl SettingsReceiveWork {
             && self.retained_join.is_none()
             && self.unexpected_join.is_none()
             && self
-                .receipts
+                .receive_tasks
                 .len()
                 .checked_add(usize::from(self.reply_build_task().is_some()))
-                .and_then(|jobs| jobs.checked_add(usize::from(self.disposition_task().is_some())))
                 == Some(self.jobs.len())
             && self.build.is_some() == report.reply_build_active
-            && self.queued.healthy(&self.ledger, report.private_requests)
-            && self.disposition_healthy()
-            && self
-                .history
-                .as_ref()
-                .is_none_or(|history| history.healthy());
+            && self.queued.len() + self.waiting.len() <= report.private_requests;
         if !report.bookkeeping_ok {
             self.ledger.failed.store(true, Ordering::Release);
         }
@@ -2258,18 +1187,38 @@ impl SettingsReceiveWork {
         &mut self,
     ) -> Result<SettingsReceiveDrain, SettingsReceiveError> {
         self.close_intake();
-        while !self.jobs.is_empty() || self.disposition_waiting() {
+        while !self.jobs.is_empty() {
             match self.next().await {
-                Ok(event) => drop(event),
-                Err(_) if !self.jobs.is_empty() || self.disposition_waiting() => {}
-                Err(_) => break,
+                Ok(Some(SettingsReceiveWorkEvent::ReplyQueued(_)) | None) | Err(_) => {}
+                Ok(Some(SettingsReceiveWorkEvent::Received(_))) => {}
             }
         }
-        if self.build.is_some() {
-            let request = self
-                .withdraw_unstarted_build()
-                .map_err(|error| self.failure.clone().unwrap_or(error))?;
-            drop(request);
+        self.waiting.clear();
+        self.withdraw_waiting_reply_build();
+        let queued = std::mem::take(&mut self.queued);
+        if !queued.is_empty() {
+            let store = self
+                .context
+                .as_ref()
+                .map(|context| context.agent.store())
+                .ok_or_else(|| self.ledger.fail())?;
+            let retired = tokio::task::spawn_blocking(move || {
+                for (_, reply) in queued {
+                    store
+                        .retire_private_settings_reply(&reply)
+                        .map_err(|_| SettingsReceiveError::Worker)?;
+                    reply.retire();
+                }
+                Ok::<_, SettingsReceiveError>(())
+            })
+            .await
+            .map_err(|_| SettingsReceiveError::Worker)
+            .and_then(|result| result);
+            if let Err(error) = retired {
+                self.ledger.fail();
+                self.failure = Some(error.clone());
+                return Err(error);
+            }
         }
         loop {
             let changed = self.ledger.changed.notified();
@@ -2284,34 +1233,10 @@ impl SettingsReceiveWork {
             }
             if report.complete() {
                 self.context = None;
+                self.connection = None;
                 return Ok(report);
             }
             changed.await;
-        }
-    }
-}
-
-impl PendingInput {
-    fn into_terminal(self) -> TerminalPendingInput {
-        let Self {
-            receipt_authority,
-            envelope,
-            context,
-            connection,
-            history,
-            waiting,
-            receipt,
-            frame,
-        } = self;
-        drop(waiting);
-        TerminalPendingInput {
-            _receipt_authority: receipt_authority,
-            _envelope: envelope,
-            _context: context,
-            _connection: connection,
-            _history: history,
-            _receipt: receipt,
-            _frame: frame,
         }
     }
 }
@@ -2320,21 +1245,17 @@ impl Drop for SettingsReceiveWork {
     fn drop(&mut self) {
         self.closed = true;
         self.ledger.closed.store(true, Ordering::Release);
-        self.stop_waiting_reply_build(SettingsReceiveError::Closed);
-        self.stop_disposition_waiter();
+        self.withdraw_waiting_reply_build();
         if !self.report().complete() || self.failure.is_some() {
             self.ledger.terminal.store(true, Ordering::Release);
             self.ledger.changed.notify_waiters();
-            let pending = self.pending.take().map(PendingInput::into_terminal);
             let retained: TerminalQuarantine = (
                 std::mem::replace(&mut self.jobs, JoinSet::new()),
-                pending,
+                self.pending.take(),
                 self.build.take(),
-                self.disposition.take(),
+                std::mem::take(&mut self.waiting),
                 std::mem::take(&mut self.queued),
-                std::mem::take(&mut self.receipts),
                 self.context.take(),
-                self.history.take(),
                 Arc::clone(&self.ledger),
                 self.failure.take(),
                 self.retained_join.take(),
@@ -2404,10 +1325,7 @@ impl Drop for PrivateWitness {
 fn run(mut input: WorkerInput) -> WorkerOutput {
     let mut command = CommandWorkState {
         authority: input.receipt_authority.take(),
-        command: None,
-        outcome: None,
         access: None,
-        read: None,
     };
     let completion =
         match std::panic::catch_unwind(AssertUnwindSafe(|| super::execute(&input, &mut command))) {
@@ -2424,10 +1342,7 @@ fn run(mut input: WorkerInput) -> WorkerOutput {
             active: Arc::clone(&input.guard.active),
         },
         context: Arc::clone(&input.context),
-        retained_command: command.command.take(),
-        command_outcome: command.outcome.take(),
         access: command.access.take(),
-        read: command.read.take(),
         frame: input.frame.take(),
     }
 }

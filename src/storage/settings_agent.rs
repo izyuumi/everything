@@ -1,12 +1,7 @@
-use rusqlite::{Connection, Row, Transaction, TransactionBehavior, params, types::ValueRef};
+use rusqlite::{Connection, Row, TransactionBehavior, params, types::ValueRef};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use super::settings_originals::{
-    RemoteOriginalIdentity, RemoteOriginalKey, RemoteOriginalLink, RemotePublicCommand,
-    StoredSettingsSessionReservation, decode_stored_reservation, read_original_on,
-    validate_paired_mutation_identity,
-};
 use super::{StorageError, StorageResult, Store, invalid, missing, validate_limit};
 use uuid::Uuid;
 
@@ -163,13 +158,29 @@ impl Store {
         let encoded = encode(reservation, MAX_SETTINGS_RECORD_BYTES)?;
         let mut connection = self.connection()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        if !reserve_session_encoded_in(
-            &transaction,
-            &StoredSettingsSessionReservation::Native(reservation.clone()),
-            &encoded,
-        )? {
-            return Ok(());
+        if let Some(original) = read_session(&transaction, reservation.session_id)? {
+            return if original == *reservation {
+                Ok(())
+            } else {
+                conflict("Settings session", reservation.session_id.to_string())
+            };
         }
+        let count: i64 =
+            transaction.query_row("SELECT count(*) FROM settings_agent_sessions", [], |row| {
+                row.get(0)
+            })?;
+        if count >= MAX_RETAINED_SETTINGS_SESSIONS as i64 {
+            return Err(StorageError::TransportCapacity(
+                "Settings session tombstones",
+            ));
+        }
+        if wall_now()? >= reservation.expires_at {
+            return invalid("Settings session expired before reservation");
+        }
+        transaction.execute(
+            "INSERT INTO settings_agent_sessions(session_id,conversation_id,create_command_id,reservation) VALUES(?1,?2,?3,?4)",
+            params![reservation.session_id.to_string(),reservation.conversation_id.to_string(),reservation.create_command_id.to_string(),encoded],
+        )?;
         transaction.commit()?;
         Ok(())
     }
@@ -186,13 +197,53 @@ impl Store {
     }
 
     pub(crate) fn arm_settings_turn(&self, fence: &SettingsTurnFence) -> StorageResult<()> {
-        validate_unspent_fence(fence)?;
+        validate_fence(fence)?;
+        if fence.phase != SettingsFencePhase::Armed
+            || fence.attempt_id.is_some()
+            || fence.model_attempts != 0
+            || fence.tool_calls != 0
+            || fence.charged_tokens != 0
+            || fence.reserved_output_tokens != 0
+            || fence.reported_input_tokens != 0
+            || fence.reported_output_tokens != 0
+            || !fence.mutation_ids.is_empty()
+            || fence.provider_complete
+            || fence.usage_complete
+            || fence.last_observed_wall != fence.started_at
+        {
+            return invalid("new Settings turn requires an unspent Armed fence");
+        }
         let encoded = encode(fence, MAX_SETTINGS_RECORD_BYTES)?;
         let mut connection = self.connection()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        if !arm_turn_encoded_in(&transaction, fence, None, &encoded)? {
-            return Ok(());
+        if let Some(original) = read_fence(&transaction, fence.command_id)? {
+            return if original == *fence {
+                Ok(())
+            } else {
+                conflict("Settings turn", fence.command_id.to_string())
+            };
         }
+        if !unsettled(&transaction, None, 1)?.is_empty() {
+            return Err(StorageError::TransportCapacity("active Settings turn"));
+        }
+        let session = read_session(&transaction, fence.session_id)?
+            .ok_or_else(|| missing("Settings session", &fence.session_id.to_string()))?;
+        validate_session_fence(&session, fence)?;
+        let count: i64 = transaction.query_row(
+            "SELECT count(*) FROM settings_agent_turns WHERE session_id=?1",
+            [fence.session_id.to_string()],
+            |row| row.get(0),
+        )?;
+        if count >= MAX_SETTINGS_TURNS as i64 {
+            return Err(StorageError::TransportCapacity("Settings session turns"));
+        }
+        if wall_now()? >= fence.deadline {
+            return invalid("Settings turn expired before reservation");
+        }
+        transaction.execute(
+            "INSERT INTO settings_agent_turns(command_id,session_id,task_id,phase,record) VALUES(?1,?2,?3,'armed',?4)",
+            params![fence.command_id.to_string(),fence.session_id.to_string(),fence.task_id.to_string(),encoded],
+        )?;
         transaction.commit()?;
         Ok(())
     }
@@ -213,10 +264,10 @@ impl Store {
             return conflict("Settings turn", fence.command_id.to_string());
         }
         validate_transition(&original, fence)?;
-        let session = read_stored_session_on(&transaction, fence.session_id)?
+        let session = read_session(&transaction, fence.session_id)?
             .ok_or_else(|| missing("Settings session", &fence.session_id.to_string()))?;
-        validate_stored_session_fence(&session, fence)?;
-        validate_stored_mutations(&transaction, &session, fence)?;
+        validate_session_fence(&session, fence)?;
+        validate_mutations(&transaction, &session, fence)?;
         transaction.execute(
             "UPDATE settings_agent_turns SET phase=?2,record=?3 WHERE command_id=?1",
             params![fence.command_id.to_string(), phase(fence.phase), encoded],
@@ -284,171 +335,6 @@ impl Store {
     }
 }
 
-pub(crate) fn reserve_session_in(
-    transaction: &Transaction<'_>,
-    reservation: &StoredSettingsSessionReservation,
-) -> StorageResult<()> {
-    match reservation {
-        StoredSettingsSessionReservation::Native(value) => validate_session(value)?,
-        StoredSettingsSessionReservation::Paired(value) => value.validate()?,
-    }
-    let encoded = reservation.encode()?;
-    reserve_session_encoded_in(transaction, reservation, &encoded)?;
-    Ok(())
-}
-
-fn reserve_session_encoded_in(
-    transaction: &Transaction<'_>,
-    reservation: &StoredSettingsSessionReservation,
-    encoded: &str,
-) -> StorageResult<bool> {
-    if let Some(original) = read_stored_session_on(transaction, reservation.session_id())? {
-        return if original == *reservation {
-            validate_installed_session_original(transaction, reservation)?;
-            Ok(false)
-        } else {
-            conflict("Settings session", reservation.session_id().to_string())
-        };
-    }
-    let count: i64 =
-        transaction.query_row("SELECT count(*) FROM settings_agent_sessions", [], |row| {
-            row.get(0)
-        })?;
-    if count >= MAX_RETAINED_SETTINGS_SESSIONS as i64 {
-        return Err(StorageError::TransportCapacity(
-            "Settings session tombstones",
-        ));
-    }
-    if wall_now()? >= reservation.expires_at() {
-        return invalid("Settings session expired before reservation");
-    }
-    transaction.execute(
-        "INSERT INTO settings_agent_sessions(session_id,conversation_id,create_command_id,reservation) VALUES(?1,?2,?3,?4)",
-        params![reservation.session_id().to_string(),reservation.conversation_id().to_string(),reservation.create_command_id().to_string(),encoded],
-    )?;
-    validate_installed_session_original(transaction, reservation)?;
-    Ok(true)
-}
-
-fn validate_installed_session_original(
-    connection: &Connection,
-    reservation: &StoredSettingsSessionReservation,
-) -> StorageResult<()> {
-    if let StoredSettingsSessionReservation::Paired(value) = reservation {
-        let original = read_original_on(
-            connection,
-            RemoteOriginalKey {
-                host_id: value.host_id,
-                actor_device_id: value.peer_keys.device_id,
-                request_id: value.open_request_id,
-            },
-        )?
-        .ok_or_else(|| {
-            missing(
-                "remote Settings original",
-                &value.open_request_id.to_string(),
-            )
-        })?;
-        if original.link
-            != Some(RemoteOriginalLink::Chat {
-                session_id: value.session_id,
-            })
-        {
-            return invalid("paired Settings session did not install its original link");
-        }
-    }
-    Ok(())
-}
-
-pub(crate) fn arm_turn_in(
-    transaction: &Transaction<'_>,
-    fence: &SettingsTurnFence,
-    remote_original_request_id: Option<CommandId>,
-) -> StorageResult<()> {
-    validate_unspent_fence(fence)?;
-    let encoded = encode(fence, MAX_SETTINGS_RECORD_BYTES)?;
-    arm_turn_encoded_in(transaction, fence, remote_original_request_id, &encoded)?;
-    Ok(())
-}
-
-fn arm_turn_encoded_in(
-    transaction: &Transaction<'_>,
-    fence: &SettingsTurnFence,
-    remote_original_request_id: Option<CommandId>,
-    encoded: &str,
-) -> StorageResult<bool> {
-    if let Some(original) = read_fence(transaction, fence.command_id)? {
-        let original_request_id = read_original_request_id(transaction, fence.command_id)?;
-        return if original == *fence && original_request_id == remote_original_request_id {
-            Ok(false)
-        } else {
-            conflict("Settings turn", fence.command_id.to_string())
-        };
-    }
-    if !unsettled(transaction, None, 1)?.is_empty() {
-        return Err(StorageError::TransportCapacity("active Settings turn"));
-    }
-    let session = read_stored_session_on(transaction, fence.session_id)?
-        .ok_or_else(|| missing("Settings session", &fence.session_id.to_string()))?;
-    validate_stored_session_fence(&session, fence)?;
-    validate_turn_original(
-        transaction,
-        &session,
-        fence,
-        remote_original_request_id,
-        false,
-    )?;
-    let count: i64 = transaction.query_row(
-        "SELECT count(*) FROM settings_agent_turns WHERE session_id=?1",
-        [fence.session_id.to_string()],
-        |row| row.get(0),
-    )?;
-    if count >= MAX_SETTINGS_TURNS as i64 {
-        return Err(StorageError::TransportCapacity("Settings session turns"));
-    }
-    if wall_now()? >= fence.deadline {
-        return invalid("Settings turn expired before reservation");
-    }
-    match remote_original_request_id {
-        None => transaction.execute(
-            "INSERT INTO settings_agent_turns(command_id,session_id,task_id,phase,record) VALUES(?1,?2,?3,'armed',?4)",
-            params![fence.command_id.to_string(),fence.session_id.to_string(),fence.task_id.to_string(),encoded],
-        )?,
-        Some(request_id) => transaction.execute(
-            "INSERT INTO settings_agent_turns(command_id,session_id,task_id,phase,record,remote_original_request_id) VALUES(?1,?2,?3,'armed',?4,?5)",
-            params![fence.command_id.to_string(),fence.session_id.to_string(),fence.task_id.to_string(),encoded,request_id.to_string()],
-        )?,
-    };
-    validate_turn_original(
-        transaction,
-        &session,
-        fence,
-        remote_original_request_id,
-        true,
-    )?;
-    Ok(true)
-}
-
-fn validate_unspent_fence(fence: &SettingsTurnFence) -> StorageResult<()> {
-    validate_fence(fence)?;
-    if fence.phase != SettingsFencePhase::Armed
-        || fence.attempt_id.is_some()
-        || fence.model_attempts != 0
-        || fence.tool_calls != 0
-        || fence.charged_tokens != 0
-        || fence.reserved_output_tokens != 0
-        || fence.reported_input_tokens != 0
-        || fence.reported_output_tokens != 0
-        || !fence.mutation_ids.is_empty()
-        || fence.provider_complete
-        || fence.usage_complete
-        || fence.last_observed_wall != fence.started_at
-    {
-        return invalid("new Settings turn requires an unspent Armed fence");
-    }
-    Ok(())
-}
-
 fn unsettled(
     connection: &Connection,
     after: Option<CommandId>,
@@ -486,7 +372,7 @@ fn unsettled(
     Ok(result)
 }
 
-pub(super) fn validate_session(value: &SettingsSessionReservation) -> StorageResult<()> {
+fn validate_session(value: &SettingsSessionReservation) -> StorageResult<()> {
     if value.version != 1
         || value.session_id.is_nil()
         || value.principal_id.is_nil()
@@ -540,74 +426,6 @@ fn validate_session_fence(
     Ok(())
 }
 
-fn validate_stored_session_fence(
-    session: &StoredSettingsSessionReservation,
-    fence: &SettingsTurnFence,
-) -> StorageResult<()> {
-    match session {
-        StoredSettingsSessionReservation::Native(value) => validate_session_fence(value, fence),
-        StoredSettingsSessionReservation::Paired(_) => {
-            if session.session_id() != fence.session_id
-                || fence.started_at < session.created_at()
-                || fence.deadline > session.expires_at()
-                || fence.command_id == session.create_command_id()
-            {
-                return invalid("Settings turn does not match its original session");
-            }
-            Ok(())
-        }
-    }
-}
-
-fn validate_turn_original(
-    connection: &Connection,
-    session: &StoredSettingsSessionReservation,
-    fence: &SettingsTurnFence,
-    request_id: Option<CommandId>,
-    installed: bool,
-) -> StorageResult<()> {
-    match (session, request_id) {
-        (StoredSettingsSessionReservation::Native(_), None) => Ok(()),
-        (StoredSettingsSessionReservation::Paired(value), Some(request_id)) => {
-            let original = read_original_on(
-                connection,
-                RemoteOriginalKey {
-                    host_id: value.host_id,
-                    actor_device_id: value.peer_keys.device_id,
-                    request_id,
-                },
-            )?
-            .ok_or_else(|| missing("remote Settings original", &request_id.to_string()))?;
-            let RemoteOriginalIdentity::Accepted(identity) = &original.identity else {
-                return invalid("paired Settings turn requires an accepted original");
-            };
-            let RemotePublicCommand::Send {
-                chat_id,
-                provider_binding_sha256,
-            } = &identity.command
-            else {
-                return invalid("paired Settings turn requires an original Send");
-            };
-            let expected_link = installed.then_some(RemoteOriginalLink::Turn {
-                session_id: value.session_id,
-                command_id: fence.command_id,
-            });
-            if !identity.matches_session(value)
-                || *chat_id != value.session_id
-                || *provider_binding_sha256 != value.provider_binding_sha256
-                || fence.started_at < identity.admitted_at
-                || fence.started_at >= identity.expires_at
-                || original.link != expected_link
-                || !installed && (original.close.is_some() || original.terminal.is_some())
-            {
-                return invalid("paired Settings turn original relationship differs");
-            }
-            Ok(())
-        }
-        _ => invalid("Settings turn original scalar has another reservation version"),
-    }
-}
-
 fn validate_transition(old: &SettingsTurnFence, new: &SettingsTurnFence) -> StorageResult<()> {
     let new_attempt = old.attempt_id != new.attempt_id;
     if old.version != new.version
@@ -656,14 +474,14 @@ fn validate_cleanup(
     attestation: &SettingsCleanupAttestation,
 ) -> StorageResult<()> {
     validate_attestation(attestation)?;
-    let session = read_stored_session_on(connection, fence.session_id)?
+    let session = read_session(connection, fence.session_id)?
         .ok_or_else(|| missing("Settings session", &fence.session_id.to_string()))?;
     if !matches!(
         fence.phase,
         SettingsFencePhase::Armed | SettingsFencePhase::Unknown
     ) || attestation.command_id != fence.command_id
         || attestation.exact_fence_sha256 != fence.sha256()?
-        || attestation.owner_principal_id != session.owner_principal_id()
+        || attestation.owner_principal_id != session.principal_id
         || attestation.attested_at < fence.last_observed_wall
     {
         return invalid("Settings cleanup does not match the original fence");
@@ -719,78 +537,6 @@ fn validate_mutations(
     Ok(())
 }
 
-fn validate_stored_mutations(
-    connection: &Connection,
-    session: &StoredSettingsSessionReservation,
-    fence: &SettingsTurnFence,
-) -> StorageResult<()> {
-    match session {
-        StoredSettingsSessionReservation::Native(value) => {
-            validate_mutations(connection, value, fence)
-        }
-        StoredSettingsSessionReservation::Paired(value) => {
-            for id in &fence.mutation_ids {
-                let mut statement = connection
-                    .prepare("SELECT identity FROM settings_operations WHERE request_id=?1")?;
-                let mut rows = statement.query([id.to_string()])?;
-                if let Some(row) = rows.next()? {
-                    validate_paired_mutation_identity(text(row, 0, 18 * 1024)?, *id, value)?;
-                }
-            }
-            Ok(())
-        }
-    }
-}
-
-pub(super) fn read_stored_session_on(
-    connection: &Connection,
-    session_id: Uuid,
-) -> StorageResult<Option<StoredSettingsSessionReservation>> {
-    if session_id.is_nil() {
-        return invalid("nil Settings session identity");
-    }
-    let mut statement = connection.prepare("SELECT session_id,conversation_id,create_command_id,reservation FROM settings_agent_sessions WHERE session_id=?1")?;
-    let mut rows = statement.query([session_id.to_string()])?;
-    let Some(row) = rows.next()? else {
-        return Ok(None);
-    };
-    let value = decode_stored_reservation(text(row, 3, MAX_SETTINGS_RECORD_BYTES)?)?;
-    if value.session_id() != session_id
-        || text(row, 0, 36)? != value.session_id().to_string()
-        || text(row, 1, 36)? != value.conversation_id().to_string()
-        || text(row, 2, 36)? != value.create_command_id().to_string()
-    {
-        return invalid("stored Settings session identity is inconsistent");
-    }
-    Ok(Some(value))
-}
-
-fn read_original_request_id(
-    connection: &Connection,
-    command_id: CommandId,
-) -> StorageResult<Option<CommandId>> {
-    let mut statement = connection.prepare(
-        "SELECT remote_original_request_id FROM settings_agent_turns WHERE command_id=?1",
-    )?;
-    let mut rows = statement.query([command_id.to_string()])?;
-    let row = rows
-        .next()?
-        .ok_or_else(|| missing("Settings turn", &command_id.to_string()))?;
-    match row.get_ref(0)? {
-        ValueRef::Null => Ok(None),
-        _ => {
-            let encoded = text(row, 0, 36)?;
-            let value: CommandId = encoded
-                .parse()
-                .map_err(|_| malformed("Settings original request"))?;
-            if value.to_string() != encoded {
-                return invalid("Settings original request is not canonical");
-            }
-            Ok(Some(value))
-        }
-    }
-}
-
 fn read_session(
     connection: &Connection,
     session_id: Uuid,
@@ -834,17 +580,10 @@ fn read_fence(
     {
         return invalid("stored Settings turn identity is inconsistent");
     }
-    let session = read_stored_session_on(connection, fence.session_id)?
+    let session = read_session(connection, fence.session_id)?
         .ok_or_else(|| missing("Settings session", &fence.session_id.to_string()))?;
-    validate_stored_session_fence(&session, &fence)?;
-    validate_turn_original(
-        connection,
-        &session,
-        &fence,
-        read_original_request_id(connection, command_id)?,
-        true,
-    )?;
-    validate_stored_mutations(connection, &session, &fence)?;
+    validate_session_fence(&session, &fence)?;
+    validate_mutations(connection, &session, &fence)?;
     Ok(Some(fence))
 }
 
@@ -914,12 +653,4 @@ fn malformed(value: &'static str) -> StorageError {
 
 fn conflict<T>(entity: &'static str, id: String) -> StorageResult<T> {
     Err(StorageError::StateConflict { entity, id })
-}
-
-pub(crate) fn read_inspection_turn_on(
-    connection: &Connection,
-    command_id: CommandId,
-) -> StorageResult<SettingsTurnFence> {
-    read_fence(connection, command_id)?
-        .ok_or_else(|| missing("Settings inspection turn", &command_id.to_string()))
 }

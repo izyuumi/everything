@@ -539,10 +539,8 @@ impl HostService {
             )
             .map_err(HostError::from)
             .and_then(|(transport, mut owner)| {
-                host.settings_service.bind_paired_transport(&transport)?;
                 let capability = super::settings::SettingsRelayCapability::new(
                     host.settings_service.clone(),
-                    Arc::clone(&host.settings_agents),
                     transport.clone(),
                 );
                 owner
@@ -552,9 +550,12 @@ impl HostService {
                         drop(rejected_capability);
                         HostError::from(error)
                     })?;
-                host.settings_transport.set(transport).map_err(|_| {
-                    HostError::Invalid("settings transport owner was already registered")
-                })?;
+                host.settings_transport
+                    .set(transport.clone())
+                    .map_err(|_| {
+                        HostError::Invalid("settings transport owner was already registered")
+                    })?;
+                host.settings_service.bind_paired_transport(&transport)?;
                 Ok(owner)
             });
             workers.spawn(async move {

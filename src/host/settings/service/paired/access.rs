@@ -13,9 +13,10 @@ use crate::crypto::{DevicePublicKeys, EnvelopeHeader};
 use crate::devices::{
     AccessStatusRejection, BindingGeneration, OwnedCommittedSettingsAccess,
     OwnedQueuedSettingsReply, OwnedVerifiedSettingsAccess, ReplyBuildPermit,
-    SettingsAccessReplyPacket, SettingsReplyBuildRequest, SettingsReplyPublicationError,
-    SettingsReplyQualification,
+    SETTINGS_CLOCK_SKEW_MS, SettingsAccessReplyPacket, SettingsReplyBuildRequest,
+    SettingsReplyPublicationError, SettingsReplyQualification,
 };
+use crate::host::settings::grants::{SettingsGrantOwner, SettingsGrantState};
 use crate::host::settings::{SettingsGrantHead, SettingsGrantReference};
 use crate::protocol::{DeviceId, MessageId, UnixMillis};
 use crate::storage::{ConsumedSettingsReply, Store, settings_grant_head_on};
@@ -23,8 +24,7 @@ use crate::storage::{ConsumedSettingsReply, Store, settings_grant_head_on};
 use super::pins::ReplyPinError;
 use super::replies::SettingsQueuedReplyCheckError;
 use super::{
-    SettingsGrantOwner, SettingsGrantState, SettingsReceiptAuthority, SettingsReplyProjectionError,
-    SettingsServiceError, original_reply_text,
+    SettingsReceiptAuthority, SettingsReplyProjectionError, SettingsServiceError, reply_row_text,
 };
 
 #[derive(Error)]
@@ -537,123 +537,6 @@ impl fmt::Debug for QualifiedSettingsAccessReply<'_> {
 }
 
 impl SettingsReceiptAuthority {
-    pub(super) fn recheck_queued_access_socket_lifetime(
-        &self,
-        store: &Store,
-        mutation: &OwnedMutexGuard<()>,
-        queued: &OwnedQueuedSettingsReply,
-        comparison: &AccessReplyComparison,
-    ) -> Result<(), SettingsQueuedReplyCheckError> {
-        let SettingsReplyBuildRequest::Access(request) = queued.request()? else {
-            return Err(SettingsReplyPublicationError::Conflict.into());
-        };
-        let header = queued.committed()?.header();
-        if !Arc::ptr_eq(OwnedMutexGuard::mutex(mutation), &self.core.mutation) {
-            return Err(
-                SettingsReplyProjectionError::from(SettingsServiceError::OutsideScope).into(),
-            );
-        }
-        let verified = request.verified_request();
-        self.check_access_context(store, verified)
-            .map_err(SettingsReplyProjectionError::from)?;
-        store
-            .check_connection_health()
-            .map_err(SettingsReplyPublicationError::from)?;
-        let source = verified.authority_source();
-        let intent = source.intent();
-        let reply = request.reply_reservation();
-        let floor = source.receipt_floor();
-        let grant_matches_family = match (comparison.family, comparison.grant) {
-            (SettingsAccessReplyFamily::Default, Some(grant)) => {
-                !grant.grant_id.is_nil() && grant.revision > 0
-            }
-            (SettingsAccessReplyFamily::Denial, None) => true,
-            _ => false,
-        };
-        let provenance = access_reply_provenance(verified, comparison.grant)
-            .map_err(SettingsReplyProjectionError::from)?;
-        if !Arc::ptr_eq(&comparison.invocation, source.invocation_identity())
-            || comparison.family != reply.family
-            || !grant_matches_family
-            || reply.reservation_id.is_nil()
-            || reply.local_device_id != intent.host_id
-            || reply.peer_device_id != source.verified_peer_keys().device_id
-            || reply.provenance.len() > 2048
-            || reply.provenance != provenance
-            || reply.created_at < floor.0
-            || reply.created_at < comparison.query_floor.0
-            || reply.created_at < intent.issued_at
-            || reply.created_at >= reply.expires_at
-            || reply.created_at >= intent.expires_at
-        {
-            return Err(
-                SettingsReplyProjectionError::from(SettingsServiceError::OutsideScope).into(),
-            );
-        }
-        drop(provenance);
-        let query_lifetime = intent
-            .expires_at
-            .get()
-            .checked_sub(comparison.query_floor.0.get())
-            .ok_or(SettingsServiceError::Expired)
-            .map_err(SettingsReplyProjectionError::from)?;
-        let maximum_expiry = reply
-            .created_at
-            .get()
-            .checked_add(60_000)
-            .ok_or(SettingsServiceError::Expired)
-            .map_err(SettingsReplyProjectionError::from)?
-            .min(intent.expires_at.get());
-        let clip = intent
-            .expires_at
-            .get()
-            .checked_sub(reply.expires_at.get())
-            .ok_or(SettingsServiceError::Expired)
-            .map_err(SettingsReplyProjectionError::from)?;
-        let deadline = comparison
-            .query_deadline
-            .min(source.original_deadline())
-            .checked_sub(Duration::from_millis(clip))
-            .ok_or(SettingsServiceError::Expired)
-            .map_err(SettingsReplyProjectionError::from)?;
-        if comparison
-            .query_floor
-            .1
-            .checked_add(Duration::from_millis(query_lifetime))
-            != Some(comparison.query_deadline)
-            || comparison.reply_deadline != deadline
-            || reply.expires_at.get() > maximum_expiry
-        {
-            return Err(
-                SettingsReplyProjectionError::from(SettingsServiceError::OutsideScope).into(),
-            );
-        }
-        queued.request()?;
-        queued.committed()?;
-        let observed = self
-            .core
-            .authority
-            .observe_access_query(&self.host, source, &self.core.application_stop)
-            .map_err(SettingsReplyProjectionError::from)?;
-        if !Arc::ptr_eq(&comparison.query, &observed.query)
-            || comparison.query_floor != observed.floor
-            || comparison.query_deadline != observed.deadline
-            || observed.wall < comparison.observed_wall
-            || observed.monotonic < comparison.observed_monotonic
-            || observed.wall.get() < header.created_at_ms
-            || observed.wall < reply.created_at
-            || observed.wall >= reply.expires_at
-            || observed.monotonic >= comparison.reply_deadline
-            || self.core.application_stop.is_cancelled()
-            || !source.connection().is_live()
-        {
-            return Err(
-                SettingsReplyProjectionError::from(SettingsServiceError::OutsideScope).into(),
-            );
-        }
-        Ok(())
-    }
-
     pub(super) fn recheck_queued_access_reply_on(
         &self,
         store: &Store,
@@ -662,9 +545,7 @@ impl SettingsReceiptAuthority {
         queued: &OwnedQueuedSettingsReply,
         comparison: &AccessReplyComparison,
     ) -> Result<(), SettingsQueuedReplyCheckError> {
-        let SettingsReplyBuildRequest::Access(request) = queued.request()? else {
-            return Err(SettingsReplyPublicationError::Conflict.into());
-        };
+        let SettingsReplyBuildRequest::Access(request) = queued.request()?;
         let header = queued.committed()?.header();
         let read = self
             .read_access_reply_on(store, connection, mutation, request)
@@ -794,10 +675,7 @@ impl SettingsReceiptAuthority {
         consumed: &ConsumedSettingsReply<'_, '_, '_, '_>,
     ) -> Result<(), SettingsReplyPublicationError> {
         consumed.check_on(transaction)?;
-        let SettingsReplyQualification::Access(qualified) = consumed.sealed().qualification()
-        else {
-            return Err(SettingsReplyPublicationError::Conflict);
-        };
+        let SettingsReplyQualification::Access(qualified) = consumed.sealed().qualification();
         self.check_access_reply_association(qualified)
             .map_err(SettingsReplyProjectionError::from)?;
         let sealed_created_at = consumed.sealed().header().created_at_ms;
@@ -1012,7 +890,11 @@ fn check_access_reply_metadata(
         || reply.provenance.len() > 2048
         || reply.created_at < floor.0
         || reply.created_at < observed.query_floor.0
-        || reply.created_at < intent.issued_at
+        || reply
+            .created_at
+            .get()
+            .saturating_add(SETTINGS_CLOCK_SKEW_MS)
+            < intent.issued_at.get()
         || reply.created_at > observed.wall
         || reply.created_at >= reply.expires_at
         || reply.created_at >= intent.expires_at
@@ -1099,11 +981,11 @@ fn check_access_reply_reservation(
         .next()
         .map_err(SettingsServiceError::from)?
         .ok_or(SettingsServiceError::NotFound)?;
-    if original_reply_text(row, 0, 36)? != reply.reservation_id.to_string()
-        || original_reply_text(row, 1, 36)? != reply.local_device_id.to_string()
-        || original_reply_text(row, 2, 36)? != reply.peer_device_id.to_string()
-        || original_reply_text(row, 3, 2048)? != reply.provenance
-        || original_reply_text(row, 4, 7)? != reply.family.name()
+    if reply_row_text(row, 0, 36)? != reply.reservation_id.to_string()
+        || reply_row_text(row, 1, 36)? != reply.local_device_id.to_string()
+        || reply_row_text(row, 2, 36)? != reply.peer_device_id.to_string()
+        || reply_row_text(row, 3, 2048)? != reply.provenance
+        || reply_row_text(row, 4, 7)? != reply.family.name()
         || row.get::<_, i64>(5).map_err(SettingsServiceError::from)? != reserved_bytes
         || row.get::<_, i64>(6).map_err(SettingsServiceError::from)? != created_at
         || row.get::<_, i64>(7).map_err(SettingsServiceError::from)? != expires_at

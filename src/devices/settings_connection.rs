@@ -9,34 +9,22 @@ use uuid::Uuid;
 
 #[cfg(unix)]
 use super::settings_ingress::{
-    OwnedCommittedSettingsAccess, OwnedCommittedSettingsInspection, OwnedCommittedSettingsSnapshot,
     ReceiveContext,
-    work::{
-        OwnedQueuedSettingsReply, PairedResultAdmissionFailure, PendingSettingsReplyBuild,
-        PendingSettingsSend, ReplyBuildAdmissionFailure, SettingsReceiveWork,
-        SettingsReceiveWorkEvent, SettingsReplyBuildRequest, SettingsSendAdmissionError,
-        SettingsSendReturnFailure,
-    },
+    work::{OwnedQueuedSettingsReply, SettingsReceiveWork, SettingsReceiveWorkEvent},
 };
 use super::{DeviceEndpoint, DeviceError, EndpointRole};
 #[cfg(unix)]
-use super::{
-    PendingSettingsReceipt, SettingsReceiveDrain, SettingsReceiveError, SettingsReceiveWitness,
-};
+use super::{SettingsReceiveDrain, SettingsReceiveError, SettingsReceiveWitness};
 use crate::agent::Agent;
 #[cfg(unix)]
 use crate::crypto::EncryptedEnvelope;
 #[cfg(unix)]
-use crate::devices::session::outbound::RelaySendWindow;
-#[cfg(unix)]
 use crate::host::settings::SettingsRelayCapability;
 #[cfg(unix)]
-use crate::host::settings::agent::{PairedResultHandoff, SettingsAgentRuntime};
+use crate::host::settings::service::SettingsReceiptAuthority;
 use crate::protocol::DeviceId;
 #[cfg(unix)]
 use crate::protocol::MessageId;
-#[cfg(unix)]
-use crate::storage::TransportOutboundCandidate;
 use crate::transport::remote::{RelayConnection, RelaySocketIdentity};
 
 pub(crate) struct SettingsHostIdentity {
@@ -105,24 +93,11 @@ impl SettingsConnectionIdentity {
         self.connection_epoch
     }
 
-    pub(crate) fn is_retired(&self) -> bool {
-        self.retired.load(Ordering::Acquire)
-    }
-
     pub(crate) fn is_live(&self) -> bool {
         self.host.is_live()
             && self.socket.is_live()
             && !self.retired.load(Ordering::Acquire)
             && !self.cancellation.is_cancelled()
-    }
-
-    #[cfg(unix)]
-    pub(in crate::devices) fn shares_socket(&self, socket: &Arc<RelaySocketIdentity>) -> bool {
-        Arc::ptr_eq(&self.socket, socket)
-    }
-
-    pub(crate) fn cancellation(&self) -> CancellationToken {
-        self.cancellation.child_token()
     }
 
     fn retire(&self) {
@@ -206,15 +181,6 @@ impl HostSettingsTransportOwner {
         Ok(())
     }
 
-    #[cfg(unix)]
-    pub(super) fn settings_capability(&self) -> Result<&SettingsRelayCapability, DeviceError> {
-        self.settings_capability
-            .as_ref()
-            .ok_or(DeviceError::Invalid(
-                "settings relay capability is not installed",
-            ))
-    }
-
     pub(super) fn connected_relay<'owner>(
         &'owner mut self,
         endpoint: &DeviceEndpoint,
@@ -266,160 +232,52 @@ impl HostSettingsTransportOwner {
     }
 }
 
+#[cfg(unix)]
 impl SettingsConnectionOwner<'_> {
-    #[cfg(unix)]
-    pub(super) fn settings_capability(&self) -> Result<&SettingsRelayCapability, DeviceError> {
-        self.owner.settings_capability()
+    pub(super) fn receipt_authority(&self) -> Result<SettingsReceiptAuthority, DeviceError> {
+        self.owner
+            .settings_capability
+            .as_ref()
+            .ok_or(DeviceError::Invalid(
+                "settings relay capability is not installed",
+            ))?
+            .receipt_authority()
+            .map_err(|_| DeviceError::Invalid("settings receipt authority is unavailable"))
     }
 
-    #[cfg(unix)]
     pub(super) fn try_receive(
         &mut self,
         envelope: EncryptedEnvelope,
-        receipt_authority: crate::host::settings::service::SettingsReceiptAuthority,
-    ) -> Result<PendingSettingsReceipt, SettingsReceiveError> {
-        let context = self.owner.receive.context()?;
-        self.owner.receive.admit(
-            context,
-            Arc::clone(&self.identity),
-            envelope,
-            receipt_authority,
-        )
+        receipt_authority: SettingsReceiptAuthority,
+    ) -> Result<(), SettingsReceiveError> {
+        self.owner
+            .receive
+            .admit(Arc::clone(&self.identity), envelope, receipt_authority)
     }
 
-    #[cfg(unix)]
-    pub(super) async fn next_receive_event(
+    pub(super) async fn next_event(
         &mut self,
     ) -> Result<Option<SettingsReceiveWorkEvent>, SettingsReceiveError> {
         self.owner.receive.next().await
     }
 
-    #[cfg(unix)]
-    pub(super) fn try_adopt_paired_result(
-        &mut self,
-        handoff: PairedResultHandoff,
-    ) -> Result<PendingSettingsReplyBuild, Box<PairedResultAdmissionFailure>> {
-        self.owner
-            .receive
-            .try_adopt_paired_result(&self.identity, handoff)
-    }
-
-    #[cfg(unix)]
-    pub(super) fn try_register_access_reply_build(
-        &mut self,
-        request: OwnedCommittedSettingsAccess,
-    ) -> Result<PendingSettingsReplyBuild, ReplyBuildAdmissionFailure> {
-        self.owner.receive.try_register_reply_build(
-            &self.identity,
-            SettingsReplyBuildRequest::Access(Box::new(request)),
-        )
-    }
-
-    #[cfg(unix)]
-    pub(super) fn try_register_snapshot_reply_build(
-        &mut self,
-        request: OwnedCommittedSettingsSnapshot,
-    ) -> Result<PendingSettingsReplyBuild, ReplyBuildAdmissionFailure> {
-        self.owner.receive.try_register_reply_build(
-            &self.identity,
-            SettingsReplyBuildRequest::Snapshot(Box::new(request)),
-        )
-    }
-
-    #[cfg(unix)]
-    pub(super) fn try_register_inspection_reply_build(
-        &mut self,
-        request: OwnedCommittedSettingsInspection,
-    ) -> Result<PendingSettingsReplyBuild, ReplyBuildAdmissionFailure> {
-        self.owner.receive.try_register_reply_build(
-            &self.identity,
-            SettingsReplyBuildRequest::Inspection(Box::new(request)),
-        )
-    }
-
-    #[cfg(unix)]
-    pub(super) fn try_start_reply_build(
-        &mut self,
-        ticket: &PendingSettingsReplyBuild,
-        authority: crate::host::settings::service::SettingsReceiptAuthority,
-    ) -> Result<(), SettingsReceiveError> {
-        self.owner
-            .receive
-            .try_start_reply_build(&self.identity, ticket, authority)
-    }
-
-    #[cfg(unix)]
-    pub(super) fn try_queue_joined_reply(
-        &mut self,
-        ticket: &PendingSettingsReplyBuild,
-    ) -> Result<MessageId, SettingsReceiveError> {
-        self.owner
-            .receive
-            .try_queue_joined_reply(&self.identity, ticket)
-    }
-
-    #[cfg(unix)]
-    pub(super) fn queued_reply(
-        &self,
-        message_id: MessageId,
-    ) -> Result<Option<&OwnedQueuedSettingsReply>, SettingsReceiveError> {
-        self.owner.receive.queued_reply(message_id)
-    }
-
-    #[cfg(unix)]
-    pub(super) fn try_lend_queued_reply(
-        &mut self,
-        window: &mut RelaySendWindow,
-        candidate: TransportOutboundCandidate,
-    ) -> Result<PendingSettingsSend, SettingsSendAdmissionError> {
-        self.owner
-            .receive
-            .try_lend_queued_reply(&self.identity, window, candidate)
-    }
-
-    #[cfg(unix)]
-    pub(super) fn try_start_returned_settings_disposition(
+    pub(super) fn take_queued_reply(
         &mut self,
         message_id: MessageId,
-    ) -> Result<(), SettingsReceiveError> {
-        self.owner
-            .receive
-            .try_start_returned_settings_disposition(&self.identity, message_id)
+    ) -> Option<OwnedQueuedSettingsReply> {
+        self.owner.receive.take_queued_reply(message_id)
     }
 
-    #[cfg(unix)]
-    pub(super) async fn return_started_settings_send(
-        &mut self,
-        window: &mut RelaySendWindow,
-        message_id: MessageId,
-    ) -> Result<(), crate::devices::session::outbound::SettingsStartedReturnFailure> {
-        self.owner
-            .receive
-            .return_started_settings_send(&self.identity, window, message_id)
-            .await
+    pub(super) fn latch_failure(&mut self) {
+        self.owner.receive.latch_failure();
     }
 
-    #[cfg(unix)]
-    pub(super) fn try_return_queued_reply(
-        &mut self,
-        window: &mut RelaySendWindow,
-        ticket: PendingSettingsSend,
-    ) -> Result<(), SettingsSendReturnFailure> {
-        self.owner
-            .receive
-            .try_return_queued_reply(&self.identity, window, ticket)
+    pub(super) fn busy(&self) -> bool {
+        self.owner.receive.busy()
     }
 
-    #[cfg(unix)]
-    pub(super) fn try_ack_paired_adoption(
-        &mut self,
-        runtime: &SettingsAgentRuntime,
-    ) -> Result<bool, SettingsReceiveError> {
-        self.owner.receive.try_ack_paired_adoption(runtime)
-    }
-
-    pub(super) fn identity(&self) -> &Arc<SettingsConnectionIdentity> {
-        &self.identity
+    pub(super) fn mutation(&self) -> Arc<Mutex<()>> {
+        Arc::clone(&self.owner.mutation)
     }
 }
 

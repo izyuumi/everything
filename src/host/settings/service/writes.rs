@@ -31,7 +31,7 @@ pub(super) struct ApplicationCapture {
     pub previous_selection: Option<(crate::host::selection::SelectionSettings, bool)>,
 }
 
-struct FileWrite<'request> {
+struct FileWrite {
     identity: OperationIdentity,
     prepared: PreparedSettingsFile,
     intent: SettingsWriteIntent,
@@ -39,17 +39,6 @@ struct FileWrite<'request> {
     cancellation: CancellationToken,
     request_cancellation: CancellationToken,
     invocation: Option<Arc<super::work::InvocationWork>>,
-    paired: Option<super::PairedWriteAdmission<'request>>,
-}
-
-struct GuardedUpdate<'request> {
-    caller: &'request SettingsCaller,
-    patch: SettingsPatch,
-    target: SettingsActionTarget,
-    cancellation: CancellationToken,
-    mutation: OwnedMutexGuard<()>,
-    work: Option<Arc<super::work::InvocationWork>>,
-    request: Option<&'request crate::devices::OwnedCommittedSettingsCommand>,
 }
 
 enum WriteGuard {
@@ -64,9 +53,6 @@ impl SettingsService {
         patch: SettingsPatch,
         cancellation: CancellationToken,
     ) -> Result<SettingsOperationInspection, SettingsServiceError> {
-        if matches!(caller.source, CallerSource::PairedSettings { .. }) {
-            return Err(SettingsServiceError::OutsideScope);
-        }
         let work =
             self.invocation_guard(&caller, SettingsToolName::Update, Some(patch.request_id))?;
         let service = self.clone();
@@ -105,15 +91,89 @@ impl SettingsService {
         let mutation = self.enter(&caller, &cancellation).await?;
         let work = self.invocation.clone();
         self.blocking(move |core| {
-            core.update_guarded(GuardedUpdate {
-                caller: &caller,
-                patch,
-                target,
-                cancellation,
-                mutation,
-                work,
-                request: None,
-            })
+            let retained_guard = WriteGuard::Ordinary(mutation);
+            core.authority
+                .require_tool(&caller, SettingsToolName::Update)?;
+            if let Some(record) = core.replay_target(&caller, &target)? {
+                if let Some(work) = &work {
+                    work.recorded(record.identity.binding.request_id)?;
+                }
+                return Ok(record.inspection());
+            }
+            core.require_resolved_file()?;
+            core.expire_unadmitted()?;
+            let composition = core.composition()?;
+            let current = core.settings.observed_snapshot()?;
+            let metadata = composition.memory.embedding_metadata()?;
+            if let Some(work) = &work
+                && current.revision != patch.expected_revision
+            {
+                work.reject()?;
+                return Err(SettingsServiceError::Conflict);
+            }
+            let candidate = updates::patch_candidate(&current, &patch, metadata.profile.as_ref())?;
+            let protected = patch.changes.iter().any(|change| {
+                change.key.agent_mutability() == AgentMutability::RequiresNativeConfirmation
+            });
+            let (identity, deadline) = core.operation_identity(&caller, target)?;
+            if protected {
+                let phase = if matches!(caller.source, CallerSource::LocalOwner { .. }) {
+                    SettingsOperationPhase::Finished {
+                        result: core.result(&identity, SettingsOperationState::HostActionRequired),
+                    }
+                } else {
+                    core.pending_phase(&identity)
+                };
+                if let Some(work) = &work {
+                    work.attempting()?;
+                }
+                let record = core
+                    .repository
+                    .prepare(identity, phase, || core.authority.validate(&caller, false))?;
+                if let Some(work) = &work {
+                    work.recorded(record.identity.binding.request_id)?;
+                }
+                if matches!(
+                    record.phase(),
+                    SettingsOperationPhase::AwaitingConfirmation { .. }
+                ) {
+                    core.pending
+                        .lock()
+                        .map_err(|_| SettingsServiceError::Poisoned)?
+                        .insert(record.identity.binding.request_id, deadline);
+                }
+                return Ok(record.inspection());
+            }
+            let prepared = core
+                .settings
+                .prepare_file(candidate, patch.expected_revision)?;
+            let difference = updates::owner_difference(&current, &prepared.candidate)?;
+            let mut changed_keys = patch
+                .changes
+                .iter()
+                .map(|change| change.key)
+                .collect::<Vec<_>>();
+            changed_keys.sort_unstable();
+            let intent = SettingsWriteIntent {
+                version: 1,
+                before: prepared.before.clone(),
+                after: prepared.after.clone(),
+                native_request_id: None,
+                changed_keys,
+                memory_changed: difference.memory_changed,
+                selection_changed: difference.selection_changed,
+                restart_required: difference.restart_required,
+            };
+            let write = FileWrite {
+                identity,
+                prepared,
+                intent,
+                deadline,
+                cancellation: cancellation.child_token(),
+                request_cancellation: cancellation,
+                invocation: work,
+            };
+            core.write_file(write, retained_guard)
         })
         .await
     }
@@ -216,7 +276,6 @@ impl SettingsService {
                     cancellation: cancellation.child_token(),
                     request_cancellation: cancellation,
                     invocation: None,
-                    paired: None,
                 },
                 retained_guard,
             )?;
@@ -336,7 +395,6 @@ impl SettingsService {
                     cancellation: effect.cancellation(),
                     request_cancellation: cancellation,
                     invocation: None,
-                    paired: None,
                 };
                 Ok((write, effect))
             })();
@@ -385,151 +443,9 @@ impl ServiceCore {
         }
     }
 
-    pub(super) fn update_paired_guarded(
-        &self,
-        request: &crate::devices::OwnedCommittedSettingsCommand,
-        caller: &SettingsCaller,
-        mutation: OwnedMutexGuard<()>,
-        cancellation: CancellationToken,
-    ) -> Result<SettingsOperationInspection, SettingsServiceError> {
-        let identity =
-            super::PairedWriteAdmission::new(self, request, caller, cancellation.clone())
-                .identity()?;
-        let SettingsActionTarget::Patch(patch) = identity.target else {
-            return Err(SettingsServiceError::OutsideScope);
-        };
-        let target = SettingsActionTarget::Patch(patch.clone());
-        self.update_guarded(GuardedUpdate {
-            caller,
-            patch,
-            target,
-            cancellation,
-            mutation,
-            work: None,
-            request: Some(request),
-        })
-    }
-
-    fn update_guarded(
-        &self,
-        update: GuardedUpdate<'_>,
-    ) -> Result<SettingsOperationInspection, SettingsServiceError> {
-        let GuardedUpdate {
-            caller,
-            patch,
-            target,
-            cancellation,
-            mutation,
-            work,
-            request,
-        } = update;
-        let retained_guard = WriteGuard::Ordinary(mutation);
-        let effect_cancellation = cancellation.child_token();
-        let paired = request.map(|request| {
-            super::PairedWriteAdmission::new(self, request, caller, effect_cancellation.clone())
-        });
-        self.authority
-            .require_tool(caller, SettingsToolName::Update)?;
-        if paired.is_none()
-            && let Some(record) = self.replay_target(caller, &target)?
-        {
-            if let Some(work) = &work {
-                work.recorded(record.identity.binding.request_id)?;
-            }
-            return Ok(record.inspection());
-        }
-        if let Some(admission) = &paired {
-            let identity = admission.identity()?;
-            admission.check_unlinked(&identity)?;
-        }
-        self.require_resolved_file()?;
-        if paired.is_none() {
-            self.expire_unadmitted()?;
-        }
-        let composition = self.composition()?;
-        let current = self.settings.observed_snapshot()?;
-        let metadata = composition.memory.embedding_metadata()?;
-        if let Some(work) = &work
-            && current.revision != patch.expected_revision
-        {
-            work.reject()?;
-            return Err(SettingsServiceError::Conflict);
-        }
-        let candidate = updates::patch_candidate(&current, &patch, metadata.profile.as_ref())?;
-        let protected = patch.changes.iter().any(|change| {
-            change.key.agent_mutability() == AgentMutability::RequiresNativeConfirmation
-        });
-        let (identity, deadline) = match &paired {
-            Some(admission) => (admission.identity()?, admission.deadline()),
-            None => self.operation_identity(caller, target)?,
-        };
-        if protected && paired.is_some() {
-            return Err(SettingsServiceError::OutsideScope);
-        }
-        if protected {
-            let phase = if matches!(caller.source, CallerSource::LocalOwner { .. }) {
-                SettingsOperationPhase::Finished {
-                    result: self.result(&identity, SettingsOperationState::HostActionRequired),
-                }
-            } else {
-                self.pending_phase(&identity)
-            };
-            if let Some(work) = &work {
-                work.attempting()?;
-            }
-            let record = self
-                .repository
-                .prepare(identity, phase, || self.authority.validate(caller, false))?;
-            if let Some(work) = &work {
-                work.recorded(record.identity.binding.request_id)?;
-            }
-            if matches!(
-                record.phase(),
-                SettingsOperationPhase::AwaitingConfirmation { .. }
-            ) {
-                self.pending
-                    .lock()
-                    .map_err(|_| SettingsServiceError::Poisoned)?
-                    .insert(record.identity.binding.request_id, deadline);
-            }
-            return Ok(record.inspection());
-        }
-        let prepared = self
-            .settings
-            .prepare_file(candidate, patch.expected_revision)?;
-        let difference = updates::owner_difference(&current, &prepared.candidate)?;
-        let mut changed_keys = patch
-            .changes
-            .iter()
-            .map(|change| change.key)
-            .collect::<Vec<_>>();
-        changed_keys.sort_unstable();
-        let intent = SettingsWriteIntent {
-            version: 1,
-            before: prepared.before.clone(),
-            after: prepared.after.clone(),
-            native_request_id: None,
-            changed_keys,
-            memory_changed: difference.memory_changed,
-            selection_changed: difference.selection_changed,
-            restart_required: difference.restart_required,
-        };
-        let write = FileWrite {
-            identity,
-            prepared,
-            intent,
-            deadline,
-            cancellation: effect_cancellation,
-            request_cancellation: cancellation,
-            invocation: work,
-            paired,
-        };
-        self.write_file(write, retained_guard)
-    }
-
     fn write_file(
         &self,
-        write: FileWrite<'_>,
+        write: FileWrite,
         guard: WriteGuard,
     ) -> Result<SettingsOperationInspection, SettingsServiceError> {
         let retained = (write, guard);
@@ -573,9 +489,6 @@ impl ServiceCore {
             *current = Some(Arc::clone(&active));
         }
         let check = || {
-            if let Some(admission) = &write.paired {
-                return admission.check_linked(&write.identity);
-            }
             self.check_write_origin(
                 &write.identity,
                 write.deadline,
@@ -587,17 +500,8 @@ impl ServiceCore {
             if let Some(work) = &write.invocation {
                 work.attempting()?;
             }
-            match &write.paired {
-                Some(admission) => self.repository.begin_paired_write(
-                    write.identity.clone(),
-                    write.intent.clone(),
-                    admission,
-                ),
-                None => {
-                    self.repository
-                        .begin_write(write.identity.clone(), write.intent.clone(), check)
-                }
-            }
+            self.repository
+                .begin_write(write.identity.clone(), write.intent.clone(), check)
         })();
         if let Err(cause) = admitted {
             let mut current = self

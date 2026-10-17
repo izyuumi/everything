@@ -9,7 +9,7 @@ use crate::crypto::DevicePublicKeys;
 use crate::devices::{DeviceAccess, DeviceError};
 use crate::storage::StorageError;
 
-use super::{SettingsReceiptAuthority, SettingsServiceError, original_reply_text};
+use super::{SettingsReceiptAuthority, SettingsServiceError, reply_row_text};
 
 const MAX_REPLY_PIN_BYTES: usize = 16 * 1024;
 
@@ -57,9 +57,9 @@ impl SettingsReceiptAuthority {
             .map_err(SettingsServiceError::from)?
             .ok_or(SettingsServiceError::NotFound)?;
         let configuration: ReplyEndpointConfiguration =
-            serde_json::from_str(original_reply_text(row, 1, MAX_REPLY_PIN_BYTES)?)
+            serde_json::from_str(reply_row_text(row, 1, MAX_REPLY_PIN_BYTES)?)
                 .map_err(ReplyPinError::Metadata)?;
-        if original_reply_text(row, 0, 36)? != self.core.authority.host_id.to_string()
+        if reply_row_text(row, 0, 36)? != self.core.authority.host_id.to_string()
             || configuration.version != 1
             || configuration.keys != self.core.endpoint.public_keys()
             || !matches!(configuration.role, ReplyEndpointRole::Host)
@@ -86,7 +86,7 @@ impl SettingsReceiptAuthority {
             .map_err(SettingsServiceError::from)?
             .ok_or(SettingsServiceError::NotFound)?;
         let peer: ReplyPinnedPeer =
-            serde_json::from_str(original_reply_text(row, 0, MAX_REPLY_PIN_BYTES)?)
+            serde_json::from_str(reply_row_text(row, 0, MAX_REPLY_PIN_BYTES)?)
                 .map_err(ReplyPinError::Metadata)?;
         peer.keys
             .validate()

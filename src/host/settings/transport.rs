@@ -10,29 +10,18 @@ use crate::devices::{
 };
 
 #[cfg(unix)]
-use super::agent::SettingsAgentRuntime;
-#[cfg(unix)]
 use super::service::{SettingsReceiptAuthority, SettingsService, SettingsServiceError};
 
 #[cfg(unix)]
 pub(crate) struct SettingsRelayCapability {
     service: SettingsService,
-    runtime: Arc<SettingsAgentRuntime>,
     transport: HostSettingsTransport,
 }
 
 #[cfg(unix)]
 impl SettingsRelayCapability {
-    pub(in crate::host) fn new(
-        service: SettingsService,
-        runtime: Arc<SettingsAgentRuntime>,
-        transport: HostSettingsTransport,
-    ) -> Self {
-        Self {
-            service,
-            runtime,
-            transport,
-        }
+    pub(in crate::host) fn new(service: SettingsService, transport: HostSettingsTransport) -> Self {
+        Self { service, transport }
     }
 
     pub(crate) fn matches_host(&self, identity: &Arc<SettingsHostIdentity>) -> bool {
@@ -43,10 +32,6 @@ impl SettingsRelayCapability {
         &self,
     ) -> Result<SettingsReceiptAuthority, SettingsServiceError> {
         self.service.paired_receipt_authority(&self.transport)
-    }
-
-    pub(crate) fn paired_runtime(&self) -> &SettingsAgentRuntime {
-        self.runtime.as_ref()
     }
 }
 

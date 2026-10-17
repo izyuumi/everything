@@ -10,22 +10,11 @@ const COMMAND_RETENTION_MS: i64 = 7 * 24 * 60 * 60 * 1_000;
 const MAX_OUTBOUND_EXCLUSIONS: usize = 16;
 const MAX_OUTBOUND_CANDIDATES: i64 = 17;
 
-pub(crate) enum TransportOutboundRouting {
-    Ordinary,
-    PrivateSettings,
-}
-
-pub(crate) enum TransportOutboundSelection {
-    OrdinaryOnly,
-    SettingsEnabled,
-}
-
 pub(crate) struct TransportOutboundCandidate {
     pub(crate) message_id: MessageId,
     pub(crate) recipient: DeviceId,
     pub(crate) not_before: i64,
     pub(crate) created_at: i64,
-    pub(crate) routing: TransportOutboundRouting,
 }
 
 pub(crate) struct LoadedOrdinaryOutbound {
@@ -332,198 +321,6 @@ impl Store {
         Ok(true)
     }
 
-    #[cfg(unix)]
-    pub(crate) fn admit_settings_bind(
-        &self,
-        admission: &super::SettingsBindAdmission<'_>,
-    ) -> Result<super::SettingsBindReceiptCommit, super::SettingsBindAdmissionError> {
-        use super::{SettingsBindAdmissionError, SettingsBindReceiptCommit};
-        admission
-            .source
-            .check_precommit(self, admission.intent)
-            .map_err(SettingsBindAdmissionError::Rejected)?;
-        let receipt = admission
-            .source
-            .receipt_metadata()
-            .map_err(SettingsBindAdmissionError::Rejected)?;
-        validate_inbox_metadata(&receipt)?;
-        let mut connection = self.connection()?;
-        let transaction = connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(StorageError::from)?;
-        if !prepare_transport_receipt_in(
-            &transaction,
-            &receipt,
-            admission.source.pinned_identity(),
-        )? {
-            return Ok(SettingsBindReceiptCommit::Duplicate);
-        }
-        let markers: i64 = transaction
-            .query_row("SELECT count(*) FROM transport_inbox", [], |row| row.get(0))
-            .map_err(StorageError::from)?;
-        if markers >= 100_000 {
-            return Err(SettingsBindAdmissionError::ReplayCapacity(
-                StorageError::TransportCapacity("durable receiver inbox"),
-            ));
-        }
-        let (grant, lifetime, now) =
-            super::settings_transport::validate_bind_on(self, &transaction, admission)?;
-        let creator = admission.source.reserve_binding(admission.intent)?;
-        let reservation = super::settings_transport::reserve_bind_reply_in(
-            &transaction,
-            admission,
-            lifetime,
-            now,
-        )?;
-        transaction.execute("INSERT INTO transport_inbox(message_id,sender,recipient,envelope_digest,payload,received_at,expires_at,state,command_id,detail) VALUES(?1,?2,?3,?4,NULL,?5,?6,'processed',NULL,NULL)",params![receipt.message_id,receipt.sender,receipt.recipient,receipt.envelope_digest,receipt.received_at,receipt.expires_at]).map_err(StorageError::from)?;
-        check_receipt_receiver(&transaction, &receipt, admission.source.pinned_identity())?;
-        let (current, final_lifetime, _) =
-            super::settings_transport::validate_bind_on(self, &transaction, admission)?;
-        if current != grant
-            || final_lifetime.expires_at != lifetime.expires_at
-            || final_lifetime.deadline != lifetime.deadline
-        {
-            return Err(SettingsBindAdmissionError::Bookkeeping);
-        }
-        transaction.commit().map_err(StorageError::from)?;
-        creator.committed(lifetime)?;
-        Ok(SettingsBindReceiptCommit::Fresh {
-            reservation,
-            grant: Box::new(grant),
-            lifetime,
-            creator,
-        })
-    }
-
-    #[cfg(unix)]
-    pub(crate) fn admit_settings_command(
-        &self,
-        admission: &super::SettingsCommandAdmission<'_>,
-    ) -> Result<super::SettingsCommandReceiptCommit, super::SettingsCommandAdmissionError> {
-        use super::settings_originals::{
-            RemoteOriginalAdmission, RemoteOriginalKey, insert_original_in, read_original_on,
-        };
-        use super::{SettingsCommandAdmissionError, SettingsCommandReceiptCommit};
-        use crate::host::settings::service::SettingsServiceError;
-
-        admission.source.check_precommit(self).map_err(|error| {
-            SettingsCommandAdmissionError::Authority(SettingsServiceError::from(error))
-        })?;
-        let receipt = admission.source.receipt_metadata().map_err(|error| {
-            SettingsCommandAdmissionError::Authority(SettingsServiceError::from(error))
-        })?;
-        validate_inbox_metadata(&receipt)?;
-        let mut connection = self.connection()?;
-        let transaction = connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(StorageError::from)?;
-        check_receipt_receiver(&transaction, &receipt, admission.source.pinned_identity())?;
-        let existing: Option<(String, String, String)> = transaction
-            .query_row(
-                "SELECT sender, recipient, envelope_digest FROM transport_inbox WHERE message_id = ?1",
-                [receipt.message_id],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-            )
-            .optional()
-            .map_err(StorageError::from)?;
-        if let Some((sender, recipient, digest)) = existing {
-            if sender != receipt.sender
-                || recipient != receipt.recipient
-                || digest != receipt.envelope_digest
-            {
-                return Err(StorageError::TransportConflict(receipt.message_id.into()).into());
-            }
-            return Ok(SettingsCommandReceiptCommit::Duplicate);
-        }
-        transaction
-            .execute(
-                "DELETE FROM transport_inbox WHERE expires_at <= ?1 AND state != 'pending'",
-                [receipt.received_at],
-            )
-            .map_err(StorageError::from)?;
-        let markers: i64 = transaction
-            .query_row("SELECT count(*) FROM transport_inbox", [], |row| row.get(0))
-            .map_err(StorageError::from)?;
-        if markers >= 100_000 {
-            return Err(rollback_command_receipt(
-                transaction,
-                SettingsCommandAdmissionError::ReplayCapacity(StorageError::TransportCapacity(
-                    "durable receiver inbox",
-                )),
-            ));
-        }
-        let qualified =
-            match admission
-                .authority
-                .precommit_command_on(self, &transaction, admission.source)
-            {
-                Ok(qualified) => qualified,
-                Err(error) => {
-                    return Err(rollback_command_receipt(
-                        transaction,
-                        SettingsCommandAdmissionError::Authority(error),
-                    ));
-                }
-            };
-        let RemoteOriginalAdmission::Accepted(identity) = qualified.original_admission() else {
-            return Err(SettingsCommandAdmissionError::Bookkeeping);
-        };
-        let key = RemoteOriginalKey {
-            host_id: identity.host_id,
-            actor_device_id: identity.peer_keys.device_id,
-            request_id: identity.request_id,
-        };
-        let (original, known) = match read_original_on(&transaction, key)? {
-            Some(original) => {
-                if !super::settings_transport::matches_command_original(&original, identity) {
-                    return Err(StorageError::StateConflict {
-                        entity: "remote Settings original",
-                        id: identity.request_id.to_string(),
-                    }
-                    .into());
-                }
-                (original, true)
-            }
-            None => {
-                let original =
-                    match insert_original_in(&transaction, qualified.original_admission()) {
-                        Err(error @ StorageError::TransportCapacity(_)) => {
-                            return Err(rollback_command_receipt(
-                                transaction,
-                                SettingsCommandAdmissionError::OriginalCapacity(error),
-                            ));
-                        }
-                        result => result?,
-                    };
-                (original, false)
-            }
-        };
-        let reply =
-            match super::settings_transport::reserve_command_reply_in(&transaction, identity) {
-                Err(error @ SettingsCommandAdmissionError::ReplyCapacity(_)) => {
-                    return Err(rollback_command_receipt(transaction, error));
-                }
-                result => result?,
-            };
-        transaction.execute("INSERT INTO transport_inbox(message_id,sender,recipient,envelope_digest,payload,received_at,expires_at,state,command_id,detail) VALUES(?1,?2,?3,?4,NULL,?5,?6,'processed',NULL,NULL)",params![receipt.message_id,receipt.sender,receipt.recipient,receipt.envelope_digest,receipt.received_at,receipt.expires_at]).map_err(StorageError::from)?;
-        check_receipt_receiver(&transaction, &receipt, admission.source.pinned_identity())?;
-        if let Err(error) = admission
-            .authority
-            .recheck_command_on(self, &transaction, &qualified)
-        {
-            return Err(rollback_command_receipt(
-                transaction,
-                SettingsCommandAdmissionError::Authority(error),
-            ));
-        }
-        transaction.commit().map_err(StorageError::from)?;
-        if known {
-            Ok(SettingsCommandReceiptCommit::Known { original, reply })
-        } else {
-            Ok(SettingsCommandReceiptCommit::Fresh { original, reply })
-        }
-    }
-
     pub fn pending_transport_inbox(&self, limit: usize) -> StorageResult<Vec<TransportInboxRow>> {
         self.pending_transport_inbox_after(None, limit)
     }
@@ -613,16 +410,14 @@ impl Store {
         &self,
         now: i64,
         excluded: &std::collections::BTreeSet<MessageId>,
-        selection: TransportOutboundSelection,
     ) -> StorageResult<Option<TransportOutboundCandidate>> {
         validate_time(now)?;
         if excluded.len() > MAX_OUTBOUND_EXCLUSIONS {
             return invalid("outbound candidate exclusion limit exceeded");
         }
-        let include_private = matches!(selection, TransportOutboundSelection::SettingsEnabled);
         let connection = self.connection()?;
-        let mut statement = connection.prepare("SELECT o.id,o.device_id,o.not_before,o.created_at,EXISTS(SELECT 1 FROM settings_transport_private_outbox AS p WHERE p.message_id=o.id) FROM outbox AS o JOIN transport_outbox AS t ON t.message_id=o.id JOIN devices AS d ON d.id=o.device_id WHERE o.delivered_at IS NULL AND o.not_before<=?1 AND t.expires_at>?1 AND d.revoked_at IS NULL AND (?2 OR NOT EXISTS(SELECT 1 FROM settings_transport_private_outbox AS p WHERE p.message_id=o.id)) ORDER BY o.not_before,o.created_at,o.id LIMIT ?3")?;
-        let mut rows = statement.query(params![now, include_private, MAX_OUTBOUND_CANDIDATES])?;
+        let mut statement = connection.prepare("SELECT o.id,o.device_id,o.not_before,o.created_at FROM outbox AS o JOIN transport_outbox AS t ON t.message_id=o.id JOIN devices AS d ON d.id=o.device_id WHERE o.delivered_at IS NULL AND o.not_before<=?1 AND t.expires_at>?1 AND d.revoked_at IS NULL AND NOT EXISTS(SELECT 1 FROM settings_transport_private_outbox AS p WHERE p.message_id=o.id) ORDER BY o.not_before,o.created_at,o.id LIMIT ?2")?;
+        let mut rows = statement.query(params![now, MAX_OUTBOUND_CANDIDATES])?;
         while let Some(row) = rows.next()? {
             let candidate = outbound_candidate_row(row)?;
             if !excluded.contains(&candidate.message_id) {
@@ -639,9 +434,6 @@ impl Store {
     ) -> StorageResult<Option<LoadedOrdinaryOutbound>> {
         validate_time(now)?;
         validate_interval(candidate.created_at, candidate.not_before)?;
-        if !matches!(candidate.routing, TransportOutboundRouting::Ordinary) {
-            return invalid("ordinary outbound loading requires ordinary routing");
-        }
         let connection = self.connection()?;
         let mut statement = connection.prepare("SELECT o.id,o.device_id,o.envelope,o.created_at,o.not_before,o.attempts,o.delivered_at FROM outbox AS o JOIN transport_outbox AS t ON t.message_id=o.id JOIN devices AS d ON d.id=o.device_id WHERE o.id=?1 AND o.device_id=?2 AND o.created_at=?3 AND o.not_before=?4 AND o.delivered_at IS NULL AND o.not_before<=?5 AND t.expires_at>?5 AND d.revoked_at IS NULL AND NOT EXISTS(SELECT 1 FROM settings_transport_private_outbox AS p WHERE p.message_id=o.id)")?;
         let mut rows = statement.query(params![
@@ -1104,20 +896,6 @@ impl Store {
     }
 }
 
-#[cfg(unix)]
-fn rollback_command_receipt(
-    transaction: rusqlite::Transaction<'_>,
-    cause: super::SettingsCommandAdmissionError,
-) -> super::SettingsCommandAdmissionError {
-    match transaction.rollback() {
-        Ok(()) => cause,
-        Err(error) => super::SettingsCommandAdmissionError::Rollback {
-            cause: Box::new(cause),
-            rollback: StorageError::from(error),
-        },
-    }
-}
-
 fn check_receipt_receiver(
     connection: &Connection,
     receipt: &TransportInboxMetadata<'_>,
@@ -1177,17 +955,11 @@ fn outbound_candidate_row(row: &Row<'_>) -> StorageResult<TransportOutboundCandi
     let not_before = outbound_candidate_integer(row, 2)?;
     let created_at = outbound_candidate_integer(row, 3)?;
     validate_interval(created_at, not_before)?;
-    let routing = match outbound_candidate_integer(row, 4)? {
-        0 => TransportOutboundRouting::Ordinary,
-        1 => TransportOutboundRouting::PrivateSettings,
-        _ => return invalid("invalid outbound candidate routing marker"),
-    };
     Ok(TransportOutboundCandidate {
         message_id,
         recipient,
         not_before,
         created_at,
-        routing,
     })
 }
 
@@ -1566,181 +1338,6 @@ fn check_access_marker_on(
         )
     {
         return Err(SettingsAccessAdmissionError::Bookkeeping);
-    }
-    Ok(())
-}
-
-#[cfg(unix)]
-impl Store {
-    pub(crate) fn admit_settings_read(
-        &self,
-        request: &crate::devices::OwnedVerifiedSettingsRead,
-    ) -> Result<
-        super::settings_transport::SettingsReadReceiptCommit,
-        super::settings_transport::SettingsReadAdmissionError,
-    > {
-        use super::settings_transport::{
-            SettingsReadAdmissionError, SettingsReadReceiptCommit, check_read_reply_on,
-            reserve_read_reply_in,
-        };
-        use crate::host::settings::service::{
-            SettingsReadQualificationError, SettingsReadQueryDisposition,
-        };
-
-        let source = request.authority_source();
-        source
-            .check_precommit(self)
-            .map_err(SettingsReadQualificationError::from)?;
-        let receipt = source
-            .receipt_metadata()
-            .map_err(SettingsReadQualificationError::from)?;
-        validate_inbox_metadata(&receipt)?;
-        let mut connection = self.connection()?;
-        let transaction = connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(StorageError::from)?;
-        let result = (|| {
-            check_receipt_receiver(&transaction, &receipt, source.pinned_identity())?;
-            if read_receipt_duplicate_on(&transaction, &receipt)? {
-                source
-                    .check_precommit(self)
-                    .map_err(SettingsReadQualificationError::from)?;
-                return Ok(SettingsReadReceiptCommit::Duplicate);
-            }
-            transaction
-                .execute(
-                    "DELETE FROM transport_inbox WHERE expires_at <= ?1 AND state != 'pending'",
-                    [receipt.received_at],
-                )
-                .map_err(StorageError::from)?;
-            let markers: i64 = transaction
-                .query_row("SELECT count(*) FROM transport_inbox", [], |row| row.get(0))
-                .map_err(StorageError::from)?;
-            if markers >= 100_000 {
-                return Err(SettingsReadAdmissionError::ReplayCapacity(
-                    StorageError::TransportCapacity("durable receiver inbox"),
-                ));
-            }
-            let authority = request.receipt_authority();
-            let plan = authority.qualify_read_query_on(self, &transaction, source)?;
-            let reply = match (plan.disposition(), plan.reply_reservation_spec()) {
-                (SettingsReadQueryDisposition::First, Some(spec)) => {
-                    Some(reserve_read_reply_in(&transaction, &spec)?)
-                }
-                (SettingsReadQueryDisposition::Known, None) => None,
-                _ => return Err(SettingsReadAdmissionError::Bookkeeping),
-            };
-            transaction.execute(
-                "INSERT INTO transport_inbox(message_id,sender,recipient,envelope_digest,payload,received_at,expires_at,state,command_id,detail) VALUES(?1,?2,?3,?4,NULL,?5,?6,'processed',NULL,NULL)",
-                params![receipt.message_id,receipt.sender,receipt.recipient,receipt.envelope_digest,receipt.received_at,receipt.expires_at],
-            ).map_err(StorageError::from)?;
-            check_read_marker_on(&transaction, &receipt)?;
-            if let Some(reply) = &reply {
-                check_read_reply_on(&transaction, reply)?;
-            }
-            check_receipt_receiver(&transaction, &receipt, source.pinned_identity())?;
-            authority.recheck_read_query_on(self, &transaction, &plan)?;
-            Ok(match reply {
-                Some(reply) => SettingsReadReceiptCommit::Fresh { reply },
-                None => SettingsReadReceiptCommit::Known,
-            })
-        })();
-        let committed = match result {
-            Ok(committed) => committed,
-            Err(cause) => return Err(rollback_read_receipt(self, transaction, cause)),
-        };
-        if let Err(error) = transaction.execute_batch("COMMIT") {
-            return Err(rollback_read_receipt(
-                self,
-                transaction,
-                SettingsReadAdmissionError::Commit(StorageError::from(error)),
-            ));
-        }
-        drop(transaction);
-        Ok(committed)
-    }
-}
-
-#[cfg(unix)]
-fn rollback_read_receipt(
-    store: &Store,
-    mut transaction: rusqlite::Transaction<'_>,
-    cause: super::settings_transport::SettingsReadAdmissionError,
-) -> super::settings_transport::SettingsReadAdmissionError {
-    transaction.set_drop_behavior(rusqlite::DropBehavior::Ignore);
-    match transaction.rollback() {
-        Ok(()) => cause,
-        Err(error) => {
-            store.quarantine_connection();
-            super::settings_transport::SettingsReadAdmissionError::Rollback {
-                cause: Box::new(cause),
-                rollback: StorageError::from(error),
-            }
-        }
-    }
-}
-
-#[cfg(unix)]
-fn read_receipt_duplicate_on(
-    connection: &Connection,
-    receipt: &TransportInboxMetadata<'_>,
-) -> Result<bool, super::settings_transport::SettingsReadAdmissionError> {
-    use super::settings_transport::read_reply_text;
-
-    let mut statement = connection
-        .prepare("SELECT sender,recipient,envelope_digest FROM transport_inbox WHERE message_id=?1")
-        .map_err(StorageError::from)?;
-    let mut rows = statement
-        .query([receipt.message_id])
-        .map_err(StorageError::from)?;
-    let Some(row) = rows.next().map_err(StorageError::from)? else {
-        return Ok(false);
-    };
-    if read_reply_text(row, 0, 36)? != receipt.sender
-        || read_reply_text(row, 1, 36)? != receipt.recipient
-        || read_reply_text(row, 2, 64)? != receipt.envelope_digest
-    {
-        return Err(StorageError::TransportConflict(receipt.message_id.into()).into());
-    }
-    Ok(true)
-}
-
-#[cfg(unix)]
-fn check_read_marker_on(
-    connection: &Connection,
-    receipt: &TransportInboxMetadata<'_>,
-) -> Result<(), super::settings_transport::SettingsReadAdmissionError> {
-    use super::settings_transport::{SettingsReadAdmissionError, read_reply_text};
-
-    let mut statement = connection.prepare("SELECT message_id,sender,recipient,envelope_digest,payload,received_at,expires_at,state,command_id,detail FROM transport_inbox WHERE message_id=?1").map_err(StorageError::from)?;
-    let mut rows = statement
-        .query([receipt.message_id])
-        .map_err(StorageError::from)?;
-    let row = rows
-        .next()
-        .map_err(StorageError::from)?
-        .ok_or(SettingsReadAdmissionError::Bookkeeping)?;
-    if read_reply_text(row, 0, 36)? != receipt.message_id
-        || read_reply_text(row, 1, 36)? != receipt.sender
-        || read_reply_text(row, 2, 36)? != receipt.recipient
-        || read_reply_text(row, 3, 64)? != receipt.envelope_digest
-        || !matches!(
-            row.get_ref(4).map_err(StorageError::from)?,
-            rusqlite::types::ValueRef::Null
-        )
-        || row.get::<_, i64>(5).map_err(StorageError::from)? != receipt.received_at
-        || row.get::<_, i64>(6).map_err(StorageError::from)? != receipt.expires_at
-        || read_reply_text(row, 7, 9)? != "processed"
-        || !matches!(
-            row.get_ref(8).map_err(StorageError::from)?,
-            rusqlite::types::ValueRef::Null
-        )
-        || !matches!(
-            row.get_ref(9).map_err(StorageError::from)?,
-            rusqlite::types::ValueRef::Null
-        )
-    {
-        return Err(SettingsReadAdmissionError::Bookkeeping);
     }
     Ok(())
 }

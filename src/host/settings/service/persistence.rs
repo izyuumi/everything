@@ -156,8 +156,7 @@ impl super::ServiceCore {
             super::super::authority::CallerSource::NativeUi(_) => {
                 self.authority.validate(caller, true)
             }
-            super::super::authority::CallerSource::SettingsAgent { .. }
-            | super::super::authority::CallerSource::PairedSettings { .. } => {
+            super::super::authority::CallerSource::SettingsAgent { .. } => {
                 Err(SettingsServiceError::OutsideScope)
             }
         }
