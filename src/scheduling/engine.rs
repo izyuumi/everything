@@ -443,7 +443,11 @@ impl Actor {
                 .await?;
         }
         let now = wall_now()?;
-        if !snapshot.task.status.is_terminal() && (now >= deadline || now < run.claimed_at) {
+        if !snapshot.task.status.is_terminal()
+            && (now >= deadline
+                || now < run.claimed_at
+                || matches!(snapshot.waiting, Some(WaitingReason::Limit)))
+        {
             snapshot = self.scheduler.cancel(attempt.task_id).await?;
         }
         if matches!(snapshot.waiting, Some(WaitingReason::ProviderUnavailable))
@@ -579,12 +583,18 @@ impl Actor {
             let journal_unknown = self
                 .work(move |repository, _| Ok(repository.terminal_journal_unknown(task_id)?))
                 .await?;
+            let expired = snapshot.task.updated_at >= deadline;
             let outcome = if uncertain(snapshot.waiting.as_ref())
                 || native_unknown
                 || journal_unknown
             {
                 RunOutcome::Unknown {
-                    reason: "native scheduled task ended with uncertain effects; owner reconciliation required".into(),
+                    reason: if expired {
+                        "native scheduled task reached its execution deadline with uncertain effects; owner reconciliation required"
+                    } else {
+                        "native scheduled task ended with uncertain effects; owner reconciliation required"
+                    }
+                    .into(),
                 }
             } else {
                 match snapshot.task.status {
@@ -593,8 +603,26 @@ impl Actor {
                             snapshot.last_output.as_deref().unwrap_or_default(),
                         ),
                     },
-                    TaskStatus::Cancelled => RunOutcome::Cancelled {
-                        reason: "native scheduled task cancelled".into(),
+                    TaskStatus::Cancelled => match self.native_pause(&attempt, &run).await {
+                        Some(
+                            PauseReason::ModelAttemptLimit
+                            | PauseReason::ToolCallLimit
+                            | PauseReason::TokenLimit,
+                        ) => RunOutcome::Failed {
+                            code: "run_budget_exhausted".into(),
+                            message:
+                                "Scheduled run reached its captured model, tool or output budget."
+                                    .into(),
+                        },
+                        Some(PauseReason::DurationLimit) => RunOutcome::Cancelled {
+                            reason: "scheduled execution deadline expired".into(),
+                        },
+                        _ if expired => RunOutcome::Cancelled {
+                            reason: "scheduled execution deadline expired".into(),
+                        },
+                        _ => RunOutcome::Cancelled {
+                            reason: "native scheduled task cancelled".into(),
+                        },
                     },
                     TaskStatus::Failed => RunOutcome::Failed {
                         code: "native_task_failed".into(),
@@ -706,6 +734,32 @@ impl Actor {
             },
         )
         .await
+    }
+
+    async fn native_pause(
+        &self,
+        attempt: &ScheduledAttempt,
+        run: &ScheduledRun,
+    ) -> Option<PauseReason> {
+        match self.agent.conversation(attempt.conversation_id).await {
+            Ok(conversation) if conversation.config == run.definition.target.configuration => {
+                let native = conversation.native_run()?;
+                match native.status {
+                    LoopStatus::Paused { reason }
+                        if native.task_id == attempt.task_id
+                            && native.command_id == attempt.input_command_id =>
+                    {
+                        Some(reason)
+                    }
+                    _ => None,
+                }
+            }
+            Ok(_) => None,
+            Err(error) => {
+                self.error(&EngineError::Agent(error));
+                None
+            }
+        }
     }
 
     fn check_stop(&self) -> Result<(), EngineError> {
