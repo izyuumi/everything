@@ -1,13 +1,13 @@
 use std::fmt;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use rusqlite::Transaction;
 use tokio::sync::OwnedMutexGuard;
 
 use crate::devices::{
-    OwnedQueuedSettingsReply, SettingsReplyBuildRequest, SettingsReplyPublicationError,
-    SettingsReplyQualification,
+    BindingHistoryState, OwnedQueuedSettingsReply, SettingsReplyBuildRequest,
+    SettingsReplyPublicationError, SettingsReplyQualification,
 };
 use crate::host::settings::contract::SettingKey;
 use crate::host::settings::operations::PairedReplyHistoryAnchor;
@@ -16,7 +16,7 @@ use crate::storage::settings_originals::{
     RemoteCloseReason, RemoteOriginalIdentity, RemoteOriginalLink, RemoteOriginalTerminal,
     RemotePublicCommand,
 };
-use crate::storage::{ConsumedSettingsReply, Store};
+use crate::storage::{CommittedSettingsReply, ConsumedSettingsReply, Store};
 
 use super::super::access::AccessReplyComparison;
 use super::super::{
@@ -63,6 +63,212 @@ struct DisclosedSettingsKeys {
 }
 
 impl SettingsReceiptAuthority {
+    pub(crate) fn recheck_queued_socket_lifetime(
+        &self,
+        store: &Store,
+        mutation: &OwnedMutexGuard<()>,
+        queued: &OwnedQueuedSettingsReply,
+    ) -> Result<(), SettingsQueuedReplyCheckError> {
+        let (request, committed) = checked_queued_reply(queued)?;
+        let comparison = committed.comparison();
+        let header = committed.header();
+        if self.core.application_stop.is_cancelled() {
+            return Err(SettingsReplyProjectionError::from(SettingsServiceError::Stopped).into());
+        }
+        if !Arc::ptr_eq(OwnedMutexGuard::mutex(mutation), &self.core.mutation)
+            || !self.core.agent.store().shares_connection(store)
+        {
+            return Err(
+                SettingsReplyProjectionError::from(SettingsServiceError::OutsideScope).into(),
+            );
+        }
+        match (request, &comparison.observation) {
+            (
+                SettingsReplyBuildRequest::Fresh(_) | SettingsReplyBuildRequest::Historical(_),
+                ReplyComparisonObservation::Original {
+                    invocation,
+                    wall,
+                    monotonic,
+                    ..
+                },
+            ) => {
+                let subject = match request {
+                    SettingsReplyBuildRequest::Fresh(request) => {
+                        OriginalReplySource::Fresh(request.committed_source())
+                    }
+                    SettingsReplyBuildRequest::Historical(request) => {
+                        OriginalReplySource::Historical(request)
+                    }
+                    _ => return Err(SettingsReplyPublicationError::Conflict.into()),
+                };
+                let source = subject.authenticated();
+                if !Arc::ptr_eq(invocation, source.invocation_identity()) {
+                    return Err(SettingsReplyPublicationError::Conflict.into());
+                }
+                if !std::ptr::eq(self, subject.receipt_authority())
+                    || !source.matches_context(
+                        &self.core.agent,
+                        &self.core.endpoint,
+                        &self.core.mutation,
+                    )
+                    || !Arc::ptr_eq(source.connection().host_identity(), &self.host)
+                {
+                    return Err(SettingsReplyProjectionError::from(
+                        SettingsServiceError::OutsideScope,
+                    )
+                    .into());
+                }
+                store
+                    .check_connection_health()
+                    .map_err(SettingsReplyPublicationError::from)?;
+                let original = subject.original();
+                let RemoteOriginalIdentity::Accepted(identity) = &original.identity else {
+                    return Err(SettingsReplyProjectionError::from(
+                        SettingsServiceError::OutsideScope,
+                    )
+                    .into());
+                };
+                let floor = subject.receipt_floor();
+                let deadline = floor
+                    .1
+                    .checked_add(Duration::from_millis(
+                        identity
+                            .expires_at
+                            .get()
+                            .checked_sub(floor.0.get())
+                            .ok_or(SettingsServiceError::Expired)
+                            .map_err(SettingsReplyProjectionError::from)?,
+                    ))
+                    .ok_or(SettingsServiceError::Expired)
+                    .map_err(SettingsReplyProjectionError::from)?;
+                if deadline != subject.original_deadline()
+                    || original.key != original.identity.key()
+                {
+                    return Err(SettingsReplyProjectionError::from(
+                        SettingsServiceError::OutsideScope,
+                    )
+                    .into());
+                }
+                check_original_reply_reservation_identity(&subject, *wall)
+                    .map_err(SettingsReplyProjectionError::from)?;
+                queued.request()?;
+                queued.committed()?;
+                let (_, observed_wall, observed_monotonic) = self
+                    .core
+                    .authority
+                    .observe_paired_reply(
+                        &self.host,
+                        source,
+                        floor,
+                        deadline,
+                        &self.core.application_stop,
+                    )
+                    .map_err(SettingsReplyProjectionError::from)?;
+                if observed_wall < *wall
+                    || observed_monotonic < *monotonic
+                    || observed_wall.get() < header.created_at_ms
+                    || observed_wall.get() >= header.expires_at_ms
+                    || self.core.application_stop.is_cancelled()
+                    || !source.connection().is_live()
+                {
+                    return Err(SettingsReplyProjectionError::from(
+                        SettingsServiceError::OutsideScope,
+                    )
+                    .into());
+                }
+                Ok(())
+            }
+            (
+                SettingsReplyBuildRequest::Bind { parent, request },
+                ReplyComparisonObservation::Bind {
+                    creation,
+                    wall,
+                    monotonic,
+                },
+            ) => {
+                let source = request.authority_source();
+                let committed = request.committed_source();
+                let lifetime = committed.lifetime();
+                if !Arc::ptr_eq(creation, committed.creation_identity()) {
+                    return Err(SettingsReplyPublicationError::Conflict.into());
+                }
+                if !source.matches_context(
+                    &self.core.agent,
+                    &self.core.endpoint,
+                    &self.core.mutation,
+                ) || !Arc::ptr_eq(source.connection().host_identity(), &self.host)
+                {
+                    return Err(SettingsReplyProjectionError::from(
+                        SettingsServiceError::OutsideScope,
+                    )
+                    .into());
+                }
+                store
+                    .check_connection_health()
+                    .map_err(SettingsReplyPublicationError::from)?;
+                let snapshot = request
+                    .binding_snapshot()
+                    .map_err(SettingsReplyProjectionError::from)?;
+                if snapshot.state != BindingHistoryState::Committed
+                    || snapshot.intent != *request.binding_intent()
+                    || snapshot.lifetime.is_none_or(|actual| {
+                        actual.expires_at != lifetime.expires_at
+                            || actual.deadline != lifetime.deadline
+                    })
+                {
+                    return Err(SettingsReplyProjectionError::from(
+                        SettingsServiceError::OutsideScope,
+                    )
+                    .into());
+                }
+                check_bind_reservation_identity(request, *wall)?;
+                let reply = committed.reply_reservation();
+                let deadline = lifetime
+                    .deadline
+                    .checked_sub(Duration::from_millis(
+                        lifetime
+                            .expires_at
+                            .get()
+                            .checked_sub(reply.expires_at.get())
+                            .ok_or(SettingsServiceError::Expired)
+                            .map_err(SettingsReplyProjectionError::from)?,
+                    ))
+                    .ok_or(SettingsServiceError::Expired)
+                    .map_err(SettingsReplyProjectionError::from)?;
+                queued.request()?;
+                queued.committed()?;
+                let (_, observed_wall, observed_monotonic) = self
+                    .core
+                    .authority
+                    .observe_paired_bind_reply(
+                        &self.host,
+                        request,
+                        parent,
+                        &self.core.application_stop,
+                    )
+                    .map_err(SettingsReplyProjectionError::from)?;
+                if observed_wall < *wall
+                    || observed_monotonic < *monotonic
+                    || observed_wall.get() < header.created_at_ms
+                    || observed_wall >= reply.expires_at
+                    || observed_monotonic >= deadline
+                    || self.core.application_stop.is_cancelled()
+                    || !source.connection().is_live()
+                {
+                    return Err(SettingsReplyProjectionError::from(
+                        SettingsServiceError::OutsideScope,
+                    )
+                    .into());
+                }
+                Ok(())
+            }
+            (SettingsReplyBuildRequest::Access(_), ReplyComparisonObservation::Access(access)) => {
+                self.recheck_queued_access_socket_lifetime(store, mutation, queued, access)
+            }
+            _ => Err(SettingsReplyPublicationError::Conflict.into()),
+        }
+    }
+
     pub(crate) fn recheck_queued_reply_on(
         &self,
         store: &Store,
@@ -70,60 +276,9 @@ impl SettingsReceiptAuthority {
         mutation: &OwnedMutexGuard<()>,
         queued: &OwnedQueuedSettingsReply,
     ) -> Result<(), SettingsQueuedReplyCheckError> {
-        let request = queued.request()?;
-        let committed = queued.committed()?;
+        let (request, committed) = checked_queued_reply(queued)?;
         let comparison = committed.comparison();
         let header = committed.header();
-        let (local, peer, created_at, expires_at) = match request {
-            SettingsReplyBuildRequest::Fresh(request) => {
-                let source = request.committed_source();
-                let reply = source.reply_reservation();
-                (
-                    reply.local_device_id,
-                    reply.peer_device_id,
-                    reply.created_at,
-                    reply.expires_at,
-                )
-            }
-            SettingsReplyBuildRequest::Historical(request) => {
-                let reply = request.reply_reservation();
-                (
-                    reply.local_device_id,
-                    reply.peer_device_id,
-                    reply.created_at,
-                    reply.expires_at,
-                )
-            }
-            SettingsReplyBuildRequest::Bind { request, .. } => {
-                let source = request.committed_source();
-                let reply = source.reply_reservation();
-                (
-                    reply.local_device_id,
-                    reply.peer_device_id,
-                    reply.created_at,
-                    reply.expires_at,
-                )
-            }
-            SettingsReplyBuildRequest::Access(request) => {
-                let reply = request.reply_reservation();
-                (
-                    reply.local_device_id,
-                    reply.peer_device_id,
-                    reply.created_at,
-                    reply.expires_at,
-                )
-            }
-        };
-        if comparison.message_id != header.message_id
-            || comparison.encrypted_sha256 != *committed.encrypted_sha256()
-            || header.sender != local
-            || header.recipient != peer
-            || header.created_at_ms < created_at.get()
-            || header.created_at_ms >= header.expires_at_ms
-            || header.expires_at_ms != expires_at.get()
-        {
-            return Err(SettingsReplyPublicationError::Conflict.into());
-        }
         match (request, &comparison.observation) {
             (
                 SettingsReplyBuildRequest::Fresh(_) | SettingsReplyBuildRequest::Historical(_),
@@ -305,6 +460,66 @@ impl SettingsReceiptAuthority {
             observation,
         })
     }
+}
+
+fn checked_queued_reply(
+    queued: &OwnedQueuedSettingsReply,
+) -> Result<(&SettingsReplyBuildRequest, &CommittedSettingsReply), SettingsQueuedReplyCheckError> {
+    let request = queued.request()?;
+    let committed = queued.committed()?;
+    let comparison = committed.comparison();
+    let header = committed.header();
+    let (local, peer, created_at, expires_at) = match request {
+        SettingsReplyBuildRequest::Fresh(request) => {
+            let source = request.committed_source();
+            let reply = source.reply_reservation();
+            (
+                reply.local_device_id,
+                reply.peer_device_id,
+                reply.created_at,
+                reply.expires_at,
+            )
+        }
+        SettingsReplyBuildRequest::Historical(request) => {
+            let reply = request.reply_reservation();
+            (
+                reply.local_device_id,
+                reply.peer_device_id,
+                reply.created_at,
+                reply.expires_at,
+            )
+        }
+        SettingsReplyBuildRequest::Bind { request, .. } => {
+            let source = request.committed_source();
+            let reply = source.reply_reservation();
+            (
+                reply.local_device_id,
+                reply.peer_device_id,
+                reply.created_at,
+                reply.expires_at,
+            )
+        }
+        SettingsReplyBuildRequest::Access(request) => {
+            let reply = request.reply_reservation();
+            (
+                reply.local_device_id,
+                reply.peer_device_id,
+                reply.created_at,
+                reply.expires_at,
+            )
+        }
+    };
+    if comparison.message_id != header.message_id
+        || comparison.encrypted_sha256 != *committed.encrypted_sha256()
+        || header.sender != local
+        || header.recipient != peer
+        || header.created_at_ms < created_at.get()
+        || header.created_at_ms >= header.expires_at_ms
+        || header.expires_at_ms != expires_at.get()
+    {
+        return Err(SettingsReplyPublicationError::Conflict.into());
+    }
+    Ok((request, committed))
 }
 
 fn capture_original_on(

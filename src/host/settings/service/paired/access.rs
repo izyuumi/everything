@@ -368,6 +368,25 @@ impl SettingsReceiptAuthority {
     }
 }
 
+fn access_reply_provenance(
+    request: &OwnedVerifiedSettingsAccess,
+    grant: Option<SettingsGrantReference>,
+) -> Result<String, SettingsAccessQualificationError> {
+    let source = request.authority_source();
+    let intent = source.intent();
+    serde_json::to_string(&AccessReplyProvenance {
+        side: "host",
+        version: 1,
+        local_id: intent.host_id,
+        peer_keys: source.verified_peer_keys(),
+        host_epoch: source.connection().host_identity().host_epoch(),
+        connection_epoch: source.connection().connection_epoch(),
+        grant,
+        parent_id: None,
+    })
+    .map_err(SettingsAccessQualificationError::Metadata)
+}
+
 fn access_reservation_spec(
     request: &OwnedVerifiedSettingsAccess,
     observed: &AccessObservation,
@@ -421,17 +440,7 @@ fn access_reservation_spec(
     if observed.wall >= expires_at || observed.monotonic >= reply_deadline {
         return Err(SettingsServiceError::Expired.into());
     }
-    let provenance = serde_json::to_string(&AccessReplyProvenance {
-        side: "host",
-        version: 1,
-        local_id: intent.host_id,
-        peer_keys: source.verified_peer_keys(),
-        host_epoch: source.connection().host_identity().host_epoch(),
-        connection_epoch: source.connection().connection_epoch(),
-        grant,
-        parent_id: None,
-    })
-    .map_err(SettingsAccessQualificationError::Metadata)?;
+    let provenance = access_reply_provenance(request, grant)?;
     if provenance.len() > 2048 {
         return Err(SettingsServiceError::CorruptJournal.into());
     }
@@ -528,6 +537,123 @@ impl fmt::Debug for QualifiedSettingsAccessReply<'_> {
 }
 
 impl SettingsReceiptAuthority {
+    pub(super) fn recheck_queued_access_socket_lifetime(
+        &self,
+        store: &Store,
+        mutation: &OwnedMutexGuard<()>,
+        queued: &OwnedQueuedSettingsReply,
+        comparison: &AccessReplyComparison,
+    ) -> Result<(), SettingsQueuedReplyCheckError> {
+        let SettingsReplyBuildRequest::Access(request) = queued.request()? else {
+            return Err(SettingsReplyPublicationError::Conflict.into());
+        };
+        let header = queued.committed()?.header();
+        if !Arc::ptr_eq(OwnedMutexGuard::mutex(mutation), &self.core.mutation) {
+            return Err(
+                SettingsReplyProjectionError::from(SettingsServiceError::OutsideScope).into(),
+            );
+        }
+        let verified = request.verified_request();
+        self.check_access_context(store, verified)
+            .map_err(SettingsReplyProjectionError::from)?;
+        store
+            .check_connection_health()
+            .map_err(SettingsReplyPublicationError::from)?;
+        let source = verified.authority_source();
+        let intent = source.intent();
+        let reply = request.reply_reservation();
+        let floor = source.receipt_floor();
+        let grant_matches_family = match (comparison.family, comparison.grant) {
+            (SettingsAccessReplyFamily::Default, Some(grant)) => {
+                !grant.grant_id.is_nil() && grant.revision > 0
+            }
+            (SettingsAccessReplyFamily::Denial, None) => true,
+            _ => false,
+        };
+        let provenance = access_reply_provenance(verified, comparison.grant)
+            .map_err(SettingsReplyProjectionError::from)?;
+        if !Arc::ptr_eq(&comparison.invocation, source.invocation_identity())
+            || comparison.family != reply.family
+            || !grant_matches_family
+            || reply.reservation_id.is_nil()
+            || reply.local_device_id != intent.host_id
+            || reply.peer_device_id != source.verified_peer_keys().device_id
+            || reply.provenance.len() > 2048
+            || reply.provenance != provenance
+            || reply.created_at < floor.0
+            || reply.created_at < comparison.query_floor.0
+            || reply.created_at < intent.issued_at
+            || reply.created_at >= reply.expires_at
+            || reply.created_at >= intent.expires_at
+        {
+            return Err(
+                SettingsReplyProjectionError::from(SettingsServiceError::OutsideScope).into(),
+            );
+        }
+        drop(provenance);
+        let query_lifetime = intent
+            .expires_at
+            .get()
+            .checked_sub(comparison.query_floor.0.get())
+            .ok_or(SettingsServiceError::Expired)
+            .map_err(SettingsReplyProjectionError::from)?;
+        let maximum_expiry = reply
+            .created_at
+            .get()
+            .checked_add(60_000)
+            .ok_or(SettingsServiceError::Expired)
+            .map_err(SettingsReplyProjectionError::from)?
+            .min(intent.expires_at.get());
+        let clip = intent
+            .expires_at
+            .get()
+            .checked_sub(reply.expires_at.get())
+            .ok_or(SettingsServiceError::Expired)
+            .map_err(SettingsReplyProjectionError::from)?;
+        let deadline = comparison
+            .query_deadline
+            .min(source.original_deadline())
+            .checked_sub(Duration::from_millis(clip))
+            .ok_or(SettingsServiceError::Expired)
+            .map_err(SettingsReplyProjectionError::from)?;
+        if comparison
+            .query_floor
+            .1
+            .checked_add(Duration::from_millis(query_lifetime))
+            != Some(comparison.query_deadline)
+            || comparison.reply_deadline != deadline
+            || reply.expires_at.get() > maximum_expiry
+        {
+            return Err(
+                SettingsReplyProjectionError::from(SettingsServiceError::OutsideScope).into(),
+            );
+        }
+        queued.request()?;
+        queued.committed()?;
+        let observed = self
+            .core
+            .authority
+            .observe_access_query(&self.host, source, &self.core.application_stop)
+            .map_err(SettingsReplyProjectionError::from)?;
+        if !Arc::ptr_eq(&comparison.query, &observed.query)
+            || comparison.query_floor != observed.floor
+            || comparison.query_deadline != observed.deadline
+            || observed.wall < comparison.observed_wall
+            || observed.monotonic < comparison.observed_monotonic
+            || observed.wall.get() < header.created_at_ms
+            || observed.wall < reply.created_at
+            || observed.wall >= reply.expires_at
+            || observed.monotonic >= comparison.reply_deadline
+            || self.core.application_stop.is_cancelled()
+            || !source.connection().is_live()
+        {
+            return Err(
+                SettingsReplyProjectionError::from(SettingsServiceError::OutsideScope).into(),
+            );
+        }
+        Ok(())
+    }
+
     pub(super) fn recheck_queued_access_reply_on(
         &self,
         store: &Store,
@@ -924,17 +1050,7 @@ fn check_access_reply_metadata(
         .min(intent.expires_at.get());
     let expected_expiry =
         grant_expiry.map_or(expected_expiry, |expiry| expected_expiry.min(expiry.get()));
-    let provenance = serde_json::to_string(&AccessReplyProvenance {
-        side: "host",
-        version: 1,
-        local_id: intent.host_id,
-        peer_keys: source.verified_peer_keys(),
-        host_epoch: source.connection().host_identity().host_epoch(),
-        connection_epoch: source.connection().connection_epoch(),
-        grant,
-        parent_id: None,
-    })
-    .map_err(SettingsAccessQualificationError::Metadata)?;
+    let provenance = access_reply_provenance(request.verified_request(), grant)?;
     if reply.family != family
         || reply.expires_at.get() != expected_expiry
         || reply.provenance != provenance
