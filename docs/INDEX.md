@@ -26,10 +26,11 @@ Scoped Settings transport foundations, with public accepted dispatch still disab
 - [Live Apple Access client](contracts/apple-settings-access-client.md): explicit metadata-only request/send, authenticated Fresh adoption and iOS display.
 - [Explicit Apple Bind client](contracts/apple-settings-bind-client.md): a separate user gesture, same-window send and genuine Fresh private parent observation; recovery and the Host private sender remain separate.
 - [Explicit Apple Snapshot client](contracts/apple-settings-snapshot-client.md): genuine current-parent value request, authenticated Fresh display and fixed freshness; Host delivery remains unverified.
+- [Explicit Apple Original inspection](contracts/apple-settings-original-inspection-client.md): exact user-specified target, genuine current parent and endpoint-free Fresh lookup; no mutation retry or recovery.
 - [Apple Bind ownership](contracts/apple-settings-bind-owner.md): the first immutable Bind identity, shared pending/receive custody, fixed clocks and nonresettable association.
 - [Outbound selection](contracts/transport-outbound-selection.md): bounded metadata selection before ciphertext loading.
 - [Private ciphertext loading and preparation](contracts/settings-private-ciphertext-loading.md): exact rows/authentication plus internal counted waiting, original worker joins and Prepared DATA; actual pump invocation remains separate.
-- [Ordinary send window](contracts/ordinary-relay-send-window.md): actual shared16-cell preparation/join/send/acceptance custody and cleanup.
+- [Ordinary send window](contracts/ordinary-relay-send-window.md): actual shared16-cell custody, internal started handback to Work and ordinary cleanup; private retirement remains separate.
 - [Physical socket identity](contracts/relay-socket-identity.md): actual authenticated connection capture and monotonic cancellation/closure liveness.
 - [Private final socket admission](contracts/settings-private-socket-admission.md): checked final SQL, true original join, scoped guard handoff and same-socket write ownership; session invocation and retirement remain absent.
 - [Host relay capability](contracts/settings-host-relay-capability.md): original Host-owned service/runtime/transport supplier, without a new runtime or accepted dispatcher.
