@@ -4,7 +4,7 @@ The iOS client uses its existing ReplicaStore, strict device preference actor an
 
 ## Authoritative inputs and initial catch-up
 
-ReplicaStore applies a verified sync batch in one transaction containing new event insertion, projection, conversation cursor, encrypted replies and inbox completion. Notification eligibility is read only from those committed event rows. Task snapshots deliberately omit terminal tasks; cursor movement, task disappearance, scheduled/remote reports and command replies never imply completion.
+ReplicaStore applies a verified sync batch in one transaction containing new event insertion, projection, conversation cursor, encrypted replies and inbox completion. Notification eligibility is read only from those committed event rows. Task snapshots deliberately omit terminal tasks; cursor movement, task disappearance, remote reports and command replies never imply completion. A scheduled run's isolated execution conversation is normally not a known replica conversation, so its delivered `scheduled_run_finished` event is the only committed terminal fact the client receives.
 
 Each actual conversation has at most one `notifications_v1_` metadata floor. An absent floor suppresses claims until the first successfully committed batch with `hasMore == false`; that same apply transaction initializes the floor to its actual durable through sequence. This also baselines existing stores that predate notification delivery. First historical catch-up is silent, including events already present before this increment. No historical notification queue or schema is introduced.
 
@@ -14,10 +14,10 @@ ReplicaService selects one of at most64 actual conversations in round-robin orde
 
 The closed categories are:
 
-- Completion: an actual `task_status_changed` event whose status is `completed`.
+- Completion: an actual `task_status_changed` event whose status is `completed`, or an actual `scheduled_run_finished` event whose validated notification outcome is `succeeded`.
 - Attention: an actual `permission_requested` event whose exact current projected approval remains undecided and has no immutable decision. If its verified inspection exists, its request lifetime must still contain the claim time. Legacy requests without inspection can produce attention only while the exact request remains undecided.
 
-Failed/cancelled tasks, text events, cursor changes, task snapshots and ordinary settings receipts produce no notice. One claim yields at most one summary per category. Summaries contain only a category and a stable opaque SHA256 identifier derived from a versioned domain and the actual local/Host/conversation/claimed-through/category identities. Notification bodies, titles and userInfo contain no conversation title, event/task/tool identifiers, tool arguments or model/user text.
+Failed/cancelled tasks, failed/cancelled/skipped/unknown scheduled runs, text events, cursor changes, task snapshots and ordinary settings receipts produce no notice. One claim yields at most one summary per category. Summaries contain only a category and a stable opaque SHA256 identifier derived from a versioned domain and the actual local/Host/conversation/claimed-through/category identities. Notification bodies, titles and userInfo contain no conversation title, event/task/tool identifiers, tool arguments or model/user text.
 
 The transaction advances the exact floor before returning notice summaries. SQL errors roll back the claim. After a successful claim, crash, cancellation, disabled preferences, unavailable preference storage, denied OS settings or submission errors may lose the notice permanently. Duplicate delivery, reconnect and relaunch do not re-alert the same claimed events. This is at-most-once attempt admission, not exactly-once OS delivery; failed claims can be attempted again only because their transaction did not commit. No fresh notification ID is generated to retry a consumed event.
 
