@@ -33,7 +33,8 @@ pub(crate) use settings_access_reply::{
 pub(crate) use settings_bind_reply::{SettingsBindReplyContractError, SettingsBindReplyPacket};
 #[cfg(unix)]
 pub(crate) use settings_ingress::read::{
-    SettingsOriginalInspectionIntent, SettingsReadRequest, SettingsSnapshotReadIntent,
+    SettingsOriginalInspectionIntent, SettingsReadContractError, SettingsReadRequest,
+    SettingsSnapshotReadIntent,
 };
 #[cfg(unix)]
 pub(crate) use settings_ingress::work::{
@@ -54,8 +55,13 @@ pub(crate) use settings_ingress::{
 };
 #[cfg(unix)]
 pub(crate) use settings_ingress::{
-    AuthenticatedSettingsReadSource, OwnedCommittedSettingsRead, OwnedVerifiedSettingsRead,
-    SettingsReadSourceError,
+    AuthenticatedSettingsReadSource, OwnedCommittedSettingsRead, OwnedCommittedSettingsSnapshot,
+    OwnedVerifiedSettingsRead, SettingsReadSourceError,
+};
+#[cfg(unix)]
+pub(crate) use settings_read_reply::{
+    SettingsHostSnapshot, SettingsReadReplyPacket, SettingsRemoteEntry,
+    SettingsRemoteModelSelection, SettingsRemoteToolSelection, SettingsRemoteValue,
 };
 
 #[cfg(unix)]

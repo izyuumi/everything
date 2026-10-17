@@ -4,6 +4,8 @@ mod access;
 mod read_replies;
 mod reads;
 
+pub(crate) use read_replies::QualifiedSettingsReadReply;
+
 pub(crate) use access::{
     QualifiedSettingsAccessReply, SettingsAccessQualificationError, SettingsAccessReplyFamily,
     SettingsAccessReservationSpec,
