@@ -220,6 +220,13 @@ impl ReadWorkState {
         }
     }
 
+    pub(super) fn witness_mut(&mut self) -> Option<&mut PrivateWitness> {
+        match self {
+            Self::Verified { verified, .. } => Some(&mut verified._witness),
+            Self::Rejected(_) => None,
+        }
+    }
+
     pub(super) fn witness(&self) -> Option<&PrivateWitness> {
         self.verified().map(|owner| &owner._witness)
     }
@@ -249,5 +256,37 @@ impl OwnedCommittedSettingsRead {
 
     pub(crate) fn reply_reservation(&self) -> &crate::storage::StoredSettingsReadReply {
         &self.reply
+    }
+}
+
+pub(crate) struct OwnedCommittedSettingsSnapshot {
+    read: OwnedCommittedSettingsRead,
+}
+
+impl OwnedCommittedSettingsRead {
+    pub(crate) fn try_into_snapshot(self) -> Result<OwnedCommittedSettingsSnapshot, Box<Self>> {
+        if !matches!(
+            self.verified.authority_source().request(),
+            SettingsReadRequest::Snapshot(_)
+        ) || self.reply.family
+            != crate::host::settings::service::SettingsReadReplyFamily::Default
+        {
+            return Err(Box::new(self));
+        }
+        Ok(OwnedCommittedSettingsSnapshot { read: self })
+    }
+}
+
+impl OwnedCommittedSettingsSnapshot {
+    pub(crate) fn read_owner(&self) -> &OwnedCommittedSettingsRead {
+        &self.read
+    }
+
+    pub(super) fn reply_build_witness(&self) -> &PrivateWitness {
+        &self.read.verified._witness
+    }
+
+    pub(super) fn reply_build_witness_mut(&mut self) -> &mut PrivateWitness {
+        &mut self.read.verified._witness
     }
 }

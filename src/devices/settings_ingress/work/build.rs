@@ -322,6 +322,12 @@ fn run_reply_build(
                     request,
                     access.verified_request().receipt_authority(),
                 ),
+                SettingsReplyBuildRequest::Snapshot(snapshot) => publish_request(
+                    &input,
+                    &guard,
+                    request,
+                    snapshot.read_owner().verified_request().receipt_authority(),
+                ),
             };
             ReplyBuildWorkerOutcome::Publication(result.map(Box::new))
         }

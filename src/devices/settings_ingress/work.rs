@@ -20,7 +20,9 @@ pub(in crate::devices) use build::{
 use build::{QueuedReplyRegistry, ReplyBuildState, ReplyBuildWorkerOutput};
 
 use super::access::{AccessReceiptOutput, AccessWorkState, OwnedCommittedSettingsAccess};
-use super::read_source::{OwnedCommittedSettingsRead, ReadReceiptOutput, ReadWorkState};
+use super::read_source::{
+    OwnedCommittedSettingsRead, OwnedCommittedSettingsSnapshot, ReadReceiptOutput, ReadWorkState,
+};
 use super::{
     BindingHistory, CommittedBindSource, CommittedSettingsCommandSource,
     OwnedCommittedSettingsBind, OwnedCommittedSettingsCommand, OwnedHistoricalSettingsCommand,
@@ -210,6 +212,7 @@ enum ReplyBuildFamily {
     CommandInspection90112,
     AccessDefault49152,
     AccessDenial4096,
+    SnapshotDefault49152,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -258,6 +261,7 @@ pub(crate) enum SettingsReplyBuildRequest {
     Fresh(Box<OwnedCommittedSettingsCommand>),
     Historical(Box<OwnedHistoricalSettingsCommand>),
     Access(Box<OwnedCommittedSettingsAccess>),
+    Snapshot(Box<OwnedCommittedSettingsSnapshot>),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -348,6 +352,16 @@ impl ReplyBuildStamp {
         }
     }
 
+    fn snapshot(reply: &crate::storage::StoredSettingsReadReply) -> Self {
+        Self {
+            reservation_id: reply.reservation_id,
+            local_device_id: reply.local_device_id,
+            peer_device_id: reply.peer_device_id,
+            created_at: reply.created_at,
+            expires_at: reply.expires_at,
+        }
+    }
+
     fn command(reply: &StoredSettingsCommandReply) -> Self {
         Self {
             reservation_id: reply.reservation_id,
@@ -371,6 +385,21 @@ impl ReplyBuildAssociation {
 }
 
 impl ReplyBuildPermit {
+    pub(crate) fn check_snapshot(
+        &self,
+        request: &OwnedCommittedSettingsSnapshot,
+    ) -> Result<(), SettingsReceiveError> {
+        let read = request.read_owner();
+        self.check(
+            request.reply_build_witness(),
+            ReplyBuildFamily::SnapshotDefault49152,
+            read.verified_request()
+                .authority_source()
+                .invocation_identity(),
+            ReplyBuildStamp::snapshot(read.reply_reservation()),
+        )
+    }
+
     pub(crate) fn check_access(
         &self,
         request: &OwnedCommittedSettingsAccess,
@@ -471,6 +500,7 @@ impl SettingsReplyBuildRequest {
             Self::Fresh(request) => request.reply_build_witness(),
             Self::Historical(request) => request.reply_build_witness(),
             Self::Access(request) => request.reply_build_witness(),
+            Self::Snapshot(request) => request.reply_build_witness(),
         }
     }
 
@@ -480,6 +510,7 @@ impl SettingsReplyBuildRequest {
             Self::Fresh(request) => request.reply_build_witness_mut(),
             Self::Historical(request) => request.reply_build_witness_mut(),
             Self::Access(request) => request.reply_build_witness_mut(),
+            Self::Snapshot(request) => request.reply_build_witness_mut(),
         }
     }
 
@@ -507,6 +538,11 @@ impl SettingsReplyBuildRequest {
             }
             Self::Access(request) => {
                 let source = request.verified_request().authority_source();
+                Arc::ptr_eq(source.connection(), connection)
+                    && source.matches_context(&context.agent, &context.endpoint, &context.mutation)
+            }
+            Self::Snapshot(request) => {
+                let source = request.read_owner().verified_request().authority_source();
                 Arc::ptr_eq(source.connection(), connection)
                     && source.matches_context(&context.agent, &context.endpoint, &context.mutation)
             }
@@ -543,6 +579,15 @@ impl SettingsReplyBuildRequest {
                     .authority_source()
                     .invocation_identity(),
                 ReplyBuildStamp::access(request.reply_reservation()),
+            ),
+            Self::Snapshot(request) => association.matches(
+                ReplyBuildFamily::SnapshotDefault49152,
+                request
+                    .read_owner()
+                    .verified_request()
+                    .authority_source()
+                    .invocation_identity(),
+                ReplyBuildStamp::snapshot(request.read_owner().reply_reservation()),
             ),
         }
     }
@@ -759,6 +804,59 @@ impl SettingsReceiveWork {
         {
             return Err(self.ledger.fail());
         }
+        Ok(())
+    }
+
+    fn seal_snapshot_join(&mut self) -> Result<(), SettingsReceiveError> {
+        let Some(Ok((_, output))) = self.retained_join.as_ref() else {
+            return Err(self.ledger.fail());
+        };
+        let Some(
+            read @ ReadWorkState::Verified {
+                result: Some(Ok(crate::storage::SettingsReadReceiptCommit::Fresh { reply })),
+                verified,
+            },
+        ) = output.read.as_ref()
+        else {
+            return Err(self.ledger.fail());
+        };
+        let source = verified.authority_source();
+        if !matches!(
+            source.request(),
+            super::read::SettingsReadRequest::Snapshot(_)
+        ) {
+            return Ok(());
+        }
+        let context = self.context.as_ref().ok_or_else(|| self.ledger.fail())?;
+        if !source.matches_context(&context.agent, &context.endpoint, &context.mutation)
+            || reply.family != crate::host::settings::service::SettingsReadReplyFamily::Default
+        {
+            return Err(self.ledger.fail());
+        }
+        self.check_unjoined_build(
+            read.witness().ok_or_else(|| self.ledger.fail())?,
+            source.connection(),
+            source.verified_peer_keys().device_id,
+        )?;
+        let association = Arc::new(ReplyBuildAssociation {
+            family: ReplyBuildFamily::SnapshotDefault49152,
+            original: Arc::clone(source.invocation_identity()),
+            reply: ReplyBuildStamp::snapshot(reply),
+        });
+        let witness = self
+            .retained_join
+            .as_mut()
+            .and_then(|joined| joined.as_mut().ok())
+            .and_then(|(_, output)| output.read.as_mut())
+            .and_then(ReadWorkState::witness_mut)
+            .ok_or_else(|| self.ledger.fail())?;
+        if witness.build.is_some() {
+            return Err(self.ledger.fail());
+        }
+        witness.build = Some(JoinedReplyBuild {
+            association,
+            claim: ReplyBuildClaim::Unclaimed,
+        });
         Ok(())
     }
 
@@ -1880,6 +1978,15 @@ impl SettingsReceiveWork {
                 return Err(error);
             }
         };
+        if matches!(&disposition, ReadJoinedDisposition::Fresh)
+            && let Err(error) = self.seal_snapshot_join()
+        {
+            self.ledger.fail();
+            self.failure = Some(error.clone());
+            self.close_intake();
+            let _ = receipt.send(Err(error.clone()));
+            return Err(error);
+        }
         match (disposition, self.retained_join.take()) {
             (
                 ReadJoinedDisposition::Fresh,
