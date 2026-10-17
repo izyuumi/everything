@@ -1,4 +1,4 @@
-mod outbound;
+pub(in crate::devices) mod outbound;
 
 use super::*;
 use crate::relay_protocol::{
@@ -8,7 +8,7 @@ use crate::storage::TransportOutboundSelection;
 use crate::transport::remote::{RelayConnection, RemoteError};
 #[cfg(unix)]
 use futures_util::FutureExt;
-use outbound::OrdinarySendWindow;
+use outbound::RelaySendWindow;
 #[cfg(unix)]
 use std::panic::AssertUnwindSafe;
 use std::time::Duration;
@@ -207,7 +207,7 @@ impl DeviceEndpoint {
         cancellation: &CancellationToken,
         status: &watch::Sender<RelaySessionStatus>,
     ) -> Result<(), DeviceError> {
-        let mut window = OrdinarySendWindow::new(self.clone())?;
+        let mut window = RelaySendWindow::new(self.clone(), connection)?;
         let outcome = self
             .relay_session_loop(connection, cancellation, status, &mut window)
             .await;
@@ -219,7 +219,7 @@ impl DeviceEndpoint {
         connection: &mut RelayConnection,
         cancellation: &CancellationToken,
         status: &watch::Sender<RelaySessionStatus>,
-        window: &mut OrdinarySendWindow,
+        window: &mut RelaySendWindow,
     ) -> Result<(), DeviceError> {
         let mut acknowledgements = BTreeSet::new();
         let mut tick = tokio::time::interval(Duration::from_secs(1));

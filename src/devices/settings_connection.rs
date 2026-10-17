@@ -12,8 +12,9 @@ use super::settings_ingress::{
     OwnedCommittedSettingsAccess, ReceiveContext,
     work::{
         OwnedQueuedSettingsReply, PairedResultAdmissionFailure, PendingSettingsReplyBuild,
-        ReplyBuildAdmissionFailure, SettingsReceiveWork, SettingsReceiveWorkEvent,
-        SettingsReplyBuildRequest,
+        PendingSettingsSend, ReplyBuildAdmissionFailure, SettingsReceiveWork,
+        SettingsReceiveWorkEvent, SettingsReplyBuildRequest, SettingsSendAdmissionError,
+        SettingsSendReturnFailure,
     },
 };
 use super::{DeviceEndpoint, DeviceError, EndpointRole};
@@ -25,10 +26,14 @@ use crate::agent::Agent;
 #[cfg(unix)]
 use crate::crypto::EncryptedEnvelope;
 #[cfg(unix)]
+use crate::devices::session::outbound::RelaySendWindow;
+#[cfg(unix)]
 use crate::host::settings::agent::{PairedResultHandoff, SettingsAgentRuntime};
 use crate::protocol::DeviceId;
 #[cfg(unix)]
 use crate::protocol::MessageId;
+#[cfg(unix)]
+use crate::storage::TransportOutboundCandidate;
 use crate::transport::remote::{RelayConnection, RelaySocketIdentity};
 
 pub(crate) struct SettingsHostIdentity {
@@ -100,6 +105,11 @@ impl SettingsConnectionIdentity {
             && self.socket.is_live()
             && !self.retired.load(Ordering::Acquire)
             && !self.cancellation.is_cancelled()
+    }
+
+    #[cfg(unix)]
+    pub(in crate::devices) fn shares_socket(&self, socket: &Arc<RelaySocketIdentity>) -> bool {
+        Arc::ptr_eq(&self.socket, socket)
     }
 
     pub(crate) fn cancellation(&self) -> CancellationToken {
@@ -287,6 +297,28 @@ impl SettingsConnectionOwner<'_> {
         message_id: MessageId,
     ) -> Result<Option<&OwnedQueuedSettingsReply>, SettingsReceiveError> {
         self.owner.receive.queued_reply(message_id)
+    }
+
+    #[cfg(unix)]
+    pub(super) fn try_lend_queued_reply(
+        &mut self,
+        window: &mut RelaySendWindow,
+        candidate: TransportOutboundCandidate,
+    ) -> Result<PendingSettingsSend, SettingsSendAdmissionError> {
+        self.owner
+            .receive
+            .try_lend_queued_reply(&self.identity, window, candidate)
+    }
+
+    #[cfg(unix)]
+    pub(super) fn try_return_queued_reply(
+        &mut self,
+        window: &mut RelaySendWindow,
+        ticket: PendingSettingsSend,
+    ) -> Result<(), SettingsSendReturnFailure> {
+        self.owner
+            .receive
+            .try_return_queued_reply(&self.identity, window, ticket)
     }
 
     #[cfg(unix)]

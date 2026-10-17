@@ -1,6 +1,6 @@
 # Ordinary relay send window
 
-The existing `DeviceEndpoint` relay loop owns one `OrdinarySendWindow` with at most 16 message cells. Preparation, a prepared packet, an awaited socket send and a sent message awaiting relay acceptance all occupy that same map. This implementation selects `TransportOutboundSelection::OrdinaryOnly` with or without a settings transport owner. Binding a settings owner to a connection does not enable private settings delivery.
+The existing `DeviceEndpoint` relay loop owns one `RelaySendWindow` with at most 16 message cells. Preparation, a prepared packet, an awaited socket send and a sent message awaiting relay acceptance all occupy that same map. This implementation selects `TransportOutboundSelection::OrdinaryOnly` with or without a settings transport owner. Binding a settings owner to a connection does not enable private settings delivery.
 
 ## Selection and exact loading
 
@@ -35,3 +35,16 @@ A bookkeeping failure, unjoined owner or dropped unfinished populated window ret
 Both outer relay entry points acquire the original endpoint session mutex once. The locked loop checks outbound health before connection admission, reconnection and every normal Stopped path. The settings wrapper holds that same actual guard through `close_and_wait` and its final health check and Stopped publication. Its existing failed-drain pending state also retains the guard. No new session lock or runtime is introduced.
 
 These are source ownership and protocol-preservation claims. Direct formatting and static source checks do not verify compiler acceptance, SQLite execution, cancellation timing, socket behavior or an Apple roundtrip. No automated tests were added. Supported CI and disposable runtime observations remain required. Private ciphertext preparation, current socket admission, send ownership, Bind creator retirement and composite private draining remain separate dependencies.
+
+
+## Private unstarted custody in the same window
+
+The Unix window also has a counted private custody entry. All ordinary phases and private Provisional/LoanedUnstarted entries share the same map and total limit16; no private window, queue, job or runtime was added. The actual successful-connect physical socket identity is captured at construction. A settings connection compares that original identity separately from admission liveness. Both normal relay modes still select OrdinaryOnly: these internal custody producers do not enable private delivery.
+
+A paired operation borrows actual Work and window mutably. It checks the genuine queued owner, original ledger/context/connection, private candidate identity, physical socket and capacity before extraction, then reserves the real cell. The actual complete queued owner moves into that cell's closed Source Arc, and the same Work entry holds the matching affine loan witness. Full or a pre-extraction error leaves the original owner in Work. No ciphertext, future frame, preparation job, loader, current permission or Source from a label is constructed.
+
+The paired unstarted inverse is ownership preservation, including after close/fault. It compares only actual retained payload/header, disarmed permit, moved settlement, original context/connection and real loan/window/physical/slot identities. It does not invoke live capture, current Core, ledger admission, history health, checked queued getters or a supervised handoff read. After that structural proof, Arc::get_mut checks exclusivity; it is not a completion proof. The same complete owner and consumed loan witness enter Work Owned NoResend before the cell is removed. Return errors preserve the full Source Arc/cell/witness and actual ticket. No original private, BUILD, creator or Supervisor charge is released.
+
+Accepted can still remove only Ordinary AwaitAccepted and create the ordinary Store receipt. A private unstarted cell has never sent a message, so Accepted for it is Protocol with no removal or private SQL operation. Maintenance of an absent ID stays a no-op; a present private cell faults and remains owned. No private timer or ACK/expiry retirement is implemented.
+
+The initial finish still has no Work borrow. It genuinely joins ordinary preparation as before, but any remaining private custody causes the complete bounded map, original outcome and typed cause to be retained before the real Work/endpoint failure latches. It cannot take the ordinary entries.clear path. Clean ordinary finish is possible only after an explicit genuine paired return already removed all private cells. Terminal ownership includes the actual physical identity, Source and slot; no Host guard, receiver, mutex waiter or task was added to Source. Private jobs, authenticated loading, current first socket admission, ACK consumption, NoResend-row handling and creator-LAST cleanup remain successors. Formatting/source review does not establish compiler or runtime acceptance.

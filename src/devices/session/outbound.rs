@@ -1,16 +1,174 @@
 use super::*;
+#[cfg(unix)]
+use crate::devices::settings_ingress::work::{
+    OwnedQueuedSettingsReply, PendingSettingsSend, SettingsSendAdmissionError,
+    SettingsSendLoanAssociation, SettingsSendReturnReason, SettingsSendSource,
+};
 use crate::storage::{TransportOutboundCandidate, TransportOutboundRouting};
+#[cfg(unix)]
+use crate::transport::remote::RelaySocketIdentity;
+#[cfg(unix)]
+use std::collections::btree_map::Entry;
 use tokio::task::{Id, JoinError, JoinHandle};
 
 const MAX_ORDINARY_INFLIGHT: usize = 16;
 
-pub(super) struct OrdinarySendWindow {
+pub(in crate::devices) struct RelaySendWindow {
     endpoint: DeviceEndpoint,
     identity: Arc<()>,
-    entries: BTreeMap<MessageId, OrdinaryEntry>,
+    #[cfg(unix)]
+    socket: Arc<RelaySocketIdentity>,
+    entries: BTreeMap<MessageId, RelaySendEntry>,
     finished: bool,
     completion: Option<Result<(), DeviceError>>,
     failure: Option<OrdinaryFailureBundle>,
+}
+
+enum RelaySendEntry {
+    Ordinary(OrdinaryEntry),
+    #[cfg(unix)]
+    Settings(SettingsSendCell),
+}
+
+impl RelaySendEntry {
+    fn ordinary(&self) -> Option<&OrdinaryEntry> {
+        match self {
+            Self::Ordinary(entry) => Some(entry),
+            #[cfg(unix)]
+            Self::Settings(_) => None,
+        }
+    }
+
+    fn ordinary_mut(&mut self) -> Option<&mut OrdinaryEntry> {
+        match self {
+            Self::Ordinary(entry) => Some(entry),
+            #[cfg(unix)]
+            Self::Settings(_) => None,
+        }
+    }
+}
+
+#[cfg(unix)]
+struct SettingsSendCell {
+    association: Option<Arc<SettingsSendLoanAssociation>>,
+    state: SettingsCustodyState,
+    slot: OrdinarySlot,
+}
+
+#[cfg(unix)]
+enum SettingsCustodyState {
+    Provisional,
+    LoanedUnstarted(Arc<SettingsSendSource>),
+}
+
+#[cfg(unix)]
+pub(in crate::devices) struct SettingsWindowReservation<'window> {
+    cell: &'window mut SettingsSendCell,
+    failure: &'window mut Option<OrdinaryFailureBundle>,
+}
+
+#[cfg(unix)]
+pub(in crate::devices) struct SettingsWindowReturn<'window> {
+    entry: Option<std::collections::btree_map::OccupiedEntry<'window, MessageId, RelaySendEntry>>,
+    failure: &'window mut Option<OrdinaryFailureBundle>,
+}
+
+#[cfg(unix)]
+impl SettingsSendCell {
+    fn matches_window(&self, window: &Arc<()>) -> bool {
+        Arc::ptr_eq(&self.slot.window, window)
+            && match &self.state {
+                SettingsCustodyState::Provisional => {
+                    self.association.as_ref().is_none_or(|association| {
+                        association.matches_slot(window, &self.slot.identity)
+                    })
+                }
+                SettingsCustodyState::LoanedUnstarted(source) => {
+                    self.association.as_ref().is_some_and(|association| {
+                        association.matches_slot(window, &self.slot.identity)
+                            && source.matches_association(association)
+                    })
+                }
+            }
+    }
+
+    fn quarantine_work(&self) {
+        if let Some(association) = &self.association {
+            association.quarantine();
+        }
+    }
+}
+
+#[cfg(unix)]
+impl SettingsWindowReservation<'_> {
+    pub(in crate::devices) fn identities(&self) -> (&Arc<()>, &Arc<()>) {
+        (&self.cell.slot.window, &self.cell.slot.identity)
+    }
+
+    pub(in crate::devices) fn associate(&mut self, association: Arc<SettingsSendLoanAssociation>) {
+        self.cell.association = Some(association);
+    }
+
+    pub(in crate::devices) fn install(self, source: Arc<SettingsSendSource>) {
+        self.cell.state = SettingsCustodyState::LoanedUnstarted(source);
+    }
+}
+
+#[cfg(unix)]
+impl Drop for SettingsWindowReservation<'_> {
+    fn drop(&mut self) {
+        if matches!(self.cell.state, SettingsCustodyState::Provisional) && self.failure.is_none() {
+            *self.failure = Some(OrdinaryFailureBundle {
+                _primary: None,
+                _cleanup: OrdinaryIssue::Bookkeeping {
+                    _reason: "Settings custody reservation was abandoned",
+                },
+            });
+        }
+    }
+}
+
+#[cfg(unix)]
+impl SettingsWindowReturn<'_> {
+    pub(in crate::devices) fn source(&self) -> Option<&Arc<SettingsSendSource>> {
+        match self.entry.as_ref()?.get() {
+            RelaySendEntry::Settings(SettingsSendCell {
+                state: SettingsCustodyState::LoanedUnstarted(source),
+                ..
+            }) => Some(source),
+            _ => None,
+        }
+    }
+
+    pub(in crate::devices) fn source_mut(&mut self) -> Option<&mut Arc<SettingsSendSource>> {
+        match self.entry.as_mut()?.get_mut() {
+            RelaySendEntry::Settings(SettingsSendCell {
+                state: SettingsCustodyState::LoanedUnstarted(source),
+                ..
+            }) => Some(source),
+            _ => None,
+        }
+    }
+
+    pub(in crate::devices) fn complete(mut self) {
+        if let Some(entry) = self.entry.take() {
+            drop(entry.remove());
+        }
+    }
+}
+
+#[cfg(unix)]
+impl Drop for SettingsWindowReturn<'_> {
+    fn drop(&mut self) {
+        if self.entry.is_some() && self.failure.is_none() {
+            *self.failure = Some(OrdinaryFailureBundle {
+                _primary: None,
+                _cleanup: OrdinaryIssue::Bookkeeping {
+                    _reason: "Settings custody return did not complete",
+                },
+            });
+        }
+    }
 }
 
 struct OrdinarySlot {
@@ -75,8 +233,12 @@ enum OrdinaryEntry {
 }
 
 enum OrdinaryIssue {
-    Bookkeeping { _reason: &'static str },
+    Bookkeeping {
+        _reason: &'static str,
+    },
     Abandoned,
+    #[cfg(unix)]
+    PrivateCustodyOutstanding,
 }
 
 struct OrdinaryFailureBundle {
@@ -86,9 +248,11 @@ struct OrdinaryFailureBundle {
 
 struct AbandonedOrdinaryWindow {
     _completion: Option<Result<(), DeviceError>>,
-    _entries: BTreeMap<MessageId, OrdinaryEntry>,
+    _entries: BTreeMap<MessageId, RelaySendEntry>,
     _failure: OrdinaryFailureBundle,
     _identity: Arc<()>,
+    #[cfg(unix)]
+    _socket: Arc<RelaySocketIdentity>,
     _endpoint: DeviceEndpoint,
 }
 
@@ -102,12 +266,19 @@ impl OrdinaryAccepted {
     }
 }
 
-impl OrdinarySendWindow {
-    pub(super) fn new(endpoint: DeviceEndpoint) -> Result<Self, DeviceError> {
+impl RelaySendWindow {
+    pub(super) fn new(
+        endpoint: DeviceEndpoint,
+        _connection: &RelayConnection,
+    ) -> Result<Self, DeviceError> {
         endpoint.check_outbound_health()?;
+        #[cfg(unix)]
+        let socket = _connection.capture_socket_identity(endpoint.public_keys().device_id)?;
         Ok(Self {
             endpoint,
             identity: Arc::new(()),
+            #[cfg(unix)]
+            socket,
             entries: BTreeMap::new(),
             finished: false,
             completion: None,
@@ -121,6 +292,90 @@ impl OrdinarySendWindow {
 
     pub(super) fn has_capacity(&self) -> bool {
         !self.finished && self.failure.is_none() && self.entries.len() < MAX_ORDINARY_INFLIGHT
+    }
+
+    #[cfg(unix)]
+    pub(in crate::devices) fn matches_endpoint(&self, endpoint: &DeviceEndpoint) -> bool {
+        Arc::ptr_eq(&self.endpoint.inner, &endpoint.inner)
+    }
+
+    #[cfg(unix)]
+    pub(in crate::devices) fn reserve_settings(
+        &mut self,
+        queued: &OwnedQueuedSettingsReply,
+        connection: &Arc<SettingsConnectionIdentity>,
+    ) -> Result<SettingsWindowReservation<'_>, SettingsSendAdmissionError> {
+        use SettingsSendAdmissionError as Admission;
+
+        self.endpoint
+            .check_outbound_health()
+            .map_err(Admission::Endpoint)?;
+        if self.finished || self.failure.is_some() {
+            return Err(Admission::Association);
+        }
+        if !self.has_capacity() {
+            return Err(Admission::Full);
+        }
+        if !connection.is_live() || !self.socket.is_live() {
+            return Err(Admission::Socket(RemoteError::Closed));
+        }
+        if !connection.shares_socket(&self.socket) {
+            return Err(Admission::Socket(RemoteError::Protocol));
+        }
+        let id = queued
+            .committed()
+            .map_err(Admission::Owner)?
+            .header()
+            .message_id;
+        let Entry::Vacant(entry) = self.entries.entry(id) else {
+            return Err(Admission::Association);
+        };
+        let entry = entry.insert(RelaySendEntry::Settings(SettingsSendCell {
+            association: None,
+            state: SettingsCustodyState::Provisional,
+            slot: OrdinarySlot {
+                window: Arc::clone(&self.identity),
+                identity: Arc::new(()),
+            },
+        }));
+        let RelaySendEntry::Settings(cell) = entry else {
+            return Err(Admission::Association);
+        };
+        Ok(SettingsWindowReservation {
+            cell,
+            failure: &mut self.failure,
+        })
+    }
+
+    #[cfg(unix)]
+    pub(in crate::devices) fn settings_return(
+        &mut self,
+        ticket: &PendingSettingsSend,
+    ) -> Result<SettingsWindowReturn<'_>, SettingsSendReturnReason> {
+        use SettingsSendReturnReason as Reason;
+
+        if !ticket.shares_socket(&self.socket) {
+            return Err(Reason::Association);
+        }
+        let Entry::Occupied(entry) = self.entries.entry(ticket.message_id()) else {
+            return Err(Reason::Association);
+        };
+        let RelaySendEntry::Settings(cell) = entry.get() else {
+            return Err(Reason::Association);
+        };
+        let SettingsCustodyState::LoanedUnstarted(source) = &cell.state else {
+            return Err(Reason::Association);
+        };
+        if !ticket.matches_slot(&self.identity, &cell.slot.identity)
+            || !Arc::ptr_eq(&cell.slot.window, &self.identity)
+            || !ticket.matches_source(source)
+        {
+            return Err(Reason::Association);
+        }
+        Ok(SettingsWindowReturn {
+            entry: Some(entry),
+            failure: &mut self.failure,
+        })
     }
 
     pub(super) async fn prepare_and_send(
@@ -148,8 +403,8 @@ impl OrdinarySendWindow {
                 identity: Arc::new(()),
             },
         });
-        self.entries.insert(id, OrdinaryEntry::Registered { input });
-        let input = match self.entries.get(&id) {
+        self.insert_ordinary(id, OrdinaryEntry::Registered { input });
+        let input = match self.entries.get(&id).and_then(RelaySendEntry::ordinary) {
             Some(OrdinaryEntry::Registered { input }) => Arc::clone(input),
             _ => return self.fault("ordinary registration was not retained"),
         };
@@ -164,7 +419,7 @@ impl OrdinarySendWindow {
             }
         });
         let task = handle.id();
-        self.entries.insert(
+        self.insert_ordinary(
             id,
             OrdinaryEntry::Preparing {
                 task,
@@ -175,12 +430,12 @@ impl OrdinarySendWindow {
         self.observe_preparation(id).await?;
         self.check_observed(id)?;
         if matches!(
-            self.entries.get(&id),
+            self.entries.get(&id).and_then(RelaySendEntry::ordinary),
             Some(OrdinaryEntry::Observed { joined: Err(_), .. })
         ) {
             return Err(DeviceError::Worker);
         }
-        let (output, input) = match self.entries.remove(&id) {
+        let (output, input) = match self.take_ordinary(id) {
             Some(OrdinaryEntry::Observed {
                 joined: Ok(output),
                 input,
@@ -188,7 +443,7 @@ impl OrdinarySendWindow {
             }) => (output, input),
             entry => {
                 if let Some(entry) = entry {
-                    self.entries.insert(id, entry);
+                    self.insert_ordinary(id, entry);
                 }
                 return self.fault("ordinary joined output was not retained");
             }
@@ -196,25 +451,24 @@ impl OrdinarySendWindow {
         match output.result? {
             OrdinaryPreparation::NotSent(_) => return Ok(()),
             OrdinaryPreparation::Prepared(prepared) => {
-                self.entries
-                    .insert(id, OrdinaryEntry::Prepared { prepared, input });
+                self.insert_ordinary(id, OrdinaryEntry::Prepared { prepared, input });
             }
         }
-        if matches!(self.entries.get(&id), Some(OrdinaryEntry::Prepared { input, .. }) if input.cancellation.is_cancelled())
+        if matches!(self.entries.get(&id).and_then(RelaySendEntry::ordinary), Some(OrdinaryEntry::Prepared { input, .. }) if input.cancellation.is_cancelled())
         {
-            self.entries.remove(&id);
+            self.take_ordinary(id);
             return Ok(());
         }
-        let (prepared, input) = match self.entries.remove(&id) {
+        let (prepared, input) = match self.take_ordinary(id) {
             Some(OrdinaryEntry::Prepared { prepared, input }) => (prepared, input),
             entry => {
                 if let Some(entry) = entry {
-                    self.entries.insert(id, entry);
+                    self.insert_ordinary(id, entry);
                 }
                 return self.fault("ordinary prepared owner was not retained");
             }
         };
-        self.entries.insert(
+        self.insert_ordinary(
             id,
             OrdinaryEntry::SocketOwned {
                 message: Box::new(RelayClientMessage::Send {
@@ -225,11 +479,15 @@ impl OrdinarySendWindow {
                 input,
             },
         );
-        let outcome = match self.entries.get(&id) {
+        let outcome = match self.entries.get(&id).and_then(RelaySendEntry::ordinary) {
             Some(OrdinaryEntry::SocketOwned { message, .. }) => connection.send(message).await,
             _ => return self.fault("ordinary socket owner was not retained"),
         };
-        match self.entries.get_mut(&id) {
+        match self
+            .entries
+            .get_mut(&id)
+            .and_then(RelaySendEntry::ordinary_mut)
+        {
             Some(OrdinaryEntry::SocketOwned {
                 outcome: observed, ..
             }) => *observed = Some(outcome),
@@ -243,7 +501,7 @@ impl OrdinarySendWindow {
                 return Err(DeviceError::OutboundQuarantined);
             }
         }
-        let (message, outcome, input) = match self.entries.remove(&id) {
+        let (message, outcome, input) = match self.take_ordinary(id) {
             Some(OrdinaryEntry::SocketOwned {
                 message,
                 outcome: Some(outcome),
@@ -251,7 +509,7 @@ impl OrdinarySendWindow {
             }) => (message, outcome, input),
             entry => {
                 if let Some(entry) = entry {
-                    self.entries.insert(id, entry);
+                    self.insert_ordinary(id, entry);
                 }
                 return self.fault("ordinary send result was not retained");
             }
@@ -261,7 +519,7 @@ impl OrdinarySendWindow {
         let input = match Arc::try_unwrap(input) {
             Ok(input) => input,
             Err(input) => {
-                self.entries.insert(id, OrdinaryEntry::Retained { input });
+                self.insert_ordinary(id, OrdinaryEntry::Retained { input });
                 return self.fault("ordinary input remained shared after join and send");
             }
         };
@@ -273,7 +531,7 @@ impl OrdinarySendWindow {
             ..
         } = input;
         drop((endpoint, candidate, cancellation));
-        self.entries.insert(
+        self.insert_ordinary(
             id,
             OrdinaryEntry::AwaitAccepted {
                 sent_at: tokio::time::Instant::now(),
@@ -283,8 +541,28 @@ impl OrdinarySendWindow {
         Ok(())
     }
 
+    fn insert_ordinary(&mut self, id: MessageId, entry: OrdinaryEntry) {
+        self.entries.insert(id, RelaySendEntry::Ordinary(entry));
+    }
+
+    fn take_ordinary(&mut self, id: MessageId) -> Option<OrdinaryEntry> {
+        match self.entries.remove(&id) {
+            Some(RelaySendEntry::Ordinary(entry)) => Some(entry),
+            #[cfg(unix)]
+            Some(entry) => {
+                self.entries.insert(id, entry);
+                None
+            }
+            None => None,
+        }
+    }
+
     async fn observe_preparation(&mut self, id: MessageId) -> Result<(), DeviceError> {
-        let (task, joined, input) = match self.entries.get_mut(&id) {
+        let (task, joined, input) = match self
+            .entries
+            .get_mut(&id)
+            .and_then(RelaySendEntry::ordinary_mut)
+        {
             Some(OrdinaryEntry::Preparing {
                 task,
                 handle,
@@ -292,7 +570,7 @@ impl OrdinarySendWindow {
             }) => (*task, handle.await, Arc::clone(input)),
             _ => return self.fault("ordinary preparation handle was not retained"),
         };
-        self.entries.insert(
+        self.insert_ordinary(
             id,
             OrdinaryEntry::Observed {
                 task,
@@ -304,7 +582,7 @@ impl OrdinarySendWindow {
     }
 
     fn check_observed(&mut self, id: MessageId) -> Result<(), DeviceError> {
-        let matches = match self.entries.get(&id) {
+        let matches = match self.entries.get(&id).and_then(RelaySendEntry::ordinary) {
             Some(OrdinaryEntry::Observed {
                 task,
                 joined,
@@ -341,27 +619,34 @@ impl OrdinarySendWindow {
             return Ok(());
         }
         if !self.awaiting(message_id) {
-            return self.fault("ordinary maintenance encountered an unfinished owner");
+            return self.fault("relay maintenance encountered unfinished custody");
         }
         self.entries.remove(&message_id);
         Ok(())
     }
 
     fn awaiting(&self, id: MessageId) -> bool {
-        matches!(self.entries.get(&id), Some(OrdinaryEntry::AwaitAccepted { slot, .. }) if Arc::ptr_eq(&slot.window, &self.identity))
+        matches!(self.entries.get(&id).and_then(RelaySendEntry::ordinary), Some(OrdinaryEntry::AwaitAccepted { slot, .. }) if Arc::ptr_eq(&slot.window, &self.identity))
     }
 
     fn check_associations(&mut self) -> Result<(), DeviceError> {
         let valid = self.entries.iter().all(|(id, entry)| match entry {
-            OrdinaryEntry::Registered { input }
-            | OrdinaryEntry::Preparing { input, .. }
-            | OrdinaryEntry::Observed { input, .. }
-            | OrdinaryEntry::Prepared { input, .. }
-            | OrdinaryEntry::SocketOwned { input, .. }
-            | OrdinaryEntry::Retained { input } => {
-                input.candidate.message_id == *id && Arc::ptr_eq(&input.slot.window, &self.identity)
-            }
-            OrdinaryEntry::AwaitAccepted { slot, .. } => Arc::ptr_eq(&slot.window, &self.identity),
+            RelaySendEntry::Ordinary(entry) => match entry {
+                OrdinaryEntry::Registered { input }
+                | OrdinaryEntry::Preparing { input, .. }
+                | OrdinaryEntry::Observed { input, .. }
+                | OrdinaryEntry::Prepared { input, .. }
+                | OrdinaryEntry::SocketOwned { input, .. }
+                | OrdinaryEntry::Retained { input } => {
+                    input.candidate.message_id == *id
+                        && Arc::ptr_eq(&input.slot.window, &self.identity)
+                }
+                OrdinaryEntry::AwaitAccepted { slot, .. } => {
+                    Arc::ptr_eq(&slot.window, &self.identity)
+                }
+            },
+            #[cfg(unix)]
+            RelaySendEntry::Settings(cell) => cell.matches_window(&self.identity),
         });
         if !valid {
             return self.fault("ordinary window ownership association mismatch");
@@ -371,7 +656,7 @@ impl OrdinarySendWindow {
 
     pub(super) fn check_timeout(&mut self) -> Result<(), DeviceError> {
         self.check_associations()?;
-        if self.entries.values().any(|entry| {
+        if self.entries.values().filter_map(RelaySendEntry::ordinary).any(|entry| {
             matches!(entry, OrdinaryEntry::AwaitAccepted { sent_at, .. } if sent_at.elapsed() > Duration::from_secs(15))
         }) {
             return Err(RemoteError::Timeout.into());
@@ -385,25 +670,27 @@ impl OrdinarySendWindow {
     ) -> Result<(), DeviceError> {
         self.completion = Some(outcome);
         let associations_ok = self.check_associations().is_ok();
-        while let Some(id) = self
-            .entries
-            .iter()
-            .find_map(|(id, entry)| matches!(entry, OrdinaryEntry::Preparing { .. }).then_some(*id))
-        {
+        while let Some(id) = self.entries.iter().find_map(|(id, entry)| {
+            matches!(entry.ordinary(), Some(OrdinaryEntry::Preparing { .. })).then_some(*id)
+        }) {
             if self.observe_preparation(id).await.is_err() || self.check_observed(id).is_err() {
                 break;
             }
         }
         if (!associations_ok
-            || self.entries.values().any(|entry| {
-                matches!(
-                    entry,
-                    OrdinaryEntry::Registered { .. }
-                        | OrdinaryEntry::Preparing { .. }
-                        | OrdinaryEntry::SocketOwned { outcome: None, .. }
-                        | OrdinaryEntry::Retained { .. }
-                )
-            }))
+            || self
+                .entries
+                .values()
+                .filter_map(RelaySendEntry::ordinary)
+                .any(|entry| {
+                    matches!(
+                        entry,
+                        OrdinaryEntry::Registered { .. }
+                            | OrdinaryEntry::Preparing { .. }
+                            | OrdinaryEntry::SocketOwned { outcome: None, .. }
+                            | OrdinaryEntry::Retained { .. }
+                    )
+                }))
             && self.failure.is_none()
         {
             self.failure = Some(OrdinaryFailureBundle {
@@ -411,6 +698,18 @@ impl OrdinarySendWindow {
                 _cleanup: OrdinaryIssue::Bookkeeping {
                     _reason: "ordinary cleanup retained unfinished ownership",
                 },
+            });
+        }
+        #[cfg(unix)]
+        if self
+            .entries
+            .values()
+            .any(|entry| matches!(entry, RelaySendEntry::Settings(_)))
+            && self.failure.is_none()
+        {
+            self.failure = Some(OrdinaryFailureBundle {
+                _primary: None,
+                _cleanup: OrdinaryIssue::PrivateCustodyOutstanding,
             });
         }
         if let Some(failure) = self.failure.take() {
@@ -451,15 +750,23 @@ impl OrdinarySendWindow {
             _entries: std::mem::take(&mut self.entries),
             _failure: failure,
             _identity: Arc::clone(&self.identity),
+            #[cfg(unix)]
+            _socket: Arc::clone(&self.socket),
             _endpoint: self.endpoint.clone(),
         };
-        let _ = Box::leak(Box::new(retained));
+        let _retained = Box::leak(Box::new(retained));
+        #[cfg(unix)]
+        for entry in _retained._entries.values() {
+            if let RelaySendEntry::Settings(cell) = entry {
+                cell.quarantine_work();
+            }
+        }
         self.finished = true;
         self.endpoint.quarantine_outbound();
     }
 }
 
-impl Drop for OrdinarySendWindow {
+impl Drop for RelaySendWindow {
     fn drop(&mut self) {
         if !self.finished
             && (!self.entries.is_empty() || self.completion.is_some() || self.failure.is_some())
