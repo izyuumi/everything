@@ -422,14 +422,20 @@ impl Store {
     }
 
     pub(crate) fn connection(&self) -> StorageResult<MutexGuard<'_, Connection>> {
-        if self.quarantined.load(Ordering::Acquire) {
-            return Err(StorageError::Quarantined);
-        }
+        self.check_connection_health()?;
         let connection = self.connection.lock().map_err(|_| StorageError::Poisoned)?;
+        self.check_connection_health()?;
+        Ok(connection)
+    }
+
+    pub(crate) fn check_connection_health(&self) -> StorageResult<()> {
         if self.quarantined.load(Ordering::Acquire) {
             return Err(StorageError::Quarantined);
         }
-        Ok(connection)
+        if self.connection.is_poisoned() {
+            return Err(StorageError::Poisoned);
+        }
+        Ok(())
     }
 
     pub(crate) fn quarantine_connection(&self) {
