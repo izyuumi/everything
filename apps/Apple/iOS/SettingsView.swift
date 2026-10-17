@@ -81,8 +81,46 @@ struct SettingsView: View {
                     }
                     Text("This original binding cannot be retried here. Cancelling or disconnecting does not confirm that the Host closed it.").font(.footnote)
                 }
-                Text("Binding requests do not start an assistant or enable Host controls.").font(.footnote)
+                Text("Binding requests do not start an assistant or change Host settings.").font(.footnote)
                 Text("This check reports access metadata only. It does not change Host settings or contact an AI provider. A stale observation grants no access.").font(.footnote)
+            }
+            Section("Connected Host values") {
+                Button("Read Host values") { model.readHostSettingsSnapshot() }
+                    .disabled(!model.canReadHostSettingsSnapshot)
+                if model.hostSettingsSnapshotStatus?.blocksNewRequest == true {
+                    Button("Cancel value read", role: .cancel) { model.cancelHostSettingsSnapshot() }
+                }
+                Text(snapshotStatus).font(.footnote).foregroundStyle(.secondary)
+                if let access = model.hostSettingsAccess, case .available(let summary) = access.display.status,
+                   summary.readableKeys.isEmpty {
+                    Text("No Host values were reported as readable for this device.").font(.footnote)
+                }
+                if let observation = model.hostSettingsSnapshot {
+                    Text(model.hostSettingsSnapshotIsCurrent ? "Current connection observation" : "Stale read-only observation")
+                        .font(.caption).foregroundStyle(.secondary)
+                    switch observation.display {
+                    case .denied(let reason):
+                        Text(reason == .grantUnavailable
+                             ? "The Host reported that Settings access is unavailable."
+                             : "The Host reported that the requested values are outside this device’s scope.")
+                    case .values(let snapshot):
+                        LabeledContent("Observed revision", value: String(snapshot.revision))
+                        LabeledContent("Observed") { Text(Date(timeIntervalSince1970: Double(snapshot.observedAt) / 1000), style: .time) }
+                        ForEach(snapshot.entries, id: \.key) { entry in
+                            VStack(alignment: .leading, spacing: 6) {
+                                Text(settingNames([entry.key])).font(.headline)
+                                LabeledContent("Default") { Text(verbatim: settingValue(entry.defaultValue)) }
+                                LabeledContent("Desired") { Text(verbatim: entry.desired.map(settingValue) ?? "No desired value") }
+                                LabeledContent("Effective") { Text(verbatim: entry.effective.map(settingValue) ?? "No effective value") }
+                                LabeledContent("State", value: settingState(entry.state))
+                                if let reason = entry.unavailableReason {
+                                    Text(unavailableReason(reason)).font(.footnote).foregroundStyle(.secondary)
+                                }
+                            }
+                        }
+                    }
+                }
+                Text("Reads show only the granted Host values. They do not change settings or contact an AI provider. Offline observations are stale.").font(.footnote)
             }
             Section("This iPhone") {
                 NavigationLink("Appearance and notifications", value: ClientSettingsDestination.thisDevice)
@@ -116,6 +154,58 @@ struct SettingsView: View {
         case .expired: "The access check expired without a current observation."
         case .interrupted: "The access check was interrupted; current Host access is unknown."
         case nil: "Connect to the Host, then explicitly check its access for this device."
+        }
+    }
+
+    private var snapshotStatus: String {
+        switch model.hostSettingsSnapshotStatus {
+        case .preparing: "Preparing the original value read."
+        case .awaitingReply: "Waiting for the Host values."
+        case .settling: "Finishing the original value read."
+        case .received: "The original Host response was observed."
+        case .cancelled: "The value read was cancelled."
+        case .expired: "The value read expired without a current observation."
+        case .interrupted: "The value read was interrupted; current Host values are unknown."
+        case nil: "Check Host access and request a binding, then explicitly read its granted values."
+        }
+    }
+
+    private func settingValue(_ value: RemoteSettingsValue) -> String {
+        switch value {
+        case .model(let selection):
+            if let selection {
+                return "\(selection.provider == .anthropic ? "Anthropic" : "OpenAI"): \(selection.model)"
+            }
+            return "Not selected"
+        case .toolSelection(let selection):
+            switch selection {
+            case .local: return "Local"
+            case .systemOne(let model): return "System One: \(model)"
+            }
+        case .boolean(let value): return value ? "Enabled" : "Disabled"
+        case .dimensions(let value): return value.map { String($0) } ?? "Backend default"
+        case .embeddingModel(let model): return model ?? "Unavailable"
+        }
+    }
+
+    private func settingState(_ state: SettingState) -> String {
+        switch state {
+        case .effective: "Effective"
+        case .pendingApplication: "Pending application"
+        case .restartRequired: "Restart required"
+        case .unavailable: "Unavailable"
+        }
+    }
+
+    private func unavailableReason(_ reason: SettingsUnavailableReason) -> String {
+        switch reason {
+        case .hostOffline: "The Host is offline."
+        case .providerUnavailable: "The provider is unavailable."
+        case .embeddingMetadataUnavailable: "Embedding status is unavailable."
+        case .embeddingBoundaryUnavailable: "Local embeddings are unavailable."
+        case .nativeActionUnavailable: "This action requires the Host."
+        case .permissionDenied: "Permission was denied."
+        case .expired: "The observation expired."
         }
     }
 
