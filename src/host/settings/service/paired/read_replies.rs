@@ -297,6 +297,7 @@ impl SettingsReceiptAuthority {
             return Err(SettingsServiceError::OutsideScope.into());
         }
         check_read_reply_reservation(connection, request)?;
+        self.check_joined_read_context(store, mutation, request)?;
         let observed = self.core.authority.observe_committed_read_query(
             &self.host,
             request,
@@ -320,7 +321,6 @@ impl SettingsReceiptAuthority {
         {
             return Err(SettingsServiceError::Expired.into());
         }
-        self.check_joined_read_context(store, mutation, request)?;
         Ok(ReadReplyObservation {
             owner: observed.owner,
             query: observed.query,
