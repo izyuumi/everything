@@ -55,13 +55,14 @@ pub(crate) use settings_ingress::{
 };
 #[cfg(unix)]
 pub(crate) use settings_ingress::{
-    AuthenticatedSettingsReadSource, OwnedCommittedSettingsRead, OwnedCommittedSettingsSnapshot,
-    OwnedVerifiedSettingsRead, SettingsReadSourceError,
+    AuthenticatedSettingsReadSource, OwnedCommittedSettingsInspection, OwnedCommittedSettingsRead,
+    OwnedCommittedSettingsSnapshot, OwnedVerifiedSettingsRead, SettingsReadSourceError,
 };
 #[cfg(unix)]
 pub(crate) use settings_read_reply::{
-    SettingsHostSnapshot, SettingsReadReplyPacket, SettingsRemoteEntry,
-    SettingsRemoteModelSelection, SettingsRemoteToolSelection, SettingsRemoteValue,
+    SettingsHostSnapshot, SettingsOriginalInspectionLookup, SettingsReadReplyPacket,
+    SettingsRemoteEntry, SettingsRemoteModelSelection, SettingsRemoteToolSelection,
+    SettingsRemoteValue,
 };
 
 #[cfg(unix)]
