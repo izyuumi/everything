@@ -9,7 +9,9 @@ mod transport;
 pub(crate) use external::ExternalTaskStateUpdate;
 pub(crate) use settings_grants::settings_grant_head_on;
 #[cfg(unix)]
-pub(crate) use settings_publication::{CommittedSettingsReply, SettingsReplyPublishFailure};
+pub(crate) use settings_publication::{
+    CommittedSettingsReply, SettingsCiphertextLoadFailure, SettingsReplyPublishFailure,
+};
 #[cfg(unix)]
 pub(crate) use settings_transport::{
     ConsumedSettingsReply, SettingsAccessAdmissionError, SettingsAccessReceiptCommit,
