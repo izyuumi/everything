@@ -1391,6 +1391,37 @@ pub(super) fn public_failure(error: &HostError) -> LocalFailure {
             LocalFailureCode::Unavailable,
             "scheduler operation requires an owner decision or is unavailable",
         ),
+        HostError::Consolidation(
+            crate::memory::consolidate::ConsolidationError::Invalid(_)
+            | crate::memory::consolidate::ConsolidationError::Limit { .. },
+        )
+        | HostError::Memory(super::memory::MemoryError::Consolidation(
+            crate::memory::consolidate::ConsolidationError::Invalid(_)
+            | crate::memory::consolidate::ConsolidationError::Limit { .. },
+        )) => (
+            LocalFailureCode::InvalidRequest,
+            "memory request or plan is invalid or exceeds a documented bound",
+        ),
+        HostError::Consolidation(crate::memory::consolidate::ConsolidationError::NotFound(_)) => {
+            (LocalFailureCode::InvalidRequest, "memory job was not found")
+        }
+        HostError::Consolidation(
+            crate::memory::consolidate::ConsolidationError::JobConflict(_)
+            | crate::memory::consolidate::ConsolidationError::PageConflict(_),
+        ) => (
+            LocalFailureCode::InvalidRequest,
+            "memory job identity, phase or page hash conflicts with durable state; inspect the job",
+        ),
+        HostError::Consolidation(
+            crate::memory::consolidate::ConsolidationError::CommitStarted(_),
+        ) => (
+            LocalFailureCode::InvalidRequest,
+            "memory job has a durable prepared write; inspect or retry it instead of cancelling",
+        ),
+        HostError::Memory(super::memory::MemoryError::Draining) => (
+            LocalFailureCode::Unavailable,
+            "memory service is shutting down",
+        ),
         _ => (
             LocalFailureCode::Internal,
             "host operation failed; durable acceptance may already exist",

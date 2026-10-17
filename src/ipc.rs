@@ -141,6 +141,8 @@ pub enum OwnerQuery {
     RetrieveMemory {
         question: String,
     },
+    #[cfg(feature = "local-embeddings")]
+    EmbeddingIndex,
     Identity,
     Runtime,
     ToolRecovery,
@@ -490,6 +492,10 @@ pub enum OwnerQueryResult {
         retrieval: crate::memory::search::RetrievalSummary,
         omitted_hits: usize,
     },
+    #[cfg(feature = "local-embeddings")]
+    EmbeddingIndex {
+        status: Option<Box<crate::memory::vector::VectorStatus>>,
+    },
     Identity {
         keys: crate::crypto::DevicePublicKeys,
         fingerprint: String,
@@ -660,6 +666,8 @@ impl OwnerQueryResult {
             (OwnerQuery::RetrieveMemory { .. }, Self::RetrievedMemory { excerpts, .. }) => {
                 excerpts.len() <= 16
             }
+            #[cfg(feature = "local-embeddings")]
+            (OwnerQuery::EmbeddingIndex, Self::EmbeddingIndex { .. }) => true,
             (OwnerQuery::Transport, Self::Transport { .. }) => true,
             (OwnerQuery::Runtime, Self::Runtime { .. }) => true,
             (

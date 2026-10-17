@@ -187,6 +187,18 @@ impl HostInner {
                     omitted_hits: memory.omitted_hits,
                 })
             }
+            #[cfg(feature = "local-embeddings")]
+            OwnerQuery::EmbeddingIndex => {
+                let _admission = self.composition.enter().await?;
+                Ok(OwnerQueryResult::EmbeddingIndex {
+                    status: self
+                        .composition
+                        .memory
+                        .semantic_status()
+                        .await?
+                        .map(Box::new),
+                })
+            }
             OwnerQuery::Settings => {
                 self.blocking(|host| {
                     Ok(OwnerQueryResult::Settings {
@@ -405,6 +417,14 @@ impl HostInner {
                 fresh,
             } => {
                 let _admission = self.composition.enter().await?;
+                if !matches!(
+                    self.composition.memory.status().embeddings,
+                    super::memory::EmbeddingStatus::Enabled { .. }
+                ) {
+                    return Err(HostError::Invalid(
+                        "local embeddings are not enabled and available; inspect composition status",
+                    ));
+                }
                 let report = self
                     .composition
                     .memory
