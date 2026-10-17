@@ -120,6 +120,7 @@ fileprivate enum VerifiedReplicaSettingsBody: Sendable, CustomStringConvertible,
     case access(RemoteSettingsAccessReply)
     case bind(RemoteSettingsBindReply)
     case snapshot(RemoteSettingsReadReply)
+    case inspection(RemoteSettingsReadReply)
 
     var description: String { "VerifiedReplicaSettingsBody([redacted])" }
     var debugDescription: String { description }
@@ -201,6 +202,12 @@ final class ReplicaSettingsBoundParentProjection: Sendable, CustomStringConverti
                                                      parent: parent, keys: input.keys, time: input.time)
     }
 
+    func prepareInspectionRequest(owner: isolated ReplicaService) throws -> RemoteSettingsOriginalInspectionRequest {
+        let input = try owner.captureSettingsInspectionRequestInput(self)
+        return try RemoteSettingsOriginalInspectionRequest(hostID: input.hostID, queryID: input.queryID,
+                            parent: parent, requestID: input.requestID, operationID: input.operationID, time: input.time)
+    }
+
     var description: String { "ReplicaSettingsBoundParentProjection([redacted])" }
     var debugDescription: String { description }
 }
@@ -219,6 +226,31 @@ final class ReplicaSettingsSnapshotProjection: Sendable, CustomStringConvertible
     fileprivate init(display: ReplicaSettingsSnapshotDisplay) { self.display = display }
 
     var description: String { "ReplicaSettingsSnapshotProjection([redacted])" }
+    var debugDescription: String { description }
+}
+
+enum ReplicaSettingsInspectionLookup: Sendable, CustomStringConvertible, CustomDebugStringConvertible {
+    case notRecorded
+    case recorded(RemoteSettingsOriginalView)
+
+    var description: String { "ReplicaSettingsInspectionLookup([redacted])" }
+    var debugDescription: String { description }
+}
+
+enum ReplicaSettingsInspectionDisplay: Sendable, CustomStringConvertible, CustomDebugStringConvertible {
+    case observation(requestID: UUID, operationID: UUID?, observedAt: UInt64, lookup: ReplicaSettingsInspectionLookup)
+    case denied(RemoteSettingsReadDenial)
+
+    var description: String { "ReplicaSettingsInspectionDisplay([redacted])" }
+    var debugDescription: String { description }
+}
+
+final class ReplicaSettingsInspectionProjection: Sendable, CustomStringConvertible, CustomDebugStringConvertible {
+    let display: ReplicaSettingsInspectionDisplay
+
+    fileprivate init(display: ReplicaSettingsInspectionDisplay) { self.display = display }
+
+    var description: String { "ReplicaSettingsInspectionProjection([redacted])" }
     var debugDescription: String { description }
 }
 
@@ -251,6 +283,9 @@ final class VerifiedReplicaSettingsReply: Sendable, CustomStringConvertible, Cus
                                                 correlation: .bind(bindingRequestID: reply.bindingRequestID),
                                                 generation: reply.parent.generation)
         case .snapshot(let reply):
+            return ReplicaSettingsReplyMetadata(header: envelope.header, inReplyTo: reply.inReplyTo,
+                                                correlation: .query(queryID: reply.queryID), generation: reply.generation)
+        case .inspection(let reply):
             return ReplicaSettingsReplyMetadata(header: envelope.header, inReplyTo: reply.inReplyTo,
                                                 correlation: .query(queryID: reply.queryID), generation: reply.generation)
         }
@@ -339,6 +374,31 @@ final class VerifiedReplicaSettingsReply: Sendable, CustomStringConvertible, Cus
         return ReplicaSettingsSnapshotProjection(display: display)
     }
 
+    fileprivate func projectInspectionDisplay(committed: CommittedReplicaSettingsReply,
+                                             qualification: ReplicaSettingsInspectionQualification,
+                                             owner: isolated ReplicaService) throws -> ReplicaSettingsInspectionProjection {
+        guard committed.matchesVerifiedObject(self) else { throw WireError.identity }
+        try owner.checkSettingsInspectionDisplayProjection(qualification, committed: committed)
+        try envelope.header.validate(now: WireID.now())
+        guard envelope.header.expires > envelope.header.created,
+              envelope.header.expires - envelope.header.created <= 60_000,
+              case .inspection(let reply) = body else { throw WireError.invalid }
+        let display: ReplicaSettingsInspectionDisplay
+        switch reply.body {
+        case .originalInspection(let requestID, let operationID, let observedAt, let lookup):
+            let displayed: ReplicaSettingsInspectionLookup
+            switch lookup {
+            case .notRecorded: displayed = .notRecorded
+            case .recorded(_, let view): displayed = .recorded(view)
+            }
+            display = .observation(requestID: requestID, operationID: operationID, observedAt: observedAt, lookup: displayed)
+        case .denied(let reason): display = .denied(reason)
+        case .snapshot: throw WireError.invalid
+        }
+        try qualification.consumeForInspectionProjection(for: committed, owner: owner)
+        return ReplicaSettingsInspectionProjection(display: display)
+    }
+
     var description: String { "VerifiedReplicaSettingsReply([redacted])" }
     var debugDescription: String { description }
 }
@@ -380,6 +440,12 @@ final class CommittedReplicaSettingsReply: Sendable, CustomStringConvertible, Cu
         return try verified.projectSnapshotDisplay(committed: self, qualification: qualification, owner: owner)
     }
 
+    func projectInspectionDisplay(qualifiedBy qualification: ReplicaSettingsInspectionQualification,
+                                owner: isolated ReplicaService) throws -> ReplicaSettingsInspectionProjection {
+        try qualification.checkCurrent(for: self, owner: owner)
+        return try verified.projectInspectionDisplay(committed: self, qualification: qualification, owner: owner)
+    }
+
     var description: String { "CommittedReplicaSettingsReply([redacted])" }
     var debugDescription: String { description }
 }
@@ -397,6 +463,7 @@ enum ReplicaClassifiedDeliveryResult: Sendable, CustomStringConvertible, CustomD
     case settingsAccess(VerifiedReplicaSettingsReply)
     case settingsBind(VerifiedReplicaSettingsReply)
     case settingsSnapshot(VerifiedReplicaSettingsReply)
+    case settingsInspection(VerifiedReplicaSettingsReply)
     case refused(ReplicaDeliveryDisposition)
 
     var description: String { "ReplicaClassifiedDeliveryResult([redacted])" }
@@ -482,6 +549,11 @@ actor DeviceIdentity {
     }
 
     func sealSettings(_ request: RemoteSettingsSnapshotReadRequest, recipient: DevicePublicKeys) throws -> EncryptedEnvelope {
+        let context = try settingsSealContext(hostID: request.hostID, time: request.time, recipient: recipient)
+        return try sealSettings(request.encoded(), context: context)
+    }
+
+    func sealSettings(_ request: RemoteSettingsOriginalInspectionRequest, recipient: DevicePublicKeys) throws -> EncryptedEnvelope {
         let context = try settingsSealContext(hostID: request.hostID, time: request.time, recipient: recipient)
         return try sealSettings(request.encoded(), context: context)
     }
@@ -586,6 +658,22 @@ actor DeviceIdentity {
                                             localID: publicKeys.deviceID, body: .snapshot(reply))
     }
 
+    private func verifiedSettingsInspectionReply(_ plaintext: Data, envelope: EncryptedEnvelope,
+                                               host: DevicePublicKeys,
+                                               request: RemoteSettingsOriginalInspectionRequest) throws -> VerifiedReplicaSettingsReply {
+        let reply = try RemoteSettingsReadWire.decodeReply(plaintext, matching: request)
+        guard reply.hostID == host.deviceID else { throw WireError.identity }
+        let maximum: Int
+        switch reply.body {
+        case .originalInspection: maximum = 90_112
+        case .denied: maximum = 4096
+        case .snapshot: throw WireError.invalid
+        }
+        try validateSettingsReplyEnvelope(envelope, maximum: maximum)
+        return VerifiedReplicaSettingsReply(envelope: envelope, host: host,
+                                            localID: publicKeys.deviceID, body: .inspection(reply))
+    }
+
     private func validateSettingsReplyEnvelope(_ envelope: EncryptedEnvelope, maximum: Int) throws {
         guard envelope.header.expires > envelope.header.created,
               envelope.header.expires - envelope.header.created <= 60_000 else { throw WireError.invalid }
@@ -613,9 +701,23 @@ actor DeviceIdentity {
         try await receiveClassified(received, host: host, into: store, expectation: .snapshot(request))
     }
 
+    func receiveClassified(_ received: ReceivedRelayFrame, host: DevicePublicKeys,
+                           into store: ReplicaStore,
+                           matchingInspection request: RemoteSettingsOriginalInspectionRequest?) async throws -> ReplicaClassifiedDelivery {
+        try await receiveClassified(received, host: host, into: store, expectation: .inspection(request))
+    }
+
     private enum SettingsReplyExpectation {
         case accessOrBind
         case snapshot(RemoteSettingsSnapshotReadRequest?)
+        case inspection(RemoteSettingsOriginalInspectionRequest?)
+
+        var packetLimit: Int {
+            switch self {
+            case .accessOrBind, .snapshot: 32_768
+            case .inspection: 65_536
+            }
+        }
     }
 
     private func receiveClassified(_ received: ReceivedRelayFrame, host: DevicePublicKeys,
@@ -629,7 +731,7 @@ actor DeviceIdentity {
             let fresh = try await store.acceptAuthenticated(envelope, plaintext: packet.plaintext, host: host, localID: publicKeys.deviceID)
             result = .ordinary(fresh ? .fresh : .duplicate)
         case .settings:
-            guard received.originalByteCount <= 364_544, packet.plaintext.count <= 32_768 else { throw WireError.size }
+            guard received.originalByteCount <= 364_544, packet.plaintext.count <= expectation.packetLimit else { throw WireError.size }
             if let reply = try classifiedSettingsReply(packet.plaintext, envelope: envelope, host: host, expectation: expectation) {
                 result = reply
             } else {
@@ -661,11 +763,16 @@ actor DeviceIdentity {
                                          host: DevicePublicKeys,
                                          expectation: SettingsReplyExpectation) throws -> ReplicaClassifiedDeliveryResult? {
         do {
-            let packet = try WireValue.parse(plaintext, maximum: 32_768)
+            let packet = try WireValue.parse(plaintext, maximum: expectation.packetLimit)
             let family = try packet.field("payload").field("message").field("correlation").field("family").text
             if case .snapshot(let request) = expectation {
                 guard family == "query", let request else { return nil }
                 return .settingsSnapshot(try verifiedSettingsSnapshotReply(plaintext, envelope: envelope,
+                                                                           host: host, request: request))
+            }
+            if case .inspection(let request) = expectation {
+                guard family == "query", let request else { return nil }
+                return .settingsInspection(try verifiedSettingsInspectionReply(plaintext, envelope: envelope,
                                                                            host: host, request: request))
             }
             switch family {

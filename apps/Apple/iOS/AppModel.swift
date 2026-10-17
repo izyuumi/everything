@@ -34,8 +34,11 @@ final class AppModel {
     private(set) var hostSettingsBinding: ReplicaSettingsBindingView?
     private(set) var hostSettingsBindingFresh = false
     private(set) var hostSettingsSnapshot: ReplicaSettingsSnapshotView?
+    private(set) var hostSettingsInspection: ReplicaSettingsInspectionView?
     private(set) var hostSettingsSnapshotFresh = false
+    private(set) var hostSettingsInspectionFresh = false
     private(set) var hostSettingsSnapshotStatus: ReplicaSettingsAccessRequestStatus?
+    private(set) var hostSettingsInspectionStatus: ReplicaSettingsAccessRequestStatus?
     private(set) var selectedTab: ClientTab = .chat
     private(set) var settingsPath: [ClientSettingsDestination] = []
     var pairing: PairingSummary?
@@ -66,6 +69,7 @@ final class AppModel {
         case access(ReplicaSettingsAccessInput)
         case bind(ReplicaSettingsBindInput)
         case snapshot(ReplicaSettingsSnapshotInput)
+        case inspection(ReplicaSettingsInspectionInput)
     }
 
     private final class SettingsAccessInteraction {
@@ -81,7 +85,9 @@ final class AppModel {
         var bindingInput: ReplicaSettingsBindInput?
         var bindingHandle: ReplicaSettingsRequestHandle?
         var snapshotInput: ReplicaSettingsSnapshotInput?
+        var inspectionInput: ReplicaSettingsInspectionInput?
         var snapshotHandle: ReplicaSettingsRequestHandle?
+        var inspectionHandle: ReplicaSettingsRequestHandle?
         var retired = false
 
         init(service: ReplicaService, host: DevicePublicKeys, localID: UUID,
@@ -162,13 +168,17 @@ final class AppModel {
             hostSettingsAccessFresh = false
             hostSettingsBindingFresh = false
             hostSettingsSnapshot = nil
+            hostSettingsInspection = nil
             hostSettingsSnapshotFresh = false
+            hostSettingsInspectionFresh = false
             return
         } catch {
             hostSettingsAccessFresh = false
             hostSettingsBindingFresh = false
             hostSettingsSnapshot = nil
+            hostSettingsInspection = nil
             hostSettingsSnapshotFresh = false
+            hostSettingsInspectionFresh = false
             present(error)
         }
     }
@@ -416,6 +426,7 @@ final class AppModel {
             && hostSettingsAccessStatus?.blocksNewRequest != true
             && hostSettingsBinding?.stage.blocksNewRequest != true
             && hostSettingsSnapshotStatus?.blocksNewRequest != true
+            && hostSettingsInspectionStatus?.blocksNewRequest != true
     }
 
     var canBindHostSettings: Bool {
@@ -446,11 +457,26 @@ final class AppModel {
         return !summary.readableKeys.isEmpty
     }
 
+    var canInspectHostSettingsOriginal: Bool {
+        canCheckHostSettingsAccess && hostSettingsBindingIsCurrent
+    }
+
     var hostSettingsSnapshotIsCurrent: Bool {
         guard hostSettingsSnapshotFresh, let original = accessInteraction,
               let capture = original.snapshotInput, let display = hostSettingsSnapshot,
               original.snapshotHandle === display.requestHandle,
               isCurrentSnapshotInteraction(original, capture: capture),
+              display.expiresAt > capture.wallFloor, display.expiresAt <= capture.expiresAt,
+              let wall = try? WireID.now(), wall >= capture.wallFloor, wall < display.expiresAt else { return false }
+        let deadline = capture.monotonicFloor.advanced(by: .milliseconds(Int64(display.expiresAt - capture.wallFloor)))
+        return ContinuousClock.now < deadline
+    }
+
+    var hostSettingsInspectionIsCurrent: Bool {
+        guard hostSettingsInspectionFresh, let original = accessInteraction,
+              let capture = original.inspectionInput, let display = hostSettingsInspection,
+              original.inspectionHandle === display.requestHandle,
+              isCurrentInspectionInteraction(original, capture: capture),
               display.expiresAt > capture.wallFloor, display.expiresAt <= capture.expiresAt,
               let wall = try? WireID.now(), wall >= capture.wallFloor, wall < display.expiresAt else { return false }
         let deadline = capture.monotonicFloor.advanced(by: .milliseconds(Int64(display.expiresAt - capture.wallFloor)))
@@ -466,10 +492,20 @@ final class AppModel {
             && monotonic >= capture.monotonicFloor && monotonic < capture.deadline
     }
 
+    private func isCurrentInspectionInteraction(_ original: SettingsAccessInteraction,
+                                               capture: ReplicaSettingsInspectionInput) -> Bool {
+        guard isCurrentSettingsScopeInteraction(original), original.inspectionInput === capture,
+              hostSettingsBindingIsCurrent, let wall = try? WireID.now() else { return false }
+        let monotonic = ContinuousClock.now
+        return wall >= capture.wallFloor && wall < capture.expiresAt
+            && monotonic >= capture.monotonicFloor && monotonic < capture.deadline
+    }
+
     private func isCurrentSettingsRequest(_ input: SettingsRequestInput, original: SettingsAccessInteraction) -> Bool {
         switch input {
         case .access, .bind: isCurrentAccessInteraction(original)
         case .snapshot(let capture): isCurrentSnapshotInteraction(original, capture: capture)
+        case .inspection(let capture): isCurrentInspectionInteraction(original, capture: capture)
         }
     }
 
@@ -545,7 +581,28 @@ final class AppModel {
         startHostSettingsRequest(.snapshot(input), original: original)
     }
 
+    func inspectHostSettingsOriginal(requestID: UUID, operationID: UUID?) {
+        guard canInspectHostSettingsOriginal, accessControlTask == nil, let original = accessInteraction,
+              let binding = hostSettingsBinding, original.bindingHandle === binding.requestHandle,
+              isCurrentSettingsScopeInteraction(original) else { return }
+        let input: ReplicaSettingsInspectionInput
+        do {
+            let gesture = try ReplicaSettingsInspectionGesture(service: original.service, scope: original.scope,
+                                                              bindingHandle: binding.requestHandle, requestID: requestID, operationID: operationID)
+            input = try gesture.take()
+        } catch {
+            hostSettingsAccessIssue = "The inspection could not capture its original time."
+            return
+        }
+        original.inspectionInput = input
+        startHostSettingsRequest(.inspection(input), original: original)
+    }
+
     func cancelHostSettingsSnapshot() {
+        retireHostSettingsAccess()
+    }
+
+    func cancelHostSettingsInspection() {
         retireHostSettingsAccess()
     }
 
@@ -553,6 +610,7 @@ final class AppModel {
         guard accessControlTask == nil else { return }
         if case .access = input { hostSettingsAccessFresh = false }
         if case .snapshot = input { hostSettingsSnapshotFresh = false }
+        if case .inspection = input { hostSettingsInspectionFresh = false }
         hostSettingsAccessIssue = nil
         hostSettingsAccessBusy = true
         accessControlTask = Task { [self, original] in
@@ -569,6 +627,8 @@ final class AppModel {
                     original.bindingHandle = try await original.service.requestSettingsBind(capture)
                 case .snapshot(let capture):
                     original.snapshotHandle = try await original.service.requestSettingsSnapshot(capture)
+                case .inspection(let capture):
+                    original.inspectionHandle = try await original.service.requestSettingsInspection(capture)
                 }
                 guard !Task.isCancelled, isCurrentSettingsRequest(input, original: original) else {
                     await cancelAccessInteraction(original)
@@ -584,6 +644,7 @@ final class AppModel {
                     hostSettingsAccessFresh = false
                     hostSettingsBindingFresh = false
                     hostSettingsSnapshotFresh = false
+                    hostSettingsInspectionFresh = false
                     switch input {
                     case .access:
                         hostSettingsAccessIssue = "The Host access check could not be started. No Host setting was changed."
@@ -591,6 +652,8 @@ final class AppModel {
                         hostSettingsAccessIssue = "The original binding request could not finish. Its Host outcome has not been verified."
                     case .snapshot:
                         hostSettingsAccessIssue = "The original Host value read could not finish. No current values were verified."
+                    case .inspection:
+                        hostSettingsAccessIssue = "The original inspection could not finish. No current outcome was verified."
                     }
                 }
             }
@@ -615,11 +678,12 @@ final class AppModel {
         hostSettingsAccessFresh = false
         hostSettingsBindingFresh = false
         hostSettingsSnapshotFresh = false
+        hostSettingsInspectionFresh = false
         guard let original = accessInteraction else { return }
         if !original.retired { accessSurfaceEpoch = UUID() }
         original.retired = true
         accessControlTask?.cancel()
-        guard accessControlTask == nil, original.handle != nil || original.bindingHandle != nil || original.snapshotHandle != nil else { return }
+        guard accessControlTask == nil, original.handle != nil || original.bindingHandle != nil || original.snapshotHandle != nil || original.inspectionHandle != nil else { return }
         hostSettingsAccessBusy = true
         accessControlTask = Task { [self, original] in
             await cancelAccessInteraction(original)
@@ -629,9 +693,12 @@ final class AppModel {
     }
 
     private func cancelAccessInteraction(_ original: SettingsAccessInteraction) async {
+        let inspection = original.inspectionHandle
         let snapshot = original.snapshotHandle
         let binding = original.bindingHandle
         let access = original.handle
+        if let inspection { await original.service.cancelSettings(inspection) }
+        if original.inspectionHandle === inspection { original.inspectionHandle = nil }
         if let snapshot { await original.service.cancelSettings(snapshot) }
         if original.snapshotHandle === snapshot { original.snapshotHandle = nil }
         if let binding { await original.service.cancelSettings(binding) }
@@ -641,9 +708,12 @@ final class AppModel {
     }
 
     private func adoptHostSettingsAccess(_ updated: ReplicaViewState) {
+        hostSettingsInspection = updated.settingsInspection
+        hostSettingsInspectionStatus = updated.settingsInspectionRequest
         hostSettingsSnapshot = updated.settingsSnapshot
         hostSettingsSnapshotStatus = updated.settingsSnapshotRequest
         hostSettingsSnapshotFresh = false
+        hostSettingsInspectionFresh = false
         hostSettingsBinding = updated.settingsBinding
         hostSettingsBindingFresh = false
         if let binding = updated.settingsBinding, let original = accessInteraction,
@@ -656,6 +726,12 @@ final class AppModel {
            isCurrentSnapshotInteraction(original, capture: capture),
            case .currentConnectionObservation = snapshot.freshness {
             hostSettingsSnapshotFresh = true
+        }
+        if let inspection = updated.settingsInspection, let original = accessInteraction,
+           let capture = original.inspectionInput, original.inspectionHandle === inspection.requestHandle,
+           isCurrentInspectionInteraction(original, capture: capture),
+           case .currentConnectionObservation = inspection.freshness {
+            hostSettingsInspectionFresh = true
         }
         hostSettingsAccessStatus = updated.settingsAccessRequest
         guard let display = updated.settingsAccess else {
