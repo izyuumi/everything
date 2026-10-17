@@ -487,6 +487,10 @@ impl OwnedVerifiedSettingsPacket {
 }
 
 impl OwnedCommittedSettingsBind {
+    pub(crate) fn quarantine_retirement(&self) {
+        self.commit.creator.cell.ledger.fail();
+    }
+
     pub(crate) fn authority_source(&self) -> &AuthenticatedSettingsSource {
         &self.verified.source
     }

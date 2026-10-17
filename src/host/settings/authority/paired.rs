@@ -1,3 +1,7 @@
+mod withdrawal;
+
+pub(crate) use withdrawal::{OwnedWithdrawnSettingsParent, PairedParentWithdrawalFailure};
+
 use std::collections::BTreeMap;
 use std::fmt;
 use std::sync::Arc;

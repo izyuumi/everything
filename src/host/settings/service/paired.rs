@@ -43,7 +43,9 @@ use crate::storage::settings_originals::{
 use crate::storage::{Store, StoredSettingsCommandReply, settings_grant_head_on};
 
 use super::super::actions::SettingsActionTarget;
-use super::super::authority::SettingsOperationOrigin;
+use super::super::authority::{
+    OwnedWithdrawnSettingsParent, PairedParentWithdrawalFailure, SettingsOperationOrigin,
+};
 use super::super::contract::{SettingKey, SettingValue, SettingsScope};
 use super::super::grants::{SettingsGrantOwner, SettingsGrantState};
 use super::super::operations::{OperationRecord, SettingsOperationPhase};
@@ -74,6 +76,25 @@ impl PairedParentAdmission {
 }
 
 impl SettingsService {
+    pub(crate) fn withdraw_retired_paired_parent_on(
+        &self,
+        mutation: &OwnedMutexGuard<()>,
+        parent: PairedSettingsParent,
+        request: Box<OwnedCommittedSettingsBind>,
+    ) -> Result<OwnedWithdrawnSettingsParent, Box<PairedParentWithdrawalFailure>> {
+        let owner = OwnedWithdrawnSettingsParent::new(parent, request);
+        if self.invocation.is_some() {
+            return Err(owner.reject_invocation());
+        }
+        owner.withdraw_on(
+            &self.core.authority,
+            &self.core.agent,
+            &self.core.endpoint,
+            &self.core.mutation,
+            mutation,
+        )
+    }
+
     pub(crate) fn bind_paired_transport(
         &self,
         transport: &HostSettingsTransport,
