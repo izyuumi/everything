@@ -65,6 +65,14 @@ impl CommittedSettingsReply {
     pub(crate) fn header(&self) -> &EnvelopeHeader {
         &self.header
     }
+
+    pub(crate) fn comparison(&self) -> &SettingsReplyComparison {
+        &self.comparison
+    }
+
+    pub(crate) fn encrypted_sha256(&self) -> &[u8; 32] {
+        &self.encrypted_sha256
+    }
 }
 
 impl Store {

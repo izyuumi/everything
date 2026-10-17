@@ -31,7 +31,7 @@ pub(crate) use settings_access_reply::{
 pub(crate) use settings_bind_reply::{SettingsBindReplyContractError, SettingsBindReplyPacket};
 #[cfg(unix)]
 pub(crate) use settings_ingress::work::{
-    PairedWorkAdoption, ReplyBuildPermit, SettingsReplyBuildRequest,
+    OwnedQueuedSettingsReply, PairedWorkAdoption, ReplyBuildPermit, SettingsReplyBuildRequest,
 };
 #[cfg(unix)]
 pub(crate) use settings_ingress::{
