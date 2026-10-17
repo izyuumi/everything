@@ -1,4 +1,5 @@
 import Foundation
+import os
 
 struct PairingSummary: Sendable {
     let deviceID: UUID
@@ -123,6 +124,7 @@ final class ReplicaSettingsBindGesture {
 }
 
 final class ReplicaSettingsSnapshotInput: Sendable, CustomStringConvertible, CustomDebugStringConvertible {
+    private let admission = OSAllocatedUnfairLock(initialState: false)
     fileprivate let service: ReplicaService
     fileprivate let scope: ReplicaSettingsScopeToken
     fileprivate let bindingHandle: ReplicaSettingsRequestHandle
@@ -144,11 +146,19 @@ final class ReplicaSettingsSnapshotInput: Sendable, CustomStringConvertible, Cus
         deadline = monotonicFloor.advanced(by: .milliseconds(Int64(expiresAt - wallFloor)))
     }
 
+    fileprivate func consumeAdmission() throws {
+        try admission.withLock { consumed in
+            guard !consumed else { throw WireError.conflict }
+            consumed = true
+        }
+    }
+
     var description: String { "ReplicaSettingsSnapshotInput([redacted])" }
     var debugDescription: String { description }
 }
 
 final class ReplicaSettingsInspectionInput: Sendable, CustomStringConvertible, CustomDebugStringConvertible {
+    private let admission = OSAllocatedUnfairLock(initialState: false)
     fileprivate let service: ReplicaService
     fileprivate let scope: ReplicaSettingsScopeToken
     fileprivate let bindingHandle: ReplicaSettingsRequestHandle
@@ -173,6 +183,13 @@ final class ReplicaSettingsInspectionInput: Sendable, CustomStringConvertible, C
         self.monotonicFloor = monotonicFloor
         self.expiresAt = expiresAt
         deadline = monotonicFloor.advanced(by: .milliseconds(Int64(expiresAt - wallFloor)))
+    }
+
+    fileprivate func consumeAdmission() throws {
+        try admission.withLock { consumed in
+            guard !consumed else { throw WireError.conflict }
+            consumed = true
+        }
     }
 
     var description: String { "ReplicaSettingsInspectionInput([redacted])" }
@@ -1271,13 +1288,14 @@ actor ReplicaService {
         let time = try RemoteSettingsRequestTime(issuedAt: capture.wallFloor, expiresAt: expiresAt)
         let deadline = min(capture.monotonicFloor.advanced(by: .milliseconds(Int64(expiresAt - capture.wallFloor))), parentDeadline)
         guard monotonic < deadline else { throw WireError.expired }
+        let key = OutboundID.snapshot(capture.queryID)
+        guard outbound[key] == nil else { throw WireError.conflict }
+        try capture.consumeAdmission()
         let input = ReplicaSettingsSnapshotRequestInput(hostID: scope.host.deviceID, queryID: capture.queryID,
                                                        keys: association.readableKeys, time: time)
         let handle = ReplicaSettingsRequestHandle()
         let pending = PendingSettingsSnapshot(handle: handle, capture: capture, scope: scope,
                                               association: association, input: input, deadline: deadline)
-        let key = OutboundID.snapshot(capture.queryID)
-        guard outbound[key] == nil else { throw WireError.conflict }
         pendingSettingsRequest = .snapshot(pending)
         outbound[key] = .snapshot(SettingsSnapshotSend(original: pending))
         lastSettingsInput = .snapshot(capture)
@@ -1331,13 +1349,14 @@ actor ReplicaService {
         let time = try RemoteSettingsRequestTime(issuedAt: capture.wallFloor, expiresAt: expiresAt)
         let deadline = min(capture.monotonicFloor.advanced(by: .milliseconds(Int64(expiresAt - capture.wallFloor))), parentDeadline)
         guard monotonic < deadline else { throw WireError.expired }
+        let key = OutboundID.inspection(capture.queryID)
+        guard outbound[key] == nil else { throw WireError.conflict }
+        try capture.consumeAdmission()
         let input = ReplicaSettingsInspectionRequestInput(hostID: scope.host.deviceID, queryID: capture.queryID,
                                                        requestID: capture.requestID, operationID: capture.operationID, time: time)
         let handle = ReplicaSettingsRequestHandle()
         let pending = PendingSettingsInspection(handle: handle, capture: capture, scope: scope,
                                               association: association, input: input, deadline: deadline)
-        let key = OutboundID.inspection(capture.queryID)
-        guard outbound[key] == nil else { throw WireError.conflict }
         pendingSettingsRequest = .inspection(pending)
         outbound[key] = .inspection(SettingsInspectionSend(original: pending))
         lastSettingsInput = .inspection(capture)
