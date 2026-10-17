@@ -139,7 +139,8 @@ Schema 15 adds immutable canonical public grant versions and receipts with exact
 ## Metadata-only transport rejection
 
 The crate-private rejection path shares ordinary inbox validation and its immediate transaction. A fresh refused packet inserts `transport_inbox.state=rejected` directly with `payload=NULL`, `command_id=NULL` and a fixed detail; schema15 already permits that terminal shape. It consumes one of the existing100000 replay markers and no pending-payload capacity. Complete pin/local-recipient checks, exact ciphertext replay and duplicate speculative-prune rollback are preserved. A duplicate never rewrites an older pending row or claims historical erasure. See [private packet rejection](private-settings-ingress.md); actual encrypted/storage observations remain separate from source compilation.
-# Connection health observations
+
+## Connection health observations
 
 The crate-private `Store::check_connection_health` reads the existing shared quarantine flag with Acquire ordering and the existing Main mutex poison state, returning the actual Quarantined or Poisoned error. It acquires no mutex, executes no SQL and does not clear either condition. Existing connection admission calls it before and after acquiring that same mutex; the lock result still independently preserves poisoning errors. All Store clones share the original connection and one-way quarantine flag.
 
