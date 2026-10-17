@@ -1,6 +1,6 @@
 # Scheduled execution policies
 
-Issue #52 extends the existing ScheduleEngine and Store with serial attempts, cumulative budgets, explicit uncertainty acknowledgement and terminal notification delivery. It uses the one native Scheduler and global Tool Broker. Schema 9 follows actual schema 8 and preserves every existing first-attempt identity and serialized policy. The execution source and [headless owner controls](scheduling-controls.md) are integrated through [#103](https://github.com/izyuumi/everything/pull/103) and [#105](https://github.com/izyuumi/everything/pull/105) after exact-source Rust CI. Historical disposable walkthroughs retain their source qualification; successful inference is unverified.
+Issue #52 extends the existing ScheduleEngine and Store with serial attempts, cumulative budgets, explicit uncertainty acknowledgement and terminal notification delivery. It uses the one native Scheduler and global Tool Broker. Schema 9 follows actual schema 8 and preserves every existing first-attempt identity and serialized policy. The execution source and [headless owner controls](scheduling-controls.md) are integrated through [#103](https://github.com/izyuumi/everything/pull/103) and [#105](https://github.com/izyuumi/everything/pull/105) after exact-source Rust CI. Historical disposable walkthroughs retain their source qualification. Successful loopback inference is recorded in the [2026-10-17 walkthrough](#2026-10-17-successful-inference-walkthrough).
 
 ## Attempts and retry
 
@@ -11,6 +11,10 @@ A durable admission marker distinguishes an unadmitted reservation from a previo
 Automatic retries are restricted to the actual trusted Scheduler retirement proof for ProviderUnavailable. The engine reserves the retirement request identity first. The actor proves an unused factory boundary, atomically retires the exact native task and records its audit; its exact request replay repairs a crash before ledger settlement. A generic Failed status, diagnostic text, native request, interrupted tool, provider uncertainty, child uncertainty or broker reconciliation never authorizes retry. Before recording any completed, failed or cancelled native result, the engine independently checks the validated saved native phase, typed waiting state and any immutable Running/Unknown tool journal for that exact task. Any uncertainty yields Unknown regardless of terminal status. Cleanup acknowledgement or zero unresolved cleanup count does not change this classification. A cancellation is not converted into a factory failure. The existing native paid-retry owner API is not used.
 
 Each proven factory failure consumes an execution-attempt ordinal and zero paid/native model, output or tool allowance. Queue-capacity replay consumes no additional ordinal. Checked exponential backoff uses the captured initial/capped values and is persisted with settlement. No next attempt is reserved until its predecessor is settled, eligible, before the original deadline and within all ceilings. The final permitted failure settles the occurrence; no occurrence UUID or generation is invented for retry.
+
+## Limits, deadline and cancellation outcomes
+
+The scheduled budget is captured and cannot be raised for an existing occurrence. When the native task pauses with the typed `limit` waiting reason, the engine requests native cancellation at once instead of holding the overlap slot until the deadline. A cancelled task whose original native turn paused at its model-attempt, tool-call or token limit records `Failed` with code `run_budget_exhausted`. A cancelled task whose native turn paused at its duration limit, or whose terminal update is at or after the occurrence deadline, records `Cancelled` with reason `scheduled execution deadline expired`. Other cancellations, including owner cancellation of a queued or running task, keep `native scheduled task cancelled`. Uncertainty still takes precedence: an uncertain task ending at or after the deadline records `Unknown` with a deadline-specific reason. These labels change only new terminal records; none of them authorizes retry, refund or overlap release beyond the existing rules.
 
 ## Terminal evidence consumption
 
@@ -64,7 +68,24 @@ A qualified missing-task walkthrough retained a genuine earlier factory attempt,
 
 A separately qualified migration walkthrough applied real migrations 1–8, seeded valid claimed/running first-attempt records with legacy None output policy and opened the actual Store. Migration 9 preserved every original identity and exact serialized policy byte, distinguished claimed from already-running admission, initialized counters and passed integrity/foreign-key checks. These seeded records establish migration behavior, not observed historical execution.
 
-Successful inference, paid tool success, arbitrary process crashes, OS clock manipulation, full retained-quota exhaustion and Apple runtime behavior remain unverified. No embedding inference was run. Automated calendar, race, crash, budget, notification and platform verification is deferred to #32.
+In this historical walkthrough, successful inference, paid tool success, arbitrary process crashes, OS clock manipulation, full retained-quota exhaustion and Apple runtime behavior remain unverified. No embedding inference was run. Automated calendar, race, crash, budget, notification and platform verification is deferred to #32.
+
+## 2026-10-17 successful-inference walkthrough
+
+A debug build of this branch ran one `serve` Host on fresh disposable state with a session credential bound to a loopback fake server implementing the OpenAI Responses streaming wire protocol. All jobs used read-only authority unless stated. Observations:
+
+- Isolated success: a manual run created its own execution conversation, made one model request and recorded `Succeeded` with the model text, known usage of 1 request/256 reserved output tokens, about 0.1 s after claim.
+- Conversation delivery: a job targeting an existing conversation appended exactly one `scheduled_run_finished` event carrying the execution conversation, task, digest and summary, with no model message.
+- Overlap: while a first run held its model response for 12 s, a second manual claim was recorded `Skipped/overlap`; a claim after the first finished was admitted and succeeded.
+- Timeout: a run with an 8 s timeout whose model response never arrived was cancelled 38 ms after its deadline; the provider saw the connection close. The recorded outcome is `Unknown`, because the request was in flight. A `full_host` run whose `shell` call awaited approval stopped at its 10 s deadline as `Cancelled`. A later owner approval of that stale operation executed nothing.
+- Cancellation: owner cancellation of a running task holding a model request recorded `Unknown` within 25 ms. Cancelling a task still queued behind another primary task recorded `Cancelled` with zero usage.
+- Retry: provider-factory failures with `max_attempts=3`, 1000 ms initial and 1500 ms maximum backoff produced three attempts with fresh task/conversation identities, persisted retries 1000 ms and 1500 ms later, the original deadline, and terminal `Failed` with no fourth attempt.
+- Permissions: a job allowing only `read_file` advertised only `read_file`; a model `shell` call returned `tool_not_advertised` and created no file. An allowed `read_file` call succeeded. Creating a read-only job that allows `shell` was refused as exceeding captured authority.
+- Budget: a 1-request job whose model asked for a tool previously stayed `running` until its 15 s timeout and then recorded a generic cancellation. With this change it settled in 142 ms as `Failed/run_budget_exhausted`.
+- Missed runs: two enabled 20 s interval jobs ran on time (1–94 ms late). The Host then stopped with SIGINT (exit 0) and restarted 50 s later. The `skip` job recorded one `skipped_missed_range` through the latest missed instant and did not dispatch. The `latest` job collapsed the older instant and dispatched the latest missed occurrence 12.5 s late. Both resumed normal timing, and earlier history was unchanged after restart. The catch-up attempt failed at provider construction because the session credential was restored only after restart.
+- Interrupted run: SIGINT during a held model request left the reopened native task waiting on `provider_uncertain`. The occurrence kept its overlap slot and became `Unknown` 652 ms after its original deadline.
+
+Native primary execution is serial by default, so a queued scheduled task spends its own deadline while it waits. Wake-up for retry instants and deadlines still uses the one-second audit, with native scheduler change notifications in addition. This walkthrough does not cover arbitrary process crashes, OS clock changes, the Anthropic adapter, Apple delivery or production security.
 
 ## 2026-10-16 copied-core observations
 
