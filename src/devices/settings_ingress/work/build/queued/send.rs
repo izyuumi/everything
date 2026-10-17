@@ -228,6 +228,109 @@ impl SettingsSendSource {
     }
 }
 
+impl SettingsSendSource {
+    fn socket_owner(
+        &self,
+    ) -> Result<
+        (&OwnedQueuedSettingsReply, &QueuedReplyPayload),
+        crate::host::settings::service::SettingsQueuedReplyCheckError,
+    > {
+        let owner = self
+            .reply
+            .as_ref()
+            .ok_or(PairedHandoffReadError::Bookkeeping)?;
+        let payload = owner.settled_payload()?;
+        if !self.association.matches_payload(
+            payload,
+            &self.association.ledger,
+            self.candidate.message_id,
+        ) || self.candidate.recipient != payload.committed.header().recipient
+            || !matches!(
+                self.candidate.routing,
+                TransportOutboundRouting::PrivateSettings
+            )
+        {
+            return Err(PairedHandoffReadError::Bookkeeping.into());
+        }
+        Ok((owner, payload))
+    }
+
+    pub(in crate::devices) fn quarantine_socket_owner(&self) {
+        self.association.quarantine();
+    }
+
+    pub(in crate::devices) fn recheck_socket_sql(
+        &self,
+        mutation: &tokio::sync::OwnedMutexGuard<()>,
+    ) -> Result<(), Box<crate::storage::SettingsSocketCheckFailure>> {
+        use crate::storage::SettingsSocketCheckFailure;
+
+        let (owner, payload) = self
+            .socket_owner()
+            .map_err(|cause| Box::new(SettingsSocketCheckFailure::BeforeTransaction { cause }))?;
+        let request = owner.request().map_err(|cause| {
+            Box::new(SettingsSocketCheckFailure::BeforeTransaction {
+                cause: cause.into(),
+            })
+        })?;
+        let fresh;
+        let authority = match request {
+            SettingsReplyBuildRequest::Fresh(request) => {
+                fresh = request.committed_source();
+                fresh.receipt_authority()
+            }
+            SettingsReplyBuildRequest::Historical(request) => request.receipt_authority(),
+            SettingsReplyBuildRequest::Bind { .. } => &payload.input.authority,
+            SettingsReplyBuildRequest::Access(request) => {
+                request.verified_request().receipt_authority()
+            }
+            SettingsReplyBuildRequest::Snapshot(request) => {
+                request.read_owner().verified_request().receipt_authority()
+            }
+            SettingsReplyBuildRequest::Inspection(request) => {
+                request.read_owner().verified_request().receipt_authority()
+            }
+        };
+        payload
+            .input
+            .context
+            .agent
+            .store()
+            .recheck_private_settings_socket(authority, mutation, owner)
+    }
+
+    pub(in crate::devices) fn recheck_socket_lifetime(
+        &self,
+        mutation: &tokio::sync::OwnedMutexGuard<()>,
+    ) -> Result<(), crate::host::settings::service::SettingsQueuedReplyCheckError> {
+        let (owner, payload) = self.socket_owner()?;
+        let request = owner.request()?;
+        let fresh;
+        let authority = match request {
+            SettingsReplyBuildRequest::Fresh(request) => {
+                fresh = request.committed_source();
+                fresh.receipt_authority()
+            }
+            SettingsReplyBuildRequest::Historical(request) => request.receipt_authority(),
+            SettingsReplyBuildRequest::Bind { .. } => &payload.input.authority,
+            SettingsReplyBuildRequest::Access(request) => {
+                request.verified_request().receipt_authority()
+            }
+            SettingsReplyBuildRequest::Snapshot(request) => {
+                request.read_owner().verified_request().receipt_authority()
+            }
+            SettingsReplyBuildRequest::Inspection(request) => {
+                request.read_owner().verified_request().receipt_authority()
+            }
+        };
+        authority.recheck_queued_socket_lifetime(
+            &payload.input.context.agent.store(),
+            mutation,
+            owner,
+        )
+    }
+}
+
 impl PendingSettingsSend {
     pub(in crate::devices) fn message_id(&self) -> MessageId {
         self.association.message_id

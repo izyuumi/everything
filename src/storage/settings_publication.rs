@@ -726,3 +726,103 @@ impl fmt::Debug for SettingsCiphertextLoadFailure {
         formatter.write_str("SettingsCiphertextLoadFailure([retained cause])")
     }
 }
+
+#[derive(Error)]
+pub(crate) enum SettingsSocketCheckFailure {
+    #[error("Settings socket check failed before opening its transaction")]
+    BeforeTransaction {
+        #[source]
+        cause: SettingsQueuedReplyCheckError,
+    },
+    #[error("Settings socket check failed and was rolled back")]
+    RolledBack {
+        #[source]
+        cause: SettingsQueuedReplyCheckError,
+    },
+    #[error("Settings socket check failed and rollback failed")]
+    RollbackFailed {
+        #[source]
+        cause: SettingsQueuedReplyCheckError,
+        rollback: rusqlite::Error,
+    },
+    #[error("Settings socket check commit outcome is uncertain")]
+    CommitUncertain {
+        #[source]
+        commit: rusqlite::Error,
+        rollback: Result<(), rusqlite::Error>,
+    },
+    #[error("Settings socket check panicked and its outcome is uncertain")]
+    Panicked {
+        payload: Box<dyn Any + Send>,
+        rollback: Result<(), rusqlite::Error>,
+    },
+}
+
+enum SocketCheckAttemptFailure {
+    Check(SettingsQueuedReplyCheckError),
+    Commit(rusqlite::Error),
+}
+
+impl Store {
+    pub(crate) fn recheck_private_settings_socket(
+        &self,
+        authority: &SettingsReceiptAuthority,
+        mutation: &OwnedMutexGuard<()>,
+        queued: &OwnedQueuedSettingsReply,
+    ) -> Result<(), Box<SettingsSocketCheckFailure>> {
+        let before = |cause: rusqlite::Error| {
+            Box::new(SettingsSocketCheckFailure::BeforeTransaction {
+                cause: SettingsReplyPublicationError::from(cause).into(),
+            })
+        };
+        let mut main = self.connection().map_err(|cause| {
+            Box::new(SettingsSocketCheckFailure::BeforeTransaction {
+                cause: SettingsReplyPublicationError::from(cause).into(),
+            })
+        })?;
+        let transaction = main
+            .transaction_with_behavior(TransactionBehavior::Deferred)
+            .map_err(before)?;
+        let attempt = catch_unwind(AssertUnwindSafe(|| {
+            authority
+                .recheck_queued_reply_on(self, &transaction, mutation, queued)
+                .map_err(SocketCheckAttemptFailure::Check)?;
+            transaction
+                .execute_batch("COMMIT")
+                .map_err(SocketCheckAttemptFailure::Commit)
+        }));
+        match attempt {
+            Ok(Ok(())) => {
+                drop(transaction);
+                Ok(())
+            }
+            Ok(Err(SocketCheckAttemptFailure::Check(cause))) => {
+                let rollback = rollback_publication(self, transaction);
+                Err(Box::new(match rollback {
+                    Ok(()) => SettingsSocketCheckFailure::RolledBack { cause },
+                    Err(rollback) => SettingsSocketCheckFailure::RollbackFailed { cause, rollback },
+                }))
+            }
+            Ok(Err(SocketCheckAttemptFailure::Commit(commit))) => {
+                let rollback = rollback_publication(self, transaction);
+                Err(Box::new(SettingsSocketCheckFailure::CommitUncertain {
+                    commit,
+                    rollback,
+                }))
+            }
+            Err(payload) => {
+                let rollback = rollback_publication(self, transaction);
+                Err(Box::new(SettingsSocketCheckFailure::Panicked {
+                    payload,
+                    rollback,
+                }))
+            }
+        }
+    }
+}
+
+impl fmt::Debug for SettingsSocketCheckFailure {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("SettingsSocketCheckFailure([retained cause])")
+    }
+}

@@ -16,6 +16,10 @@ mod settings_read_reply;
 mod settings_reply;
 
 pub use session::RelaySessionStatus;
+#[cfg(unix)]
+pub(crate) use session::outbound::{
+    SettingsSocketAdmissionFailure, SettingsSocketObserveFailure, SettingsSocketSendLoan,
+};
 pub use settings::{
     DeviceSettingsPage, DeviceSettingsSummary, MAX_DEVICE_SETTINGS_PAGE,
     MAX_DEVICE_SETTINGS_PAGE_BYTES, PairingCancellation,

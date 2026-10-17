@@ -15,6 +15,10 @@ use settings::{GuardWait, SettingsPreparationInput, SettingsPreparationOutput};
 #[cfg(unix)]
 pub(in crate::devices) use settings::{SettingsPreparationStop, SettingsPreparationWorkerFailure};
 #[cfg(unix)]
+pub(crate) use settings::{
+    SettingsSocketAdmissionFailure, SettingsSocketObserveFailure, SettingsSocketSendLoan,
+};
+#[cfg(unix)]
 use std::collections::btree_map::Entry;
 use tokio::task::{Id, JoinError, JoinHandle};
 
@@ -87,6 +91,7 @@ enum SettingsCustodyState {
         frame: Box<RelayClientMessage>,
         input: Arc<SettingsPreparationInput>,
     },
+    Socket(Box<settings::SettingsSocketAttempt>),
     Stopped {
         cause: SettingsPreparationStop,
         input: Arc<SettingsPreparationInput>,
@@ -268,6 +273,8 @@ enum ActivePreparation {
     Ordinary(MessageId),
     #[cfg(unix)]
     Settings(MessageId),
+    #[cfg(unix)]
+    SettingsSocket(MessageId),
 }
 
 enum OrdinaryIssue {
@@ -721,6 +728,11 @@ impl RelaySendWindow {
                         state: SettingsCustodyState::Preparing { .. },
                         ..
                     }) => Some(ActivePreparation::Settings(*id)),
+                    #[cfg(unix)]
+                    RelaySendEntry::Settings(SettingsSendCell {
+                        state: SettingsCustodyState::Socket(attempt),
+                        ..
+                    }) if attempt.is_running() => Some(ActivePreparation::SettingsSocket(*id)),
                     _ => None,
                 })
             };
@@ -740,6 +752,17 @@ impl RelaySendWindow {
                 #[cfg(unix)]
                 Some(ActivePreparation::Settings(id)) => {
                     if self.observe_settings_preparation(id).await.is_err()
+                        && self.failure.is_none()
+                    {
+                        self.failure = Some(OrdinaryFailureBundle {
+                            _primary: None,
+                            _cleanup: OrdinaryIssue::PrivateCustodyOutstanding,
+                        });
+                    }
+                }
+                #[cfg(unix)]
+                Some(ActivePreparation::SettingsSocket(id)) => {
+                    if self.join_settings_socket_on_close(id).await.is_err()
                         && self.failure.is_none()
                     {
                         self.failure = Some(OrdinaryFailureBundle {

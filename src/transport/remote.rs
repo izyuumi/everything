@@ -389,3 +389,242 @@ fn socket_error(error: SocketError) -> RemoteError {
         _ => RemoteError::Socket,
     }
 }
+
+#[cfg(unix)]
+mod settings_write {
+    use std::any::Any;
+    use std::fmt;
+    use std::future::Future;
+    use std::panic::{AssertUnwindSafe, catch_unwind};
+    use std::pin::Pin;
+    use std::task::{Context, Poll};
+
+    use futures_util::Sink;
+
+    use super::*;
+    use crate::devices::{
+        SettingsSocketAdmissionFailure, SettingsSocketObserveFailure, SettingsSocketSendLoan,
+    };
+
+    type StopWait = Pin<Box<dyn Future<Output = ()> + Send>>;
+
+    enum WriteProgress {
+        BeforeFirstPoll,
+        ReadinessPolled,
+        FrameStarted,
+        Flushed,
+    }
+
+    enum WriteResult {
+        Flushed,
+        Admission(SettingsSocketAdmissionFailure),
+        Remote(RemoteError),
+        Panicked(Box<dyn Any + Send>),
+        FutureDropped,
+    }
+
+    pub(crate) struct SettingsSocketWriteOutcome {
+        result: WriteResult,
+        progress: WriteProgress,
+        returned_abandoned: bool,
+        socket: Arc<RelaySocketIdentity>,
+    }
+
+    pub(crate) struct SettingsSocketWriteReturn<'window> {
+        payload: Option<WriteReturnPayload<'window>>,
+    }
+
+    struct WriteReturnPayload<'window> {
+        outcome: SettingsSocketWriteOutcome,
+        loan: SettingsSocketSendLoan<'window>,
+    }
+
+    struct WritePayload<'window> {
+        cancellation: StopWait,
+        progress: WriteProgress,
+        loan: SettingsSocketSendLoan<'window>,
+    }
+
+    struct SettingsWriter<'connection, 'window> {
+        connection: &'connection mut RelayConnection,
+        payload: Option<WritePayload<'window>>,
+    }
+
+    impl RelayConnection {
+        pub(crate) async fn send_settings<'window>(
+            &mut self,
+            loan: SettingsSocketSendLoan<'window>,
+        ) -> SettingsSocketWriteReturn<'window> {
+            let cancellation = Box::pin(self.cancellation.clone().cancelled_owned());
+            SettingsWriter {
+                connection: self,
+                payload: Some(WritePayload {
+                    cancellation,
+                    progress: WriteProgress::BeforeFirstPoll,
+                    loan,
+                }),
+            }
+            .await
+        }
+    }
+
+    impl SettingsWriter<'_, '_> {
+        fn poll_write(&mut self, cx: &mut Context<'_>) -> Poll<WriteResult> {
+            let Some(payload) = self.payload.as_mut() else {
+                panic!("completed Settings writer was polled again");
+            };
+            if payload.cancellation.as_mut().poll(cx).is_ready() {
+                return Poll::Ready(WriteResult::Remote(RemoteError::Cancelled));
+            }
+            if let Poll::Ready(cause) = payload.loan.poll_stop(cx) {
+                return Poll::Ready(WriteResult::Admission(cause));
+            }
+            if !payload
+                .loan
+                .matches_socket(&self.connection.socket_identity, self.connection.device_id)
+            {
+                return Poll::Ready(WriteResult::Remote(RemoteError::Protocol));
+            }
+            let Some(socket) = self.connection.socket.as_mut() else {
+                return Poll::Ready(WriteResult::Remote(RemoteError::Closed));
+            };
+            if matches!(payload.progress, WriteProgress::BeforeFirstPoll) {
+                if let Err(cause) = payload.loan.admit_current_then_release_guard(
+                    &self.connection.socket_identity,
+                    self.connection.device_id,
+                ) {
+                    return Poll::Ready(WriteResult::Admission(cause));
+                }
+                payload.progress = WriteProgress::ReadinessPolled;
+                match Pin::new(&mut *socket).poll_ready(cx) {
+                    Poll::Pending => return Poll::Pending,
+                    Poll::Ready(Err(cause)) => {
+                        return Poll::Ready(WriteResult::Remote(socket_error(cause)));
+                    }
+                    Poll::Ready(Ok(())) => {}
+                }
+            } else if matches!(payload.progress, WriteProgress::ReadinessPolled) {
+                match Pin::new(&mut *socket).poll_ready(cx) {
+                    Poll::Pending => return Poll::Pending,
+                    Poll::Ready(Err(cause)) => {
+                        return Poll::Ready(WriteResult::Remote(socket_error(cause)));
+                    }
+                    Poll::Ready(Ok(())) => {}
+                }
+            }
+            if matches!(payload.progress, WriteProgress::ReadinessPolled) {
+                let message = match payload.loan.take_preencoded_for_start_send() {
+                    Ok(message) => message,
+                    Err(cause) => return Poll::Ready(WriteResult::Admission(cause)),
+                };
+                payload.progress = WriteProgress::FrameStarted;
+                if let Err(cause) = Pin::new(&mut *socket).start_send(message) {
+                    return Poll::Ready(WriteResult::Remote(socket_error(cause)));
+                }
+            }
+            match Pin::new(socket).poll_flush(cx) {
+                Poll::Pending => Poll::Pending,
+                Poll::Ready(Err(cause)) => Poll::Ready(WriteResult::Remote(socket_error(cause))),
+                Poll::Ready(Ok(())) => {
+                    payload.progress = WriteProgress::Flushed;
+                    Poll::Ready(WriteResult::Flushed)
+                }
+            }
+        }
+    }
+
+    impl<'window> Future for SettingsWriter<'_, 'window> {
+        type Output = SettingsSocketWriteReturn<'window>;
+
+        fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+            let result = catch_unwind(AssertUnwindSafe(|| self.poll_write(cx)));
+            let result = match result {
+                Ok(Poll::Pending) => return Poll::Pending,
+                Ok(Poll::Ready(result)) => result,
+                Err(payload) => WriteResult::Panicked(payload),
+            };
+            let Some(mut payload) = self.payload.take() else {
+                panic!("completed Settings writer was polled again");
+            };
+            payload.loan.release_guard_on_drop();
+            if !matches!(&result, WriteResult::Flushed) {
+                self.connection.socket_identity.close();
+                drop(self.connection.socket.take());
+            }
+            let outcome = SettingsSocketWriteOutcome {
+                result,
+                progress: payload.progress,
+                returned_abandoned: false,
+                socket: Arc::clone(&self.connection.socket_identity),
+            };
+            Poll::Ready(SettingsSocketWriteReturn {
+                payload: Some(WriteReturnPayload {
+                    outcome,
+                    loan: payload.loan,
+                }),
+            })
+        }
+    }
+
+    impl Drop for SettingsWriter<'_, '_> {
+        fn drop(&mut self) {
+            if let Some(mut payload) = self.payload.take() {
+                payload.loan.release_guard_on_drop();
+                self.connection.socket_identity.close();
+                drop(self.connection.socket.take());
+                let outcome = SettingsSocketWriteOutcome {
+                    result: WriteResult::FutureDropped,
+                    progress: payload.progress,
+                    returned_abandoned: false,
+                    socket: Arc::clone(&self.connection.socket_identity),
+                };
+                payload.loan.record_actual_write(outcome);
+            }
+        }
+    }
+
+    impl SettingsSocketWriteReturn<'_> {
+        pub(crate) fn register(mut self) {
+            if let Some(payload) = self.payload.take() {
+                payload.loan.record_actual_write(payload.outcome);
+            }
+        }
+    }
+
+    impl Drop for SettingsSocketWriteReturn<'_> {
+        fn drop(&mut self) {
+            if let Some(mut payload) = self.payload.take() {
+                payload.outcome.returned_abandoned = true;
+                payload.loan.record_actual_write(payload.outcome);
+            }
+        }
+    }
+
+    impl SettingsSocketWriteOutcome {
+        pub(crate) fn fence_abandoned_return(&self) {
+            if self.returned_abandoned {
+                self.socket.close();
+            }
+        }
+
+        pub(crate) fn observation(&self) -> Result<(), SettingsSocketObserveFailure> {
+            if matches!(self.result, WriteResult::Flushed)
+                && matches!(self.progress, WriteProgress::Flushed)
+                && !self.returned_abandoned
+            {
+                Ok(())
+            } else {
+                Err(SettingsSocketObserveFailure::WRITE)
+            }
+        }
+    }
+
+    impl fmt::Debug for SettingsSocketWriteOutcome {
+        fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+            formatter.write_str("SettingsSocketWriteOutcome([retained result])")
+        }
+    }
+}
+
+#[cfg(unix)]
+pub(crate) use settings_write::{SettingsSocketWriteOutcome, SettingsSocketWriteReturn};

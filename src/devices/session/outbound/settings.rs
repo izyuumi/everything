@@ -1,3 +1,10 @@
+mod socket;
+
+pub(super) use socket::SettingsSocketAttempt;
+pub(crate) use socket::{
+    SettingsSocketAdmissionFailure, SettingsSocketObserveFailure, SettingsSocketSendLoan,
+};
+
 use std::fmt;
 use std::future::Future;
 use std::pin::Pin;
@@ -89,6 +96,7 @@ impl SettingsCustodyState {
         match self {
             Self::Provisional => None,
             Self::LoanedUnstarted(source) => Some(source),
+            Self::Socket(attempt) => Some(attempt.source()),
             Self::Waiting { input, .. }
             | Self::Preparing { input, .. }
             | Self::Observed { input, .. }
@@ -99,6 +107,7 @@ impl SettingsCustodyState {
 
     pub(super) fn stop_preparation(&mut self, cause: SettingsPreparationStop) {
         match self {
+            Self::Socket(attempt) => attempt.stop(cause),
             Self::Waiting { .. } => {
                 let state = std::mem::replace(self, Self::Provisional);
                 match state {
