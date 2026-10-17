@@ -328,6 +328,15 @@ fn run_reply_build(
                     request,
                     snapshot.read_owner().verified_request().receipt_authority(),
                 ),
+                SettingsReplyBuildRequest::Inspection(inspection) => publish_request(
+                    &input,
+                    &guard,
+                    request,
+                    inspection
+                        .read_owner()
+                        .verified_request()
+                        .receipt_authority(),
+                ),
             };
             ReplyBuildWorkerOutcome::Publication(result.map(Box::new))
         }

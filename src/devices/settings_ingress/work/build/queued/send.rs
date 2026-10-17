@@ -157,6 +157,15 @@ impl SettingsSendSource {
                 };
                 (source.original_deadline(), intent.expires_at.get())
             }
+            SettingsReplyBuildRequest::Inspection(request) => {
+                let source = request.read_owner().verified_request().authority_source();
+                let super::super::super::super::read::SettingsReadRequest::InspectOriginal(intent) =
+                    source.request()
+                else {
+                    return Err(Failure::Association);
+                };
+                (source.original_deadline(), intent.expires_at.get())
+            }
         };
         let clipping = expiry
             .checked_sub(payload.committed.header().expires_at_ms)
@@ -195,6 +204,9 @@ impl SettingsSendSource {
                 request.verified_request().receipt_authority()
             }
             SettingsReplyBuildRequest::Snapshot(request) => {
+                request.read_owner().verified_request().receipt_authority()
+            }
+            SettingsReplyBuildRequest::Inspection(request) => {
                 request.read_owner().verified_request().receipt_authority()
             }
         };

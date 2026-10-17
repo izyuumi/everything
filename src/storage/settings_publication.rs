@@ -225,6 +225,18 @@ fn publish_on(
             let sealed = SealedSettingsReply::snapshot(context, transaction, &qualified, request)?;
             commit_sealed_on(store, transaction, authority, &sealed)
         }
+        SettingsReplyBuildRequest::Inspection(request) => {
+            let authority = request.read_owner().verified_request().receipt_authority();
+            if !std::ptr::eq(context.authority, authority) {
+                return Err(SettingsReplyPublicationError::Conflict.into());
+            }
+            let qualified = authority
+                .qualify_inspection_reply_on(store, transaction, context.mutation, request)
+                .map_err(SettingsReplyProjectionError::from)?;
+            let sealed =
+                SealedSettingsReply::inspection(context, transaction, &qualified, request)?;
+            commit_sealed_on(store, transaction, authority, &sealed)
+        }
     }
 }
 
@@ -553,6 +565,22 @@ fn queued_reply_stamp(
                 bounded_reply_provenance(&reply.provenance)?,
                 "default",
                 49_152,
+                reply.created_at,
+                reply.expires_at,
+            )
+        }
+        SettingsReplyBuildRequest::Inspection(request) => {
+            let reply = request.read_owner().reply_reservation();
+            if reply.family != crate::host::settings::service::SettingsReadReplyFamily::Inspection {
+                return Err(SettingsReplyPublicationError::Conflict.into());
+            }
+            (
+                reply.reservation_id,
+                reply.local_device_id,
+                reply.peer_device_id,
+                bounded_reply_provenance(&reply.provenance)?,
+                "inspection",
+                90_112,
                 reply.created_at,
                 reply.expires_at,
             )

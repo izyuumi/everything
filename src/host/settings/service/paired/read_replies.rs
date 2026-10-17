@@ -1,4 +1,8 @@
+mod inspection;
 mod snapshot;
+
+pub(super) use inspection::InspectionReplyComparison;
+pub(crate) use inspection::QualifiedSettingsInspectionReply;
 
 use std::fmt;
 use std::sync::Arc;

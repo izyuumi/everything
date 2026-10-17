@@ -44,8 +44,8 @@ pub(crate) use command::{
 };
 use read_source::ReadWorkState;
 pub(crate) use read_source::{
-    AuthenticatedSettingsReadSource, OwnedCommittedSettingsRead, OwnedCommittedSettingsSnapshot,
-    OwnedVerifiedSettingsRead, SettingsReadSourceError,
+    AuthenticatedSettingsReadSource, OwnedCommittedSettingsInspection, OwnedCommittedSettingsRead,
+    OwnedCommittedSettingsSnapshot, OwnedVerifiedSettingsRead, SettingsReadSourceError,
 };
 pub(crate) use wire::{BindingGeneration, BindingIntent};
 pub(crate) use work::{PendingSettingsReceipt, SettingsReceiveDrain, SettingsReceiveWitness};

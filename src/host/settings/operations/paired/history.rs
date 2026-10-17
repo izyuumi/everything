@@ -165,3 +165,74 @@ fn check_transition(
     }
     Ok(())
 }
+
+pub(super) fn check_inspection_history_on(
+    connection: &Connection,
+    current: &OperationRecord,
+    anchor: Option<&PairedReplyHistoryAnchor>,
+    remaining: &mut usize,
+) -> Result<(), SettingsServiceError> {
+    if current.identity.version != 2 || !super::is_origin(&current.identity.origin) {
+        return Err(SettingsServiceError::CorruptJournal);
+    }
+    {
+        let observed = read(connection, current.identity.binding.request_id)?
+            .ok_or(SettingsServiceError::CorruptJournal)?;
+        if observed.identity != current.identity || observed.update != current.update {
+            return Err(SettingsServiceError::CorruptJournal);
+        }
+    }
+    let baseline = anchor
+        .map(|anchor| {
+            i64::try_from(anchor.sequence)
+                .ok()
+                .filter(|sequence| *sequence > 0)
+                .ok_or(SettingsServiceError::CorruptJournal)
+        })
+        .transpose()?;
+    let mut baseline_found = baseline.is_none();
+    let request_id = current.identity.binding.request_id.to_string();
+    let mut statement = connection.prepare(
+        "SELECT sequence,request_id,record,occurred_at FROM settings_operation_updates WHERE request_id=?1 ORDER BY sequence LIMIT ?2",
+    )?;
+    let limit = (*remaining).min(MAX_UPDATES as usize);
+    let mut rows = statement.query(params![request_id, limit + 1])?;
+    let mut previous_sequence = 0;
+    let mut previous = None;
+    let mut count = 0;
+    while let Some(row) = rows.next()? {
+        if count >= limit {
+            return Err(SettingsServiceError::CorruptJournal);
+        }
+        count += 1;
+        *remaining = remaining
+            .checked_sub(1)
+            .ok_or(SettingsServiceError::CorruptJournal)?;
+        let sequence = row.get::<_, i64>(0)?;
+        if sequence <= previous_sequence || bounded_text(row, 1, 36)? != request_id {
+            return Err(SettingsServiceError::CorruptJournal);
+        }
+        let update: UpdateRecord =
+            decode(bounded_text(row, 2, MAX_UPDATE_BYTES)?, MAX_UPDATE_BYTES)?;
+        validate_update(&current.identity, &update)?;
+        validate_native_link(connection, &current.identity, &update)?;
+        let occurred_at = i64::try_from(update.updated_at.get())
+            .map_err(|_| SettingsServiceError::CorruptJournal)?;
+        if occurred_at != row.get::<_, i64>(3)? {
+            return Err(SettingsServiceError::CorruptJournal);
+        }
+        match &previous {
+            Some(previous) => check_transition(previous, &update)?,
+            None => check_initial(&update)?,
+        }
+        if baseline == Some(sequence) {
+            baseline_found = true;
+        }
+        previous_sequence = sequence;
+        previous = Some(update);
+    }
+    if !baseline_found || previous.as_ref() != Some(&current.update) {
+        return Err(SettingsServiceError::CorruptJournal);
+    }
+    Ok(())
+}

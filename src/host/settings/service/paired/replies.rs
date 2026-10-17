@@ -186,6 +186,9 @@ impl SettingsReceiptAuthority {
             SettingsReplyQualification::Snapshot(_) => {
                 self.recheck_consumed_snapshot_reply_on(store, transaction, consumed)?;
             }
+            SettingsReplyQualification::Inspection(_) => {
+                self.recheck_consumed_inspection_reply_on(store, transaction, consumed)?;
+            }
         }
         Ok(())
     }
@@ -518,7 +521,7 @@ fn check_bind_reply_observation(
     Ok(())
 }
 
-fn remote_phase(
+pub(in crate::host::settings::service::paired) fn remote_phase(
     phase: &SettingsOperationPhase,
 ) -> Result<RemoteOperationPhase, SettingsServiceError> {
     Ok(match phase {

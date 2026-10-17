@@ -19,7 +19,7 @@ use crate::storage::settings_originals::{
 use crate::storage::{CommittedSettingsReply, ConsumedSettingsReply, Store};
 
 use super::super::access::AccessReplyComparison;
-use super::super::read_replies::SnapshotReplyComparison;
+use super::super::read_replies::{InspectionReplyComparison, SnapshotReplyComparison};
 use super::super::{
     OriginalReplySource, QualifiedOriginalReply, check_original_reply_reservation_identity,
 };
@@ -37,6 +37,7 @@ pub(crate) struct SettingsReplyComparison {
 enum ReplyComparisonObservation {
     Access(AccessReplyComparison),
     Snapshot(SnapshotReplyComparison),
+    Inspection(Box<InspectionReplyComparison>),
     Original {
         invocation: Arc<()>,
         linked: bool,
@@ -271,6 +272,12 @@ impl SettingsReceiptAuthority {
                 SettingsReplyBuildRequest::Snapshot(_),
                 ReplyComparisonObservation::Snapshot(snapshot),
             ) => self.recheck_queued_snapshot_socket_lifetime(store, mutation, queued, snapshot),
+            (
+                SettingsReplyBuildRequest::Inspection(_),
+                ReplyComparisonObservation::Inspection(inspection),
+            ) => {
+                self.recheck_queued_inspection_socket_lifetime(store, mutation, queued, inspection)
+            }
             _ => Err(SettingsReplyPublicationError::Conflict.into()),
         }
     }
@@ -345,6 +352,16 @@ impl SettingsReceiptAuthority {
                 mutation,
                 queued,
                 snapshot,
+            ),
+            (
+                SettingsReplyBuildRequest::Inspection(_),
+                ReplyComparisonObservation::Inspection(inspection),
+            ) => self.recheck_queued_inspection_reply_on(
+                store,
+                transaction,
+                mutation,
+                queued,
+                inspection,
             ),
             _ => Err(SettingsReplyPublicationError::Conflict.into()),
         }
@@ -475,6 +492,12 @@ impl SettingsReceiptAuthority {
                         .map_err(SettingsReplyProjectionError::from)?,
                 )
             }
+            SettingsReplyQualification::Inspection(qualified) => {
+                ReplyComparisonObservation::Inspection(Box::new(
+                    self.capture_inspection_reply_comparison(transaction, qualified)
+                        .map_err(SettingsReplyProjectionError::from)?,
+                ))
+            }
         };
         Ok(SettingsReplyComparison {
             message_id: sealed.header().message_id,
@@ -531,6 +554,15 @@ fn checked_queued_reply(
             )
         }
         SettingsReplyBuildRequest::Snapshot(request) => {
+            let reply = request.read_owner().reply_reservation();
+            (
+                reply.local_device_id,
+                reply.peer_device_id,
+                reply.created_at,
+                reply.expires_at,
+            )
+        }
+        SettingsReplyBuildRequest::Inspection(request) => {
             let reply = request.read_owner().reply_reservation();
             (
                 reply.local_device_id,

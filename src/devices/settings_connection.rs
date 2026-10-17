@@ -9,7 +9,8 @@ use uuid::Uuid;
 
 #[cfg(unix)]
 use super::settings_ingress::{
-    OwnedCommittedSettingsAccess, OwnedCommittedSettingsSnapshot, ReceiveContext,
+    OwnedCommittedSettingsAccess, OwnedCommittedSettingsInspection, OwnedCommittedSettingsSnapshot,
+    ReceiveContext,
     work::{
         OwnedQueuedSettingsReply, PairedResultAdmissionFailure, PendingSettingsReplyBuild,
         PendingSettingsSend, ReplyBuildAdmissionFailure, SettingsReceiveWork,
@@ -278,6 +279,17 @@ impl SettingsConnectionOwner<'_> {
         self.owner.receive.try_register_reply_build(
             &self.identity,
             SettingsReplyBuildRequest::Snapshot(Box::new(request)),
+        )
+    }
+
+    #[cfg(unix)]
+    pub(super) fn try_register_inspection_reply_build(
+        &mut self,
+        request: OwnedCommittedSettingsInspection,
+    ) -> Result<PendingSettingsReplyBuild, ReplyBuildAdmissionFailure> {
+        self.owner.receive.try_register_reply_build(
+            &self.identity,
+            SettingsReplyBuildRequest::Inspection(Box::new(request)),
         )
     }
 

@@ -337,3 +337,31 @@ impl super::OperationRepository {
         Ok((record, true))
     }
 }
+
+impl PairedReplyHistoryAnchor {
+    pub(in crate::host::settings) fn capture_inspection_on(
+        connection: &rusqlite::Connection,
+        current: &super::OperationRecord,
+        remaining: &mut usize,
+    ) -> Result<Self, SettingsServiceError> {
+        history::check_inspection_history_on(connection, current, None, remaining)?;
+        let sequence: i64 = connection.query_row(
+            "SELECT sequence FROM settings_operation_updates WHERE request_id=?1 ORDER BY sequence DESC LIMIT 1",
+            [current.identity.binding.request_id.to_string()], |row| row.get(0),
+        )?;
+        let sequence = u64::try_from(sequence)
+            .ok()
+            .filter(|value| *value > 0)
+            .ok_or(SettingsServiceError::CorruptJournal)?;
+        Ok(Self { sequence })
+    }
+
+    pub(in crate::host::settings) fn check_inspection_current_on(
+        &self,
+        connection: &rusqlite::Connection,
+        current: &super::OperationRecord,
+        remaining: &mut usize,
+    ) -> Result<(), SettingsServiceError> {
+        history::check_inspection_history_on(connection, current, Some(self), remaining)
+    }
+}
