@@ -537,6 +537,7 @@ actor ReplicaStore: DurableEnvelopeInbox {
                       kind == event.kind, kind.utf8.count == Int(sqlite3_column_bytes(row, 3)),
                       seen.insert(event.id).inserted else { throw WireError.conflict }
                 if event.kind == "task_status_changed", try event.payload.field("status").text == "completed" { completion = true }
+                if event.kind == "scheduled_run_finished", try WireScheduledRunNotification(event.payload.field("notification")).outcome == "succeeded" { completion = true }
                 if event.kind == "permission_requested", try notificationPermissionIsPending(event, now: now) { attention = true }
                 through = event.sequence
                 bytes += encoded.count
