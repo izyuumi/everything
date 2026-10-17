@@ -1264,6 +1264,19 @@ pub(super) fn public_failure(error: &HostError) -> LocalFailure {
             LocalFailureCode::Cancelled,
             "operation was cancelled; inspect durable state before retrying a mutation",
         ),
+        HostError::Selection(super::selection::SelectionPreflightError::Capacity) => (
+            LocalFailureCode::Busy,
+            "selection preflight capacity is exhausted; discard unused selection tickets",
+        ),
+        HostError::Selection(
+            super::selection::SelectionPreflightError::BindingChanged
+            | super::selection::SelectionPreflightError::Expired
+            | super::selection::SelectionPreflightError::NotReady
+            | super::selection::SelectionPreflightError::Unavailable,
+        ) => (
+            LocalFailureCode::InvalidRequest,
+            "selection ticket is unavailable, expired, already consumed or changed; prepare a new selection",
+        ),
         HostError::ScheduleControl(ControlError::Cancelled)
         | HostError::ScheduleEngine(crate::scheduling::engine::EngineError::Cancelled) => (
             LocalFailureCode::Cancelled,
