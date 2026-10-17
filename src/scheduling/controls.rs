@@ -788,7 +788,8 @@ fn next_run(
     if !job.enabled {
         return Ok(None);
     }
-    match next_after(&job.definition.schedule, now, cancellation) {
+    let after = old.map_or(now, |old| now.max(old.updated_at));
+    match next_after(&job.definition.schedule, after, cancellation) {
         Ok(Some(next)) => Ok(Some(next)),
         Ok(None) => Err(ControlError::Invalid(
             "enabled schedule has no future occurrence",

@@ -63,7 +63,7 @@ impl ScheduleRepository {
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let existing = required_job(&transaction, edit.job.id)?;
         check_revision(existing.revision, edit.expected_revision)?;
-        check_time(now, existing.updated_at)?;
+        let now = recorded_time(now, existing.updated_at)?;
         if existing.deleted_at.is_some() {
             return Err(ScheduleError::Invalid("deleted jobs cannot be edited"));
         }
@@ -96,7 +96,7 @@ impl ScheduleRepository {
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let existing = required_job(&transaction, id)?;
         check_revision(existing.revision, expected_revision)?;
-        check_time(now, existing.updated_at)?;
+        let now = recorded_time(now, existing.updated_at)?;
         if existing.deleted_at.is_some() || (enabled && next_run_at.is_none()) {
             return Err(ScheduleError::Invalid(
                 "enabling requires an undeleted job and a next run",
@@ -122,7 +122,7 @@ impl ScheduleRepository {
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let existing = required_job(&transaction, id)?;
         check_revision(existing.revision, expected_revision)?;
-        check_time(now, existing.updated_at)?;
+        let now = recorded_time(now, existing.updated_at)?;
         if existing.deleted_at.is_some() {
             return Err(ScheduleError::Invalid("job is already deleted"));
         }
@@ -295,7 +295,7 @@ impl ScheduleRepository {
         }
         let job = required_job(&transaction, claim.job_id)?;
         check_revision(job.revision, claim.expected_revision)?;
-        check_time(now, job.updated_at)?;
+        let recorded = recorded_time(now, job.updated_at)?;
         job.definition.target.validate_authority(authority)?;
         if job.deleted_at.is_some() {
             return Err(ScheduleError::Invalid(
@@ -325,13 +325,13 @@ impl ScheduleRepository {
                 digest: &digest,
                 forced_outcome: None,
             },
-            now,
+            recorded,
         )?;
         transaction.execute(
             "UPDATE scheduled_jobs SET last_run_at=?2,updated_at=?2,revision=?3 WHERE id=?1",
             params![
                 job.id.to_string(),
-                timestamp(now)?,
+                timestamp(recorded)?,
                 increment(job.revision)?
             ],
         )?;
@@ -784,6 +784,11 @@ fn check_time(now: UnixMillis, previous: UnixMillis) -> ScheduleResult<()> {
         ));
     }
     Ok(())
+}
+
+fn recorded_time(now: UnixMillis, previous: UnixMillis) -> ScheduleResult<UnixMillis> {
+    timestamp(now)?;
+    Ok(now.max(previous))
 }
 
 fn optional_time(value: Option<UnixMillis>) -> ScheduleResult<Option<i64>> {
