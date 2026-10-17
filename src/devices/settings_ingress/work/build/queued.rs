@@ -1,3 +1,5 @@
+mod send;
+
 use std::collections::{BTreeMap, btree_map::Entry};
 use std::fmt;
 use std::sync::Arc;
@@ -13,11 +15,27 @@ use super::super::{
 };
 use super::{ReplyBuildJobInput, ReplyBuildState, handoff_receive_error};
 
+pub(in crate::devices) use send::{
+    PendingSettingsSend, SettingsSendAdmissionError, SettingsSendLoanAssociation,
+    SettingsSendReturnFailure, SettingsSendReturnReason, SettingsSendSource,
+};
+use send::{ReturnedSettingsSend, WorkSettingsSendLoan};
+
 const MAX_QUEUED_REPLIES: usize = 32;
 
 #[derive(Default)]
 pub(in crate::devices::settings_ingress::work) struct QueuedReplyRegistry {
-    entries: BTreeMap<MessageId, OwnedQueuedSettingsReply>,
+    entries: BTreeMap<MessageId, QueuedReplyEntry>,
+}
+
+enum QueuedReplyEntry {
+    Owned {
+        returned: Option<ReturnedSettingsSend>,
+        reply: Option<OwnedQueuedSettingsReply>,
+    },
+    Loaned {
+        witness: Option<WorkSettingsSendLoan>,
+    },
 }
 
 pub(crate) struct OwnedQueuedSettingsReply {
@@ -69,12 +87,22 @@ impl QueuedReplyRegistry {
     ) -> bool {
         self.entries.len() <= MAX_QUEUED_REPLIES
             && self.entries.len() <= private_requests
-            && self.entries.iter().all(|(message_id, reply)| {
-                reply.payload.as_ref().is_some_and(|payload| {
+            && self.entries.iter().all(|(message_id, entry)| match entry {
+                QueuedReplyEntry::Owned {
+                    returned,
+                    reply: Some(reply),
+                } => reply.payload.as_ref().is_some_and(|payload| {
                     Arc::ptr_eq(&payload.input.record.permit.ledger, ledger)
                         && payload.committed.header().message_id == *message_id
                         && payload.settled()
-                })
+                        && returned.as_ref().is_none_or(|returned| {
+                            returned.matches_payload(payload, ledger, *message_id)
+                        })
+                }),
+                QueuedReplyEntry::Loaned {
+                    witness: Some(witness),
+                } => witness.matches_registry(ledger, *message_id),
+                _ => false,
             })
     }
 }
@@ -190,11 +218,14 @@ impl SettingsReceiveWork {
                     _committed: committed,
                     _input: input,
                 }) => {
-                    entry.insert(OwnedQueuedSettingsReply {
-                        payload: Some(QueuedReplyPayload {
-                            committed,
-                            settlement: None,
-                            input,
+                    entry.insert(QueuedReplyEntry::Owned {
+                        returned: None,
+                        reply: Some(OwnedQueuedSettingsReply {
+                            payload: Some(QueuedReplyPayload {
+                                committed,
+                                settlement: None,
+                                input,
+                            }),
                         }),
                     });
                     true
@@ -211,8 +242,11 @@ impl SettingsReceiveWork {
             return Err(SettingsReceiveError::Bookkeeping);
         }
         let settled = match self.queued.entries.get_mut(&message_id) {
-            Some(reply) => reply.settle(&self.ledger),
-            None => Err(self.ledger.fail()),
+            Some(QueuedReplyEntry::Owned {
+                reply: Some(reply),
+                returned: None,
+            }) => reply.settle(&self.ledger),
+            _ => Err(self.ledger.fail()),
         };
         if let Err(error) = settled {
             self.ledger.fail();
@@ -232,8 +266,15 @@ impl SettingsReceiveWork {
         if self.failure.is_some() {
             return Err(self.ledger.fail());
         }
-        let Some(reply) = self.queued.entries.get(&message_id) else {
+        let Some(entry) = self.queued.entries.get(&message_id) else {
             return Ok(None);
+        };
+        let reply = match entry {
+            QueuedReplyEntry::Owned {
+                reply: Some(reply), ..
+            } => reply,
+            QueuedReplyEntry::Loaned { witness: Some(_) } => return Ok(None),
+            _ => return Err(self.ledger.fail()),
         };
         let committed = reply.committed().map_err(handoff_receive_error)?;
         let payload = reply.payload.as_ref().ok_or_else(|| self.ledger.fail())?;

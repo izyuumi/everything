@@ -13,6 +13,10 @@ use tokio::task::{Id, JoinSet};
 use uuid::Uuid;
 
 pub(crate) use build::OwnedQueuedSettingsReply;
+pub(in crate::devices) use build::{
+    PendingSettingsSend, SettingsSendAdmissionError, SettingsSendLoanAssociation,
+    SettingsSendReturnFailure, SettingsSendReturnReason, SettingsSendSource,
+};
 use build::{QueuedReplyRegistry, ReplyBuildState, ReplyBuildWorkerOutput};
 
 use super::access::{AccessReceiptOutput, AccessWorkState, OwnedCommittedSettingsAccess};
