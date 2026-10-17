@@ -21,6 +21,7 @@ Scoped Settings transport foundations, with public accepted dispatch still disab
 - [Verified Read sources](contracts/settings-read-sources.md): actual envelope/context ownership and original clocks.
 - [Read qualification](contracts/settings-read-qualification.md): one shared query ledger, current parent/full pins/R and fixed deadlines.
 - [Read receipts](contracts/settings-read-receipts.md): sole metadata writer, actual joined ownership and mutex cleanup; BUILD/value/Original producers remain separate.
+- [Joined Read currentness](contracts/settings-read-replies.md): exact owner/capability/Transaction/Host guard, full pins/R, eight reservation fields and original clocks; values and publication remain separate.
 - [Apple Bind ownership](contracts/apple-settings-bind-owner.md): the first immutable Bind identity, shared pending/receive custody and genuine Fresh projection; live transport and recovery remain separate.
 - [Outbound selection](contracts/transport-outbound-selection.md): bounded metadata selection before ciphertext loading.
 - [Ordinary send window](contracts/ordinary-relay-send-window.md): actual shared16-cell preparation/join/send/acceptance custody and cleanup.
