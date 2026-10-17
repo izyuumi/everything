@@ -19,6 +19,16 @@ pub(in crate::devices) struct OwnedStartedSettingsReturn {
     stage: Option<ReturnStage>,
 }
 
+pub(in crate::devices) struct SettingsRemovedSendSlot {
+    removed: RelaySendEntry,
+}
+
+pub(in crate::devices) struct ReturnedSettingsSqlInput {
+    source: SettingsSendSource,
+    window: Arc<()>,
+    slot: Arc<()>,
+}
+
 enum ReturnStage {
     Phase(Box<SettingsCustodyState>),
     Input {
@@ -29,6 +39,11 @@ enum ReturnStage {
         evidence: ReturnEvidence,
         retained: RetainedPreparationInput,
         source: Arc<SettingsSendSource>,
+    },
+    SqlLoaned {
+        evidence: ReturnEvidence,
+        retained: RetainedPreparationInput,
+        input: Arc<ReturnedSettingsSqlInput>,
     },
     OwnedNoResend {
         _evidence: ReturnEvidence,
@@ -106,6 +121,7 @@ impl ReturnStage {
             Self::Input { input, .. } => Some(&input.source),
             Self::Source { source, .. } => Some(source),
             Self::OwnedNoResend { source, .. } => Some(source),
+            Self::SqlLoaned { input, .. } => Some(&input.source),
         }
     }
 }
@@ -188,6 +204,91 @@ impl OwnedStartedSettingsReturn {
                     }
                 },
                 complete @ ReturnStage::OwnedNoResend { .. } => self.stage = Some(complete),
+                loaned @ ReturnStage::SqlLoaned { .. } => {
+                    self.stage = Some(loaned);
+                    return Err(SettingsStartedReturnFailure::ASSOCIATION);
+                }
+            }
+        }
+    }
+
+    pub(in crate::devices) fn loan_sql(
+        &mut self,
+        removed: &SettingsRemovedSendSlot,
+    ) -> Result<(), SettingsStartedReturnFailure> {
+        if !self.ticket_matches()
+            || self
+                .source()
+                .is_none_or(|source| !removed.matches_source(source))
+        {
+            return Err(SettingsStartedReturnFailure::ASSOCIATION);
+        }
+        let Some(stage) = self.stage.take() else {
+            return Err(SettingsStartedReturnFailure::ASSOCIATION);
+        };
+        let (evidence, retained, source) = match stage {
+            ReturnStage::OwnedNoResend {
+                _evidence,
+                retained,
+                source,
+            } => (_evidence, retained, source),
+            stage => {
+                self.stage = Some(stage);
+                return Err(SettingsStartedReturnFailure::ASSOCIATION);
+            }
+        };
+        let input = Arc::new(ReturnedSettingsSqlInput {
+            source,
+            window: Arc::clone(&retained._window),
+            slot: Arc::clone(&retained._slot),
+        });
+        self.stage = Some(ReturnStage::SqlLoaned {
+            evidence,
+            retained,
+            input,
+        });
+        Ok(())
+    }
+
+    pub(in crate::devices) fn sql_input(&self) -> Option<&Arc<ReturnedSettingsSqlInput>> {
+        match self.stage.as_ref()? {
+            ReturnStage::SqlLoaned { input, .. } => Some(input),
+            _ => None,
+        }
+    }
+
+    pub(in crate::devices) fn finish_sql_loan(
+        &mut self,
+    ) -> Result<(), SettingsStartedReturnFailure> {
+        let Some(stage) = self.stage.take() else {
+            return Err(SettingsStartedReturnFailure::ASSOCIATION);
+        };
+        match stage {
+            ReturnStage::SqlLoaned {
+                evidence,
+                retained,
+                input,
+            } => match Arc::try_unwrap(input) {
+                Ok(ReturnedSettingsSqlInput { source, .. }) => {
+                    self.stage = Some(ReturnStage::OwnedNoResend {
+                        _evidence: evidence,
+                        retained,
+                        source,
+                    });
+                    Ok(())
+                }
+                Err(input) => {
+                    self.stage = Some(ReturnStage::SqlLoaned {
+                        evidence,
+                        retained,
+                        input,
+                    });
+                    Err(SettingsStartedReturnFailure::SHARED_INPUT)
+                }
+            },
+            stage => {
+                self.stage = Some(stage);
+                Err(SettingsStartedReturnFailure::ASSOCIATION)
             }
         }
     }
@@ -319,7 +420,7 @@ impl SettingsStartedWindowReturn<'_> {
     pub(in crate::devices) fn complete(
         mut self,
         adoption: SettingsStartedReturnAdoption<'_>,
-    ) -> Result<(), SettingsStartedReturnFailure> {
+    ) -> Result<SettingsRemovedSendSlot, SettingsStartedReturnFailure> {
         let entry = self
             .entry
             .as_ref()
@@ -337,10 +438,13 @@ impl SettingsStartedWindowReturn<'_> {
         {
             return Err(SettingsStartedReturnFailure::ASSOCIATION);
         }
-        if let Some(entry) = self.entry.take() {
-            drop(entry.remove());
-        }
-        Ok(())
+        let entry = self
+            .entry
+            .take()
+            .ok_or(SettingsStartedReturnFailure::ASSOCIATION)?;
+        Ok(SettingsRemovedSendSlot {
+            removed: entry.remove(),
+        })
     }
 }
 
@@ -475,3 +579,34 @@ impl fmt::Display for SettingsStartedReturnFailure {
 }
 
 impl std::error::Error for SettingsStartedReturnFailure {}
+
+impl SettingsRemovedSendSlot {
+    pub(in crate::devices) fn matches_source(&self, source: &SettingsSendSource) -> bool {
+        matches!(&self.removed, RelaySendEntry::Settings(cell)
+            if matches!(cell.state, SettingsCustodyState::Returning)
+                && cell.association.as_ref().is_some_and(|association|
+                    source.matches_association(association)
+                        && association.matches_slot(&cell.slot.window, &cell.slot.identity)))
+    }
+
+    pub(in crate::devices) fn matches_input(&self, input: &ReturnedSettingsSqlInput) -> bool {
+        self.matches_source(&input.source)
+            && matches!(&self.removed, RelaySendEntry::Settings(cell)
+                if Arc::ptr_eq(&cell.slot.window, &input.window)
+                    && Arc::ptr_eq(&cell.slot.identity, &input.slot))
+    }
+}
+
+impl ReturnedSettingsSqlInput {
+    pub(in crate::devices) fn source(&self) -> &SettingsSendSource {
+        &self.source
+    }
+
+    pub(in crate::devices) fn window_identity(&self) -> &Arc<()> {
+        &self.window
+    }
+
+    pub(in crate::devices) fn slot_identity(&self) -> &Arc<()> {
+        &self.slot
+    }
+}

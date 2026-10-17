@@ -226,6 +226,20 @@ impl PairedResultHandoff {
         }
     }
 
+    pub(crate) fn returned_reply_request(
+        &self,
+    ) -> Result<&SettingsReplyBuildRequest, PairedHandoffReadError> {
+        match self
+            .payload
+            .as_ref()
+            .ok_or(PairedHandoffReadError::Bookkeeping)?
+        {
+            PairedHandoffPayload::Ready(reply) if reply.matches_identity() => Ok(&reply.request),
+            PairedHandoffPayload::Ready(_) => Err(PairedHandoffReadError::Bookkeeping),
+            PairedHandoffPayload::RejectedBind { .. } => Err(PairedHandoffReadError::RejectedBind),
+        }
+    }
+
     pub(crate) fn reply_request(
         &self,
     ) -> Result<&SettingsReplyBuildRequest, PairedHandoffReadError> {

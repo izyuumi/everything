@@ -1,5 +1,7 @@
 mod send;
 
+pub(crate) use send::ReturnedSettingsReplySource;
+
 use std::collections::{BTreeMap, btree_map::Entry};
 use std::fmt;
 use std::sync::Arc;

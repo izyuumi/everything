@@ -13,6 +13,7 @@ use crate::storage::{CommittedSettingsReply, SettingsReplyPublishFailure};
 
 pub(crate) use queued::OwnedQueuedSettingsReply;
 pub(super) use queued::QueuedReplyRegistry;
+pub(crate) use queued::ReturnedSettingsReplySource;
 pub(in crate::devices) use queued::SettingsStartedReturnAdoption;
 pub(in crate::devices) use queued::{
     PendingSettingsSend, SettingsSendAdmissionError, SettingsSendLoanAssociation,
@@ -78,6 +79,13 @@ enum ReplyBuildWorkerOutcome {
 }
 
 impl RegisteredReplyBuild {
+    fn returned_reply_request(&self) -> Result<&SettingsReplyBuildRequest, PairedHandoffReadError> {
+        match &self.request {
+            RegisteredReplyBuildOwner::Direct(request) => Ok(request),
+            RegisteredReplyBuildOwner::Supervised(handoff) => handoff.returned_reply_request(),
+        }
+    }
+
     fn reply_request(&self) -> Result<&SettingsReplyBuildRequest, PairedHandoffReadError> {
         match &self.request {
             RegisteredReplyBuildOwner::Direct(request) => Ok(request),

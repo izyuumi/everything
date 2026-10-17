@@ -1,6 +1,7 @@
 use super::*;
 use crate::devices::session::outbound::{
-    OwnedStartedSettingsReturn, RelaySendWindow, SettingsStartedReturnFailure,
+    OwnedStartedSettingsReturn, RelaySendWindow, ReturnedSettingsSqlInput, SettingsRemovedSendSlot,
+    SettingsStartedReturnFailure,
 };
 use crate::devices::session::outbound::{
     SettingsPreparationStop, SettingsPreparationWorkerFailure,
@@ -565,7 +566,7 @@ impl std::error::Error for SettingsSendReturnFailure {
 }
 
 pub(in crate::devices) struct SettingsStartedReturnAdoption<'registry> {
-    record: &'registry StartedReturnedSettingsSend,
+    payload: &'registry StartedReturnPayload,
 }
 
 impl SettingsStartedReturnAdoption<'_> {
@@ -575,16 +576,16 @@ impl SettingsStartedReturnAdoption<'_> {
         window: &Arc<()>,
         slot: &Arc<()>,
     ) -> bool {
-        let Some(payload) = self.record.payload.as_ref() else {
-            return false;
-        };
+        let payload = self.payload;
         payload.owner.owned_no_resend()
             && payload.owner.ticket_matches()
             && Arc::ptr_eq(&payload.loan.association, association)
             && association.matches_slot(window, slot)
-            && self
-                .record
-                .healthy(&association.ledger, association.message_id)
+            && StartedReturnedSettingsSend::payload_healthy(
+                payload,
+                &association.ledger,
+                association.message_id,
+            )
     }
 }
 
@@ -594,6 +595,8 @@ pub(super) struct StartedReturnedSettingsSend {
 
 struct StartedReturnPayload {
     owner: OwnedStartedSettingsReturn,
+    removed: Option<SettingsRemovedSendSlot>,
+    disposition: Option<super::super::super::disposition::RetainedDisposition>,
     loan: WorkSettingsSendLoan,
 }
 
@@ -603,21 +606,17 @@ struct AbandonedStartedReturnPayload {
 }
 
 impl StartedReturnedSettingsSend {
-    fn adoption(&self) -> Result<SettingsStartedReturnAdoption<'_>, SettingsStartedReturnFailure> {
-        if self
-            .payload
+    pub(super) fn healthy(&self, ledger: &Arc<Ledger>, message_id: MessageId) -> bool {
+        self.payload
             .as_ref()
-            .is_none_or(|payload| !payload.owner.owned_no_resend())
-        {
-            return Err(SettingsStartedReturnFailure::ASSOCIATION);
-        }
-        Ok(SettingsStartedReturnAdoption { record: self })
+            .is_some_and(|payload| Self::payload_healthy(payload, ledger, message_id))
     }
 
-    pub(super) fn healthy(&self, ledger: &Arc<Ledger>, message_id: MessageId) -> bool {
-        let Some(payload) = self.payload.as_ref() else {
-            return false;
-        };
+    fn payload_healthy(
+        payload: &StartedReturnPayload,
+        ledger: &Arc<Ledger>,
+        message_id: MessageId,
+    ) -> bool {
         let Some(source) = payload.owner.source() else {
             return false;
         };
@@ -628,7 +627,18 @@ impl StartedReturnedSettingsSend {
         else {
             return false;
         };
-        Arc::ptr_eq(&source.association, &payload.loan.association)
+        payload
+            .removed
+            .as_ref()
+            .is_none_or(|removed| removed.matches_source(source))
+            && payload.owner.sql_input().is_none_or(|input| {
+                payload
+                    .removed
+                    .as_ref()
+                    .is_some_and(|removed| removed.matches_input(input))
+                    && ReturnedSettingsReplySource::new(input).is_ok()
+            })
+            && Arc::ptr_eq(&source.association, &payload.loan.association)
             && payload
                 .loan
                 .association
@@ -748,18 +758,330 @@ impl SettingsReceiveWork {
                 return Err(SettingsStartedReturnFailure::ASSOCIATION);
             };
             *entry = QueuedReplyEntry::StartedReturned(Box::new(StartedReturnedSettingsSend {
-                payload: Some(StartedReturnPayload { owner, loan }),
+                payload: Some(StartedReturnPayload {
+                    owner,
+                    removed: None,
+                    disposition: None,
+                    loan,
+                }),
             }));
             let QueuedReplyEntry::StartedReturned(returned) = entry else {
                 return Err(SettingsStartedReturnFailure::ASSOCIATION);
             };
             returned.finish(&self.ledger, message_id)?;
-            let adoption = returned.adoption()?;
-            returning.complete(adoption)
+            let payload = returned
+                .payload
+                .as_mut()
+                .ok_or(SettingsStartedReturnFailure::ASSOCIATION)?;
+            let adoption = SettingsStartedReturnAdoption { payload };
+            let removed = returning.complete(adoption)?;
+            payload.removed = Some(removed);
+            Ok(())
         })();
         if returned.is_err() {
             self.latch_failure();
         }
         returned
+    }
+}
+
+pub(crate) struct ReturnedSettingsReplySource<'source> {
+    input: &'source ReturnedSettingsSqlInput,
+    request: &'source SettingsReplyBuildRequest,
+    committed: &'source crate::storage::CommittedSettingsReply,
+}
+
+impl<'source> ReturnedSettingsReplySource<'source> {
+    pub(in crate::devices::settings_ingress::work) fn new(
+        input: &'source ReturnedSettingsSqlInput,
+    ) -> Result<Self, PairedHandoffReadError> {
+        let source = input.source();
+        let owner = source
+            .reply
+            .as_ref()
+            .ok_or(PairedHandoffReadError::Bookkeeping)?;
+        let payload = owner
+            .payload
+            .as_ref()
+            .ok_or(PairedHandoffReadError::Bookkeeping)?;
+        if !source.association.matches_payload(
+            payload,
+            &source.association.ledger,
+            source.candidate.message_id,
+        ) || !source
+            .association
+            .matches_slot(input.window_identity(), input.slot_identity())
+            || source.candidate.recipient != payload.committed.header().recipient
+            || !matches!(
+                source.candidate.routing,
+                TransportOutboundRouting::PrivateSettings
+            )
+        {
+            return Err(PairedHandoffReadError::Bookkeeping);
+        }
+        let request = payload.input.record.returned_reply_request()?;
+        let permit = &payload.input.record.permit;
+        let witness = request.witness();
+        let joined = witness
+            .build
+            .as_ref()
+            .ok_or(PairedHandoffReadError::Bookkeeping)?;
+        if !request.matches_context(&payload.input.context, &source.association.connection)
+            || !request.matches_association(&permit.association)
+            || !Arc::ptr_eq(&witness.ledger, &permit.ledger)
+            || witness.peer != permit.association.reply.peer_device_id
+            || !Arc::ptr_eq(&joined.association, &permit.association)
+            || joined.claim != super::super::super::ReplyBuildClaim::Claimed
+        {
+            return Err(PairedHandoffReadError::Bookkeeping);
+        }
+        Ok(Self {
+            input,
+            request,
+            committed: &payload.committed,
+        })
+    }
+
+    pub(crate) fn candidate(&self) -> &TransportOutboundCandidate {
+        &self.input.source().candidate
+    }
+
+    pub(crate) fn committed(&self) -> &crate::storage::CommittedSettingsReply {
+        self.committed
+    }
+
+    pub(crate) fn request(&self) -> &SettingsReplyBuildRequest {
+        self.request
+    }
+
+    pub(crate) fn slot_identity(&self) -> &Arc<()> {
+        self.input.slot_identity()
+    }
+
+    pub(crate) fn shares_store(&self, store: &crate::storage::Store) -> bool {
+        self.input
+            .source()
+            .reply
+            .as_ref()
+            .and_then(|owner| owner.payload.as_ref())
+            .is_some_and(|payload| {
+                payload.input.context.endpoint.shares_store(store)
+                    && payload.input.context.agent.store().shares_connection(store)
+            })
+    }
+}
+
+impl super::QueuedReplyRegistry {
+    pub(in crate::devices::settings_ingress::work) fn disposition_input(
+        &self,
+        message_id: MessageId,
+    ) -> Option<&Arc<ReturnedSettingsSqlInput>> {
+        let QueuedReplyEntry::StartedReturned(record) = self.entries.get(&message_id)? else {
+            return None;
+        };
+        record.payload.as_ref()?.owner.sql_input()
+    }
+
+    pub(in crate::devices::settings_ingress::work) fn disposition_association(
+        &self,
+        message_id: MessageId,
+    ) -> Option<&Arc<SettingsSendLoanAssociation>> {
+        let QueuedReplyEntry::StartedReturned(record) = self.entries.get(&message_id)? else {
+            return None;
+        };
+        Some(&record.payload.as_ref()?.loan.association)
+    }
+}
+
+impl SettingsReceiveWork {
+    pub(in crate::devices) fn try_start_returned_settings_disposition(
+        &mut self,
+        connection: &Arc<SettingsConnectionIdentity>,
+        message_id: MessageId,
+    ) -> Result<(), SettingsReceiveError> {
+        use super::super::super::disposition::ReturnedDispositionState;
+        if self.disposition.is_some() {
+            return Err(SettingsReceiveError::Capacity);
+        }
+        let counts = self.ledger.counts.lock().map_err(|_| self.ledger.fail())?;
+        if !self.queued.healthy(&self.ledger, counts.private)
+            || self.unexpected_join.is_some()
+            || counts.jobs != self.receipts.len()
+            || self
+                .receipts
+                .len()
+                .checked_add(usize::from(self.reply_build_task().is_some()))
+                != Some(self.jobs.len())
+        {
+            return Err(self.ledger.fail());
+        }
+        let Some(QueuedReplyEntry::StartedReturned(record)) =
+            self.queued.entries.get_mut(&message_id)
+        else {
+            return Err(self.ledger.fail());
+        };
+        let payload = record.payload.as_mut().ok_or_else(|| self.ledger.fail())?;
+        let removed = payload.removed.as_ref().ok_or_else(|| self.ledger.fail())?;
+        let source = payload.owner.source().ok_or_else(|| self.ledger.fail())?;
+        let queued = source
+            .reply
+            .as_ref()
+            .and_then(|owner| owner.payload.as_ref())
+            .ok_or_else(|| self.ledger.fail())?;
+        if !payload.owner.owned_no_resend()
+            || payload.disposition.is_some()
+            || !payload.owner.ticket_matches()
+            || !removed.matches_source(source)
+            || !Arc::ptr_eq(&payload.loan.association.connection, connection)
+            || self
+                .history
+                .as_ref()
+                .is_none_or(|history| !Arc::ptr_eq(&history.connection, connection))
+            || self
+                .context
+                .as_ref()
+                .is_none_or(|context| !Arc::ptr_eq(context, &queued.input.context))
+        {
+            return Err(self.ledger.fail());
+        }
+        let mutation = Arc::clone(&queued.input.context.mutation);
+        let association = Arc::clone(&payload.loan.association);
+        payload
+            .owner
+            .loan_sql(removed)
+            .map_err(|_| self.ledger.fail())?;
+        let input = payload
+            .owner
+            .sql_input()
+            .ok_or_else(|| self.ledger.fail())?;
+        if !removed.matches_input(input) || ReturnedSettingsReplySource::new(input).is_err() {
+            return Err(self.ledger.fail());
+        }
+        self.disposition = Some(ReturnedDispositionState::Waiting {
+            message_id,
+            association,
+            waiting: Box::pin(mutation.lock_owned()),
+        });
+        drop(counts);
+        Ok(())
+    }
+}
+
+impl ReturnedSettingsReplySource<'_> {
+    pub(in crate::devices::settings_ingress::work) fn store(
+        &self,
+    ) -> Option<crate::storage::Store> {
+        self.input
+            .source()
+            .reply
+            .as_ref()
+            .and_then(|owner| owner.payload.as_ref())
+            .map(|payload| payload.input.context.agent.store())
+    }
+}
+
+impl super::QueuedReplyRegistry {
+    pub(in crate::devices::settings_ingress::work) fn disposition_mutation(
+        &self,
+        message_id: MessageId,
+    ) -> Option<&Arc<tokio::sync::Mutex<()>>> {
+        let input = self.disposition_input(message_id)?;
+        Some(
+            &input
+                .source()
+                .reply
+                .as_ref()?
+                .payload
+                .as_ref()?
+                .input
+                .context
+                .mutation,
+        )
+    }
+
+    pub(in crate::devices::settings_ingress::work) fn retain_disposition_join(
+        &mut self,
+        message_id: MessageId,
+        expected: tokio::task::Id,
+        joined: super::super::super::disposition::JoinedDispositionJob,
+    ) -> Result<(), super::super::super::disposition::JoinedDispositionJob> {
+        use super::super::super::disposition::RetainedDisposition;
+        if let Some(QueuedReplyEntry::StartedReturned(record)) = self.entries.get_mut(&message_id)
+            && let Some(payload) = record.payload.as_mut()
+            && payload.disposition.is_none()
+        {
+            payload.disposition = Some(RetainedDisposition::Observed { expected, joined });
+            Ok(())
+        } else {
+            Err(joined)
+        }
+    }
+
+    pub(in crate::devices::settings_ingress::work) fn finish_disposition_join(
+        &mut self,
+        ledger: &Arc<Ledger>,
+        message_id: MessageId,
+    ) -> Result<(), SettingsReceiveError> {
+        use super::super::super::disposition::{RetainedDisposition, RetainedDispositionOutcome};
+        let Some(QueuedReplyEntry::StartedReturned(record)) = self.entries.get_mut(&message_id)
+        else {
+            return Err(ledger.fail());
+        };
+        let payload = record.payload.as_mut().ok_or_else(|| ledger.fail())?;
+        let Some(RetainedDisposition::Observed { expected, joined }) = payload.disposition.as_ref()
+        else {
+            return Err(ledger.fail());
+        };
+        let input = payload.owner.sql_input().ok_or_else(|| ledger.fail())?;
+        let removed = payload.removed.as_ref().ok_or_else(|| ledger.fail())?;
+        if !removed.matches_input(input) {
+            return Err(ledger.fail());
+        }
+        let status = match joined {
+            Ok((actual, output)) => {
+                if actual != expected || !Arc::ptr_eq(&output.input, input) {
+                    return Err(ledger.fail());
+                }
+                match &output.outcome {
+                    Ok(disposition) => {
+                        let source =
+                            ReturnedSettingsReplySource::new(input).map_err(|_| ledger.fail())?;
+                        if !disposition.matches_source(&source) {
+                            return Err(ledger.fail());
+                        }
+                        Ok(())
+                    }
+                    Err(_) => Err(SettingsReceiveError::Worker),
+                }
+            }
+            Err(error) if error.id() == *expected => Err(SettingsReceiveError::Worker),
+            Err(_) => return Err(ledger.fail()),
+        };
+        {
+            let mut counts = ledger.counts.lock().map_err(|_| ledger.fail())?;
+            counts.jobs = counts.jobs.checked_sub(1).ok_or_else(|| ledger.fail())?;
+        }
+        let Some(RetainedDisposition::Observed { joined, .. }) = payload.disposition.take() else {
+            return Err(ledger.fail());
+        };
+        let outcome = match joined {
+            Ok((_, output)) => {
+                let super::super::super::disposition::ReturnedDispositionOutput { outcome, input } =
+                    output;
+                drop(input);
+                RetainedDispositionOutcome::Worker { _outcome: outcome }
+            }
+            Err(cause) => RetainedDispositionOutcome::Join { _cause: cause },
+        };
+        let source_return = payload.owner.finish_sql_loan();
+        let returned_ok = source_return.is_ok();
+        payload.disposition = Some(RetainedDisposition::Finished {
+            _outcome: outcome,
+            _source_return: source_return,
+        });
+        if !returned_ok {
+            return Err(ledger.fail());
+        }
+        status
     }
 }
