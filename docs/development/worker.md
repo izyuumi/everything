@@ -103,3 +103,23 @@ Observed:
 - Lifecycle: every Host, executor and relay stopped by SIGINT exited 0, executors after reporting supervisor, local endpoint and relay joins. One Host and one relay generation were instead killed by the test harness's background time limit. Five retained stores passed SQLite `integrity_check` with no foreign-key violations.
 
 Unrelated to the product: rebuilding the binary changed its code identity, so a later executor's Keychain read of the item created by the earlier binary returned `Credential(Timeout)`, probably waiting on a macOS access prompt. The executor reported a service failure, and that process stayed alive with a blocked Keychain call until it was force-killed. A cleanup delete of that earlier item also hung and was stopped. No real provider credential, paid inference, Apple client, arbitrary-code isolation, hostile-worker attestation or security review is covered by this walkthrough. Automated coverage remains deferred to [#32](https://github.com/izyuumi/everything/issues/32).
+
+## Owner release walkthrough, 2026-10-17
+
+The owner-release change was checked with one debug build (`everything` SHA-256 `30ac5580705fa74d02479b10a62a1d5813b73f180cda02197cf0725e4ffb6128`). Its copies ran every Host, executor and relay process, and the same binary stored and deleted the fake worker credential, so its code identity never changed. Setup matched the walkthrough above: real relay, Host coordinator, dedicated executor and loopback fake Responses server, all in disposable state under `target/`, deleted afterwards.
+
+Observed:
+
+- **Unknown:** a delegated task was cancelled with an ordinary `cancel_task` while its provider request was held open. The worker dropped the connection, and the Host admitted an `unknown` report with phase `outcome_unknown`. A new delegation then failed with `host command or task capacity is exhausted`, and coordinator status reported `unresolved_remote_tasks: 1`.
+- **Release checks:**
+  - A release naming `cancellation-requested` for that Unknown task was refused.
+  - `release --expected-phase outcome-unknown` returned phase `released`, status `failed` and the stored request ID, operator, reason and `released_at`. The full charge and the Unknown report stayed, and unresolved dropped to 0.
+  - Replaying the same request ID returned the identical `released_at`.
+  - A different request ID was refused.
+- **After release:** the next delegation ran and settled `succeeded` with one quarantined artifact.
+- **Late result:** a second delegation's provider request was held, then the executor was stopped with SIGINT (exit 0) before it sent any result. The owner ran coordinator `cancel` (phase `cancellation_requested`) and then `release --expected-phase cancellation-requested`. On restart, the executor sent its `unknown` Result. The Host ledger recorded the result digest (`result_ready`), but the native task kept phase `released` with `result: null`, no receipt, no quarantine and no ACK. Coordinator status showed no failure code.
+- **Restart:** after SIGINT (exit 0) and restart, both release records, their request IDs and `released_at` values, the refused late result and the `remote_released_by_owner` failure codes were unchanged. Replaying the first release returned the same record, and a new delegation succeeded.
+- **Crash found and fixed:** before the admission-completion fix, delegating after a capacity-rejected delegation made the Host exit 1 with `host command ... conflicts with an existing identity or result`. With the fix, the same sequence succeeded and the Host kept running.
+- **Lifecycle:** Host, executor and relay exited 0 after SIGINT, and the Host and executor stores passed `integrity_check` with no foreign-key violations. The fake credential was deleted with `worker credential delete`.
+
+The leftover Keychain item from the first walkthrough was created by an earlier binary. A `worker credential delete` attempt with the new binary timed out after 90 s, probably on a macOS Keychain access prompt. That item remains. This walkthrough is not a security review. Automated coverage remains deferred to [#32](https://github.com/izyuumi/everything/issues/32).
