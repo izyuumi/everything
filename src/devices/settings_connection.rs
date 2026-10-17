@@ -374,6 +374,18 @@ impl SettingsConnectionOwner<'_> {
     }
 
     #[cfg(unix)]
+    pub(super) async fn return_started_settings_send(
+        &mut self,
+        window: &mut RelaySendWindow,
+        message_id: MessageId,
+    ) -> Result<(), crate::devices::session::outbound::SettingsStartedReturnFailure> {
+        self.owner
+            .receive
+            .return_started_settings_send(&self.identity, window, message_id)
+            .await
+    }
+
+    #[cfg(unix)]
     pub(super) fn try_return_queued_reply(
         &mut self,
         window: &mut RelaySendWindow,

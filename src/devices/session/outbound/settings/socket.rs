@@ -737,3 +737,108 @@ impl std::error::Error for SettingsSocketAdmissionFailure {
         }
     }
 }
+
+pub(super) struct ReturnedSocketParts {
+    pub(super) input: Arc<SettingsPreparationInput>,
+    pub(super) evidence: ReturnedSocketEvidence,
+}
+
+pub(super) struct ReturnedSocketEvidence {
+    _start_failure: Option<SocketStartFailure>,
+    _final_phase: ReturnedFinalPhase,
+    _outcome: Option<SettingsSocketWriteOutcome>,
+    _stop: Option<SettingsPreparationStop>,
+    _issue: Option<SettingsSocketObserveFailure>,
+    _loan_abandoned: bool,
+    _delivery_failure: Option<oneshot::error::TryRecvError>,
+}
+
+enum ReturnedFinalPhase {
+    NotSpawned,
+    Joined {
+        _expected: Id,
+        _outcome: Result<ReturnedFinalOutput, JoinError>,
+    },
+}
+
+struct ReturnedFinalOutput {
+    _outcome: FinalWorkerOutcome,
+    _slot: Arc<()>,
+}
+
+impl SettingsSocketAttempt {
+    pub(super) fn return_identity_matches(
+        &self,
+        window: &Arc<()>,
+        slot: &Arc<()>,
+        socket: &Arc<RelaySocketIdentity>,
+    ) -> bool {
+        Arc::ptr_eq(&self.input.window, window)
+            && Arc::ptr_eq(&self.input.slot, slot)
+            && self.input.ticket.matches_slot(window, slot)
+            && self.input.ticket.shares_socket(socket)
+            && self.input.ticket.matches_source(&self.input.source)
+    }
+
+    pub(super) fn return_ready(&self) -> bool {
+        self.frame.is_none()
+            && self.binary.is_none()
+            && match &self.phase {
+                FinalPhase::Unstarted | FinalPhase::Stopped => {
+                    self.outcome.is_none() && self.stop.is_some()
+                }
+                FinalPhase::Observed { .. } => self.joined_matches(),
+                FinalPhase::Waiting(_) | FinalPhase::Running { .. } => false,
+            }
+    }
+
+    pub(super) fn return_parts(self: Box<Self>) -> Result<ReturnedSocketParts, Box<Self>> {
+        if !self.return_ready() {
+            return Err(self);
+        }
+        let Self {
+            start_failure,
+            phase,
+            frame,
+            binary,
+            outcome,
+            stop,
+            issue,
+            loan_abandoned,
+            delivery_failure,
+            input,
+        } = *self;
+        drop(frame);
+        drop(binary);
+        let final_phase = match phase {
+            FinalPhase::Observed { expected, joined } => ReturnedFinalPhase::Joined {
+                _expected: expected,
+                _outcome: joined.map(|output| {
+                    let FinalOutput {
+                        outcome,
+                        slot,
+                        source,
+                    } = output;
+                    drop(source);
+                    ReturnedFinalOutput {
+                        _outcome: outcome,
+                        _slot: slot,
+                    }
+                }),
+            },
+            _ => ReturnedFinalPhase::NotSpawned,
+        };
+        Ok(ReturnedSocketParts {
+            input,
+            evidence: ReturnedSocketEvidence {
+                _start_failure: start_failure,
+                _final_phase: final_phase,
+                _outcome: outcome,
+                _stop: stop,
+                _issue: issue,
+                _loan_abandoned: loan_abandoned,
+                _delivery_failure: delivery_failure,
+            },
+        })
+    }
+}

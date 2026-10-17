@@ -1,4 +1,7 @@
+mod returned;
 mod socket;
+
+pub(in crate::devices) use returned::{OwnedStartedSettingsReturn, SettingsStartedReturnFailure};
 
 pub(super) use socket::SettingsSocketAttempt;
 pub(crate) use socket::{
@@ -94,7 +97,7 @@ impl SettingsPreparationInput {
 impl SettingsCustodyState {
     pub(super) fn source(&self) -> Option<&Arc<SettingsSendSource>> {
         match self {
-            Self::Provisional => None,
+            Self::Provisional | Self::Returning => None,
             Self::LoanedUnstarted(source) => Some(source),
             Self::Socket(attempt) => Some(attempt.source()),
             Self::Waiting { input, .. }

@@ -15,11 +15,12 @@ use super::super::{
 };
 use super::{ReplyBuildJobInput, ReplyBuildState, handoff_receive_error};
 
+pub(in crate::devices) use send::SettingsStartedReturnAdoption;
 pub(in crate::devices) use send::{
     PendingSettingsSend, SettingsSendAdmissionError, SettingsSendLoanAssociation,
     SettingsSendReturnFailure, SettingsSendReturnReason, SettingsSendSource,
 };
-use send::{ReturnedSettingsSend, WorkSettingsSendLoan};
+use send::{ReturnedSettingsSend, StartedReturnedSettingsSend, WorkSettingsSendLoan};
 
 const MAX_QUEUED_REPLIES: usize = 32;
 
@@ -29,6 +30,7 @@ pub(in crate::devices::settings_ingress::work) struct QueuedReplyRegistry {
 }
 
 enum QueuedReplyEntry {
+    StartedReturned(StartedReturnedSettingsSend),
     Owned {
         returned: Option<ReturnedSettingsSend>,
         reply: Option<OwnedQueuedSettingsReply>,
@@ -99,6 +101,9 @@ impl QueuedReplyRegistry {
                             returned.matches_payload(payload, ledger, *message_id)
                         })
                 }),
+                QueuedReplyEntry::StartedReturned(returned) => {
+                    returned.healthy(ledger, *message_id)
+                }
                 QueuedReplyEntry::Loaned {
                     witness: Some(witness),
                 } => witness.matches_registry(ledger, *message_id),
@@ -273,7 +278,8 @@ impl SettingsReceiveWork {
             QueuedReplyEntry::Owned {
                 reply: Some(reply), ..
             } => reply,
-            QueuedReplyEntry::Loaned { witness: Some(_) } => return Ok(None),
+            QueuedReplyEntry::Loaned { witness: Some(_) }
+            | QueuedReplyEntry::StartedReturned(_) => return Ok(None),
             _ => return Err(self.ledger.fail()),
         };
         let committed = reply.committed().map_err(handoff_receive_error)?;

@@ -1,5 +1,7 @@
 use super::*;
-use crate::devices::session::outbound::RelaySendWindow;
+use crate::devices::session::outbound::{
+    OwnedStartedSettingsReturn, RelaySendWindow, SettingsStartedReturnFailure,
+};
 use crate::devices::session::outbound::{
     SettingsPreparationStop, SettingsPreparationWorkerFailure,
 };
@@ -405,6 +407,9 @@ impl SettingsReceiveWork {
             .entries
             .get_mut(&id)
             .ok_or(Admission::MissingOwner)?;
+        if matches!(entry, QueuedReplyEntry::StartedReturned(_)) {
+            return Err(Admission::NoResend);
+        }
         let QueuedReplyEntry::Owned { returned, reply } = entry else {
             return Err(Admission::Association);
         };
@@ -556,5 +561,205 @@ impl fmt::Display for SettingsSendReturnFailure {
 impl std::error::Error for SettingsSendReturnFailure {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         Some(&self.reason)
+    }
+}
+
+pub(in crate::devices) struct SettingsStartedReturnAdoption<'registry> {
+    record: &'registry StartedReturnedSettingsSend,
+}
+
+impl SettingsStartedReturnAdoption<'_> {
+    pub(in crate::devices) fn matches_slot(
+        &self,
+        association: &Arc<SettingsSendLoanAssociation>,
+        window: &Arc<()>,
+        slot: &Arc<()>,
+    ) -> bool {
+        let Some(payload) = self.record.payload.as_ref() else {
+            return false;
+        };
+        payload.owner.owned_no_resend()
+            && payload.owner.ticket_matches()
+            && Arc::ptr_eq(&payload.loan.association, association)
+            && association.matches_slot(window, slot)
+            && self
+                .record
+                .healthy(&association.ledger, association.message_id)
+    }
+}
+
+pub(super) struct StartedReturnedSettingsSend {
+    payload: Option<StartedReturnPayload>,
+}
+
+struct StartedReturnPayload {
+    owner: OwnedStartedSettingsReturn,
+    loan: WorkSettingsSendLoan,
+}
+
+struct AbandonedStartedReturnPayload {
+    _cause: SettingsStartedReturnFailure,
+    payload: StartedReturnPayload,
+}
+
+impl StartedReturnedSettingsSend {
+    fn adoption(&self) -> Result<SettingsStartedReturnAdoption<'_>, SettingsStartedReturnFailure> {
+        if self
+            .payload
+            .as_ref()
+            .is_none_or(|payload| !payload.owner.owned_no_resend())
+        {
+            return Err(SettingsStartedReturnFailure::ASSOCIATION);
+        }
+        Ok(SettingsStartedReturnAdoption { record: self })
+    }
+
+    pub(super) fn healthy(&self, ledger: &Arc<Ledger>, message_id: MessageId) -> bool {
+        let Some(payload) = self.payload.as_ref() else {
+            return false;
+        };
+        let Some(source) = payload.owner.source() else {
+            return false;
+        };
+        let Some(queued) = source
+            .reply
+            .as_ref()
+            .and_then(|owner| owner.payload.as_ref())
+        else {
+            return false;
+        };
+        Arc::ptr_eq(&source.association, &payload.loan.association)
+            && payload
+                .loan
+                .association
+                .matches_payload(queued, ledger, message_id)
+            && source.candidate.message_id == message_id
+            && source.candidate.recipient == queued.committed.header().recipient
+            && matches!(
+                source.candidate.routing,
+                TransportOutboundRouting::PrivateSettings
+            )
+    }
+
+    fn finish(
+        &mut self,
+        ledger: &Arc<Ledger>,
+        message_id: MessageId,
+    ) -> Result<(), SettingsStartedReturnFailure> {
+        if !self.healthy(ledger, message_id) {
+            return Err(SettingsStartedReturnFailure::ASSOCIATION);
+        }
+        let payload = self
+            .payload
+            .as_mut()
+            .ok_or(SettingsStartedReturnFailure::ASSOCIATION)?;
+        payload.owner.finish()?;
+        if !payload.owner.ticket_matches() {
+            return Err(SettingsStartedReturnFailure::ASSOCIATION);
+        }
+        if !self.healthy(ledger, message_id) {
+            return Err(SettingsStartedReturnFailure::ASSOCIATION);
+        }
+        Ok(())
+    }
+}
+
+impl Drop for StartedReturnedSettingsSend {
+    fn drop(&mut self) {
+        if let Some(payload) = self.payload.take() {
+            let retained = Box::leak(Box::new(AbandonedStartedReturnPayload {
+                _cause: SettingsStartedReturnFailure::ASSOCIATION,
+                payload,
+            }));
+            retained.payload.loan.association.quarantine();
+        }
+    }
+}
+
+impl SettingsReceiveWork {
+    pub(in crate::devices) async fn return_started_settings_send(
+        &mut self,
+        connection: &Arc<SettingsConnectionIdentity>,
+        window: &mut RelaySendWindow,
+        message_id: MessageId,
+    ) -> Result<(), SettingsStartedReturnFailure> {
+        let association = match self.queued.entries.get(&message_id) {
+            Some(QueuedReplyEntry::Loaned {
+                witness: Some(loan),
+            }) if Arc::ptr_eq(&loan.association.connection, connection)
+                && Arc::ptr_eq(&loan.association.ledger, &self.ledger)
+                && self
+                    .history
+                    .as_ref()
+                    .is_some_and(|history| Arc::ptr_eq(&history.connection, connection)) =>
+            {
+                Arc::clone(&loan.association)
+            }
+            _ => return Err(SettingsStartedReturnFailure::ASSOCIATION),
+        };
+        if let Err(error) = window.collect_started_settings_return(message_id).await {
+            self.latch_failure();
+            return Err(error);
+        }
+        let returned = (|| {
+            let entry = self
+                .queued
+                .entries
+                .get_mut(&message_id)
+                .ok_or(SettingsStartedReturnFailure::MISSING)?;
+            let QueuedReplyEntry::Loaned { witness } = entry else {
+                return Err(SettingsStartedReturnFailure::ASSOCIATION);
+            };
+            if witness
+                .as_ref()
+                .is_none_or(|loan| !Arc::ptr_eq(&loan.association, &association))
+            {
+                return Err(SettingsStartedReturnFailure::ASSOCIATION);
+            }
+            let mut returning = window.started_settings_return(message_id, &association)?;
+            let source = returning
+                .source()
+                .ok_or(SettingsStartedReturnFailure::ASSOCIATION)?;
+            let queued = source
+                .reply
+                .as_ref()
+                .and_then(|owner| owner.payload.as_ref())
+                .ok_or(SettingsStartedReturnFailure::ASSOCIATION)?;
+            if !Arc::ptr_eq(&source.association, &association)
+                || !association.matches_payload(queued, &self.ledger, message_id)
+                || self
+                    .context
+                    .as_ref()
+                    .is_none_or(|context| !Arc::ptr_eq(context, &queued.input.context))
+                || source.candidate.message_id != message_id
+                || source.candidate.recipient != queued.committed.header().recipient
+                || !matches!(
+                    source.candidate.routing,
+                    TransportOutboundRouting::PrivateSettings
+                )
+            {
+                return Err(SettingsStartedReturnFailure::ASSOCIATION);
+            }
+            let loan = witness
+                .take()
+                .ok_or(SettingsStartedReturnFailure::ASSOCIATION)?;
+            let Some(owner) = returning.take_phase() else {
+                *witness = Some(loan);
+                return Err(SettingsStartedReturnFailure::ASSOCIATION);
+            };
+            *entry = QueuedReplyEntry::StartedReturned(StartedReturnedSettingsSend {
+                payload: Some(StartedReturnPayload { owner, loan }),
+            });
+            let QueuedReplyEntry::StartedReturned(returned) = entry else {
+                return Err(SettingsStartedReturnFailure::ASSOCIATION);
+            };
+            returned.finish(&self.ledger, message_id)?;
+            let adoption = returned.adoption()?;
+            returning.complete(adoption)
+        })();
+        if returned.is_err() {
+            self.latch_failure();
+        }
+        returned
     }
 }

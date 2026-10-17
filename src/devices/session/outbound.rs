@@ -13,6 +13,8 @@ use crate::transport::remote::RelaySocketIdentity;
 #[cfg(unix)]
 use settings::{GuardWait, SettingsPreparationInput, SettingsPreparationOutput};
 #[cfg(unix)]
+pub(in crate::devices) use settings::{OwnedStartedSettingsReturn, SettingsStartedReturnFailure};
+#[cfg(unix)]
 pub(in crate::devices) use settings::{SettingsPreparationStop, SettingsPreparationWorkerFailure};
 #[cfg(unix)]
 pub(crate) use settings::{
@@ -69,6 +71,7 @@ struct SettingsSendCell {
 #[cfg(unix)]
 enum SettingsCustodyState {
     Provisional,
+    Returning,
     LoanedUnstarted(Arc<SettingsSendSource>),
     Waiting {
         waiting: GuardWait,
@@ -115,7 +118,7 @@ impl SettingsSendCell {
     fn matches_window(&self, window: &Arc<()>) -> bool {
         Arc::ptr_eq(&self.slot.window, window)
             && match &self.state {
-                SettingsCustodyState::Provisional => {
+                SettingsCustodyState::Provisional | SettingsCustodyState::Returning => {
                     self.association.as_ref().is_none_or(|association| {
                         association.matches_slot(window, &self.slot.identity)
                     })
