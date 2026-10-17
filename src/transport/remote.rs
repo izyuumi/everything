@@ -441,7 +441,6 @@ mod settings_write {
 
     struct WritePayload<'window> {
         cancellation: StopWait,
-        deadline: Pin<Box<tokio::time::Sleep>>,
         progress: WriteProgress,
         loan: SettingsSocketSendLoan<'window>,
     }
@@ -457,12 +456,10 @@ mod settings_write {
             loan: SettingsSocketSendLoan<'window>,
         ) -> SettingsSocketWriteReturn<'window> {
             let cancellation = Box::pin(self.cancellation.clone().cancelled_owned());
-            let deadline = Box::pin(tokio::time::sleep(WRITE_TIMEOUT));
             SettingsWriter {
                 connection: self,
                 payload: Some(WritePayload {
                     cancellation,
-                    deadline,
                     progress: WriteProgress::BeforeFirstPoll,
                     loan,
                 }),
@@ -481,9 +478,6 @@ mod settings_write {
             }
             if let Poll::Ready(cause) = payload.loan.poll_stop(cx) {
                 return Poll::Ready(WriteResult::Admission(cause));
-            }
-            if payload.deadline.as_mut().poll(cx).is_ready() {
-                return Poll::Ready(WriteResult::Remote(RemoteError::Timeout));
             }
             if !payload
                 .loan

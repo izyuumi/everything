@@ -143,6 +143,7 @@ pub(crate) struct SettingsSocketSendLoan<'window> {
     connection_cancellation: StopWait,
     deadline: Pin<Box<tokio::time::Sleep>>,
     write_deadline: Instant,
+    write_budget: Pin<Box<tokio::time::Sleep>>,
     phase: LoanPhase,
     attempt: &'window mut SettingsSocketAttempt,
     endpoint: &'window DeviceEndpoint,
@@ -447,6 +448,10 @@ impl FinalDriver<'_> {
             return self.fail(Failure::stopped(cause));
         }
         let input = &self.attempt.input;
+        let write_deadline = Instant::now() + std::time::Duration::from_secs(5);
+        let write_budget = Box::pin(tokio::time::sleep_until(tokio::time::Instant::from_std(
+            write_deadline,
+        )));
         let loan = SettingsSocketSendLoan {
             guard: Some(guard),
             cancellation: Box::pin(input.cancellation.clone().cancelled_owned()),
@@ -456,7 +461,8 @@ impl FinalDriver<'_> {
             deadline: Box::pin(tokio::time::sleep_until(tokio::time::Instant::from_std(
                 input.deadline,
             ))),
-            write_deadline: Instant::now() + std::time::Duration::from_secs(5),
+            write_deadline,
+            write_budget,
             phase: LoanPhase::Unchecked,
             attempt: self.attempt,
             endpoint: self.endpoint,
@@ -545,7 +551,7 @@ impl SettingsSocketSendLoan<'_> {
         &mut self,
         cx: &mut Context<'_>,
     ) -> Poll<SettingsSocketAdmissionFailure> {
-        if Instant::now() >= self.write_deadline {
+        if self.write_budget.as_mut().poll(cx).is_ready() {
             return Poll::Ready(SettingsSocketAdmissionFailure::TIMED_OUT);
         }
         let stop = if self.cancellation.as_mut().poll(cx).is_ready() {
