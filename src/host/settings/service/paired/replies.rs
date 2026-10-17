@@ -23,6 +23,7 @@ use crate::devices::{
     SettingsReplyPublicationError, SettingsReplyQualification,
 };
 use crate::host::settings::SettingsGrantReference;
+use crate::host::settings::agent::PairedHandoffReadError;
 use crate::host::settings::contract::SettingsOperationState;
 use crate::protocol::{DeviceId, MessageId, UnixMillis};
 use crate::storage::settings_originals::{
@@ -68,6 +69,59 @@ impl From<SettingsServiceError> for SettingsReplyProjectionError {
 impl fmt::Debug for SettingsReplyProjectionError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str("SettingsReplyProjectionError([retained cause])")
+    }
+}
+
+pub(crate) enum SettingsQueuedReplyCheckError {
+    Owner(PairedHandoffReadError),
+    Current(SettingsReplyPublicationError),
+}
+
+impl From<PairedHandoffReadError> for SettingsQueuedReplyCheckError {
+    fn from(cause: PairedHandoffReadError) -> Self {
+        Self::Owner(cause)
+    }
+}
+
+impl From<SettingsReplyPublicationError> for SettingsQueuedReplyCheckError {
+    fn from(cause: SettingsReplyPublicationError) -> Self {
+        Self::Current(cause)
+    }
+}
+
+impl From<SettingsReplyProjectionError> for SettingsQueuedReplyCheckError {
+    fn from(cause: SettingsReplyProjectionError) -> Self {
+        Self::Current(cause.into())
+    }
+}
+
+impl fmt::Debug for SettingsQueuedReplyCheckError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("SettingsQueuedReplyCheckError([retained cause])")
+    }
+}
+
+impl fmt::Display for SettingsQueuedReplyCheckError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::Owner(PairedHandoffReadError::Closed) => "Settings queued reply owner is closed",
+            Self::Owner(PairedHandoffReadError::RejectedBind) => {
+                "Settings queued reply owner retains a rejected Bind"
+            }
+            Self::Owner(PairedHandoffReadError::Bookkeeping) => {
+                "Settings queued reply ownership bookkeeping failed"
+            }
+            Self::Current(_) => "Settings queued reply current authority check failed",
+        })
+    }
+}
+
+impl std::error::Error for SettingsQueuedReplyCheckError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Owner(_) => None,
+            Self::Current(cause) => Some(cause),
+        }
     }
 }
 
