@@ -322,11 +322,11 @@ enum CiphertextLoadAttemptFailure {
     Commit(rusqlite::Error),
 }
 
-struct QueuedReplyStamp<'reply> {
+struct QueuedReplyStamp {
     reservation_id: Uuid,
     local_device_id: DeviceId,
     peer_device_id: DeviceId,
-    provenance: &'reply str,
+    provenance: String,
     family: &'static str,
     maximum_bytes: usize,
     created_at: UnixMillis,
@@ -461,7 +461,7 @@ fn load_private_ciphertext_on(
 
 fn queued_reply_stamp(
     queued: &OwnedQueuedSettingsReply,
-) -> Result<QueuedReplyStamp<'_>, SettingsQueuedReplyCheckError> {
+) -> Result<QueuedReplyStamp, SettingsQueuedReplyCheckError> {
     let (
         reservation_id,
         local_device_id,
@@ -473,12 +473,13 @@ fn queued_reply_stamp(
         expires_at,
     ) = match queued.request()? {
         SettingsReplyBuildRequest::Fresh(request) => {
-            let reply = request.committed_source().reply_reservation();
+            let source = request.committed_source();
+            let reply = source.reply_reservation();
             (
                 reply.reservation_id,
                 reply.local_device_id,
                 reply.peer_device_id,
-                reply.provenance.as_str(),
+                bounded_reply_provenance(&reply.provenance)?,
                 "inspection",
                 90_112,
                 reply.created_at,
@@ -491,7 +492,7 @@ fn queued_reply_stamp(
                 reply.reservation_id,
                 reply.local_device_id,
                 reply.peer_device_id,
-                reply.provenance.as_str(),
+                bounded_reply_provenance(&reply.provenance)?,
                 "inspection",
                 90_112,
                 reply.created_at,
@@ -499,12 +500,13 @@ fn queued_reply_stamp(
             )
         }
         SettingsReplyBuildRequest::Bind { request, .. } => {
-            let reply = request.committed_source().reply_reservation();
+            let source = request.committed_source();
+            let reply = source.reply_reservation();
             (
                 reply.reservation_id,
                 reply.local_device_id,
                 reply.peer_device_id,
-                reply.provenance.as_str(),
+                bounded_reply_provenance(&reply.provenance)?,
                 "default",
                 49_152,
                 reply.created_at,
@@ -521,7 +523,7 @@ fn queued_reply_stamp(
                 reply.reservation_id,
                 reply.local_device_id,
                 reply.peer_device_id,
-                reply.provenance.as_str(),
+                bounded_reply_provenance(&reply.provenance)?,
                 family,
                 maximum_bytes,
                 reply.created_at,
@@ -541,11 +543,18 @@ fn queued_reply_stamp(
     })
 }
 
+fn bounded_reply_provenance(provenance: &str) -> Result<String, SettingsQueuedReplyCheckError> {
+    if provenance.len() > 2048 {
+        return Err(SettingsReplyPublicationError::Conflict.into());
+    }
+    Ok(provenance.to_owned())
+}
+
 fn read_private_ciphertext_on(
     transaction: &Transaction<'_>,
     candidate: &TransportOutboundCandidate,
     committed: &CommittedSettingsReply,
-    stamp: &QueuedReplyStamp<'_>,
+    stamp: &QueuedReplyStamp,
     now: UnixMillis,
 ) -> Result<RelayClientMessage, CiphertextLoadAttemptFailure> {
     let reservation_exists: bool = transaction.query_row(
@@ -588,7 +597,7 @@ fn read_private_ciphertext_on(
         || ciphertext_text(row, 10, 36)? != stamp.reservation_id.to_string()
         || ciphertext_text(row, 11, 36)? != stamp.local_device_id.to_string()
         || ciphertext_text(row, 12, 36)? != peer
-        || ciphertext_text(row, 13, 2048)? != stamp.provenance
+        || ciphertext_text(row, 13, 2048)? != stamp.provenance.as_str()
         || ciphertext_text(row, 14, 10)? != stamp.family
         || row.get::<_, i64>(15)?
             != i64::try_from(bytes.len()).map_err(|_| SettingsReplyPublicationError::Conflict)?
