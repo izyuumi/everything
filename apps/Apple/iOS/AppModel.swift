@@ -8,6 +8,67 @@ enum ClientTab: Hashable {
 
 enum ClientSettingsDestination: Hashable {
     case thisDevice
+    case hostAssistant
+}
+
+enum HostSettingsStep: Equatable {
+    case access, snapshot, changes, update, open, send, poll, close
+    case hostAction(RemoteSettingsHostAction)
+}
+
+struct HostSettingsValues {
+    let snapshot: SettingsSnapshot
+    let observedAt: UInt64
+    let scope: ReplicaSettingsScopeToken
+}
+
+struct HostSettingsMutation {
+    enum State {
+        case sending
+        case uncertain
+        case recorded(RemoteSettingsOperation)
+        case rejected(RemoteSettingsDenial)
+    }
+
+    let requestID: UUID
+    let expectedRevision: UInt64
+    let changes: [SettingChange]
+    var state: State
+    var attempts = 0
+
+    var isOpen: Bool {
+        switch state {
+        case .sending, .uncertain: true
+        case .recorded(let operation):
+            if case .finished = operation.phase { false } else { true }
+        case .rejected: false
+        }
+    }
+}
+
+struct HostSettingsTurn: Identifiable {
+    let id: UUID
+    let text: String
+    var accepted: Bool
+}
+
+struct HostSettingsAssistant {
+    var openRequestID: UUID?
+    var chat: RemoteSettingsChatOpened?
+    var turns: [HostSettingsTurn] = []
+    var status: RemoteSettingsChatStatus?
+    var textRevision: UInt64?
+    var changesFloor: UInt64?
+    var text = Data()
+    var pollAfterDelay = false
+    var ended: String?
+
+    var assistantText: String { String(decoding: text, as: UTF8.self) }
+    var pendingTurn: HostSettingsTurn? { turns.last.flatMap { $0.accepted ? nil : $0 } }
+    var isRunning: Bool {
+        pendingTurn != nil || status?.phase == .running
+            || (turns.last.map { $0.accepted && status?.turnID != $0.id } ?? false)
+    }
 }
 
 enum LocalSettingsCover: Hashable {
@@ -39,6 +100,12 @@ final class AppModel {
     private(set) var hostSettingsInspectionFresh = false
     private(set) var hostSettingsSnapshotStatus: ReplicaSettingsAccessRequestStatus?
     private(set) var hostSettingsInspectionStatus: ReplicaSettingsAccessRequestStatus?
+    private(set) var hostValues: HostSettingsValues?
+    private(set) var hostChanges: [SettingsChangeHint] = []
+    private(set) var hostMutation: HostSettingsMutation?
+    private(set) var hostActionResult: RemoteSettingsHostAction?
+    private(set) var hostSettingsStep: HostSettingsStep?
+    private(set) var assistant = HostSettingsAssistant()
     private(set) var selectedTab: ClientTab = .chat
     private(set) var settingsPath: [ClientSettingsDestination] = []
     var pairing: PairingSummary?
@@ -63,7 +130,14 @@ final class AppModel {
     @ObservationIgnored private var accessInteraction: SettingsAccessInteraction?
     @ObservationIgnored private var accessControlTask: Task<Void, Never>?
     @ObservationIgnored private var accessSurfaceVisible = false
+    @ObservationIgnored private var assistantSurfaceVisible = false
     @ObservationIgnored private var accessSurfaceEpoch = UUID()
+    @ObservationIgnored private var hostSettingsQueue: [HostSettingsStep] = []
+    @ObservationIgnored private var hostSettingsTask: Task<Void, Never>?
+    @ObservationIgnored private var hostChangesCursor: UInt64 = 0
+    @ObservationIgnored private var hostChangesPages = 0
+    @ObservationIgnored private var hostAccessRetried = false
+    @ObservationIgnored private var hostAutoRefreshScope: ReplicaSettingsScopeToken?
 
     private enum SettingsRequestInput {
         case access(ReplicaSettingsAccessInput)
@@ -109,8 +183,10 @@ final class AppModel {
             retireNotificationDelivery()
             let delivery = notificationDeliveryTask
             let access = accessControlTask
+            let hostTask = hostSettingsTask
             await service?.stop()
             if let access { await access.value }
+            if let hostTask { await hostTask.value }
             if let delivery { await delivery.value }
             await refresh()
             return
@@ -151,11 +227,13 @@ final class AppModel {
             if state?.snapshot.host != updated.snapshot.host || updated.snapshot.revoked {
                 retireHostSettingsAccess()
                 retireNotificationDelivery()
+                if state?.snapshot.host != updated.snapshot.host { forgetHostSettings() }
             } else if state?.settingsScope !== updated.settingsScope {
                 retireHostSettingsAccess()
             }
             state = updated
             adoptHostSettingsAccess(updated)
+            autoRefreshHostSettings()
             requestNotificationDelivery()
             let conversation = selectedConversation
             await service.selectConversation(conversation)
@@ -214,8 +292,10 @@ final class AppModel {
         retireNotificationDelivery()
         let delivery = notificationDeliveryTask
         let access = accessControlTask
+        let hostTask = hostSettingsTask
         await service?.stop()
         if let access { await access.value }
+        if let hostTask { await hostTask.value }
         if let delivery { await delivery.value }
         await refresh()
     }
@@ -305,13 +385,18 @@ final class AppModel {
         retireNotificationDelivery()
         let delivery = notificationDeliveryTask
         let access = accessControlTask
+        let hostTask = hostSettingsTask
         await perform {
             guard let service else { throw WireError.unavailable }
             try await service.disable()
             connectionEnabled = false
         }
         if let access { await access.value }
+        if let hostTask { await hostTask.value }
         if let delivery { await delivery.value }
+        hostValues = nil
+        hostChanges = []
+        assistant = HostSettingsAssistant()
     }
 
     func localSceneChanged(active: Bool) {
@@ -422,7 +507,7 @@ final class AppModel {
     }
 
     var canCheckHostSettingsAccess: Bool {
-        hostSettingsAccessEligible && !hostSettingsAccessBusy
+        hostSettingsAccessEligible && !hostSettingsAccessBusy && hostSettingsTask == nil
             && hostSettingsAccessStatus?.blocksNewRequest != true
             && hostSettingsBinding?.stage.blocksNewRequest != true
             && hostSettingsSnapshotStatus?.blocksNewRequest != true
@@ -510,8 +595,9 @@ final class AppModel {
     }
 
     private var hostSettingsAccessEligible: Bool {
-        accessSurfaceVisible && localSceneActive && platformActive && UIApplication.shared.applicationState == .active
-            && selectedTab == .settings && settingsPath.isEmpty && localCovers.isEmpty
+        (accessSurfaceVisible || assistantSurfaceVisible) && localSceneActive && platformActive
+            && UIApplication.shared.applicationState == .active && selectedTab == .settings
+            && (settingsPath.isEmpty || settingsPath == [.hostAssistant]) && localCovers.isEmpty
             && connectionEnabled && state?.connection == "Connected" && state?.settingsScope != nil
             && state?.snapshot.host != nil && state?.snapshot.revoked == false
     }
@@ -671,10 +757,20 @@ final class AppModel {
     func hostSettingsAccessSurfaceChanged(visible: Bool) {
         guard accessSurfaceVisible != visible else { return }
         accessSurfaceVisible = visible
-        if !visible { retireHostSettingsAccess() }
+        if !hostSettingsAccessEligible { retireHostSettingsAccess() }
+        if visible { autoRefreshHostSettings() }
+    }
+
+    func hostSettingsAssistantSurfaceChanged(visible: Bool) {
+        guard assistantSurfaceVisible != visible else { return }
+        assistantSurfaceVisible = visible
+        if !hostSettingsAccessEligible { retireHostSettingsAccess() }
+        if visible, assistant.chat != nil, assistant.ended == nil { enqueueHostSettings(assistant.pendingTurn == nil ? [.poll] : [.send]) }
     }
 
     private func retireHostSettingsAccess() {
+        hostSettingsQueue.removeAll()
+        hostSettingsTask?.cancel()
         hostSettingsAccessFresh = false
         hostSettingsBindingFresh = false
         hostSettingsSnapshotFresh = false
@@ -747,6 +843,356 @@ final class AppModel {
         }
         if case .currentConnectionObservation = display.freshness { hostSettingsAccessFresh = true }
         else { hostSettingsAccessFresh = false }
+    }
+
+    var hostSettingsBusy: Bool { hostSettingsTask != nil || accessControlTask != nil }
+
+    var canRefreshHostSettings: Bool { hostSettingsAccessEligible && !hostSettingsBusy }
+
+    var hostSettingsSummary: ReplicaSettingsAccessDisplaySummary? {
+        guard let access = hostSettingsAccess, access.requestsAvailable,
+              case .available(let summary) = access.display.status else { return nil }
+        return summary
+    }
+
+    var hostValuesCurrent: Bool {
+        guard let hostValues, let scope = state?.settingsScope else { return false }
+        return hostValues.scope === scope && hostSettingsSummary != nil
+    }
+
+    var canSaveHostSettings: Bool {
+        hostSettingsAccessEligible && !hostSettingsBusy && hostValuesCurrent
+            && hostSettingsSummary?.writableKeys.isEmpty == false && hostMutation?.isOpen != true
+    }
+
+    var canAskHostSettings: Bool {
+        guard hostSettingsAccessEligible, let summary = hostSettingsSummary,
+              case .configuredProvider = summary.sessionConsent else { return false }
+        return true
+    }
+
+    func refreshHostSettings() {
+        hostSettingsAccessIssue = nil
+        hostChangesPages = 0
+        hostAccessRetried = false
+        var steps: [HostSettingsStep] = [.access]
+        if hostMutation?.isOpen == true { steps.append(.update) }
+        steps += [.snapshot, .changes]
+        enqueueHostSettings(steps)
+    }
+
+    func saveHostSettings(_ changes: [SettingChange]) {
+        guard canSaveHostSettings, let hostValues, !changes.isEmpty else { return }
+        hostSettingsAccessIssue = nil
+        hostMutation = HostSettingsMutation(requestID: UUID(), expectedRevision: hostValues.snapshot.revision,
+                                            changes: changes, state: .sending)
+        hostChangesPages = 0
+        enqueueHostSettings([.update, .snapshot, .changes])
+    }
+
+    func reconcileHostSettingsMutation() {
+        guard hostMutation?.isOpen == true else { return }
+        refreshHostSettings()
+    }
+
+    func forgetHostSettingsMutation() {
+        guard hostSettingsTask == nil else { return }
+        hostMutation = nil
+    }
+
+    func confirmHostAction(_ action: RemoteSettingsHostAction) {
+        hostActionResult = nil
+        enqueueHostSettings([.hostAction(action)])
+    }
+
+    func openHostSettingsAssistant() {
+        guard canAskHostSettings, assistant.chat == nil || assistant.ended != nil else { return }
+        assistant = HostSettingsAssistant(openRequestID: UUID())
+        enqueueHostSettings([.open])
+    }
+
+    func sendHostSettingsAssistant(_ text: String) -> Bool {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard canAskHostSettings, assistant.chat != nil, assistant.ended == nil, !assistant.isRunning,
+              !trimmed.isEmpty, text.utf8.count <= RemoteSettingsQuery.maximumSessionTextBytes,
+              !text.contains("\0") else { return false }
+        assistant.turns.append(HostSettingsTurn(id: UUID(), text: text, accepted: false))
+        assistant.changesFloor = hostChangesCursor
+        enqueueHostSettings([.send])
+        return true
+    }
+
+    func closeHostSettingsAssistant() {
+        guard assistant.chat != nil, assistant.ended == nil else {
+            assistant = HostSettingsAssistant()
+            return
+        }
+        enqueueHostSettings([.close])
+    }
+
+    private func forgetHostSettings() {
+        hostValues = nil
+        hostChanges = []
+        hostChangesCursor = 0
+        hostMutation = nil
+        hostActionResult = nil
+        hostAutoRefreshScope = nil
+        assistant = HostSettingsAssistant()
+    }
+
+    private func autoRefreshHostSettings() {
+        guard accessSurfaceVisible, settingsPath.isEmpty, hostSettingsAccessEligible, !hostSettingsBusy,
+              let scope = state?.settingsScope, hostAutoRefreshScope !== scope, !hostValuesCurrent else { return }
+        hostAutoRefreshScope = scope
+        refreshHostSettings()
+    }
+
+    private func enqueueHostSettings(_ steps: [HostSettingsStep]) {
+        for step in steps where !hostSettingsQueue.contains(step) && hostSettingsQueue.count < 16 {
+            hostSettingsQueue.append(step)
+        }
+        startHostSettingsDriver()
+    }
+
+    private func startHostSettingsDriver() {
+        guard hostSettingsTask == nil, accessControlTask == nil, hostSettingsAccessEligible,
+              !hostSettingsQueue.isEmpty else { return }
+        hostSettingsTask = Task { [self] in
+            while !Task.isCancelled, hostSettingsAccessEligible, !hostSettingsQueue.isEmpty {
+                let step = hostSettingsQueue.removeFirst()
+                hostSettingsStep = step
+                await runHostSettings(step)
+            }
+            hostSettingsStep = nil
+            hostSettingsTask = nil
+            if !Task.isCancelled, hostSettingsAccessEligible, !hostSettingsQueue.isEmpty { startHostSettingsDriver() }
+        }
+    }
+
+    private func hostSettingsQuery(_ step: HostSettingsStep) -> RemoteSettingsQuery? {
+        switch step {
+        case .access: return .accessStatus
+        case .snapshot:
+            guard let summary = hostSettingsSummary, !summary.readableKeys.isEmpty else { return nil }
+            return .snapshot(keys: summary.readableKeys)
+        case .changes:
+            guard hostSettingsSummary != nil else { return nil }
+            return .changes(afterSequence: hostChangesCursor, limit: 32)
+        case .update:
+            guard let mutation = hostMutation, mutation.isOpen else { return nil }
+            return .update(requestID: mutation.requestID, expectedRevision: mutation.expectedRevision, changes: mutation.changes)
+        case .hostAction(let action): return .hostAction(action)
+        case .open:
+            guard let openRequestID = assistant.openRequestID, assistant.chat == nil else { return nil }
+            return .sessionOpen(openRequestID: openRequestID)
+        case .send:
+            guard let chat = assistant.chat, assistant.ended == nil, let turn = assistant.pendingTurn else { return nil }
+            return .sessionSend(chatID: chat.chatID, turnID: turn.id, providerBindingSHA256: chat.providerBindingSHA256, text: turn.text)
+        case .poll:
+            guard let chat = assistant.chat, assistant.ended == nil else { return nil }
+            let offset = assistant.textRevision == nil ? 0 : UInt64(assistant.text.count)
+            return .sessionPoll(chatID: chat.chatID, textOffset: min(offset, RemoteSettingsQuery.maximumTextOffset))
+        case .close:
+            guard let chat = assistant.chat else { return nil }
+            return .sessionClose(chatID: chat.chatID)
+        }
+    }
+
+    private func runHostSettings(_ step: HostSettingsStep) async {
+        if step == .poll, assistant.pollAfterDelay {
+            assistant.pollAfterDelay = false
+            do { try await Task.sleep(for: .milliseconds(1500)) } catch { return }
+        }
+        guard let service, let state, let host = state.snapshot.host, let scope = state.settingsScope,
+              let query = hostSettingsQuery(step) else { return }
+        let input: ReplicaSettingsAccessInput
+        do { input = try ReplicaSettingsAccessGesture(service: service, scope: scope, query: query).take() }
+        catch {
+            hostSettingsAccessIssue = "The Host request could not capture its original time."
+            return
+        }
+        var original: SettingsAccessInteraction?
+        if step == .access {
+            let interaction = SettingsAccessInteraction(service: service, host: host, localID: state.identity.deviceID,
+                                                        scope: scope, epoch: accessSurfaceEpoch,
+                                                        started: input.monotonicFloor, wallFloor: input.wallFloor)
+            accessInteraction = interaction
+            original = interaction
+            hostSettingsAccessFresh = false
+        }
+        if step == .update, var mutation = hostMutation {
+            mutation.attempts += 1
+            mutation.state = mutation.attempts == 1 ? .sending : .uncertain
+            hostMutation = mutation
+        }
+        var handle: ReplicaSettingsRequestHandle?
+        do {
+            let requested = try await service.requestSettingsAccess(input)
+            handle = requested
+            original?.handle = requested
+            var outcome = ReplicaSettingsQueryOutcome.pending
+            while case .pending = outcome {
+                try await Task.sleep(for: .milliseconds(200))
+                outcome = await service.settingsQueryOutcome(requested)
+            }
+            if step == .access { await refresh() }
+            applyHostSettings(step, outcome: outcome)
+        } catch {
+            if let handle { await service.cancelSettings(handle) }
+            interruptHostSettings(step, error: error)
+        }
+    }
+
+    private func interruptHostSettings(_ step: HostSettingsStep, error: Error) {
+        if step == .update, var mutation = hostMutation, mutation.isOpen {
+            mutation.state = .uncertain
+            hostMutation = mutation
+        }
+        if error is CancellationError { return }
+        if (error as? WireError) == .unavailable, step != .access, !hostAccessRetried {
+            hostAccessRetried = true
+            hostSettingsQueue.insert(contentsOf: [.access, step], at: 0)
+            return
+        }
+        hostSettingsQueue.removeAll()
+        hostSettingsAccessIssue = step == .update
+            ? "The change could not be confirmed. Its original identity is kept; refresh to reconcile with the Host."
+            : "The Host request could not be completed. Current Host values have not been verified."
+    }
+
+    private func applyHostSettings(_ step: HostSettingsStep, outcome: ReplicaSettingsQueryOutcome) {
+        switch outcome {
+        case .pending: return
+        case .accessObserved:
+            guard step == .access else { return interruptHostSettings(step, error: WireError.unavailable) }
+            if case .grantUnavailable = hostSettingsAccess?.display.status {
+                hostSettingsQueue.removeAll()
+                hostSettingsAccessIssue = "The Host reports no Settings access for this iPhone. Host values below are not current."
+            }
+        case .ended(let status):
+            if step == .update, var mutation = hostMutation, mutation.isOpen {
+                mutation.state = .uncertain
+                hostMutation = mutation
+            }
+            if step == .send || step == .open {
+                hostSettingsAccessIssue = "The Settings chat request did not finish. Its identity is kept and is resent when you return."
+            } else if status != .cancelled {
+                hostSettingsAccessIssue = step == .update
+                    ? "No Host reply arrived. The change outcome is unknown; refresh to reconcile."
+                    : "The Host request did not finish. Current Host values have not been verified."
+            }
+            hostSettingsQueue.removeAll()
+        case .received(let result, let observedAt):
+            applyHostSettings(step, result: result, observedAt: observedAt)
+        }
+    }
+
+    private func applyHostSettings(_ step: HostSettingsStep, result: ReplicaSettingsQueryResult, observedAt: UInt64) {
+        switch result {
+        case .snapshot(let snapshot):
+            if let scope = state?.settingsScope { hostValues = HostSettingsValues(snapshot: snapshot, observedAt: observedAt, scope: scope) }
+        case .changes(let page):
+            hostChanges = Array((hostChanges + page.changes).suffix(32))
+            if let next = page.nextSequence { hostChangesCursor = max(hostChangesCursor, next) }
+            hostChangesPages += 1
+            if page.changes.count == 32, hostChangesPages < 8 { hostSettingsQueue.insert(.changes, at: 0) }
+        case .update(let requestID, let operation):
+            guard var mutation = hostMutation, mutation.requestID == requestID else { return }
+            mutation.state = .recorded(operation)
+            hostMutation = mutation
+        case .hostActionRequired(let action):
+            hostActionResult = action
+        case .sessionOpened(let chat):
+            assistant.chat = chat
+        case .sessionAccepted(let chatID, let turnID):
+            guard assistant.chat?.chatID == chatID,
+                  let index = assistant.turns.firstIndex(where: { $0.id == turnID }) else { return }
+            assistant.turns[index].accepted = true
+            enqueueHostSettings([.poll])
+        case .sessionStatus(let status):
+            applyAssistantStatus(status, closing: step == .close)
+        case .denied(let reason):
+            applyHostSettingsDenial(step, reason: reason)
+        }
+    }
+
+    private func applyAssistantStatus(_ status: RemoteSettingsChatStatus, closing: Bool) {
+        guard assistant.chat?.chatID == status.chatID else { return }
+        if assistant.textRevision != status.textRevision {
+            assistant.textRevision = status.textRevision
+            assistant.text = Data()
+        }
+        if status.textOffset == UInt64(assistant.text.count) { assistant.text.append(Data(status.text.utf8)) }
+        let previous = assistant.status?.operationIDs ?? []
+        assistant.status = status
+        switch status.phase {
+        case .ready, .running, .completed:
+            if closing { assistant.ended = "This Settings chat is closed." }
+        default:
+            assistant.ended = closing ? "This Settings chat is closed." : "This Settings chat ended on the Host."
+        }
+        if UInt64(assistant.text.count) < status.textBytes, UInt64(assistant.text.count) <= RemoteSettingsQuery.maximumTextOffset {
+            enqueueHostSettings([.poll])
+        } else if assistant.isRunning, assistant.ended == nil {
+            assistant.pollAfterDelay = true
+            enqueueHostSettings([.poll])
+        }
+        if status.operationIDs != previous, !status.operationIDs.isEmpty {
+            enqueueHostSettings([.snapshot, .changes])
+        }
+    }
+
+    private func applyHostSettingsDenial(_ step: HostSettingsStep, reason: RemoteSettingsDenial) {
+        if step == .update, var mutation = hostMutation {
+            switch reason {
+            case .conflict, .outsideScope, .writeBlocked, .invalid:
+                mutation.state = .rejected(reason)
+            case .grantUnavailable, .capacity:
+                mutation.state = mutation.attempts > 1 ? .uncertain : .rejected(reason)
+            case .grantChanged, .outcomeUnknown, .unavailable:
+                mutation.state = .uncertain
+            }
+            hostMutation = mutation
+        }
+        switch reason {
+        case .grantChanged where !hostAccessRetried:
+            hostAccessRetried = true
+            hostSettingsQueue.insert(contentsOf: [.access, step], at: 0)
+            return
+        case .grantUnavailable, .grantChanged:
+            hostSettingsQueue.removeAll()
+            hostSettingsAccessIssue = "Host Settings access for this iPhone was revoked or changed. Controls are disabled until a refresh shows current access."
+        case .outsideScope:
+            if step == .open || step == .send || step == .poll || step == .close {
+                assistant.ended = "The Host refused this Settings chat. Its consent, scope or chat changed; open a new chat after refreshing."
+            } else {
+                hostSettingsAccessIssue = "The Host refused a request outside this iPhone's current scope."
+            }
+            if !hostAccessRetried {
+                hostAccessRetried = true
+                hostSettingsQueue = [.access]
+            }
+        case .conflict:
+            hostSettingsAccessIssue = step == .update
+                ? "Not saved: Host settings changed since they were read. Review the refreshed values."
+                : "The Host reported a conflicting reuse of this request."
+            if step == .update { hostSettingsQueue = [.snapshot, .changes] }
+        case .capacity:
+            hostSettingsAccessIssue = step == .open
+                ? "Another Settings chat for this iPhone is still live on the Host. Close it or wait for it to expire."
+                : "The Host is at capacity. Try again later."
+        case .invalid:
+            if step == .poll {
+                assistant.textRevision = nil
+                assistant.text = Data()
+            } else {
+                hostSettingsAccessIssue = "The Host rejected the request as invalid."
+            }
+        case .outcomeUnknown, .unavailable, .writeBlocked:
+            hostSettingsAccessIssue = step == .open || step == .send
+                ? "The Settings assistant is unavailable on the Host (no configured model, credential or free runtime). No other provider is used."
+                : "The Host could not complete this request now. Nothing is reported as saved."
+        }
     }
 
     private func requestLocalDrain(permanent: Bool = false) {
