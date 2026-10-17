@@ -11,6 +11,7 @@ pub(crate) use settings_grants::settings_grant_head_on;
 #[cfg(unix)]
 pub(crate) use settings_publication::{
     CommittedSettingsReply, SettingsCiphertextLoadFailure, SettingsReplyPublishFailure,
+    SettingsSocketCheckFailure,
 };
 #[cfg(unix)]
 pub(crate) use settings_transport::{
