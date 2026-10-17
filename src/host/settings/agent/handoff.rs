@@ -177,7 +177,7 @@ impl PairedReadyReply {
                 request.authority_source().invocation_identity(),
                 &self.correlation.identity,
             ),
-            SettingsReplyBuildRequest::Access(_) => false,
+            SettingsReplyBuildRequest::Access(_) | SettingsReplyBuildRequest::Snapshot(_) => false,
         }
     }
 }
