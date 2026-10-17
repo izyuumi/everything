@@ -770,6 +770,22 @@ impl Conversation {
             .map(run_info)
             .or_else(|| state.last_run.clone())
     }
+
+    pub fn approval_expires_at(&self) -> Option<i64> {
+        let turn = self.checkpoint.native.as_ref()?.turn.as_ref()?;
+        if turn.status != LoopStatus::AwaitingPermission {
+            return None;
+        }
+        turn.round
+            .as_ref()?
+            .calls
+            .iter()
+            .filter_map(|call| match &call.phase {
+                CallPhase::AwaitingPermission { approval } => Some(approval.expires_at),
+                _ => None,
+            })
+            .min()
+    }
 }
 
 impl ToolRunSetup {
