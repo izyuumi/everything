@@ -1,5 +1,5 @@
 use super::*;
-use crate::protocol::{CommandEnvelope, SyncBatch, SyncCursor};
+use crate::protocol::{CommandEnvelope, DeviceId, MessageId, SyncBatch, SyncCursor};
 
 const MAX_TRANSPORT_ENVELOPE: usize = 2 * MAX_JSON_BYTES;
 const MAX_PENDING_INBOX: i64 = 1_024;
@@ -7,6 +7,26 @@ const MAX_PENDING_INBOX_BYTES: i64 = 64 * 1_048_576;
 const MAX_PEER_INBOX: i64 = 128;
 const MAX_PEER_INBOX_BYTES: i64 = 8 * 1_048_576;
 const COMMAND_RETENTION_MS: i64 = 7 * 24 * 60 * 60 * 1_000;
+const MAX_OUTBOUND_EXCLUSIONS: usize = 16;
+const MAX_OUTBOUND_CANDIDATES: i64 = 17;
+
+pub(crate) enum TransportOutboundRouting {
+    Ordinary,
+    PrivateSettings,
+}
+
+pub(crate) enum TransportOutboundSelection {
+    OrdinaryOnly,
+    SettingsEnabled,
+}
+
+pub(crate) struct TransportOutboundCandidate {
+    pub(crate) message_id: MessageId,
+    pub(crate) recipient: DeviceId,
+    pub(crate) not_before: i64,
+    pub(crate) created_at: i64,
+    pub(crate) routing: TransportOutboundRouting,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct TransportInboxRow {
@@ -579,6 +599,29 @@ impl Store {
         Ok(())
     }
 
+    pub(crate) fn next_transport_outbound_candidate(
+        &self,
+        now: i64,
+        excluded: &std::collections::BTreeSet<MessageId>,
+        selection: TransportOutboundSelection,
+    ) -> StorageResult<Option<TransportOutboundCandidate>> {
+        validate_time(now)?;
+        if excluded.len() > MAX_OUTBOUND_EXCLUSIONS {
+            return invalid("outbound candidate exclusion limit exceeded");
+        }
+        let include_private = matches!(selection, TransportOutboundSelection::SettingsEnabled);
+        let connection = self.connection()?;
+        let mut statement = connection.prepare("SELECT o.id,o.device_id,o.not_before,o.created_at,EXISTS(SELECT 1 FROM settings_transport_private_outbox AS p WHERE p.message_id=o.id) FROM outbox AS o JOIN transport_outbox AS t ON t.message_id=o.id JOIN devices AS d ON d.id=o.device_id WHERE o.delivered_at IS NULL AND o.not_before<=?1 AND t.expires_at>?1 AND d.revoked_at IS NULL AND (?2 OR NOT EXISTS(SELECT 1 FROM settings_transport_private_outbox AS p WHERE p.message_id=o.id)) ORDER BY o.not_before,o.created_at,o.id LIMIT ?3")?;
+        let mut rows = statement.query(params![now, include_private, MAX_OUTBOUND_CANDIDATES])?;
+        while let Some(row) = rows.next()? {
+            let candidate = outbound_candidate_row(row)?;
+            if !excluded.contains(&candidate.message_id) {
+                return Ok(Some(candidate));
+            }
+        }
+        Ok(None)
+    }
+
     pub fn pending_transport_outbox(
         &self,
         now: i64,
@@ -1075,6 +1118,56 @@ fn prepare_transport_receipt_in(
         return Ok(false);
     }
     Ok(true)
+}
+
+fn outbound_candidate_row(row: &Row<'_>) -> StorageResult<TransportOutboundCandidate> {
+    let message_id = MessageId::try_from(outbound_candidate_uuid(row, 0)?)
+        .map_err(|_| StorageError::InvalidInput("invalid outbound candidate message ID".into()))?;
+    let recipient = DeviceId::try_from(outbound_candidate_uuid(row, 1)?).map_err(|_| {
+        StorageError::InvalidInput("invalid outbound candidate recipient ID".into())
+    })?;
+    let not_before = outbound_candidate_integer(row, 2)?;
+    let created_at = outbound_candidate_integer(row, 3)?;
+    validate_interval(created_at, not_before)?;
+    let routing = match outbound_candidate_integer(row, 4)? {
+        0 => TransportOutboundRouting::Ordinary,
+        1 => TransportOutboundRouting::PrivateSettings,
+        _ => return invalid("invalid outbound candidate routing marker"),
+    };
+    Ok(TransportOutboundCandidate {
+        message_id,
+        recipient,
+        not_before,
+        created_at,
+        routing,
+    })
+}
+
+fn outbound_candidate_uuid(row: &Row<'_>, column: usize) -> StorageResult<uuid::Uuid> {
+    let rusqlite::types::ValueRef::Text(bytes) = row.get_ref(column)? else {
+        return invalid("outbound candidate identifier is not text");
+    };
+    if bytes.len() != 36 {
+        return invalid("outbound candidate identifier is not a canonical UUID");
+    }
+    let text = std::str::from_utf8(bytes).map_err(|_| {
+        StorageError::InvalidInput("invalid outbound candidate identifier text".into())
+    })?;
+    let id = uuid::Uuid::parse_str(text)
+        .map_err(|_| StorageError::InvalidInput("invalid outbound candidate UUID".into()))?;
+    let mut encoded = [0_u8; 36];
+    let canonical = id.hyphenated().encode_lower(&mut encoded);
+    if id.is_nil() || canonical.as_bytes() != bytes {
+        return invalid("outbound candidate identifier is not a canonical nonnil UUID");
+    }
+    Ok(id)
+}
+
+fn outbound_candidate_integer(row: &Row<'_>, column: usize) -> StorageResult<i64> {
+    match row.get_ref(column)? {
+        rusqlite::types::ValueRef::Integer(value) => Ok(value),
+        _ => invalid("outbound candidate scalar is not an integer"),
+    }
 }
 
 fn active_peer(
