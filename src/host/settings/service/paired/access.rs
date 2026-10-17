@@ -92,17 +92,6 @@ pub(crate) struct SettingsAccessReceiptPlan<'transaction, 'connection, 'request>
     transaction: &'transaction Transaction<'connection>,
 }
 
-pub(crate) struct QualifiedSettingsAccess<'scope> {
-    authority: &'scope SettingsReceiptAuthority,
-    request: &'scope OwnedVerifiedSettingsAccess,
-    mutation: &'scope OwnedMutexGuard<()>,
-    query: Arc<()>,
-    invocation: Arc<()>,
-    decision: AccessDecision,
-    observed_wall: UnixMillis,
-    observed_monotonic: Instant,
-}
-
 struct AccessObservation {
     query: Arc<()>,
     query_floor: (UnixMillis, Instant),
@@ -186,12 +175,6 @@ impl fmt::Debug for SettingsAccessReceiptPlan<'_, '_, '_> {
     }
 }
 
-impl fmt::Debug for QualifiedSettingsAccess<'_> {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("QualifiedSettingsAccess([own current status])")
-    }
-}
-
 impl SettingsReceiptAuthority {
     pub(crate) fn check_access_receipt_on<'transaction, 'connection, 'request>(
         &'request self,
@@ -265,58 +248,6 @@ impl SettingsReceiptAuthority {
             return Err(SettingsServiceError::OutsideScope.into());
         }
         plan.check_time(wall, monotonic)
-    }
-
-    pub(crate) fn qualify_access_status_on<'scope>(
-        &'scope self,
-        store: &Store,
-        transaction: &Transaction<'_>,
-        mutation: &'scope OwnedMutexGuard<()>,
-        request: &'scope OwnedVerifiedSettingsAccess,
-    ) -> Result<QualifiedSettingsAccess<'scope>, SettingsAccessQualificationError> {
-        if !Arc::ptr_eq(OwnedMutexGuard::mutex(mutation), &self.core.mutation) {
-            return Err(SettingsServiceError::OutsideScope.into());
-        }
-        let observed = self.observe_access_on(store, transaction, request)?;
-        Ok(QualifiedSettingsAccess {
-            authority: self,
-            request,
-            mutation,
-            query: observed.query,
-            invocation: Arc::clone(request.authority_source().invocation_identity()),
-            decision: observed.decision,
-            observed_wall: observed.wall,
-            observed_monotonic: observed.monotonic,
-        })
-    }
-
-    pub(crate) fn recheck_access_status_on(
-        &self,
-        store: &Store,
-        transaction: &Transaction<'_>,
-        qualified: &QualifiedSettingsAccess<'_>,
-    ) -> Result<(), SettingsAccessQualificationError> {
-        if !std::ptr::eq(self, qualified.authority)
-            || !Arc::ptr_eq(
-                OwnedMutexGuard::mutex(qualified.mutation),
-                &self.core.mutation,
-            )
-            || !Arc::ptr_eq(
-                &qualified.invocation,
-                qualified.request.authority_source().invocation_identity(),
-            )
-        {
-            return Err(SettingsServiceError::OutsideScope.into());
-        }
-        let observed = self.observe_access_on(store, transaction, qualified.request)?;
-        if !Arc::ptr_eq(&observed.query, &qualified.query)
-            || observed.decision != qualified.decision
-            || observed.wall < qualified.observed_wall
-            || observed.monotonic < qualified.observed_monotonic
-        {
-            return Err(SettingsServiceError::OutsideScope.into());
-        }
-        Ok(())
     }
 
     fn check_access_context(
