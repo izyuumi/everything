@@ -1076,3 +1076,29 @@ fn decode<T: DeserializeOwned + Serialize>(encoded: &str, maximum: usize) -> Sto
 fn malformed(message: &'static str) -> StorageError {
     StorageError::InvalidInput(message.into())
 }
+
+pub(crate) fn read_inspection_session_on(
+    connection: &Connection,
+    id: Uuid,
+) -> StorageResult<PairedSettingsSessionReservation> {
+    paired_session(connection, id)
+}
+
+pub(crate) fn check_inspection_mutation_on(
+    connection: &Connection,
+    request_id: CommandId,
+    session: &PairedSettingsSessionReservation,
+) -> StorageResult<bool> {
+    let mut statement =
+        connection.prepare("SELECT identity FROM settings_operations WHERE request_id=?1")?;
+    let mut rows = statement.query([request_id.to_string()])?;
+    let Some(row) = rows.next()? else {
+        return Ok(false);
+    };
+    validate_paired_mutation_identity(
+        text(row, 0, MAX_OPERATION_IDENTITY_BYTES)?,
+        request_id,
+        session,
+    )?;
+    Ok(true)
+}

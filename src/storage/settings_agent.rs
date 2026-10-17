@@ -915,3 +915,11 @@ fn malformed(value: &'static str) -> StorageError {
 fn conflict<T>(entity: &'static str, id: String) -> StorageResult<T> {
     Err(StorageError::StateConflict { entity, id })
 }
+
+pub(crate) fn read_inspection_turn_on(
+    connection: &Connection,
+    command_id: CommandId,
+) -> StorageResult<SettingsTurnFence> {
+    read_fence(connection, command_id)?
+        .ok_or_else(|| missing("Settings inspection turn", &command_id.to_string()))
+}

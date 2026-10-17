@@ -290,3 +290,33 @@ impl OwnedCommittedSettingsSnapshot {
         &mut self.read.verified._witness
     }
 }
+
+pub(crate) struct OwnedCommittedSettingsInspection {
+    read: OwnedCommittedSettingsRead,
+}
+
+impl OwnedCommittedSettingsRead {
+    pub(crate) fn try_into_inspection(self) -> Result<OwnedCommittedSettingsInspection, Box<Self>> {
+        if !matches!(
+            self.verified.authority_source().request(),
+            SettingsReadRequest::InspectOriginal(_)
+        ) || self.reply.family
+            != crate::host::settings::service::SettingsReadReplyFamily::Inspection
+        {
+            return Err(Box::new(self));
+        }
+        Ok(OwnedCommittedSettingsInspection { read: self })
+    }
+}
+
+impl OwnedCommittedSettingsInspection {
+    pub(crate) fn read_owner(&self) -> &OwnedCommittedSettingsRead {
+        &self.read
+    }
+    pub(super) fn reply_build_witness(&self) -> &PrivateWitness {
+        &self.read.verified._witness
+    }
+    pub(super) fn reply_build_witness_mut(&mut self) -> &mut PrivateWitness {
+        &mut self.read.verified._witness
+    }
+}
