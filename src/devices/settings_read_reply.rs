@@ -73,7 +73,7 @@ pub(crate) enum SettingsOriginalInspectionLookup {
     NotRecorded,
     Recorded {
         original_generation: BindingGeneration,
-        view: OriginalView,
+        view: Box<OriginalView>,
     },
 }
 
