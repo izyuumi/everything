@@ -22,7 +22,13 @@ impl SettingsService {
             core.authority
                 .require_tool(&caller, SettingsToolName::List)?;
             let metadata = core.composition()?.memory.embedding_metadata()?;
-            let registry = SettingRegistry::from_profile(metadata.profile.as_ref());
+            let mut registry = SettingRegistry::from_profile(metadata.profile.as_ref());
+            #[cfg(unix)]
+            if let Some(paired) = core.paired_agent_scope(&caller)? {
+                registry
+                    .descriptors
+                    .retain(|descriptor| paired.readable.contains(&descriptor.key));
+            }
             core.authority
                 .require_tool(&caller, SettingsToolName::List)?;
             Ok(registry)
@@ -46,7 +52,13 @@ impl SettingsService {
         self.blocking(move |core| {
             core.authority
                 .require_tool(&caller, SettingsToolName::Get)?;
-            let snapshot = core.host_snapshot(scope)?;
+            let mut snapshot = core.host_snapshot(scope)?;
+            #[cfg(unix)]
+            if let Some(paired) = core.paired_agent_scope(&caller)? {
+                snapshot
+                    .entries
+                    .retain(|entry| paired.readable.contains(&entry.key));
+            }
             core.authority
                 .require_tool(&caller, SettingsToolName::Get)?;
             Ok(snapshot)

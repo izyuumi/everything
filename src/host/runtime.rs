@@ -377,6 +377,8 @@ impl HostService {
                     agent: agent.clone(),
                 },
             );
+        #[cfg(unix)]
+        settings_service.bind_settings_agents(&settings_agents)?;
         let (server, calls) = LocalServer::bind_with_lease(lease, LocalOptions::default()).await?;
         let scheduler = Scheduler::start_with_preparation(
             SchedulerServices {

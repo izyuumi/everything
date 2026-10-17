@@ -133,6 +133,11 @@ impl HostInner {
             if !commit.receipt.matches_change(&change) {
                 return Err(HostError::Invalid("Settings grant receipt mismatch"));
             }
+            #[cfg(unix)]
+            if !commit.replayed {
+                host.settings_service
+                    .retire_paired_sessions(change.peer_keys.device_id)?;
+            }
             Ok(OwnerOperationResult::SettingsGrantCommitted {
                 receipt: commit.receipt,
                 replayed: commit.replayed,

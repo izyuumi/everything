@@ -201,6 +201,8 @@ struct Session {
     closed: bool,
     cancellation: CancellationToken,
     admitted: Arc<AtomicUsize>,
+    #[cfg(unix)]
+    device: Option<paired::PairedSessionParent>,
 }
 
 pub(super) struct SessionAdmission {
@@ -330,6 +332,8 @@ impl Authority {
             closed: false,
             cancellation: CancellationToken::new(),
             admitted: Arc::new(AtomicUsize::new(0)),
+            #[cfg(unix)]
+            device: None,
         };
         match sessions.values.entry(session_id) {
             std::collections::btree_map::Entry::Vacant(entry) => {
@@ -366,6 +370,7 @@ impl Authority {
             .get(&proof.session_id)
             .ok_or(SettingsServiceError::OutsideScope)?;
         if session.secret_hash != secret_hash(&proof.secret.0)
+            || session.paired()
             || (!cleanup && (sessions.closed || session.closed || !session.live(now)))
         {
             return Err(SettingsServiceError::OutsideScope);
@@ -399,7 +404,9 @@ impl Authority {
                     .values
                     .get(&id)
                     .ok_or(SettingsServiceError::OutsideScope)?;
-                if cleanup || !sessions.closed && !session.closed && session.live(now) {
+                if session.paired() {
+                    Err(SettingsServiceError::OutsideScope)
+                } else if cleanup || !sessions.closed && !session.closed && session.live(now) {
                     Ok(())
                 } else {
                     Err(SettingsServiceError::OutsideScope)
@@ -464,6 +471,14 @@ impl Authority {
             .sessions
             .lock()
             .map_err(|_| SettingsServiceError::Poisoned)?;
+        self.insert_agent(&mut sessions, native_session_id)
+    }
+
+    fn insert_agent(
+        self: &Arc<Self>,
+        sessions: &mut Sessions,
+        native_session_id: Uuid,
+    ) -> Result<SettingsAgentSession, SettingsServiceError> {
         sessions
             .agents
             .retain(|_, session| !session.cancellation.is_cancelled());
@@ -809,6 +824,16 @@ impl Authority {
 impl Session {
     fn live(&self, now: UnixMillis) -> bool {
         now.get() < self.expires_at.get() && Instant::now() < self.deadline
+    }
+
+    #[cfg(unix)]
+    fn paired(&self) -> bool {
+        self.device.is_some()
+    }
+
+    #[cfg(not(unix))]
+    fn paired(&self) -> bool {
+        false
     }
 }
 

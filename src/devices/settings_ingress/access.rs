@@ -12,6 +12,7 @@ use uuid::Uuid;
 use super::wire::{BindingGeneration, MAX_PRIVATE_REQUEST_BYTES, canonical_uuid, object};
 use super::{SettingsReceiveError, VerifiedSettingsEnvelope, work::PrivateWitness};
 use crate::agent::Agent;
+use crate::agent::settings::{MAX_INPUT, MAX_TEXT};
 use crate::crypto::DevicePublicKeys;
 use crate::devices::{DeviceEndpoint, EndpointRole, SettingsConnectionIdentity};
 use crate::host::settings::contract::{
@@ -54,6 +55,26 @@ pub(crate) enum SettingsRemoteRequest {
     HostAction {
         action: SettingsHostAction,
     },
+    SessionOpen {
+        generation: BindingGeneration,
+        open_request_id: CommandId,
+    },
+    SessionSend {
+        generation: BindingGeneration,
+        chat_id: Uuid,
+        turn_id: CommandId,
+        provider_binding_sha256: String,
+        text: String,
+    },
+    SessionPoll {
+        generation: BindingGeneration,
+        chat_id: Uuid,
+        text_offset: usize,
+    },
+    SessionClose {
+        generation: BindingGeneration,
+        chat_id: Uuid,
+    },
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
@@ -74,7 +95,11 @@ impl SettingsRemoteRequest {
         match self {
             Self::Snapshot { generation, .. }
             | Self::Changes { generation, .. }
-            | Self::Update { generation, .. } => Some(generation),
+            | Self::Update { generation, .. }
+            | Self::SessionOpen { generation, .. }
+            | Self::SessionSend { generation, .. }
+            | Self::SessionPoll { generation, .. }
+            | Self::SessionClose { generation, .. } => Some(generation),
             Self::AccessStatus | Self::HostAction { .. } => None,
         }
     }
@@ -115,6 +140,21 @@ impl SettingsRemoteRequest {
             }
             .validate()
             .is_ok(),
+            Self::SessionOpen { .. } | Self::SessionClose { .. } => true,
+            Self::SessionSend {
+                provider_binding_sha256,
+                text,
+                ..
+            } => {
+                provider_binding_sha256.len() == 64
+                    && provider_binding_sha256
+                        .bytes()
+                        .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+                    && !text.trim().is_empty()
+                    && !text.contains('\0')
+                    && text.len() <= MAX_INPUT
+            }
+            Self::SessionPoll { text_offset, .. } => *text_offset <= MAX_TEXT,
         }
     }
 }
@@ -433,6 +473,68 @@ pub(super) fn decode(bytes: &[u8]) -> DecodedAccessStatus {
             )
         }
         Body::HostAction { action, time } => (time, SettingsRemoteRequest::HostAction { action }),
+        Body::SessionOpen {
+            generation,
+            open_request_id,
+            time,
+        } => {
+            let Ok(open_request_id) = CommandId::try_from(open_request_id) else {
+                return DecodedAccessStatus::Invalid;
+            };
+            (
+                time,
+                SettingsRemoteRequest::SessionOpen {
+                    generation,
+                    open_request_id,
+                },
+            )
+        }
+        Body::SessionSend {
+            generation,
+            chat_id,
+            turn_id,
+            provider_binding_sha256,
+            text,
+            time,
+        } => {
+            let Ok(turn_id) = CommandId::try_from(turn_id) else {
+                return DecodedAccessStatus::Invalid;
+            };
+            (
+                time,
+                SettingsRemoteRequest::SessionSend {
+                    generation,
+                    chat_id,
+                    turn_id,
+                    provider_binding_sha256,
+                    text,
+                },
+            )
+        }
+        Body::SessionPoll {
+            generation,
+            chat_id,
+            text_offset,
+            time,
+        } => (
+            time,
+            SettingsRemoteRequest::SessionPoll {
+                generation,
+                chat_id,
+                text_offset,
+            },
+        ),
+        Body::SessionClose {
+            generation,
+            chat_id,
+            time,
+        } => (
+            time,
+            SettingsRemoteRequest::SessionClose {
+                generation,
+                chat_id,
+            },
+        ),
     };
     let (Ok(host_id), Ok(issued_at), Ok(expires_at)) = (
         DeviceId::try_from(packet.payload.host_id),
@@ -511,6 +613,35 @@ enum Body {
     },
     HostAction {
         action: SettingsHostAction,
+        time: RequestTime,
+    },
+    SessionOpen {
+        generation: BindingGeneration,
+        #[serde(deserialize_with = "canonical_uuid")]
+        open_request_id: Uuid,
+        time: RequestTime,
+    },
+    SessionSend {
+        generation: BindingGeneration,
+        #[serde(deserialize_with = "canonical_uuid")]
+        chat_id: Uuid,
+        #[serde(deserialize_with = "canonical_uuid")]
+        turn_id: Uuid,
+        provider_binding_sha256: String,
+        text: String,
+        time: RequestTime,
+    },
+    SessionPoll {
+        generation: BindingGeneration,
+        #[serde(deserialize_with = "canonical_uuid")]
+        chat_id: Uuid,
+        text_offset: usize,
+        time: RequestTime,
+    },
+    SessionClose {
+        generation: BindingGeneration,
+        #[serde(deserialize_with = "canonical_uuid")]
+        chat_id: Uuid,
         time: RequestTime,
     },
 }

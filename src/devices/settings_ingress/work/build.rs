@@ -8,7 +8,7 @@ use tokio::sync::OwnedMutexGuard;
 use tokio::task::{Id, JoinError};
 
 use crate::devices::SettingsReplySealContext;
-use crate::host::settings::service::SettingsReplyProjectionError;
+use crate::host::settings::service::{SettingsRemotePreparation, SettingsReplyProjectionError};
 use crate::protocol::MessageId;
 use crate::storage::{CommittedSettingsReply, SettingsReplyPublishFailure};
 
@@ -343,7 +343,19 @@ fn run_reply_build(
     let SettingsReplyBuildRequest::Access(access) = &input.record.request;
     let store = input.context.agent.store();
     let authority = access.verified_request().receipt_authority();
-    let outcome = match authority.prepare_remote_reply(&store, &guard, access) {
+    let (guard, prepared) = match authority.prepare_remote_reply(&store, &guard, access) {
+        Ok(SettingsRemotePreparation::Session(plan)) => {
+            drop(guard);
+            let payload = authority.run_remote_session(*plan);
+            (
+                Arc::clone(&input.context.mutation).blocking_lock_owned(),
+                Ok(Some(payload)),
+            )
+        }
+        Ok(SettingsRemotePreparation::Reply(payload)) => (guard, Ok(payload)),
+        Err(cause) => (guard, Err(cause)),
+    };
+    let outcome = match prepared {
         Ok(payload) => store
             .publish_settings_reply(
                 SettingsReplySealContext {

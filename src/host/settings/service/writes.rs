@@ -401,6 +401,27 @@ impl ServiceCore {
         if let CallerSource::PairedSettings { device_id } = caller.source {
             self.repository.check_paired_capacity(device_id)?;
         }
+        #[cfg(unix)]
+        match self.paired_agent_scope(caller) {
+            Ok(Some(paired))
+                if !patch
+                    .changes
+                    .iter()
+                    .all(|change| paired.writable.contains(&change.key)) =>
+            {
+                if let Some(work) = &work {
+                    work.reject()?;
+                }
+                return Err(SettingsServiceError::OutsideScope);
+            }
+            Err(error) => {
+                if let Some(work) = &work {
+                    work.reject()?;
+                }
+                return Err(error);
+            }
+            Ok(_) => {}
+        }
         self.require_resolved_file()?;
         self.expire_unadmitted()?;
         let composition = self.composition()?;
