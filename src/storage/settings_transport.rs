@@ -122,7 +122,7 @@ pub(super) fn reserve_command_reply_in(
     identity: &RemoteAcceptedIdentity,
 ) -> Result<StoredSettingsCommandReply, SettingsCommandAdmissionError> {
     let peer = identity.peer_keys.device_id;
-    match check_outbox_capacity(connection, &peer.to_string(), 90_112) {
+    match check_settings_reply_capacity(connection, &peer.to_string(), 90_112) {
         Err(error @ StorageError::TransportCapacity(_)) => {
             return Err(SettingsCommandAdmissionError::ReplyCapacity(error));
         }
@@ -289,7 +289,7 @@ pub(super) fn reserve_bind_reply_in(
     now: UnixMillis,
 ) -> Result<StoredSettingsBindReply, SettingsBindAdmissionError> {
     let peer = admission.source.verified_peer_keys().device_id;
-    match check_outbox_capacity(connection, &peer.to_string(), 49_152) {
+    match check_settings_reply_capacity(connection, &peer.to_string(), 49_152) {
         Err(error @ StorageError::TransportCapacity(_)) => {
             return Err(SettingsBindAdmissionError::ReplyCapacity(error));
         }
@@ -347,6 +347,15 @@ const MAX_OUTBOX_MESSAGES: i64 = 1_024;
 const MAX_OUTBOX_BYTES: i64 = 128 * 1_048_576;
 const MAX_PEER_OUTBOX_MESSAGES: i64 = 64;
 const MAX_PEER_OUTBOX_BYTES: i64 = 16 * 1_048_576;
+#[cfg(unix)]
+const MAX_SETTINGS_REPLIES: i64 = 128;
+#[cfg(unix)]
+const MAX_SETTINGS_REPLY_BYTES: i64 = 32 * 1_048_576;
+#[cfg(unix)]
+const MAX_PEER_SETTINGS_REPLIES: i64 = 16;
+#[cfg(unix)]
+const MAX_PEER_SETTINGS_REPLY_BYTES: i64 = 8 * 1_048_576;
+const SETTINGS_ORIGINAL_RETENTION_MS: i64 = 86_400_000;
 
 struct OutboxUsage {
     queued_count: i64,
@@ -389,12 +398,12 @@ pub(super) fn check_outbox_capacity(
         .filter(|value| *value > 0)
         .ok_or_else(|| StorageError::InvalidInput("invalid outbox capacity size".into()))?;
     let global = connection.query_row(
-        "SELECT q.message_count,q.message_bytes,r.message_count,r.message_bytes FROM (SELECT count(*) AS message_count,coalesce(sum(length(envelope)),0) AS message_bytes FROM outbox WHERE delivered_at IS NULL) AS q CROSS JOIN (SELECT count(*) AS message_count,coalesce(sum(reserved_bytes),0) AS message_bytes FROM settings_transport_reply_reservations) AS r",
+        "SELECT count(*),coalesce(sum(length(o.envelope)),0),0,0 FROM outbox AS o WHERE o.delivered_at IS NULL AND NOT EXISTS(SELECT 1 FROM settings_transport_private_outbox AS p WHERE p.message_id=o.id)",
         [],
         outbox_usage,
     )?;
     let peer = connection.query_row(
-        "SELECT q.message_count,q.message_bytes,r.message_count,r.message_bytes FROM (SELECT count(*) AS message_count,coalesce(sum(length(envelope)),0) AS message_bytes FROM outbox WHERE delivered_at IS NULL AND device_id=?1) AS q CROSS JOIN (SELECT count(*) AS message_count,coalesce(sum(reserved_bytes),0) AS message_bytes FROM settings_transport_reply_reservations WHERE peer_device_id=?1) AS r",
+        "SELECT count(*),coalesce(sum(length(o.envelope)),0),0,0 FROM outbox AS o WHERE o.delivered_at IS NULL AND o.device_id=?1 AND NOT EXISTS(SELECT 1 FROM settings_transport_private_outbox AS p WHERE p.message_id=o.id)",
         [peer_id],
         outbox_usage,
     )?;
@@ -406,16 +415,68 @@ pub(super) fn check_outbox_capacity(
     Ok(())
 }
 
+#[cfg(unix)]
+fn check_settings_reply_capacity(
+    connection: &Connection,
+    peer_id: &str,
+    incoming_bytes: usize,
+) -> StorageResult<()> {
+    let incoming = i64::try_from(incoming_bytes)
+        .ok()
+        .filter(|value| *value > 0)
+        .ok_or_else(|| StorageError::InvalidInput("invalid Settings reply capacity size".into()))?;
+    let global = connection.query_row(
+        "SELECT q.message_count,q.message_bytes,r.message_count,r.message_bytes FROM (SELECT count(*) AS message_count,coalesce(sum(envelope_bytes),0) AS message_bytes FROM settings_transport_private_outbox) AS q CROSS JOIN (SELECT count(*) AS message_count,coalesce(sum(reserved_bytes),0) AS message_bytes FROM settings_transport_reply_reservations) AS r",
+        [],
+        outbox_usage,
+    )?;
+    let peer = connection.query_row(
+        "SELECT q.message_count,q.message_bytes,r.message_count,r.message_bytes FROM (SELECT count(*) AS message_count,coalesce(sum(envelope_bytes),0) AS message_bytes FROM settings_transport_private_outbox WHERE peer_device_id=?1) AS q CROSS JOIN (SELECT count(*) AS message_count,coalesce(sum(reserved_bytes),0) AS message_bytes FROM settings_transport_reply_reservations WHERE peer_device_id=?1) AS r",
+        [peer_id],
+        outbox_usage,
+    )?;
+    let global_permitted =
+        global.permits(incoming, MAX_SETTINGS_REPLIES, MAX_SETTINGS_REPLY_BYTES)?;
+    let peer_permitted = peer.permits(
+        incoming,
+        MAX_PEER_SETTINGS_REPLIES,
+        MAX_PEER_SETTINGS_REPLY_BYTES,
+    )?;
+    if !global_permitted || !peer_permitted {
+        return Err(StorageError::TransportCapacity("private Settings replies"));
+    }
+    Ok(())
+}
+
+pub(super) fn sweep_settings_transport(connection: &Connection, now: i64) -> StorageResult<()> {
+    connection.execute(
+        "DELETE FROM settings_transport_reply_reservations WHERE expires_at<=?1",
+        [now],
+    )?;
+    connection.execute(
+        "DELETE FROM outbox WHERE id IN (SELECT message_id FROM settings_transport_private_outbox WHERE expires_at<=?1)",
+        [now],
+    )?;
+    connection.execute(
+        "DELETE FROM settings_remote_originals WHERE terminal IS NOT NULL AND coalesce(json_extract(identity,'$.expires_at'),json_extract(identity,'$.admitted_at'))<=?1-?2",
+        [now, SETTINGS_ORIGINAL_RETENTION_MS],
+    )?;
+    Ok(())
+}
+
+pub(super) fn is_private_outbox(connection: &Connection, message_id: &str) -> StorageResult<bool> {
+    Ok(connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM settings_transport_private_outbox WHERE message_id=?1)",
+        [message_id],
+        |row| row.get(0),
+    )?)
+}
+
 pub(super) fn require_ordinary_outbox(
     connection: &Connection,
     message_id: &str,
 ) -> StorageResult<()> {
-    let private: bool = connection.query_row(
-        "SELECT EXISTS(SELECT 1 FROM settings_transport_private_outbox WHERE message_id=?1)",
-        [message_id],
-        |row| row.get(0),
-    )?;
-    if private {
+    if is_private_outbox(connection, message_id)? {
         return Err(StorageError::TransportConflict(
             "private settings outbox requires its owned transport".into(),
         ));
@@ -461,7 +522,6 @@ pub(crate) fn consume_settings_reply_in<'sealed, 'transaction, 'connection, 'sou
     if deleted != 1 {
         return Err(crate::devices::SettingsReplyPublicationError::Conflict);
     }
-    super::transport::enqueue_transport(transaction, sealed.item())?;
     let item = sealed.item();
     let envelope_bytes = i64::try_from(item.message.envelope.len())
         .map_err(|_| crate::devices::SettingsReplyPublicationError::Conflict)?;
@@ -469,6 +529,7 @@ pub(crate) fn consume_settings_reply_in<'sealed, 'transaction, 'connection, 'sou
         "INSERT INTO settings_transport_private_outbox(message_id,reservation_id,local_device_id,peer_device_id,provenance,family,envelope_bytes,created_at,expires_at) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9)",
         rusqlite::params![item.message.id,reply.reservation_id.to_string(),reply.local_device_id.to_string(),reply.peer_device_id.to_string(),reply.provenance,reply.family.name(),envelope_bytes,item.message.created_at,item.expires_at],
     )?;
+    super::transport::enqueue_transport(transaction, item)?;
     check_consumed_reply_on(transaction, sealed)?;
     sealed.check_local_on(transaction)?;
     Ok(ConsumedSettingsReply { sealed })
@@ -690,7 +751,7 @@ pub(super) fn reserve_access_reply_in(
     if spec.provenance().len() > 2048 || created_at >= expires_at {
         return Err(SettingsAccessAdmissionError::Bookkeeping);
     }
-    match check_outbox_capacity(
+    match check_settings_reply_capacity(
         connection,
         &spec.peer_device_id().to_string(),
         spec.family().reserved_bytes(),
@@ -877,7 +938,7 @@ pub(super) fn reserve_read_reply_in(
     if provenance.len() > 2048 || created_at >= expires_at {
         return Err(SettingsReadAdmissionError::Bookkeeping);
     }
-    match check_outbox_capacity(
+    match check_settings_reply_capacity(
         connection,
         &spec.peer_device_id().to_string(),
         spec.family().reserved_bytes(),

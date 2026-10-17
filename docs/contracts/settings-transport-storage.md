@@ -6,7 +6,7 @@ Compilation, bundled-SQLite migration execution, populated upgrades and actual S
 
 ## Migration ownership
 
-`Store` applies migrations through17 in its existing single immediate migration transaction and foreign-key policy, then records the schema version. Migration17 follows the [permanent Originals foundation](settings-originals.md). It adds exactly two STRICT tables and five triggers, giving268 explicit schema objects after the261-object prerequisite. Constraint autoindexes are separate from that count.
+`Store` applies migrations through17 in its existing single immediate migration transaction and foreign-key policy, then records the schema version. Migration17 follows the [permanent Originals foundation](settings-originals.md). It adds exactly two STRICT tables and six triggers, giving 269 explicit schema objects after the 261-object prerequisite. Both private-ciphertext foreign keys to `outbox` and `transport_outbox` are `DEFERRABLE INITIALLY DEFERRED` so the provenance row can be inserted before its ciphertext roots inside one transaction. Constraint autoindexes are separate from that count.
 
 | Object | Responsibility |
 | --- | --- |
@@ -26,20 +26,29 @@ Families reserve complete ciphertext bytes: denial4096, default49152, inspection
 
 ## Fresh admission and existing queues
 
-The private storage module contains two helpers used by real existing Store methods. They are visible only within storage; no new public transaction or producer API is exposed.
+The private storage module keeps ordinary and Settings capacity separate, so private Settings work can never consume ordinary sending capacity. The helpers are visible only within storage; no new public transaction or producer API is exposed.
 
-`check_outbox_capacity` reads actual pending outbox counts and ciphertext bytes plus actual unconsumed reservation counts and reserved bytes. It checks the incoming ciphertext against both global and target-peer limits inside the caller's existing immediate transaction:
+`check_outbox_capacity` reads actual pending ordinary outbox counts and ciphertext bytes, excluding rows with private provenance and ignoring reply reservations. It checks the incoming ciphertext against both global and target-peer limits inside the caller's existing immediate transaction:
 
-| Scope | Queued plus reserved messages | Queued plus reserved ciphertext bytes |
+| Scope | Queued ordinary messages | Queued ordinary ciphertext bytes |
 | --- | --- | --- |
 | Global | 1024 | 134217728 |
 | Target peer | 64 | 16777216 |
 
-`Store::enqueue` and the shared `enqueue_transport` insertion helper both call this check. The latter is used by existing encrypted queue, remote-command completion and replica-sync paths. Their existing input, active-device, local-endpoint and transaction ownership checks remain in their respective paths; ordinary identifiers do not acquire a new UUID restriction. Their actual outbox/transport-outbox insert statements remain unchanged.
+`check_settings_reply_capacity` reads queued private ciphertext rows and bytes plus unconsumed reply reservations and reserved bytes. Every reply reservation admission uses it:
+
+| Scope | Private queued plus reserved replies | Private queued plus reserved bytes |
+| --- | --- | --- |
+| Global | 128 | 33554432 |
+| Target peer | 16 | 8388608 |
+
+The `outbox_capacity_admission` trigger enforces the ordinary table and exempts a new outbox row that already has matching private provenance, whose bytes and recipient must equal that provenance. The reservation trigger and a private-ciphertext insert trigger enforce the Settings table; the latter also refuses provenance whose reservation still exists.
+
+`Store::enqueue` and the shared `enqueue_transport` insertion helper both call the ordinary check; `enqueue_transport` skips it only for a message that already has private provenance. The latter is used by existing encrypted queue, remote-command completion and replica-sync paths. Their existing input, active-device, local-endpoint and transaction ownership checks remain in their respective paths; ordinary identifiers do not acquire a new UUID restriction. Their actual outbox/transport-outbox insert statements remain unchanged.
 
 Projected counts and byte totals use checked integer arithmetic. Expected insufficient headroom returns the existing typed `StorageError::TransportCapacity("encrypted sender outbox")`. Negative accounting returns a fixed typed conflict. SQL aggregate overflow, decoding, I/O and poison failures retain their actual error cause; trigger messages are not parsed to classify capacity.
 
-Older `Store::enqueue` versions could create queues exceeding these limits. Every existing row is grandfathered, including an over-limit ordinary backlog. Migration does not assert an initial aggregate bound or repair that backlog. Existing drain, expiry, revocation, deletion and monotonic defer operations do not require fresh capacity. A new admission must fit its projected global and target-peer limits; otherwise it is refused until actual releases leave sufficient room. Counts include all pending ordinary and private ciphertext rows; queued private bytes are not also counted as an unconsumed reservation after a future valid transfer.
+Older `Store::enqueue` versions could create queues exceeding these limits. Every existing row is grandfathered, including an over-limit ordinary backlog. Migration does not assert an initial aggregate bound or repair that backlog. Existing drain, expiry, revocation, deletion and monotonic defer operations do not require fresh capacity. A new admission must fit its projected global and target-peer limits; otherwise it is refused until actual releases leave sufficient room. Ordinary counts include only pending ordinary rows. Settings counts include reservations and private ciphertext rows; a valid transfer deletes the reservation before inserting the private row, so queued private bytes are never also counted as an unconsumed reservation.
 
 The two new private tables begin empty. Their own fresh admission guards provide a separate logical bound on newly admitted private capacity metadata; they do not retroactively bound all existing ordinary queues.
 
@@ -51,13 +60,13 @@ The two new private tables begin empty. Their own fresh admission guards provide
 
 `accept_transport_outbox` checks the same private provenance in one Immediate transaction before its existing exact transport-root deletion and observed commit. A tagged private row returns the same fixed typed conflict before deletion. Missing ordinary identifiers remain successful no-ops.
 
-`maintain_transport` excludes actual private provenance from both its expired-identifier report query and matching expiry deletion in the same existing Immediate transaction. Ordinary expiry filters, report ordering and limit, replay-marker pruning, synchronization offers and command-payload archival remain unchanged. Private ciphertext expiry must use its actual owned disposition path rather than generic maintenance.
+`maintain_transport` excludes actual private provenance from its expired-identifier report query and ordinary expiry deletion. In the same Immediate transaction it then runs `sweep_settings_transport`, which deletes reply reservations whose `expires_at` has passed, deletes the outbox root of every private ciphertext whose `expires_at` has passed (cascading its transport and provenance rows), and deletes terminal Originals more than 24 hours past their expiry. `Store` runs the same sweep with the system clock inside its opening migration transaction. A later owned disposition of a swept private reply observes `AlreadyAbsent`. Ordinary expiry filters, report ordering and limit, replay-marker pruning, synchronization offers and command-payload archival remain unchanged; swept private identifiers are not reported to the ordinary send window.
 
-Explicit revocation deletion and valid defer bookkeeping remain unchanged. These exclusions do not authorize private sending, release a reservation or private charge, prove no effects, retire an owner or establish clean drain. They add no private dispatcher or runtime observation.
+`revoke_device` deletes the revoked peer's pending outbox rows, which cascades its private ciphertext, and also deletes its reply reservations. Valid defer bookkeeping remains unchanged. These exclusions do not authorize private sending, release a reservation or private charge, prove no effects, retire an owner or establish clean drain. They add no private dispatcher or runtime observation.
 
 ## Future producer boundary
 
-No current method in this increment inserts either new private table. Accepted ingress still needs the real authenticated connection, original-request transaction, current grant/epoch checks, same-Authority caller and owned request/worker/result lifetimes. A later reservation-to-ciphertext transfer must delete the exact reservation, insert actual quota-checked ciphertext roots and insert matching immutable private provenance in one immediate transaction, rolling back every step on any failure. There is no new standalone quota service or second management runtime.
+The `reserve_*_reply_in` helpers insert reservations, and `consume_settings_reply_in` performs the reservation-to-ciphertext transfer: it deletes the exact reservation, inserts matching immutable private provenance, then inserts the ciphertext roots in one immediate transaction, rolling back every step on any failure. Session dispatch does not call them yet. Accepted ingress still needs the real authenticated connection, original-request transaction, current grant/epoch checks, same-Authority caller and owned request/worker/result lifetimes. There is no new standalone quota service or second management runtime.
 
 Reservation and outbox admission guards reject existing identities before insertion, including replacement attempts through those guarded roots. Within the approved seven objects, private provenance has no insert guard against arbitrary raw-SQL `OR REPLACE`. A future private producer must use plain `INSERT`, retain its actual publication owner and compare the full original reservation/provenance; a replacement row or DTO cannot authorize publication. `transport_outbox` has no new global update-immutability trigger. Cross-row ciphertext/header/recipient/expiry checks and current connection/grant gates remain required from the actual producer and sender. These limitations are not solved by a public metadata row or foreign key.
 

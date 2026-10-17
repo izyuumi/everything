@@ -735,6 +735,7 @@ impl Store {
         let expired_sync_offers =
             transaction.execute("DELETE FROM sync_offers WHERE expires_at <= ?1", [now])?;
         let archived_command_payloads = transaction.execute("UPDATE remote_commands SET request = NULL, result = NULL WHERE state != 'pending' AND updated_at < ?1 AND (request IS NOT NULL OR result IS NOT NULL)", [now.saturating_sub(COMMAND_RETENTION_MS)])?;
+        super::settings_transport::sweep_settings_transport(&transaction, now)?;
         transaction.commit()?;
         Ok(TransportPruneReport {
             expired_outbox_ids,
@@ -1300,11 +1301,13 @@ pub(super) fn enqueue_transport(
             "local endpoint is revoked or unconfigured".into(),
         ));
     }
-    super::settings_transport::check_outbox_capacity(
-        connection,
-        &item.message.device_id,
-        item.message.envelope.len(),
-    )?;
+    if !super::settings_transport::is_private_outbox(connection, &item.message.id)? {
+        super::settings_transport::check_outbox_capacity(
+            connection,
+            &item.message.device_id,
+            item.message.envelope.len(),
+        )?;
+    }
     connection.execute(
         "INSERT INTO outbox(id,device_id,envelope,created_at,not_before) VALUES (?1,?2,?3,?4,?5)",
         params![

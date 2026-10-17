@@ -762,7 +762,7 @@ END;
 
 CREATE TRIGGER settings_remote_originals_no_delete BEFORE DELETE ON settings_remote_originals
 BEGIN
-    SELECT RAISE(ABORT,'remote Settings original retirement is permanent') WHERE 1;
+    SELECT RAISE(ABORT,'remote Settings original retirement is permanent') WHERE NOT coalesce(OLD.terminal IS NOT NULL AND coalesce(json_extract(OLD.identity,'$.expires_at'),json_extract(OLD.identity,'$.admitted_at'))<=CAST((julianday('now')-2440587.5)*86400000.0 AS INTEGER)-86400000,0);
 END;
 
 CREATE TRIGGER settings_remote_session_install AFTER INSERT ON settings_agent_sessions

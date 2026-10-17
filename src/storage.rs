@@ -417,6 +417,13 @@ impl Store {
             transaction.execute_batch(include_str!("../migrations/0017_settings_transport.sql"))?;
         }
         transaction.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+        if let Some(now) = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .ok()
+            .and_then(|elapsed| i64::try_from(elapsed.as_millis()).ok())
+        {
+            settings_transport::sweep_settings_transport(&transaction, now)?;
+        }
         transaction.commit()?;
         Ok(Self {
             connection: Arc::new(Mutex::new(connection)),
@@ -1359,6 +1366,10 @@ impl Store {
         transaction.execute("UPDATE transport_inbox SET state = 'rejected', detail = 'sender_revoked', payload = NULL WHERE sender = ?1 AND state = 'pending'", [id])?;
         transaction.execute("UPDATE remote_commands SET state = 'rejected', result = '{\"reason\":\"sender_revoked\"}', updated_at = max(updated_at, ?2) WHERE sender = ?1 AND state = 'pending'", params![id, revoked_at])?;
         transaction.execute("DELETE FROM sync_offers WHERE device_id = ?1", [id])?;
+        transaction.execute(
+            "DELETE FROM settings_transport_reply_reservations WHERE peer_device_id = ?1",
+            [id],
+        )?;
         transaction.commit()?;
         Ok(())
     }
