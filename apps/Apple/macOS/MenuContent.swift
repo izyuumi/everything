@@ -15,6 +15,9 @@ struct MenuContent: View {
                 VStack(alignment: .leading) {
                     Text("Everything").font(.headline)
                     Text(model.status).font(.caption).foregroundStyle(.secondary)
+                    if let service = model.serviceStatus {
+                        Text("Service: " + service).font(.caption2).foregroundStyle(.secondary)
+                    }
                 }
                 Spacer()
                 Button { Task { await model.refresh() } } label: { Image(systemName: "arrow.clockwise") }
