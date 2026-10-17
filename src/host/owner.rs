@@ -456,6 +456,12 @@ impl HostInner {
                     .broker
                     .acknowledge_cleanup(&operation_id, &original_result_digest, &operator, &note)
                     .await?;
+                if !report.quarantined
+                    && !self.draining.load(Ordering::Acquire)
+                    && let Err(error) = self.scheduler.redispatch().await
+                {
+                    tracing::warn!(error = %error, "scheduler redispatch after cleanup acknowledgement failed; owner wake remains available");
+                }
                 self.receipt_changed();
                 Ok(OwnerOperationResult::ToolRecovery { report })
             }

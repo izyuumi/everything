@@ -152,6 +152,7 @@ enum Control {
         reply: Reply,
     },
     Shutdown(oneshot::Sender<ShutdownReport>, OwnedMutexGuard<()>),
+    Redispatch(oneshot::Sender<Result<(), SchedulerError>>),
 }
 
 impl Scheduler {
@@ -307,6 +308,16 @@ impl Scheduler {
 
     pub async fn wake(&self, task: TaskId) -> Result<TaskSnapshot, SchedulerError> {
         self.request(|reply| Control::Wake(task, reply)).await
+    }
+
+    pub async fn redispatch(&self) -> Result<(), SchedulerError> {
+        let (reply, result) = oneshot::channel();
+        self.inner
+            .sender
+            .send(Control::Redispatch(reply))
+            .await
+            .map_err(|_| SchedulerError::Stopped)?;
+        result.await.map_err(|_| SchedulerError::Stopped)?
     }
 
     pub async fn steer(
@@ -644,6 +655,7 @@ struct Actor {
     workers: JoinSet<ExecutionOutcome>,
     retry_once: HashMap<TaskId, ResumeTarget>,
     wake_active: HashSet<TaskId>,
+    approval_deadlines: HashMap<TaskId, tokio::time::Instant>,
     stopping: bool,
     activated: bool,
     shutdown: Vec<oneshot::Sender<ShutdownReport>>,
@@ -672,6 +684,7 @@ impl Actor {
             workers: JoinSet::new(),
             retry_once: HashMap::new(),
             wake_active: HashSet::new(),
+            approval_deadlines: HashMap::new(),
             stopping: false,
             activated: false,
             shutdown: Vec::new(),
@@ -824,7 +837,17 @@ impl Actor {
                 }
                 return;
             }
+            let approval_deadline = self
+                .approval_deadlines
+                .values()
+                .min()
+                .copied()
+                .filter(|_| self.activated && !self.stopping);
             tokio::select! {
+                _ = tokio::time::sleep_until(approval_deadline.unwrap_or_else(tokio::time::Instant::now)), if approval_deadline.is_some() => {
+                    self.expire_approvals().await;
+                    self.changed.send_modify(|revision| *revision = revision.wrapping_add(1));
+                }
                 control = self.receiver.recv(), if !self.controls_closed => {
                     match control {
                         Some(control) => { let notify=!matches!(control,Control::Status(..)|Control::RemoteStatus(..)|Control::RemoteReceipt(..)|Control::RemoteByBinding(..)|Control::ScopedStatus{..}|Control::ScheduleContext{..}|Control::Active(..)); self.control(control).await; if notify{self.changed.send_modify(|revision| *revision = revision.wrapping_add(1));} },
@@ -860,9 +883,63 @@ impl Actor {
         }
     }
 
+    async fn expire_approvals(&mut self) {
+        let now = tokio::time::Instant::now();
+        let expired = self
+            .approval_deadlines
+            .iter()
+            .filter(|(_, deadline)| **deadline <= now)
+            .map(|(id, _)| *id)
+            .collect::<Vec<_>>();
+        for id in expired {
+            self.approval_deadlines.remove(&id);
+            if let Err(error) = self.wake(id).await {
+                tracing::warn!(task_id=%id, error=%error, "approval expiry wake failed; owner wake remains available");
+            }
+        }
+    }
+
+    async fn track_approval(&mut self, task: &StoredTask) -> Result<(), SchedulerError> {
+        let id = task.definition.initial.id;
+        let conversation = self
+            .services
+            .agent
+            .conversation(task.definition.initial.conversation_id)
+            .await?;
+        match conversation.approval_expires_at() {
+            Some(expires_at) => {
+                let remaining = u64::try_from(expires_at)
+                    .unwrap_or(0)
+                    .saturating_sub(UnixMillis::now()?.get());
+                self.approval_deadlines.insert(
+                    id,
+                    tokio::time::Instant::now() + std::time::Duration::from_millis(remaining),
+                );
+            }
+            None => {
+                self.approval_deadlines.remove(&id);
+            }
+        }
+        Ok(())
+    }
+
+    async fn redispatch(&mut self) -> Result<(), SchedulerError> {
+        for task in repository::unfinished(&self.store(), self.limits.max_pending_tasks)? {
+            let id = task.definition.initial.id;
+            if task.definition.remote.is_none()
+                && !task.checkpoint.task.status.is_terminal()
+                && repository::cancelled_ancestor(&self.store(), id)?
+            {
+                self.queue(id);
+            }
+        }
+        Ok(())
+    }
+
     fn stop(&mut self) {
         self.stopping = true;
         self.wake_active.clear();
+        self.approval_deadlines.clear();
         for active in self.active.values() {
             active.cancellation.cancel();
         }
@@ -1019,6 +1096,14 @@ impl Actor {
                     Err(SchedulerError::Stopped)
                 } else {
                     self.wake(id).await
+                };
+                let _ = reply.send(result);
+            }
+            Control::Redispatch(reply) => {
+                let result = if self.stopping {
+                    Err(SchedulerError::Stopped)
+                } else {
+                    self.redispatch().await
                 };
                 let _ = reply.send(result);
             }
@@ -2261,6 +2346,7 @@ impl Actor {
             progress = true;
             task.checkpoint.waiting = None;
             repository::save(&self.store(), &mut task, TaskStatus::Running)?;
+            self.approval_deadlines.remove(&id);
             let cancellation = CancellationToken::new();
             let services = Arc::clone(&self.services);
             let preparation = self.preparation.clone();
@@ -2479,6 +2565,12 @@ impl Actor {
                         TaskStatus::WaitingForChildren
                     },
                 )?;
+                if permission
+                    && !self.stopping
+                    && let Err(error) = self.track_approval(&task).await
+                {
+                    tracing::warn!(task_id=%outcome.task_id, error=%error, "approval expiry is not tracked; owner wake remains available");
+                }
             }
             ExecutionStop::Failed { diagnostic } => {
                 task.checkpoint.diagnostic = Some(diagnostic);
