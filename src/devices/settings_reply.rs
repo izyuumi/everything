@@ -144,6 +144,14 @@ pub(crate) enum SettingsReplyContractError {
 }
 
 impl OriginalView {
+    pub(super) fn encode_checked(&self) -> Result<Zeroizing<Vec<u8>>, SettingsReplyContractError> {
+        self.validate()?;
+        if let ServiceLookup::Recorded { receipt } = &self.service {
+            drop(encode_bounded(receipt, MAX_SERVICE_RECEIPT_BYTES)?);
+        }
+        encode_bounded(self, MAX_ORIGINAL_VIEW_BYTES)
+    }
+
     fn validate(&self) -> Result<(), SettingsReplyContractError> {
         if self.mutation_operation_ids.len() > MAX_MUTATION_OPERATIONS
             || self
@@ -376,11 +384,7 @@ impl SettingsOriginalReplyPacket {
                 },
             ..
         } = &self.payload;
-        view.validate()?;
-        if let ServiceLookup::Recorded { receipt } = &view.service {
-            drop(encode_bounded(receipt, MAX_SERVICE_RECEIPT_BYTES)?);
-        }
-        drop(encode_bounded(view, MAX_ORIGINAL_VIEW_BYTES)?);
+        drop(view.encode_checked()?);
         encode_bounded(self, MAX_ORIGINAL_PACKET_BYTES)
     }
 }
