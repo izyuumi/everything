@@ -20,7 +20,8 @@ pub(super) use paired::PairedWriteAdmission;
 pub(crate) use paired::{
     OriginalReplySource, PairedParentAdmission, PairedSettingsParent, PairedUpdateOutcome,
     QualifiedBindReply, QualifiedOriginalReply, QualifiedSettingsAccessReply,
-    SettingsAccessQualificationError, SettingsAccessReplyFamily, SettingsAccessReservationSpec,
+    QualifiedSettingsReadQuery, SettingsAccessQualificationError, SettingsAccessReplyFamily,
+    SettingsAccessReservationSpec, SettingsReadQualificationError, SettingsReadQueryDisposition,
     SettingsReceiptAuthority, SettingsReplyComparison, SettingsReplyProjectionError,
 };
 pub use pairing::{

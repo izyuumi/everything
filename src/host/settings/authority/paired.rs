@@ -9,15 +9,19 @@ use uuid::Uuid;
 
 use crate::crypto::DevicePublicKeys;
 use crate::devices::{
-    AuthenticatedSettingsAccessSource, AuthenticatedSettingsCommandSource, BindingHistoryState,
-    BindingIntent, BindingLifetime, OwnedCommittedSettingsBind, SettingsAccessStatusIntent,
-    SettingsConnectionIdentity, SettingsHostIdentity,
+    AuthenticatedSettingsAccessSource, AuthenticatedSettingsCommandSource,
+    AuthenticatedSettingsReadSource, BindingHistoryState, BindingIntent, BindingLifetime,
+    OwnedCommittedSettingsBind, SettingsAccessStatusIntent, SettingsConnectionIdentity,
+    SettingsHostIdentity, SettingsOriginalInspectionIntent, SettingsParentReference,
+    SettingsReadRequest, SettingsSnapshotReadIntent,
 };
 use crate::protocol::{DeviceId, UnixMillis};
 use crate::storage::Store;
 
 use super::super::grants::SettingsGrantOwner;
-use super::super::service::SettingsServiceError;
+use super::super::service::{
+    SettingsReadQualificationError, SettingsReadQueryDisposition, SettingsServiceError,
+};
 use super::Authority;
 
 const MAX_PAIRED_PARENTS: usize = 32;
@@ -738,9 +742,25 @@ impl Authority {
     }
 }
 
+#[derive(Clone, PartialEq, Eq)]
+enum SettingsQueryIntent {
+    AccessStatus(SettingsAccessStatusIntent),
+    Snapshot(SettingsSnapshotReadIntent),
+    InspectOriginal(SettingsOriginalInspectionIntent),
+}
+
+impl SettingsQueryIntent {
+    fn from_read(request: &SettingsReadRequest) -> Self {
+        match request {
+            SettingsReadRequest::Snapshot(intent) => Self::Snapshot(intent.clone()),
+            SettingsReadRequest::InspectOriginal(intent) => Self::InspectOriginal(intent.clone()),
+        }
+    }
+}
+
 struct AccessQuery {
     identity: Arc<()>,
-    intent: SettingsAccessStatusIntent,
+    intent: SettingsQueryIntent,
     peer: DevicePublicKeys,
     floor: (UnixMillis, Instant),
     deadline: Instant,
@@ -791,7 +811,9 @@ impl Authority {
         let peer = source.verified_peer_keys();
         let key = (peer.device_id, intent.query_id);
         if let Some(original) = paired.access_queries.get(&key) {
-            if original.intent != *intent || original.peer != *peer {
+            if original.intent != SettingsQueryIntent::AccessStatus(intent.clone())
+                || original.peer != *peer
+            {
                 return Err(SettingsServiceError::Conflict);
             }
             return Ok(());
@@ -811,7 +833,7 @@ impl Authority {
             key,
             AccessQuery {
                 identity: Arc::new(()),
-                intent: intent.clone(),
+                intent: SettingsQueryIntent::AccessStatus(intent.clone()),
                 peer: peer.clone(),
                 floor,
                 deadline: source.original_deadline(),
@@ -849,7 +871,8 @@ impl Authority {
             .access_queries
             .get_mut(&(peer.device_id, intent.query_id))
             .ok_or(SettingsServiceError::NotFound)?;
-        if query.intent != *intent || query.peer != *peer {
+        if query.intent != SettingsQueryIntent::AccessStatus(intent.clone()) || query.peer != *peer
+        {
             return Err(SettingsServiceError::Conflict);
         }
         let floor = source.receipt_floor();
@@ -909,4 +932,254 @@ fn check_access_host(
         return Err(SettingsServiceError::OutsideScope);
     }
     Ok(())
+}
+
+pub(in crate::host::settings) struct ReadQueryRegistration {
+    pub(in crate::host::settings) disposition: SettingsReadQueryDisposition,
+    pub(in crate::host::settings) query: Arc<()>,
+}
+
+pub(in crate::host::settings) struct ReadQueryObservation {
+    pub(in crate::host::settings) owner: SettingsGrantOwner,
+    pub(in crate::host::settings) query: Arc<()>,
+    pub(in crate::host::settings) floor: (UnixMillis, Instant),
+    pub(in crate::host::settings) deadline: Instant,
+    pub(in crate::host::settings) parent_lifetime: BindingLifetime,
+    pub(in crate::host::settings) wall: UnixMillis,
+    pub(in crate::host::settings) monotonic: Instant,
+}
+
+impl Authority {
+    pub(in crate::host::settings) fn register_read_query(
+        &self,
+        host: &Arc<SettingsHostIdentity>,
+        store: &Store,
+        source: &AuthenticatedSettingsReadSource,
+        stop: &CancellationToken,
+    ) -> Result<ReadQueryRegistration, SettingsReadQualificationError> {
+        let mut sessions = self
+            .sessions
+            .lock()
+            .map_err(|_| SettingsServiceError::Poisoned)?;
+        check_read_host(self, &sessions, host, source, stop)?;
+        let (wall, monotonic) = source.check_precommit(store)?;
+        let paired = &mut sessions.paired;
+        if let Some(original) = &paired.access_connection {
+            if !Arc::ptr_eq(original, source.connection()) {
+                if original.is_live()
+                    || !Arc::ptr_eq(original.host_identity(), host)
+                    || original.connection_epoch() == source.connection().connection_epoch()
+                {
+                    return Err(SettingsServiceError::Conflict.into());
+                }
+                paired.access_queries.clear();
+                paired.access_connection = Some(Arc::clone(source.connection()));
+            }
+        } else {
+            if !paired.access_queries.is_empty() {
+                return Err(SettingsServiceError::CorruptJournal.into());
+            }
+            paired.access_connection = Some(Arc::clone(source.connection()));
+        }
+        let (_, query_id, _, issued_at, expires_at) = read_request_parts(source.request());
+        let peer = source.verified_peer_keys();
+        let key = (peer.device_id, query_id);
+        let intent = SettingsQueryIntent::from_read(source.request());
+        if let Some(original) = paired.access_queries.get_mut(&key) {
+            if original.intent != intent || original.peer != *peer {
+                return Err(SettingsServiceError::Conflict.into());
+            }
+            let floor = source.receipt_floor();
+            if wall < original.floor.0
+                || monotonic < original.floor.1
+                || wall < original.observed_wall
+                || monotonic < original.observed_monotonic
+                || wall < floor.0
+                || monotonic < floor.1
+                || wall < issued_at
+            {
+                return Err(SettingsServiceError::OutsideScope.into());
+            }
+            if wall >= expires_at
+                || monotonic >= original.deadline
+                || monotonic >= source.original_deadline()
+            {
+                return Err(SettingsServiceError::Expired.into());
+            }
+            original.observed_wall = wall;
+            original.observed_monotonic = monotonic;
+            return Ok(ReadQueryRegistration {
+                disposition: SettingsReadQueryDisposition::Known,
+                query: Arc::clone(&original.identity),
+            });
+        }
+        if paired.access_queries.len() >= MAX_ACCESS_QUERIES
+            || paired
+                .access_queries
+                .values()
+                .filter(|query| query.peer == *peer)
+                .count()
+                >= MAX_PEER_ACCESS_QUERIES
+        {
+            return Err(SettingsServiceError::Capacity.into());
+        }
+        let floor = source.receipt_floor();
+        let identity = Arc::new(());
+        paired.access_queries.insert(
+            key,
+            AccessQuery {
+                identity: Arc::clone(&identity),
+                intent,
+                peer: peer.clone(),
+                floor,
+                deadline: source.original_deadline(),
+                observed_wall: wall,
+                observed_monotonic: monotonic,
+            },
+        );
+        Ok(ReadQueryRegistration {
+            disposition: SettingsReadQueryDisposition::First,
+            query: identity,
+        })
+    }
+
+    pub(in crate::host::settings) fn observe_read_query(
+        &self,
+        host: &Arc<SettingsHostIdentity>,
+        store: &Store,
+        source: &AuthenticatedSettingsReadSource,
+        stop: &CancellationToken,
+    ) -> Result<ReadQueryObservation, SettingsReadQualificationError> {
+        let mut sessions = self
+            .sessions
+            .lock()
+            .map_err(|_| SettingsServiceError::Poisoned)?;
+        check_read_host(self, &sessions, host, source, stop)?;
+        let (wall, monotonic) = source.check_precommit(store)?;
+        let (host_id, query_id, parent, issued_at, expires_at) =
+            read_request_parts(source.request());
+        let paired = &mut sessions.paired;
+        if paired
+            .access_connection
+            .as_ref()
+            .is_none_or(|original| !Arc::ptr_eq(original, source.connection()))
+        {
+            return Err(SettingsServiceError::OutsideScope.into());
+        }
+        let entry = paired
+            .entries
+            .values_mut()
+            .find(|entry| entry.record.id == parent.parent_id)
+            .ok_or(SettingsServiceError::OutsideScope)?;
+        let record = &entry.record;
+        if record.intent.host_id != host_id
+            || record.intent.generation != parent.generation
+            || record.peer != *source.verified_peer_keys()
+            || !Arc::ptr_eq(&record.connection, source.connection())
+            || !record.connection.is_live()
+            || record.cancellation.is_cancelled()
+            || wall < entry.observed_wall
+            || monotonic < entry.observed_monotonic
+        {
+            return Err(SettingsServiceError::OutsideScope.into());
+        }
+        let query = paired
+            .access_queries
+            .get_mut(&(source.verified_peer_keys().device_id, query_id))
+            .ok_or(SettingsServiceError::NotFound)?;
+        if query.intent != SettingsQueryIntent::from_read(source.request())
+            || query.peer != *source.verified_peer_keys()
+        {
+            return Err(SettingsServiceError::Conflict.into());
+        }
+        let floor = source.receipt_floor();
+        if wall < query.floor.0
+            || monotonic < query.floor.1
+            || wall < floor.0
+            || monotonic < floor.1
+            || wall < query.observed_wall
+            || monotonic < query.observed_monotonic
+            || wall < issued_at
+        {
+            return Err(SettingsServiceError::OutsideScope.into());
+        }
+        if wall >= expires_at
+            || monotonic >= query.deadline
+            || monotonic >= source.original_deadline()
+            || wall >= record.lifetime.expires_at
+            || monotonic >= record.lifetime.deadline
+        {
+            return Err(SettingsServiceError::Expired.into());
+        }
+        entry.observed_wall = wall;
+        entry.observed_monotonic = monotonic;
+        query.observed_wall = wall;
+        query.observed_monotonic = monotonic;
+        Ok(ReadQueryObservation {
+            owner: SettingsGrantOwner {
+                host_id: self.host_id,
+                principal_id: self.owner_principal,
+            },
+            query: Arc::clone(&query.identity),
+            floor: query.floor,
+            deadline: query.deadline,
+            parent_lifetime: record.lifetime,
+            wall,
+            monotonic,
+        })
+    }
+}
+
+fn check_read_host(
+    authority: &Authority,
+    sessions: &super::Sessions,
+    host: &Arc<SettingsHostIdentity>,
+    source: &AuthenticatedSettingsReadSource,
+    stop: &CancellationToken,
+) -> Result<(), SettingsServiceError> {
+    if sessions.closed || stop.is_cancelled() {
+        return Err(SettingsServiceError::Stopped);
+    }
+    let (host_id, _, _, _, _) = read_request_parts(source.request());
+    if sessions
+        .paired
+        .host
+        .as_ref()
+        .is_none_or(|registered| !Arc::ptr_eq(registered, host))
+        || !Arc::ptr_eq(source.connection().host_identity(), host)
+        || host.host_id() != authority.host_id
+        || host_id != authority.host_id
+        || !host.is_live()
+        || !source.connection().is_live()
+    {
+        return Err(SettingsServiceError::OutsideScope);
+    }
+    Ok(())
+}
+
+fn read_request_parts(
+    request: &SettingsReadRequest,
+) -> (
+    DeviceId,
+    Uuid,
+    &SettingsParentReference,
+    UnixMillis,
+    UnixMillis,
+) {
+    match request {
+        SettingsReadRequest::Snapshot(intent) => (
+            intent.host_id,
+            intent.query_id,
+            &intent.parent,
+            intent.issued_at,
+            intent.expires_at,
+        ),
+        SettingsReadRequest::InspectOriginal(intent) => (
+            intent.host_id,
+            intent.query_id,
+            &intent.parent,
+            intent.issued_at,
+            intent.expires_at,
+        ),
+    }
 }
