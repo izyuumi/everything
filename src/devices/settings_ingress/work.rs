@@ -1,4 +1,7 @@
 mod build;
+mod disposition;
+
+use disposition::{ReturnedDispositionOutput, ReturnedDispositionState};
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -13,6 +16,7 @@ use tokio::task::{Id, JoinSet};
 use uuid::Uuid;
 
 pub(crate) use build::OwnedQueuedSettingsReply;
+pub(crate) use build::ReturnedSettingsReplySource;
 pub(in crate::devices) use build::SettingsStartedReturnAdoption;
 pub(in crate::devices) use build::{
     PendingSettingsSend, SettingsSendAdmissionError, SettingsSendLoanAssociation,
@@ -90,6 +94,7 @@ pub(in crate::devices) struct SettingsReceiveWork {
     receipts: BTreeMap<Id, oneshot::Sender<Result<SettingsTransportReceipt, SettingsReceiveError>>>,
     pending: Option<PendingInput>,
     build: Option<ReplyBuildState>,
+    disposition: Option<ReturnedDispositionState>,
     queued: QueuedReplyRegistry,
     history: Option<Arc<BindingHistory>>,
     context: Option<Arc<ReceiveContext>>,
@@ -149,22 +154,28 @@ type JoinedRegisteredJob = Result<(Id, RegisteredJobOutput), tokio::task::JoinEr
 enum RegisteredJobOutput {
     Receive(Box<WorkerOutput>),
     ReplyBuild(Box<ReplyBuildWorkerOutput>),
+    Disposition(Box<ReturnedDispositionOutput>),
 }
 
 enum RegisteredProgress {
     Receive,
     ReplyBuild,
+    Disposition,
 }
 
 enum ReadyWork {
     ReceiveGuard(OwnedMutexGuard<()>),
     ReplyBuildGuard(OwnedMutexGuard<()>),
+    DispositionGuard(OwnedMutexGuard<()>),
     Joined(JoinedRegisteredJob),
 }
 
 pub(in crate::devices) enum SettingsReceiveWorkEvent {
     Receive(Box<SettingsReceiveEvent>),
     ReplyBuildJoined,
+    ReplyDispositionJoined {
+        message_id: crate::protocol::MessageId,
+    },
 }
 
 struct UnmatchedRegisteredJoin {
@@ -316,6 +327,7 @@ type TerminalQuarantine = (
     JoinSet<RegisteredJobOutput>,
     Option<TerminalPendingInput>,
     Option<ReplyBuildState>,
+    Option<ReturnedDispositionState>,
     QueuedReplyRegistry,
     BTreeMap<Id, oneshot::Sender<Result<SettingsTransportReceipt, SettingsReceiveError>>>,
     Option<Arc<ReceiveContext>>,
@@ -781,6 +793,7 @@ impl SettingsReceiveWork {
             receipts: BTreeMap::new(),
             pending: None,
             build: None,
+            disposition: None,
             queued: QueuedReplyRegistry::default(),
             history: None,
             context: None,
@@ -1370,7 +1383,12 @@ impl SettingsReceiveWork {
         }
         loop {
             let build_waiting = matches!(self.build, Some(ReplyBuildState::Waiting { .. }));
-            if self.jobs.is_empty() && self.pending.is_none() && !build_waiting {
+            let disposition_waiting = self.disposition_waiting();
+            if self.jobs.is_empty()
+                && self.pending.is_none()
+                && !build_waiting
+                && !disposition_waiting
+            {
                 return match &self.failure {
                     Some(error) => Err(error.clone()),
                     None => Ok(None),
@@ -1379,6 +1397,7 @@ impl SettingsReceiveWork {
             let has_jobs = !self.jobs.is_empty();
             let receive = &mut self.pending;
             let build = &mut self.build;
+            let disposition = &mut self.disposition;
             let receive_ready = async {
                 match receive {
                     Some(pending) => pending.waiting.as_mut().await,
@@ -1388,6 +1407,14 @@ impl SettingsReceiveWork {
             let build_ready = async {
                 match build {
                     Some(ReplyBuildState::Waiting { waiting, .. }) => waiting.as_mut().await,
+                    _ => std::future::pending().await,
+                }
+            };
+            let disposition_ready = async {
+                match disposition {
+                    Some(ReturnedDispositionState::Waiting { waiting, .. }) => {
+                        waiting.as_mut().await
+                    }
                     _ => std::future::pending().await,
                 }
             };
@@ -1401,6 +1428,7 @@ impl SettingsReceiveWork {
                 }
                 guard = receive_ready => ReadyWork::ReceiveGuard(guard),
                 guard = build_ready => ReadyWork::ReplyBuildGuard(guard),
+                guard = disposition_ready => ReadyWork::DispositionGuard(guard),
             };
             match ready {
                 ReadyWork::ReceiveGuard(guard) => {
@@ -1417,6 +1445,13 @@ impl SettingsReceiveWork {
                         return Err(error);
                     }
                 }
+                ReadyWork::DispositionGuard(guard) => {
+                    if let Err(error) = self.spawn_disposition(guard) {
+                        self.stop_disposition_waiter();
+                        self.latch_failure();
+                        return Err(error);
+                    }
+                }
                 ReadyWork::Joined(joined) => match self.register_join(joined)? {
                     RegisteredProgress::Receive => {
                         return self.finish_receive_join().map(|event| {
@@ -1426,6 +1461,14 @@ impl SettingsReceiveWork {
                     RegisteredProgress::ReplyBuild => {
                         self.finish_reply_build_join()?;
                         return Ok(Some(SettingsReceiveWorkEvent::ReplyBuildJoined));
+                    }
+                    RegisteredProgress::Disposition => {
+                        let message_id = self
+                            .finish_disposition_join()
+                            .inspect_err(|_| self.latch_failure())?;
+                        return Ok(Some(SettingsReceiveWorkEvent::ReplyDispositionJoined {
+                            message_id,
+                        }));
                     }
                 },
             }
@@ -1496,6 +1539,28 @@ impl SettingsReceiveWork {
                     Ok(()) => return Ok(RegisteredProgress::ReplyBuild),
                     Err(Ok((id, output))) => {
                         Ok((id, RegisteredJobOutput::ReplyBuild(Box::new(output))))
+                    }
+                    Err(Err(error)) => Err(error),
+                }
+            }
+            Ok((id, RegisteredJobOutput::Disposition(output))) => {
+                match self.register_disposition_join(Ok((id, *output))) {
+                    Ok(()) => return Ok(RegisteredProgress::Disposition),
+                    Err(Ok((id, output))) => {
+                        Ok((id, RegisteredJobOutput::Disposition(Box::new(output))))
+                    }
+                    Err(Err(error)) => Err(error),
+                }
+            }
+            Err(error)
+                if self
+                    .disposition_task()
+                    .is_some_and(|task| task == error.id()) =>
+            {
+                match self.register_disposition_join(Err(error)) {
+                    Ok(()) => return Ok(RegisteredProgress::Disposition),
+                    Err(Ok((id, output))) => {
+                        Ok((id, RegisteredJobOutput::Disposition(Box::new(output))))
                     }
                     Err(Err(error)) => Err(error),
                 }
@@ -2174,9 +2239,11 @@ impl SettingsReceiveWork {
                 .receipts
                 .len()
                 .checked_add(usize::from(self.reply_build_task().is_some()))
+                .and_then(|jobs| jobs.checked_add(usize::from(self.disposition_task().is_some())))
                 == Some(self.jobs.len())
             && self.build.is_some() == report.reply_build_active
             && self.queued.healthy(&self.ledger, report.private_requests)
+            && self.disposition_healthy()
             && self
                 .history
                 .as_ref()
@@ -2191,10 +2258,10 @@ impl SettingsReceiveWork {
         &mut self,
     ) -> Result<SettingsReceiveDrain, SettingsReceiveError> {
         self.close_intake();
-        while !self.jobs.is_empty() {
+        while !self.jobs.is_empty() || self.disposition_waiting() {
             match self.next().await {
                 Ok(event) => drop(event),
-                Err(_) if !self.jobs.is_empty() => {}
+                Err(_) if !self.jobs.is_empty() || self.disposition_waiting() => {}
                 Err(_) => break,
             }
         }
@@ -2254,6 +2321,7 @@ impl Drop for SettingsReceiveWork {
         self.closed = true;
         self.ledger.closed.store(true, Ordering::Release);
         self.stop_waiting_reply_build(SettingsReceiveError::Closed);
+        self.stop_disposition_waiter();
         if !self.report().complete() || self.failure.is_some() {
             self.ledger.terminal.store(true, Ordering::Release);
             self.ledger.changed.notify_waiters();
@@ -2262,6 +2330,7 @@ impl Drop for SettingsReceiveWork {
                 std::mem::replace(&mut self.jobs, JoinSet::new()),
                 pending,
                 self.build.take(),
+                self.disposition.take(),
                 std::mem::take(&mut self.queued),
                 std::mem::take(&mut self.receipts),
                 self.context.take(),

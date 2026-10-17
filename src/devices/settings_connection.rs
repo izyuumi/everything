@@ -374,6 +374,16 @@ impl SettingsConnectionOwner<'_> {
     }
 
     #[cfg(unix)]
+    pub(super) fn try_start_returned_settings_disposition(
+        &mut self,
+        message_id: MessageId,
+    ) -> Result<(), SettingsReceiveError> {
+        self.owner
+            .receive
+            .try_start_returned_settings_disposition(&self.identity, message_id)
+    }
+
+    #[cfg(unix)]
     pub(super) async fn return_started_settings_send(
         &mut self,
         window: &mut RelaySendWindow,
