@@ -308,6 +308,7 @@ impl SettingsReceiptAuthority {
             source.verified_peer_keys().device_id,
         )
         .map_err(SettingsServiceError::from)?;
+        self.check_access_context(store, request)?;
         let observed = self.core.authority.observe_access_query(
             &self.host,
             source,
@@ -342,7 +343,6 @@ impl SettingsReceiptAuthority {
                 }
             }
         };
-        self.check_access_context(store, request)?;
         Ok(AccessObservation {
             query: observed.query,
             query_floor: observed.floor,
@@ -800,12 +800,18 @@ impl SettingsReceiptAuthority {
         };
         self.check_access_reply_association(qualified)
             .map_err(SettingsReplyProjectionError::from)?;
+        let sealed_created_at = consumed.sealed().header().created_at_ms;
         let read = self
             .read_access_reply_on(store, transaction, qualified.mutation, qualified.request)
             .map_err(SettingsReplyProjectionError::from)?;
         let observed = self
             .finish_access_reply_observation(store, qualified.request, read)
             .map_err(SettingsReplyProjectionError::from)?;
+        if observed.status.wall.get() < sealed_created_at {
+            return Err(
+                SettingsReplyProjectionError::from(SettingsServiceError::OutsideScope).into(),
+            );
+        }
         check_access_reply_observation(qualified, &observed)
             .map_err(SettingsReplyProjectionError::from)?;
         Ok(())
@@ -899,6 +905,7 @@ impl SettingsReceiptAuthority {
             reply_deadline,
         } = read;
         let verified = request.verified_request();
+        self.check_access_context(store, verified)?;
         let observed = self.core.authority.observe_access_query(
             &self.host,
             verified.authority_source(),
@@ -924,7 +931,6 @@ impl SettingsReceiptAuthority {
         {
             return Err(SettingsServiceError::Expired.into());
         }
-        self.check_access_context(store, verified)?;
         Ok(AccessReplyObservation {
             status: AccessObservation {
                 query: observed.query,
