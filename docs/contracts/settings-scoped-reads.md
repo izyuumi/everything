@@ -1,6 +1,6 @@
 # Scoped Settings read DATA (Swift only)
 
-`apps/Apple/Shared/Settings/RemoteSettingsReadWire.swift`, registered in both EverythingMac and EverythingIOS, encodes Snapshot and Original-inspection requests and decodes their replies. There is no Rust counterpart in this tree. The Host does not answer these requests: it records such packets as rejected (`settings_unavailable`) and ACKs them; see [Access transport](settings-access-transport.md). The iOS Settings screen does not expose these controls.
+`apps/Apple/Shared/Settings/RemoteSettingsReadWire.swift`, registered in both EverythingMac and EverythingIOS, encodes Snapshot and Original-inspection requests and decodes their replies. It predates the Host's implemented [request shape](settings-access-status.md): the Host now answers a parent-free, generation-scoped `snapshot` and has no Original-inspection or Bind parent, so these Swift requests are rejected (`settings_unavailable`) and ACKed. Aligning the Swift codec is #117 work. The iOS Settings screen does not expose these controls.
 
 ## Requests
 

@@ -430,7 +430,7 @@ enum NativeSettingsWire {
             switch operation.origin {
             case .nativeUI(let id): guard id == proof.sessionID else { throw NativeSettingsWireError.invalidResponse }
             case .settingsAgent(_, let id): guard id == proof.sessionID else { throw NativeSettingsWireError.invalidResponse }
-            case .localOwner: throw NativeSettingsWireError.invalidResponse
+            case .localOwner, .pairedDevice: throw NativeSettingsWireError.invalidResponse
             }
         }
     }

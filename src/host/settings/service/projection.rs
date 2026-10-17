@@ -46,66 +46,7 @@ impl SettingsService {
         self.blocking(move |core| {
             core.authority
                 .require_tool(&caller, SettingsToolName::Get)?;
-            let settings = core.settings.observed_snapshot()?;
-            let composition = core.composition()?;
-            let metadata = composition.memory.embedding_metadata()?;
-            let selection = composition.selection.configuration_status()?;
-            let mut effective_selection = settings.clone();
-            effective_selection.selection = selection.settings;
-            effective_selection.preference_overrides.system_one_enabled =
-                Some(selection.remote_enabled && !selection.suspended);
-            let desired_selection = updates::tool_selection(&settings)?;
-            let current_selection = updates::tool_selection(&effective_selection)?;
-            let model = SettingValue::Model {
-                selection: updates::model_selection(&settings),
-            };
-            let mut entries = vec![
-                effective(SettingKey::ModelSelection, Some(model.clone()), model),
-                preference(
-                    SettingKey::ToolSelection,
-                    SettingValue::ToolSelection {
-                        selection: desired_selection,
-                    },
-                    SettingValue::ToolSelection {
-                        selection: current_selection,
-                    },
-                    selection.suspended,
-                ),
-            ];
-            let fingerprint = super::persistence::file_fingerprint(&settings)?;
-            let (pending_semantics, pending_selection) = core
-                .repository
-                .pending_applications()?
-                .into_iter()
-                .filter_map(|record| {
-                    record
-                        .write()
-                        .filter(|write| write.intent.after == fingerprint)
-                        .map(|write| (write.intent.memory_changed, write.intent.selection_changed))
-                })
-                .fold((false, false), |current, pending| {
-                    (current.0 || pending.0, current.1 || pending.1)
-                });
-            if !pending_selection && entries[1].state != SettingState::Effective {
-                entries[1].state = SettingState::Unavailable;
-                entries[1].unavailable_reason =
-                    Some(SettingsUnavailableReason::ProviderUnavailable);
-            }
-            entries.extend(memory_entries(
-                &settings,
-                &metadata,
-                &composition.memory.status().worker,
-                pending_semantics,
-            ));
-            let snapshot = SettingsSnapshot {
-                contract_version: SETTINGS_CONTRACT_VERSION,
-                scope,
-                revision: settings.revision,
-                observed_at: UnixMillis::now()?,
-                stale: core.repository.unresolved_write()?.is_some(),
-                entries,
-            };
-            snapshot.validate()?;
+            let snapshot = core.host_snapshot(scope)?;
             core.authority
                 .require_tool(&caller, SettingsToolName::Get)?;
             Ok(snapshot)
@@ -115,6 +56,72 @@ impl SettingsService {
 }
 
 impl ServiceCore {
+    pub(super) fn host_snapshot(
+        &self,
+        scope: SettingsScope,
+    ) -> Result<SettingsSnapshot, SettingsServiceError> {
+        let settings = self.settings.observed_snapshot()?;
+        let composition = self.composition()?;
+        let metadata = composition.memory.embedding_metadata()?;
+        let selection = composition.selection.configuration_status()?;
+        let mut effective_selection = settings.clone();
+        effective_selection.selection = selection.settings;
+        effective_selection.preference_overrides.system_one_enabled =
+            Some(selection.remote_enabled && !selection.suspended);
+        let desired_selection = updates::tool_selection(&settings)?;
+        let current_selection = updates::tool_selection(&effective_selection)?;
+        let model = SettingValue::Model {
+            selection: updates::model_selection(&settings),
+        };
+        let mut entries = vec![
+            effective(SettingKey::ModelSelection, Some(model.clone()), model),
+            preference(
+                SettingKey::ToolSelection,
+                SettingValue::ToolSelection {
+                    selection: desired_selection,
+                },
+                SettingValue::ToolSelection {
+                    selection: current_selection,
+                },
+                selection.suspended,
+            ),
+        ];
+        let fingerprint = super::persistence::file_fingerprint(&settings)?;
+        let (pending_semantics, pending_selection) = self
+            .repository
+            .pending_applications()?
+            .into_iter()
+            .filter_map(|record| {
+                record
+                    .write()
+                    .filter(|write| write.intent.after == fingerprint)
+                    .map(|write| (write.intent.memory_changed, write.intent.selection_changed))
+            })
+            .fold((false, false), |current, pending| {
+                (current.0 || pending.0, current.1 || pending.1)
+            });
+        if !pending_selection && entries[1].state != SettingState::Effective {
+            entries[1].state = SettingState::Unavailable;
+            entries[1].unavailable_reason = Some(SettingsUnavailableReason::ProviderUnavailable);
+        }
+        entries.extend(memory_entries(
+            &settings,
+            &metadata,
+            &composition.memory.status().worker,
+            pending_semantics,
+        ));
+        let snapshot = SettingsSnapshot {
+            contract_version: SETTINGS_CONTRACT_VERSION,
+            scope,
+            revision: settings.revision,
+            observed_at: UnixMillis::now()?,
+            stale: self.repository.unresolved_write()?.is_some(),
+            entries,
+        };
+        snapshot.validate()?;
+        Ok(snapshot)
+    }
+
     pub(super) fn composition(
         &self,
     ) -> Result<std::sync::Arc<crate::host::composition::Composition>, SettingsServiceError> {

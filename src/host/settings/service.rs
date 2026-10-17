@@ -19,7 +19,7 @@ pub use devices::NativeDeviceActionResult;
 pub(crate) use paired::{
     QualifiedSettingsAccessReply, SettingsAccessQualificationError, SettingsAccessReplyFamily,
     SettingsAccessReservationSpec, SettingsQueuedReplyCheckError, SettingsReceiptAuthority,
-    SettingsReplyComparison, SettingsReplyProjectionError,
+    SettingsRemotePayload, SettingsReplyComparison, SettingsReplyProjectionError,
 };
 pub use pairing::{
     NativePairingAcceptance, NativePairingAccess, NativePairingApprovalInput,
@@ -1214,6 +1214,8 @@ impl ServiceCore {
             CallerSource::LocalOwner { .. } => self.authority.validate_owner_cleanup(caller),
             CallerSource::NativeUi(_) => self.authority.validate(caller, true),
             CallerSource::SettingsAgent { .. } => self.authority.validate(caller, false),
+            #[cfg(unix)]
+            CallerSource::PairedSettings { .. } => self.authority.validate_paired_update(caller),
         }
     }
 
@@ -1222,6 +1224,14 @@ impl ServiceCore {
         caller: &SettingsCaller,
         target: &SettingsActionTarget,
     ) -> Result<Uuid, SettingsServiceError> {
+        #[cfg(unix)]
+        if let CallerSource::PairedSettings { device_id } = caller.source {
+            self.authority.validate_paired_update(caller)?;
+            return match target {
+                SettingsActionTarget::Patch(_) => Ok(*device_id.as_uuid()),
+                _ => Err(SettingsServiceError::OutsideScope),
+            };
+        }
         self.authority.validate(caller, false)?;
         match caller.source {
             CallerSource::LocalOwner { request_id }
@@ -1259,6 +1269,8 @@ impl ServiceCore {
                     .ok_or(SettingsServiceError::Expired)?;
                 (UnixMillis::try_from(expiry)?, deadline)
             }
+            #[cfg(unix)]
+            CallerSource::PairedSettings { .. } => self.authority.paired_lifetime(caller)?,
             _ => self.authority.lifetime(caller)?,
         };
         let identity = OperationIdentity {
@@ -1764,6 +1776,12 @@ impl ServiceCore {
             }
             CallerSource::NativeUi(session_id)
                 if identity.binding.client_session_id != session_id =>
+            {
+                return Err(SettingsServiceError::OutsideScope);
+            }
+            #[cfg(unix)]
+            CallerSource::PairedSettings { device_id }
+                if identity.origin != (SettingsOperationOrigin::PairedDevice { device_id }) =>
             {
                 return Err(SettingsServiceError::OutsideScope);
             }

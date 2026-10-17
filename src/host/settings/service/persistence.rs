@@ -159,6 +159,10 @@ impl super::ServiceCore {
             super::super::authority::CallerSource::SettingsAgent { .. } => {
                 Err(SettingsServiceError::OutsideScope)
             }
+            #[cfg(unix)]
+            super::super::authority::CallerSource::PairedSettings { .. } => {
+                Err(SettingsServiceError::OutsideScope)
+            }
         }
     }
 

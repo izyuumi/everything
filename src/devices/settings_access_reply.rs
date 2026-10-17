@@ -5,11 +5,15 @@ use thiserror::Error;
 use uuid::Uuid;
 use zeroize::Zeroizing;
 
-use crate::host::settings::contract::{SettingKey, SettingsContractError};
-use crate::host::settings::{SettingsGrantConsent, SettingsGrantHead, SettingsGrantState};
-use crate::protocol::{DeviceId, MessageId, SchemaVersion, UnixMillis};
+use crate::host::settings::contract::{SettingKey, SettingsContractError, SettingsSnapshot};
+use crate::host::settings::service::SettingsChangePage;
+use crate::host::settings::{
+    SettingsApplicationState, SettingsGrantConsent, SettingsGrantHead, SettingsGrantState,
+    SettingsOperationInspection, SettingsOperationPhase, SettingsWriteInspection,
+};
+use crate::protocol::{CommandId, DeviceId, MessageId, SchemaVersion, UnixMillis};
 
-use super::BindingGeneration;
+use super::{BindingGeneration, SettingsHostAction};
 
 const MAX_ACCESS_PACKET_BYTES: usize = 32_768;
 const MAX_DENIAL_PACKET_BYTES: usize = 2048;
@@ -50,8 +54,69 @@ enum QueryCorrelation {
 #[derive(Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 enum AccessReplyBody {
-    AccessStatus { summary: AccessSummary },
-    Denied { reason: AccessDenialReason },
+    AccessStatus {
+        summary: AccessSummary,
+    },
+    Snapshot {
+        snapshot: SettingsSnapshot,
+    },
+    Changes {
+        page: SettingsChangePage,
+    },
+    Update {
+        request_id: CommandId,
+        operation: SettingsRemoteOperation,
+    },
+    HostActionRequired {
+        action: SettingsHostAction,
+    },
+    Denied {
+        reason: SettingsRemoteDenial,
+    },
+}
+
+#[derive(Clone)]
+pub(crate) enum SettingsRemoteReply {
+    Snapshot(SettingsSnapshot),
+    Changes(SettingsChangePage),
+    Update {
+        request_id: CommandId,
+        operation: SettingsRemoteOperation,
+    },
+    Denied(SettingsRemoteDenial),
+}
+
+#[derive(Clone, Serialize)]
+pub(crate) struct SettingsRemoteOperation {
+    phase: SettingsOperationPhase,
+    updated_at: UnixMillis,
+    write: Option<SettingsWriteInspection>,
+    application: Option<SettingsApplicationState>,
+}
+
+impl SettingsRemoteOperation {
+    pub(crate) fn from_inspection(inspection: &SettingsOperationInspection) -> Self {
+        Self {
+            phase: inspection.phase.clone(),
+            updated_at: inspection.updated_at,
+            write: inspection.write.clone(),
+            application: inspection.application.clone(),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum SettingsRemoteDenial {
+    GrantUnavailable,
+    GrantChanged,
+    OutsideScope,
+    Conflict,
+    WriteBlocked,
+    Capacity,
+    Invalid,
+    OutcomeUnknown,
+    Unavailable,
 }
 
 #[derive(Serialize)]
@@ -62,12 +127,6 @@ struct AccessSummary {
     writable_keys: Vec<SettingKey>,
     session_consent: SettingsGrantConsent,
     configured_settings_revision: Option<u64>,
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "snake_case")]
-enum AccessDenialReason {
-    GrantUnavailable,
 }
 
 #[derive(Error)]
@@ -136,8 +195,53 @@ impl SettingsAccessReplyPacket {
             query_id,
             None,
             AccessReplyBody::Denied {
-                reason: AccessDenialReason::GrantUnavailable,
+                reason: SettingsRemoteDenial::GrantUnavailable,
             },
+        )
+    }
+
+    pub(crate) fn remote(
+        host_id: DeviceId,
+        in_reply_to: MessageId,
+        query_id: Uuid,
+        generation: BindingGeneration,
+        reply: SettingsRemoteReply,
+    ) -> Result<Self, SettingsAccessReplyContractError> {
+        let (generation, body) = match reply {
+            SettingsRemoteReply::Snapshot(snapshot) => {
+                (Some(generation), AccessReplyBody::Snapshot { snapshot })
+            }
+            SettingsRemoteReply::Changes(page) => {
+                (Some(generation), AccessReplyBody::Changes { page })
+            }
+            SettingsRemoteReply::Update {
+                request_id,
+                operation,
+            } => (
+                Some(generation),
+                AccessReplyBody::Update {
+                    request_id,
+                    operation,
+                },
+            ),
+            SettingsRemoteReply::Denied(reason) => (None, AccessReplyBody::Denied { reason }),
+        };
+        Self::new(host_id, in_reply_to, query_id, generation, body)
+    }
+
+    pub(crate) fn host_action_required(
+        host_id: DeviceId,
+        in_reply_to: MessageId,
+        query_id: Uuid,
+        generation: BindingGeneration,
+        action: SettingsHostAction,
+    ) -> Result<Self, SettingsAccessReplyContractError> {
+        Self::new(
+            host_id,
+            in_reply_to,
+            query_id,
+            Some(generation),
+            AccessReplyBody::HostActionRequired { action },
         )
     }
 
@@ -210,6 +314,23 @@ impl SettingsAccessReplyPacket {
                     || generation.grant_revision == 0
                     || generation.grant_revision > i64::MAX as u64
                     || summary.expires_at.get() == 0
+                {
+                    return Err(SettingsAccessReplyContractError::Invalid);
+                }
+                Ok(MAX_ACCESS_PACKET_BYTES)
+            }
+            AccessReplyBody::Snapshot { .. }
+            | AccessReplyBody::Changes { .. }
+            | AccessReplyBody::Update { .. }
+            | AccessReplyBody::HostActionRequired { .. } => {
+                let generation = generation
+                    .as_ref()
+                    .ok_or(SettingsAccessReplyContractError::Invalid)?;
+                if generation.grant_id.is_nil()
+                    || generation.host_epoch.is_nil()
+                    || generation.connection_epoch.is_nil()
+                    || generation.grant_revision == 0
+                    || generation.grant_revision > i64::MAX as u64
                 {
                     return Err(SettingsAccessReplyContractError::Invalid);
                 }

@@ -1,11 +1,13 @@
 mod access;
 mod pins;
+mod remote;
 mod replies;
 
 pub(crate) use access::{
     QualifiedSettingsAccessReply, SettingsAccessQualificationError, SettingsAccessReplyFamily,
     SettingsAccessReservationSpec,
 };
+pub(crate) use remote::SettingsRemotePayload;
 pub(crate) use replies::{
     SettingsQueuedReplyCheckError, SettingsReplyComparison, SettingsReplyProjectionError,
 };

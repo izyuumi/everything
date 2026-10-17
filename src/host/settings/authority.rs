@@ -30,6 +30,8 @@ pub struct SettingsCaller {
     pub(super) authority: Arc<Authority>,
     pub(super) source: CallerSource,
     agent_identity: Option<Arc<()>>,
+    #[cfg(unix)]
+    paired: Option<Arc<paired::PairedCallerLease>>,
 }
 
 #[derive(Clone, Copy)]
@@ -42,6 +44,10 @@ pub(super) enum CallerSource {
         session_id: Uuid,
         native_session_id: Uuid,
         tool: SettingsToolName,
+    },
+    #[cfg(unix)]
+    PairedSettings {
+        device_id: DeviceId,
     },
 }
 
@@ -57,6 +63,9 @@ pub enum SettingsOperationOrigin {
     SettingsAgent {
         session_id: Uuid,
         native_session_id: Uuid,
+    },
+    PairedDevice {
+        device_id: DeviceId,
     },
 }
 
@@ -251,6 +260,8 @@ impl Authority {
                 request_id: call.request.request_id,
             },
             agent_identity: None,
+            #[cfg(unix)]
+            paired: None,
         })
     }
 
@@ -265,6 +276,8 @@ impl Authority {
                 request_id: call.request.request_id,
             },
             agent_identity: None,
+            #[cfg(unix)]
+            paired: None,
         })
     }
 
@@ -361,6 +374,8 @@ impl Authority {
             authority: Arc::clone(self),
             source: CallerSource::NativeUi(proof.session_id),
             agent_identity: None,
+            #[cfg(unix)]
+            paired: None,
         })
     }
 
@@ -432,6 +447,8 @@ impl Authority {
                 native_session_id, ..
             } => Ok(native_session_id),
             CallerSource::LocalOwner { .. } => Err(SettingsServiceError::OutsideScope),
+            #[cfg(unix)]
+            CallerSource::PairedSettings { .. } => Err(SettingsServiceError::OutsideScope),
         }
     }
 
@@ -508,6 +525,8 @@ impl Authority {
                 tool,
             },
             agent_identity: Some(Arc::clone(&session.identity)),
+            #[cfg(unix)]
+            paired: None,
         };
         self.validate(&caller, false)?;
         Ok(caller)
@@ -625,6 +644,14 @@ impl Authority {
         Ok(())
     }
 
+    pub fn require_update(&self, caller: &SettingsCaller) -> Result<(), SettingsServiceError> {
+        match caller.source {
+            #[cfg(unix)]
+            CallerSource::PairedSettings { .. } => self.validate_paired_update(caller),
+            _ => self.require_tool(caller, SettingsToolName::Update),
+        }
+    }
+
     pub fn origin(&self, caller: &SettingsCaller) -> SettingsOperationOrigin {
         match caller.source {
             CallerSource::LocalOwner { request_id } => {
@@ -639,6 +666,10 @@ impl Authority {
                 session_id,
                 native_session_id,
             },
+            #[cfg(unix)]
+            CallerSource::PairedSettings { device_id } => {
+                SettingsOperationOrigin::PairedDevice { device_id }
+            }
         }
     }
 
@@ -672,6 +703,14 @@ impl Authority {
                 *native_session_id
             }
             SettingsOperationOrigin::LocalOwner { .. } => return Ok(()),
+            #[cfg(unix)]
+            SettingsOperationOrigin::PairedDevice { device_id } => {
+                return sessions.paired.check_caller_origin(*device_id);
+            }
+            #[cfg(not(unix))]
+            SettingsOperationOrigin::PairedDevice { .. } => {
+                return Err(SettingsServiceError::OutsideScope);
+            }
         };
         let native = sessions
             .values

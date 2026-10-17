@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
-use crate::protocol::{CommandId, MessageId, UnixMillis};
+use crate::protocol::{CommandId, DeviceId, MessageId, UnixMillis};
 use crate::storage::Store;
 
 use super::actions::{NativeActionObservation, NativeActionReference, SettingsActionTarget};
@@ -22,6 +22,8 @@ const MAX_UPDATES: i64 = 8192;
 const MAX_IDENTITY_BYTES: usize = 18 * 1024;
 const MAX_UPDATE_BYTES: usize = 2048;
 const MAX_NATIVE_REQUEST_BYTES: usize = 1024;
+const MAX_PAIRED_IDENTITIES: i64 = 128;
+const MAX_DEVICE_PAIRED_IDENTITIES: i64 = 32;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -81,6 +83,9 @@ impl SettingsOperationInspection {
                 session_id,
                 native_session_id,
             } => !session_id.is_nil() && native_session_id == self.binding.client_session_id,
+            SettingsOperationOrigin::PairedDevice { device_id } => {
+                *device_id.as_uuid() == self.binding.client_session_id
+            }
         };
         if !valid_origin || self.updated_at.get() < self.binding.issued_at.get() {
             return Err(SettingsContractError::Invalid(
@@ -368,6 +373,9 @@ impl OperationIdentity {
                 session_id,
                 native_session_id,
             } if !session_id.is_nil() && *native_session_id == self.binding.client_session_id => {}
+            SettingsOperationOrigin::PairedDevice { device_id }
+                if *device_id.as_uuid() == self.binding.client_session_id
+                    && matches!(self.target, SettingsActionTarget::Patch(_)) => {}
             _ => return Err(SettingsServiceError::CorruptJournal),
         }
         self.target.validate()?;
@@ -410,6 +418,19 @@ impl OperationRepository {
                 false
             }
         });
+    }
+
+    pub fn check_paired_capacity(&self, device_id: DeviceId) -> Result<(), SettingsServiceError> {
+        let connection = self.store.connection()?;
+        let (all, device): (i64, i64) = connection.query_row(
+            "SELECT count(*),coalesce(sum(json_extract(identity,'$.origin.device_id')=?1),0) FROM settings_operations WHERE json_extract(identity,'$.origin.kind')='paired_device'",
+            [device_id.to_string()],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        if all >= MAX_PAIRED_IDENTITIES || device >= MAX_DEVICE_PAIRED_IDENTITIES {
+            return Err(SettingsServiceError::Capacity);
+        }
+        Ok(())
     }
 
     pub fn get(&self, request_id: CommandId) -> Result<OperationRecord, SettingsServiceError> {

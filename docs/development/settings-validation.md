@@ -70,3 +70,29 @@ The review opened only three ordinary databases using `mode=ro&immutable=1` and 
 After joins, the producer scanned 167 retained files totaling 963,303 bytes for eight exact private proof/dummy-secret strings held only in RAM. It found zero matches and retained no marker values or hashes. The independent review verifies that record, not a repetition of its unavailable private markers, transformed-value scan, universal non-disclosure or secure erasure. All 314 compiled source inputs, four new copied artifacts and twelve earlier copied artifacts also matched their original identities. The independent review receipt SHA-256 is `5a0b95f42b0d5d97c8c76d350843da21dff98a54079c6222c71498665f9511b3`.
 
 This sequence does not verify OS-native credential storage, Apple Keychain/UI, SystemOne enrollment, SettingsAgent-origin rejection, reference-collision guards, stale/pre-vault races, active-write cancellation, vault failure/Unknown, CAS conflict or restart between storage and metadata linking. It does not query credential presence or authenticate a provider. The actual native secure-entry/linking consumer remains open #110/#114 work. This candidate still requires its own public PR checks and normal merge; these exact `c62739b` artifacts are separate from current main and later Swift-only integrations. The earlier Dad configured Session evidence retains its original scope. No automated tests were created, and deferred verification remains [#32](https://github.com/izyuumi/everything/issues/32).
+
+## Remote scoped Settings walkthrough
+
+Dated 2026-10-17, macOS Apple Silicon, debug builds of the #116 branch implementation commit `55e272b`. A disposable Host (`serve`, fresh private state directory, no model, embeddings disabled, no credentials) and `everything-relay` on loopback `ws://127.0.0.1:28116` ran from scratch data outside the repository. A scratch Replica helper linked the unchanged library: it created a Replica identity, paired through the real owner `begin_pairing`/`approve_pairing` operations with empty conversation access (the invitation stayed in process memory and was never written or printed), then sealed Settings requests and opened replies through the relay. The relay enrolled both public identities. Grants were set, reduced and revoked through the owner `set_settings_grant` request-file route. The Host was restarted once (task kill, not graceful SIGINT) after setting the relay origin.
+
+| Step | Observed reply |
+| --- | --- |
+| Ordinary paired device, no grant: AccessStatus, Snapshot with an invented generation, HostAction | `denied/grant_unavailable` (three real round trips) |
+| Grant r1 (readable models.selection, embeddings enabled/dimensions; writable embeddings enabled): AccessStatus | Summary with generation (grant, revision 1, Host and connection epochs) |
+| Snapshot of models.selection and embeddings enabled | Two entries only, settings revision 2 |
+| Snapshot of tools.selection | `denied/outside_scope` |
+| Update enabled=true, expected revision 2 | `update`: write applied 2→3, `pending_application` |
+| Same `request_id` and body in a new envelope | Same original receipt (revision 3, no new write); later application observation `unavailable/embedding_boundary_unavailable` |
+| Same `request_id`, changed value | `denied/conflict` |
+| New `request_id`, stale expected revision 2 | `denied/conflict` |
+| Update of non-writable embeddings dimensions | `denied/outside_scope` |
+| One envelope sent twice | Relay reported the second as duplicate and did not redeliver; one reply. The Host duplicate-receipt path was not reached |
+| HostAction credential_entry | `host_action_required` |
+| Changes after 0 | Three hints for the device's own operation; the owner relay-origin change (no readable key) was omitted |
+| Update enabled=false (r3→4) then immediate disconnect; reconnect after 3 s | Reply queued at the relay was delivered on reconnect; resending the same `request_id` returned the same receipt (revision 4) |
+| Grant reduced to no writable keys (r2): Update with r1 generation, then with r2 generation | `denied/grant_changed`, then `denied/outside_scope` |
+| Grant revoked (r3): Update, AccessStatus | `denied/grant_unavailable` both |
+| Envelope already expired at send | Refused by the relay (`InvalidEnvelope`); never reached the Host |
+| Owner `settings_operation` query for the paired update | Origin `paired_device` with the device id as client session, Finished `pending_application` revision 4 |
+
+The Host log showed no Settings errors or quarantine. Not observed: revocation racing an in-progress write, a pending request waiting behind another build, capacity limits, Host restart while a paired write is applying, graceful shutdown with queued replies, an Apple client, any provider request, or security properties. The helper and runtime data are scratch artifacts, not repository files.

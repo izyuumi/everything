@@ -1,6 +1,6 @@
 # Settings reply publication
 
-`Store::publish_settings_reply` (`src/storage/settings_publication.rs`) turns one committed AccessStatus receipt into a sealed, queued private ciphertext. It runs in the Work build worker under the Host mutation guard; see [the Access transport](settings-access-transport.md) for the surrounding flow.
+`Store::publish_settings_reply` (`src/storage/settings_publication.rs`) turns one committed remote Settings receipt into a sealed, queued private ciphertext. It runs in the Work build worker under the Host mutation guard, after `prepare_remote_reply` has computed any Snapshot, Changes or Update payload under that same guard; see [the transport](settings-access-transport.md#reply-build) for the surrounding flow. The payload is passed in `SettingsReplySealContext::payload` and must carry the generation the publication qualification observes.
 
 ## Transaction
 

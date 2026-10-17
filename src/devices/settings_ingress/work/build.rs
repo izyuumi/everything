@@ -8,6 +8,7 @@ use tokio::sync::OwnedMutexGuard;
 use tokio::task::{Id, JoinError};
 
 use crate::devices::SettingsReplySealContext;
+use crate::host::settings::service::SettingsReplyProjectionError;
 use crate::protocol::MessageId;
 use crate::storage::{CommittedSettingsReply, SettingsReplyPublishFailure};
 
@@ -341,19 +342,26 @@ fn run_reply_build(
     let slot = Arc::clone(&input.record.permit.slot);
     let SettingsReplyBuildRequest::Access(access) = &input.record.request;
     let store = input.context.agent.store();
-    let outcome = store
-        .publish_settings_reply(
-            SettingsReplySealContext {
-                agent: &input.context.agent,
-                endpoint: &input.context.endpoint,
-                store: &store,
-                mutation: &guard,
-                authority: access.verified_request().receipt_authority(),
-                permit: &input.record.permit,
-            },
-            &input.record.request,
-        )
-        .map(Box::new);
+    let authority = access.verified_request().receipt_authority();
+    let outcome = match authority.prepare_remote_reply(&store, &guard, access) {
+        Ok(payload) => store
+            .publish_settings_reply(
+                SettingsReplySealContext {
+                    agent: &input.context.agent,
+                    endpoint: &input.context.endpoint,
+                    store: &store,
+                    mutation: &guard,
+                    authority,
+                    permit: &input.record.permit,
+                    payload: payload.as_ref(),
+                },
+                &input.record.request,
+            )
+            .map(Box::new),
+        Err(cause) => Err(Box::new(SettingsReplyPublishFailure::BeforeTransaction {
+            cause: SettingsReplyProjectionError::from(cause).into(),
+        })),
+    };
     drop(guard);
     drop(input);
     ReplyBuildWorkerOutput { outcome, slot }

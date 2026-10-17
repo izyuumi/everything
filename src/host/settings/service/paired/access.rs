@@ -11,9 +11,9 @@ use zeroize::Zeroizing;
 
 use crate::crypto::{DevicePublicKeys, EnvelopeHeader};
 use crate::devices::{
-    AccessStatusRejection, BindingGeneration, OwnedCommittedSettingsAccess,
-    OwnedQueuedSettingsReply, OwnedVerifiedSettingsAccess, ReplyBuildPermit,
-    SETTINGS_CLOCK_SKEW_MS, SettingsAccessReplyPacket, SettingsReplyBuildRequest,
+    AccessStatusRejection, OwnedCommittedSettingsAccess, OwnedQueuedSettingsReply,
+    OwnedVerifiedSettingsAccess, ReplyBuildPermit, SETTINGS_CLOCK_SKEW_MS,
+    SettingsAccessReplyPacket, SettingsRemoteRequest, SettingsReplyBuildRequest,
     SettingsReplyPublicationError, SettingsReplyQualification,
 };
 use crate::host::settings::grants::{SettingsGrantOwner, SettingsGrantState};
@@ -22,6 +22,7 @@ use crate::protocol::{DeviceId, MessageId, UnixMillis};
 use crate::storage::{ConsumedSettingsReply, Store, settings_grant_head_on};
 
 use super::pins::ReplyPinError;
+use super::remote::{SettingsRemotePayload, remote_generation};
 use super::replies::SettingsQueuedReplyCheckError;
 use super::{
     SettingsReceiptAuthority, SettingsReplyProjectionError, SettingsServiceError, reply_row_text,
@@ -59,7 +60,7 @@ impl fmt::Debug for SettingsAccessQualificationError {
 }
 
 #[derive(PartialEq, Eq)]
-enum AccessDecision {
+pub(super) enum AccessDecision {
     GrantUnavailable,
     Active(Box<SettingsGrantHead>),
 }
@@ -94,11 +95,11 @@ pub(crate) struct SettingsAccessReceiptPlan<'transaction, 'connection, 'request>
     transaction: &'transaction Transaction<'connection>,
 }
 
-struct AccessObservation {
+pub(super) struct AccessObservation {
     query: Arc<()>,
     query_floor: (UnixMillis, Instant),
     query_deadline: Instant,
-    decision: AccessDecision,
+    pub(super) decision: AccessDecision,
     wall: UnixMillis,
     monotonic: Instant,
 }
@@ -483,8 +484,8 @@ pub(crate) struct QualifiedSettingsAccessReply<'scope> {
     observed_monotonic: Instant,
 }
 
-struct AccessReplyObservation {
-    status: AccessObservation,
+pub(super) struct AccessReplyObservation {
+    pub(super) status: AccessObservation,
     reply_deadline: Instant,
 }
 
@@ -624,6 +625,7 @@ impl SettingsReceiptAuthority {
         transaction: &Transaction<'_>,
         qualified: &QualifiedSettingsAccessReply<'_>,
         permit: &ReplyBuildPermit,
+        payload: Option<&SettingsRemotePayload>,
     ) -> Result<SettingsAccessReplyProjection, SettingsReplyProjectionError> {
         permit.check_access(qualified.request)?;
         self.check_access_reply_association(qualified)?;
@@ -642,24 +644,47 @@ impl SettingsReceiptAuthority {
             .parse()
             .map_err(SettingsServiceError::from)?;
         let intent = source.intent();
-        let packet = match &observed.status.decision {
-            AccessDecision::GrantUnavailable => SettingsAccessReplyPacket::grant_unavailable(
-                intent.host_id,
-                in_reply_to,
-                intent.query_id,
-            )?,
-            AccessDecision::Active(head) => SettingsAccessReplyPacket::from_grant_head(
-                intent.host_id,
-                in_reply_to,
-                intent.query_id,
-                BindingGeneration {
-                    grant_id: head.grant.change.target.grant_id,
-                    grant_revision: head.grant.revision,
-                    host_epoch: source.connection().host_identity().host_epoch(),
-                    connection_epoch: source.connection().connection_epoch(),
-                },
-                head,
-            )?,
+        let packet = match (&observed.status.decision, &intent.request, payload) {
+            (AccessDecision::GrantUnavailable, _, None) => {
+                SettingsAccessReplyPacket::grant_unavailable(
+                    intent.host_id,
+                    in_reply_to,
+                    intent.query_id,
+                )?
+            }
+            (AccessDecision::Active(head), SettingsRemoteRequest::AccessStatus, None) => {
+                SettingsAccessReplyPacket::from_grant_head(
+                    intent.host_id,
+                    in_reply_to,
+                    intent.query_id,
+                    remote_generation(source, head),
+                    head,
+                )?
+            }
+            (AccessDecision::Active(head), SettingsRemoteRequest::HostAction { action }, None) => {
+                SettingsAccessReplyPacket::host_action_required(
+                    intent.host_id,
+                    in_reply_to,
+                    intent.query_id,
+                    remote_generation(source, head),
+                    *action,
+                )?
+            }
+            (AccessDecision::Active(head), request, Some(payload))
+                if request.generation().is_some()
+                    && payload.generation == remote_generation(source, head) =>
+            {
+                SettingsAccessReplyPacket::remote(
+                    intent.host_id,
+                    in_reply_to,
+                    intent.query_id,
+                    payload.generation.clone(),
+                    payload.reply.clone(),
+                )?
+            }
+            _ => {
+                return Err(SettingsServiceError::OutsideScope.into());
+            }
         };
         Ok(SettingsAccessReplyProjection {
             plaintext: packet.encode_checked()?,
@@ -738,7 +763,7 @@ impl SettingsReceiptAuthority {
         Ok(())
     }
 
-    fn observe_access_reply_on(
+    pub(super) fn observe_access_reply_on(
         &self,
         store: &Store,
         connection: &Connection,
