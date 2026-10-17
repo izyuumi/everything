@@ -34,16 +34,18 @@ final class ReplicaSettingsAccessInput: Sendable, CustomStringConvertible, Custo
     fileprivate let service: ReplicaService
     fileprivate let scope: ReplicaSettingsScopeToken
     fileprivate let queryID: UUID
+    fileprivate let query: RemoteSettingsQuery
     let wallFloor: UInt64
     let monotonicFloor: ContinuousClock.Instant
     let expiresAt: UInt64
     let deadline: ContinuousClock.Instant
 
-    fileprivate init(service: ReplicaService, scope: ReplicaSettingsScopeToken,
+    fileprivate init(service: ReplicaService, scope: ReplicaSettingsScopeToken, query: RemoteSettingsQuery,
                      wallFloor: UInt64, monotonicFloor: ContinuousClock.Instant, expiresAt: UInt64) {
         self.service = service
         self.scope = scope
         queryID = UUID()
+        self.query = query
         self.wallFloor = wallFloor
         self.monotonicFloor = monotonicFloor
         self.expiresAt = expiresAt
@@ -58,12 +60,13 @@ final class ReplicaSettingsAccessInput: Sendable, CustomStringConvertible, Custo
 final class ReplicaSettingsAccessGesture {
     private var input: ReplicaSettingsAccessInput?
 
-    init(service: ReplicaService, scope: ReplicaSettingsScopeToken) throws {
+    init(service: ReplicaService, scope: ReplicaSettingsScopeToken, query: RemoteSettingsQuery = .accessStatus) throws {
+        try query.validate()
         let monotonic = ContinuousClock.now
         let wall = try WireID.now()
         let expiry = wall.addingReportingOverflow(30_000)
         guard !expiry.overflow, expiry.partialValue <= UInt64(Int64.max) else { throw WireError.expired }
-        input = ReplicaSettingsAccessInput(service: service, scope: scope, wallFloor: wall,
+        input = ReplicaSettingsAccessInput(service: service, scope: scope, query: query, wallFloor: wall,
                                            monotonicFloor: monotonic, expiresAt: expiry.partialValue)
     }
 
@@ -308,15 +311,17 @@ struct ReplicaSettingsAccessDisplayView: Sendable, CustomStringConvertible, Cust
     let expiresAt: UInt64
     let freshness: ReplicaSettingsAccessDisplayFreshness
     let requestHandle: ReplicaSettingsRequestHandle
+    let requestsAvailable: Bool
 
     fileprivate init(display: ReplicaSettingsAccessDisplay, observedAt: UInt64,
                      expiresAt: UInt64, freshness: ReplicaSettingsAccessDisplayFreshness,
-                     requestHandle: ReplicaSettingsRequestHandle) {
+                     requestHandle: ReplicaSettingsRequestHandle, requestsAvailable: Bool) {
         self.display = display
         self.observedAt = observedAt
         self.expiresAt = expiresAt
         self.freshness = freshness
         self.requestHandle = requestHandle
+        self.requestsAvailable = requestsAvailable
     }
 
     var description: String { "ReplicaSettingsAccessDisplayView([redacted])" }
@@ -369,6 +374,16 @@ final class ReplicaSettingsRequestHandle: Sendable, CustomStringConvertible, Cus
     fileprivate init() {}
 
     var description: String { "ReplicaSettingsRequestHandle([redacted])" }
+    var debugDescription: String { description }
+}
+
+enum ReplicaSettingsQueryOutcome: Sendable, CustomStringConvertible, CustomDebugStringConvertible {
+    case pending
+    case accessObserved
+    case received(ReplicaSettingsQueryResult, observedAt: UInt64)
+    case ended(ReplicaSettingsAccessRequestStatus)
+
+    var description: String { "ReplicaSettingsQueryOutcome([redacted])" }
     var debugDescription: String { description }
 }
 
@@ -693,6 +708,8 @@ actor ReplicaService {
     private var outbound: [OutboundID: OutboundSend] = [:]
     private var outboundSocket: RelayConnection?
     private var settingsAccessOutcome: ReplicaSettingsAccessRequestStatus?
+    private var settingsAccessHandle: ReplicaSettingsRequestHandle?
+    private var settingsQueryResultCache: (handle: ReplicaSettingsRequestHandle, result: ReplicaSettingsQueryResult, observedAt: UInt64)?
     private var settingsSnapshotOutcome: ReplicaSettingsAccessRequestStatus?
     private var settingsInspectionOutcome: ReplicaSettingsAccessRequestStatus?
     private var lastSettingsInput: SettingsInputCapture?
@@ -1661,8 +1678,10 @@ actor ReplicaService {
         let wall = try WireID.now()
         guard monotonic >= input.monotonicFloor, monotonic < input.deadline,
               wall >= input.wallFloor, wall < input.expiresAt else { throw WireError.expired }
+        let generation = try settingsQueryGeneration(for: input.query, scope: scope, wall: wall)
         let time = try RemoteSettingsRequestTime(issuedAt: input.wallFloor, expiresAt: input.expiresAt)
-        let request = try RemoteSettingsAccessRequest(hostID: scope.host.deviceID, queryID: input.queryID, time: time)
+        let request = try RemoteSettingsAccessRequest(hostID: scope.host.deviceID, queryID: input.queryID, time: time,
+                                                      query: input.query, generation: generation)
         let handle = ReplicaSettingsRequestHandle()
         let pending = PendingSettingsAccess(
             handle: handle, input: input, scope: scope, request: request, wallFloor: input.wallFloor,
@@ -1674,7 +1693,40 @@ actor ReplicaService {
         pendingSettingsRequest = .access(pending)
         lastSettingsInput = .access(input)
         settingsAccessOutcome = nil
+        settingsAccessHandle = handle
         return handle
+    }
+
+    private func settingsQueryGeneration(for query: RemoteSettingsQuery, scope: SettingsConnectionScope,
+                                         wall: UInt64) throws -> RemoteSettingsGeneration? {
+        guard query.requiresGeneration else { return nil }
+        guard let cache = settingsAccessDisplayCache, cache.scope === scope,
+              cache.host == scope.host, cache.localID == scope.localID,
+              case .available(let summary) = cache.projection.display.status,
+              let generation = cache.projection.generation, let grantExpiresAt = cache.grantExpiresAt,
+              wall < grantExpiresAt else { throw WireError.unavailable }
+        switch query {
+        case .snapshot(let keys):
+            guard keys.allSatisfy(summary.readableKeys.contains) else { throw WireError.unavailable }
+        case .update(_, _, let changes):
+            guard changes.allSatisfy({ summary.writableKeys.contains($0.key) }) else { throw WireError.unavailable }
+        case .sessionOpen, .sessionSend:
+            guard case .configuredProvider = summary.sessionConsent else { throw WireError.unavailable }
+        default: break
+        }
+        return generation
+    }
+
+    func settingsQueryOutcome(_ handle: ReplicaSettingsRequestHandle) -> ReplicaSettingsQueryOutcome {
+        if pendingSettingsAccess?.handle === handle { return .pending }
+        for entry in outbound.values {
+            if case .access(let sent) = entry, sent.original.handle === handle { return .pending }
+        }
+        if let cache = settingsQueryResultCache, cache.handle === handle {
+            return .received(cache.result, observedAt: cache.observedAt)
+        }
+        guard settingsAccessHandle === handle, let outcome = settingsAccessOutcome else { return .ended(.interrupted) }
+        return outcome == .received ? .accessObserved : .ended(outcome)
     }
 
     func requestSettingsBind(_ capture: ReplicaSettingsBindInput) throws -> ReplicaSettingsRequestHandle {
@@ -1983,6 +2035,7 @@ actor ReplicaService {
 
     func disable() async throws {
         settingsAccessDisplayCache = nil
+        settingsQueryResultCache = nil
         settingsSnapshotDisplayCache = nil
         settingsInspectionDisplayCache = nil
         retireSettingsScope()
@@ -2503,6 +2556,7 @@ actor ReplicaService {
                     guard try fields.required("device_id").identifier == own.deviceID else { throw WireError.identity }
                     _ = try WireID.timestamp(fields.required("revoked_at"))
                     settingsAccessDisplayCache = nil
+                    settingsQueryResultCache = nil
                     settingsSnapshotDisplayCache = nil
                     settingsInspectionDisplayCache = nil
                     retireSettingsScope()
@@ -2974,8 +3028,9 @@ actor ReplicaService {
         try checkSettingsAccessQualification(qualification, committed: qualification.committed)
     }
 
+    @discardableResult
     func checkSettingsAccessDisplayProjection(_ qualification: ReplicaSettingsAccessQualification,
-                                             committed: CommittedReplicaSettingsReply) throws {
+                                             committed: CommittedReplicaSettingsReply) throws -> RemoteSettingsAccessRequest {
         try checkSettingsAccessQualification(qualification, committed: committed)
         guard let pending = try currentSettingsAccessOriginal(qualification.attempt) else {
             throw WireError.unavailable
@@ -2985,6 +3040,7 @@ actor ReplicaService {
               header.expires <= pending.request.time.expiresAt else {
             throw WireError.invalid
         }
+        return pending.request
     }
 
     private func adoptSettingsAccessDisplay(_ qualification: ReplicaSettingsAccessQualification) async throws {
@@ -2999,7 +3055,21 @@ actor ReplicaService {
         let queryExpiresAt = pending.request.time.expiresAt
         let queryDeadline = pending.deadline
         let header = qualification.committed.metadata.header
-        let projection = try qualification.committed.projectAccessDisplay(qualifiedBy: qualification, owner: self)
+        let projected = try qualification.committed.projectAccessDisplay(qualifiedBy: qualification, owner: self)
+        let projection: ReplicaSettingsAccessProjection
+        switch projected {
+        case .access(let access): projection = access
+        case .result(let result):
+            let wall = try WireID.now()
+            let monotonic = ContinuousClock.now
+            guard isCurrentSettingsScope(scope), wall >= wallFloor, wall < queryExpiresAt,
+                  monotonic >= monotonicFloor, monotonic < queryDeadline else { throw WireError.expired }
+            if case .denied(let reason) = result, reason == .grantUnavailable || reason == .grantChanged {
+                settingsAccessDisplayCache = nil
+            }
+            settingsQueryResultCache = (pending.handle, result, header.created)
+            return
+        }
         let packetExpiry = min(queryExpiresAt, header.expires)
         let expiresAt = projection.grantExpiresAt.map { min(packetExpiry, $0) } ?? packetExpiry
         guard queryExpiresAt > wallFloor, queryExpiresAt - wallFloor <= 30_000,
@@ -3070,10 +3140,17 @@ actor ReplicaService {
             settingsInspectionDisplayCache = nil
             throw WireError.identity
         }
+        var requestsAvailable = false
+        if let scope = cache.scope, isCurrentSettingsScope(scope), scope.host == cache.host,
+           scope.localID == cache.localID, cache.projection.generation != nil,
+           let grantExpiresAt = cache.grantExpiresAt {
+            requestsAvailable = try WireID.now() < grantExpiresAt
+        }
         return ReplicaSettingsAccessDisplayView(display: cache.projection.display, observedAt: cache.observedAt,
                                                expiresAt: cache.expiresAt,
                                                freshness: current ? .currentConnectionObservation : .stale,
-                                               requestHandle: cache.requestHandle)
+                                               requestHandle: cache.requestHandle,
+                                               requestsAvailable: requestsAvailable)
     }
 
     private func isCurrentSettingsParent(_ association: SettingsBindingAssociation,

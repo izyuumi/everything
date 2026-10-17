@@ -35,11 +35,11 @@ struct SettingsView: View {
                 Text("The host chooses access separately; its signed acceptance does not contain conversation or permission grants. Add only conversation IDs that its owner authorized.").font(.footnote)
             }
             Section("Connected Host access") {
-                Button("Check Host access") { model.checkHostSettingsAccess() }
-                    .disabled(!model.canCheckHostSettingsAccess)
-                if model.hostSettingsAccessBusy || model.hostSettingsAccessStatus == .preparing
+                Button("Refresh Host settings") { model.refreshHostSettings() }
+                    .disabled(!model.canRefreshHostSettings)
+                if model.hostSettingsBusy || model.hostSettingsAccessStatus == .preparing
                     || model.hostSettingsAccessStatus == .awaitingReply {
-                    Button("Cancel access check", role: .cancel) { model.cancelHostSettingsAccess() }
+                    Button("Cancel Host request", role: .cancel) { model.cancelHostSettingsAccess() }
                 }
                 Text(accessStatus).font(.footnote).foregroundStyle(.secondary)
                 if let issue = model.hostSettingsAccessIssue { Text(issue).foregroundStyle(.red) }
@@ -66,8 +66,9 @@ struct SettingsView: View {
                     }
                     LabeledContent("Observed") { Text(Date(timeIntervalSince1970: Double(access.observedAt) / 1000), style: .time) }
                 }
-                Text("This check reports access metadata only. It does not change Host settings or contact an AI provider. A stale observation grants no access.").font(.footnote)
+                Text("Refreshing reads access metadata and granted values over the encrypted relay. It does not contact an AI provider. A stale observation grants no access.").font(.footnote)
             }
+            HostSettingsSections(model: model)
             Section("This iPhone") {
                 NavigationLink("Appearance and notifications", value: ClientSettingsDestination.thisDevice)
                 if let issue = model.localSettingsIssue { Text(issue).foregroundStyle(.red) }
@@ -104,19 +105,7 @@ struct SettingsView: View {
     }
 
     private func settingNames(_ keys: [SettingKey]) -> String {
-        guard !keys.isEmpty else { return "None" }
-        return keys.map { key -> String in
-            switch key {
-            case .modelSelection: "Model selection"
-            case .toolSelection: "Tool selection"
-            case .embeddingsEnabled: "Local embeddings"
-            case .embeddingsDimensions: "Embedding dimensions"
-            case .embeddingsModel: "Embedding model"
-            case .notificationsCompletion: "Completion notifications"
-            case .notificationsAttention: "Attention notifications"
-            case .notificationAuthorization: "Notification authorization"
-            }
-        }.joined(separator: ", ")
+        keys.isEmpty ? "None" : keys.map(hostSettingName).joined(separator: ", ")
     }
 
     private func setDisabling(_ presented: Bool) {

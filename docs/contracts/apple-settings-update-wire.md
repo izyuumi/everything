@@ -1,6 +1,6 @@
 # Apple Update wire data
 
-`Shared/Settings/RemoteSettingsUpdateWire.swift` is a data codec for a narrow embedding-preference Update command and its matching Original response, registered in both Apple targets. Its parent/Original shape predates the Host's implemented generation-scoped `update` [request](settings-access-status.md) and does not interoperate with it; alignment is #117 work. It is used only by the [Update client](apple-settings-update-client.md), which has no UI caller. The iOS Settings screen exposes only the [Access check](apple-settings-access-client.md), and the Host in this tree answers only `AccessStatus`; Update commands are recorded as rejected ([Host Access transport](settings-access-transport.md)).
+`Shared/Settings/RemoteSettingsUpdateWire.swift` is a data codec for a narrow embedding-preference Update command and its matching Original response, registered in both Apple targets. Its parent/Original shape predates the Host's implemented generation-scoped `update` [request](settings-access-status.md) and does not interoperate with it; the Host rejects it ([Host transport](settings-access-transport.md)). It is used only by the superseded [Update client](apple-settings-update-client.md), which has no caller. iOS encodes the Host's `update` request with the [query wire](apple-remote-settings-wire.md) instead.
 
 ## Request
 

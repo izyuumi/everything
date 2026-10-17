@@ -163,10 +163,32 @@ struct ReplicaSettingsAccessDisplay: Sendable, CustomStringConvertible, CustomDe
     var debugDescription: String { description }
 }
 
+enum ReplicaSettingsQueryResult: Sendable, CustomStringConvertible, CustomDebugStringConvertible {
+    case snapshot(SettingsSnapshot)
+    case changes(SettingsChangePage)
+    case update(requestID: UUID, operation: RemoteSettingsOperation)
+    case hostActionRequired(RemoteSettingsHostAction)
+    case sessionOpened(RemoteSettingsChatOpened)
+    case sessionAccepted(chatID: UUID, turnID: UUID)
+    case sessionStatus(RemoteSettingsChatStatus)
+    case denied(RemoteSettingsDenial)
+
+    var description: String { "ReplicaSettingsQueryResult([redacted])" }
+    var debugDescription: String { description }
+}
+
+enum ReplicaSettingsQueryProjection: Sendable, CustomStringConvertible, CustomDebugStringConvertible {
+    case access(ReplicaSettingsAccessProjection)
+    case result(ReplicaSettingsQueryResult)
+
+    var description: String { "ReplicaSettingsQueryProjection([redacted])" }
+    var debugDescription: String { description }
+}
+
 final class ReplicaSettingsAccessProjection: Sendable, CustomStringConvertible, CustomDebugStringConvertible {
     let display: ReplicaSettingsAccessDisplay
     let grantExpiresAt: UInt64?
-    private let generation: RemoteSettingsGeneration?
+    let generation: RemoteSettingsGeneration?
 
     fileprivate init(display: ReplicaSettingsAccessDisplay, grantExpiresAt: UInt64?,
                      generation: RemoteSettingsGeneration?) {
@@ -280,13 +302,8 @@ final class VerifiedReplicaSettingsReply: Sendable, CustomStringConvertible, Cus
     var metadata: ReplicaSettingsReplyMetadata {
         switch body {
         case .access(let reply):
-            let generation: RemoteSettingsGeneration?
-            switch reply.body {
-            case .summary(let summary): generation = summary.generation
-            case .grantUnavailable: generation = nil
-            }
             return ReplicaSettingsReplyMetadata(header: envelope.header, inReplyTo: reply.inReplyTo,
-                                                correlation: .query(queryID: reply.queryID), generation: generation)
+                                                correlation: .query(queryID: reply.queryID), generation: reply.generation)
         case .bind(let reply):
             return ReplicaSettingsReplyMetadata(header: envelope.header, inReplyTo: reply.inReplyTo,
                                                 correlation: .bind(bindingRequestID: reply.bindingRequestID),
@@ -314,20 +331,18 @@ final class VerifiedReplicaSettingsReply: Sendable, CustomStringConvertible, Cus
 
     fileprivate func projectAccessDisplay(committed: CommittedReplicaSettingsReply,
                                           qualification: ReplicaSettingsAccessQualification,
-                                          owner: isolated ReplicaService) throws -> ReplicaSettingsAccessProjection {
+                                          owner: isolated ReplicaService) throws -> ReplicaSettingsQueryProjection {
         guard committed.matchesVerifiedObject(self) else { throw WireError.identity }
-        try owner.checkSettingsAccessDisplayProjection(qualification, committed: committed)
+        let request = try owner.checkSettingsAccessDisplayProjection(qualification, committed: committed)
         let now = try WireID.now()
         try envelope.header.validate(now: now)
         guard envelope.header.expires > envelope.header.created,
               envelope.header.expires - envelope.header.created <= 60_000 else { throw WireError.invalid }
-        guard case .access(let reply) = body else { throw WireError.invalid }
-        switch reply.body {
-        case .summary(let summary):
+        guard case .access(let reply) = body, request.accepts(reply) else { throw WireError.invalid }
+        if case .summary(let summary) = reply.body {
             guard summary.expiresAt > now, envelope.header.expires <= summary.expiresAt else {
                 throw WireError.expired
             }
-        case .grantUnavailable: break
         }
         try qualification.consumeForAccessProjection(for: committed, owner: owner)
         switch reply.body {
@@ -336,11 +351,20 @@ final class VerifiedReplicaSettingsReply: Sendable, CustomStringConvertible, Cus
                 readableKeys: summary.readableKeys, writableKeys: summary.writableKeys,
                 sessionConsent: summary.sessionConsent, configuredSettingsRevision: summary.configuredSettingsRevision
             )
-            return ReplicaSettingsAccessProjection(display: ReplicaSettingsAccessDisplay(status: .available(displayed)),
-                                                   grantExpiresAt: summary.expiresAt, generation: summary.generation)
+            return .access(ReplicaSettingsAccessProjection(display: ReplicaSettingsAccessDisplay(status: .available(displayed)),
+                                                           grantExpiresAt: summary.expiresAt, generation: summary.generation))
         case .grantUnavailable:
-            return ReplicaSettingsAccessProjection(display: ReplicaSettingsAccessDisplay(status: .grantUnavailable),
-                                                   grantExpiresAt: nil, generation: nil)
+            guard request.query == .accessStatus else { return .result(.denied(.grantUnavailable)) }
+            return .access(ReplicaSettingsAccessProjection(display: ReplicaSettingsAccessDisplay(status: .grantUnavailable),
+                                                           grantExpiresAt: nil, generation: nil))
+        case .snapshot(let snapshot): return .result(.snapshot(snapshot))
+        case .changes(let page): return .result(.changes(page))
+        case .update(let requestID, let operation): return .result(.update(requestID: requestID, operation: operation))
+        case .hostActionRequired(let action): return .result(.hostActionRequired(action))
+        case .sessionOpened(let chat): return .result(.sessionOpened(chat))
+        case .sessionAccepted(let chatID, let turnID): return .result(.sessionAccepted(chatID: chatID, turnID: turnID))
+        case .sessionStatus(let status): return .result(.sessionStatus(status))
+        case .denied(let reason): return .result(.denied(reason))
         }
     }
 
@@ -448,7 +472,7 @@ final class CommittedReplicaSettingsReply: Sendable, CustomStringConvertible, Cu
     }
 
     func projectAccessDisplay(qualifiedBy qualification: ReplicaSettingsAccessQualification,
-                              owner: isolated ReplicaService) throws -> ReplicaSettingsAccessProjection {
+                              owner: isolated ReplicaService) throws -> ReplicaSettingsQueryProjection {
         try qualification.checkCurrent(for: self, owner: owner)
         return try verified.projectAccessDisplay(committed: self, qualification: qualification, owner: owner)
     }
@@ -657,8 +681,8 @@ actor DeviceIdentity {
         guard reply.hostID == host.deviceID else { throw WireError.identity }
         let maximum: Int
         switch reply.body {
-        case .summary: maximum = 49_152
-        case .grantUnavailable: maximum = 4096
+        case .grantUnavailable, .denied: maximum = 4096
+        default: maximum = 49_152
         }
         try validateSettingsReplyEnvelope(envelope, maximum: maximum)
         return VerifiedReplicaSettingsReply(envelope: envelope, host: host,

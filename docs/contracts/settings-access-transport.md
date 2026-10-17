@@ -1,6 +1,6 @@
 # Remote Settings transport (Host)
 
-The Host answers one scoped remote Settings request family over the relay through a single pipeline. Request kinds are `access_status`, `snapshot`, `changes`, `update`, `host_action` and the session kinds `session_open`, `session_send`, `session_poll` and `session_close` ([request DATA](settings-access-status.md), [remote session](settings-remote-session.md)); replies are in [reply DATA](settings-access-replies.md). Authority comes only from the verified envelope sender, the live pin and the owner-created [grant](settings-grants.md). There is no OwnerQuery/OwnerOperation forwarding. The Apple side currently sends only `access_status` ([Access client](apple-settings-access-client.md)).
+The Host answers one scoped remote Settings request family over the relay through a single pipeline. Request kinds are `access_status`, `snapshot`, `changes`, `update`, `host_action` and the session kinds `session_open`, `session_send`, `session_poll` and `session_close` ([request DATA](settings-access-status.md), [remote session](settings-remote-session.md)); replies are in [reply DATA](settings-access-replies.md). Authority comes only from the verified envelope sender, the live pin and the owner-created [grant](settings-grants.md). There is no OwnerQuery/OwnerOperation forwarding. The iOS client sends every kind through one [query client](apple-settings-access-client.md).
 
 Owners: `src/devices/session.rs` (`relay_session_loop`), `src/devices/settings_connection.rs`, `src/devices/settings_ingress.rs` and `settings_ingress/{access,wire,work,work/build}.rs`, `src/devices/settings_publication.rs`, `src/devices/settings_access_reply.rs`, `src/host/settings/service/paired*.rs` (including `paired/remote.rs`), `src/host/settings/authority/paired.rs`, `src/storage/settings_transport.rs`, `src/storage/settings_publication.rs`, `src/storage/transport.rs`. Storage tables and quotas are in [transport storage](settings-transport-storage.md).
 
@@ -83,8 +83,8 @@ When the connection ends, the owner is dropped: the connection identity is retir
 
 ## Not implemented
 
-No Apple client sends the scoped or session requests. The Swift Snapshot, Inspection, Bind and Update codecs predate this Host shape and do not interoperate with it; iOS integration is #117.
+The legacy Swift Snapshot, Inspection, Bind and Update codecs predate this Host shape, are rejected by it and have no caller; iOS uses the [query client](apple-settings-access-client.md). No macOS client sends remote requests (macOS is the local owner).
 
 ## Validation
 
-Local compile/static checks and disposable real-relay walkthroughs with a scratch Replica helper ([scoped requests](../development/settings-validation.md#remote-scoped-settings-walkthrough), [remote session](../development/settings-validation.md#remote-settings-session-walkthrough)). Deferred automated coverage is tracked in [#32](https://github.com/izyuumi/everything/issues/32).
+Local compile/static checks and disposable real-relay walkthroughs with a scratch Replica helper ([scoped requests](../development/settings-validation.md#remote-scoped-settings-walkthrough), [remote session](../development/settings-validation.md#remote-settings-session-walkthrough)) and with the Swift client in the iOS Simulator ([iOS client](../development/settings-validation.md#ios-remote-settings-client-walkthrough)). Deferred automated coverage is tracked in [#32](https://github.com/izyuumi/everything/issues/32).

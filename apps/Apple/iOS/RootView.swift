@@ -62,6 +62,8 @@ struct RootView: View {
                             } else {
                                 ContentUnavailableView("Local preferences unavailable", systemImage: "lock", description: Text(model.localSettingsIssue ?? "Unlock this iPhone and reopen Everything to access its existing protected identity."))
                             }
+                        case .hostAssistant:
+                            HostSettingsAssistantView(model: model)
                         }
                     }
             }
