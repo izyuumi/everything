@@ -615,7 +615,7 @@ enum RemoteSettingsReadWire {
         }
     }
 
-    private static func decodeOriginalView(_ value: WireValue) throws -> RemoteSettingsOriginalView {
+    static func decodeOriginalView(_ value: WireValue) throws -> RemoteSettingsOriginalView {
         _ = try value.encoded(maximum: 4096)
         let fields = try object(value, ["original_kind", "terminal", "link", "mutation_operation_ids", "service"])
         guard let kind = RemoteSettingsOriginalKind(rawValue: try fields.required("original_kind").text) else {
