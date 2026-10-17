@@ -1,10 +1,14 @@
 mod pins;
 
 mod access;
+mod reads;
 
 pub(crate) use access::{
     QualifiedSettingsAccessReply, SettingsAccessQualificationError, SettingsAccessReplyFamily,
     SettingsAccessReservationSpec,
+};
+pub(crate) use reads::{
+    QualifiedSettingsReadQuery, SettingsReadQualificationError, SettingsReadQueryDisposition,
 };
 
 mod replies;
