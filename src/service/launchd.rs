@@ -17,6 +17,7 @@ pub struct LaunchdService {
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct ServiceStatus {
     pub installed: bool,
+    pub enabled: bool,
     pub loaded: bool,
     pub process_id: Option<u32>,
     pub last_exit_status: Option<i32>,
@@ -115,6 +116,9 @@ impl LaunchdService {
             if status.process_id.is_some() {
                 return Ok(());
             }
+            if !status.loaded && !status.enabled {
+                return Err(ServiceError::Disabled);
+            }
             self.filesystem(cancellation.clone(), |service| {
                 service.verify_executable()?;
                 super::state::StateDirectory::open(&service.state_directory, false)?;
@@ -212,11 +216,29 @@ impl LaunchdService {
             let installed = self
                 .filesystem(cancellation.clone(), |service| service.installed_plist())
                 .await?;
+            let disabled = run_launchctl(
+                vec!["print-disabled".to_owned(), user_domain()],
+                cancellation.clone(),
+            )
+            .await?;
+            if !disabled.status.success() {
+                return Err(ServiceError::Launchctl {
+                    operation: "print-disabled",
+                    status: disabled.status.code(),
+                });
+            }
+            let entry = format!("\"{SERVICE_LABEL}\" => ");
+            let enabled = !std::str::from_utf8(&disabled.stdout)
+                .map_err(|_| ServiceError::InvalidResponse("launchctl output is not UTF-8"))?
+                .lines()
+                .filter_map(|line| line.trim().strip_prefix(&entry))
+                .any(|value| matches!(value, "disabled" | "true"));
             let output =
                 run_launchctl(vec!["print".to_owned(), service_target()], cancellation).await?;
             if output.status.code() == Some(113) {
                 return Ok(ServiceStatus {
                     installed,
+                    enabled,
                     loaded: false,
                     process_id: None,
                     last_exit_status: None,
@@ -240,16 +262,19 @@ impl LaunchdService {
                             .map_err(|_| ServiceError::InvalidResponse("invalid process ID"))?,
                     );
                 }
-                if let Some(value) = line.trim().strip_prefix("last exit code = ") {
+                if let Some(value) = line.trim().strip_prefix("last exit code = ")
+                    && value != "(never exited)"
+                {
+                    let code = value.split_once(':').map_or(value, |(code, _)| code);
                     last_exit_status = Some(
-                        value
-                            .parse::<i32>()
+                        code.parse::<i32>()
                             .map_err(|_| ServiceError::InvalidResponse("invalid exit code"))?,
                     );
                 }
             }
             Ok(ServiceStatus {
                 installed,
+                enabled,
                 loaded: true,
                 process_id,
                 last_exit_status,

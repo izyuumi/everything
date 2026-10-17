@@ -15,6 +15,8 @@ pub enum ServiceError {
     UnsupportedPlatform,
     #[error("unsafe service path: {0}")]
     UnsafePath(&'static str),
+    #[error("service is disabled; enable it before starting")]
+    Disabled,
     #[error("another host holds the state directory lock")]
     AlreadyRunning,
     #[error("service filesystem operation failed: {0}")]
