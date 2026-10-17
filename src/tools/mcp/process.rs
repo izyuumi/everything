@@ -247,19 +247,20 @@ impl ProcessGroup {
             else {
                 return false;
             };
-            if rustix::process::waitid(
+            let exited = match rustix::process::waitid(
                 WaitId::Pid(pid),
                 WaitIdOptions::EXITED | WaitIdOptions::NOWAIT | WaitIdOptions::NOHANG,
-            )
-            .is_err()
-            {
-                return false;
-            }
+            ) {
+                Ok(status) => status.is_some(),
+                Err(_) => return false,
+            };
             let group = rustix::process::kill_process_group(pid, Signal::KILL);
             let leader = rustix::process::kill_process(pid, Signal::KILL);
-            [group, leader]
-                .into_iter()
-                .all(|result| matches!(result, Ok(()) | Err(rustix::io::Errno::SRCH)))
+            [group, leader].into_iter().all(|result| match result {
+                Ok(()) | Err(rustix::io::Errno::SRCH) => true,
+                Err(rustix::io::Errno::PERM) => exited,
+                Err(_) => false,
+            })
         }
         #[cfg(not(unix))]
         {
