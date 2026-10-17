@@ -105,6 +105,10 @@ impl SettingsConnectionIdentity {
         self.connection_epoch
     }
 
+    pub(crate) fn is_retired(&self) -> bool {
+        self.retired.load(Ordering::Acquire)
+    }
+
     pub(crate) fn is_live(&self) -> bool {
         self.host.is_live()
             && self.socket.is_live()
