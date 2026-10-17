@@ -91,6 +91,7 @@ use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::{Read, Write};
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use thiserror::Error;
 use tokio::sync::Notify;
@@ -140,6 +141,8 @@ pub enum DeviceError {
     Worker,
     #[error("a relay session is already running for this endpoint")]
     SessionAlreadyRunning,
+    #[error("relay outbound ownership is quarantined; process restart required")]
+    OutboundQuarantined,
     #[error(transparent)]
     Remote(#[from] crate::transport::remote::RemoteError),
     #[error("device operation was cancelled")]
@@ -322,6 +325,7 @@ struct EndpointInner {
     outbox_ready: Notify,
     inbox_ready: Notify,
     session: tokio::sync::Mutex<()>,
+    outbound_failed: AtomicBool,
 }
 
 impl DeviceEndpoint {
@@ -350,6 +354,7 @@ impl DeviceEndpoint {
                 outbox_ready: Notify::new(),
                 inbox_ready: Notify::new(),
                 session: tokio::sync::Mutex::new(()),
+                outbound_failed: AtomicBool::new(false),
             }),
         })
     }
@@ -362,6 +367,18 @@ impl DeviceEndpoint {
     }
     pub(crate) fn shares_store(&self, store: &Store) -> bool {
         self.inner.store.shares_connection(store)
+    }
+    pub(crate) fn outbound_is_quarantined(&self) -> bool {
+        self.inner.outbound_failed.load(Ordering::Acquire)
+    }
+    fn check_outbound_health(&self) -> Result<(), DeviceError> {
+        if self.outbound_is_quarantined() {
+            return Err(DeviceError::OutboundQuarantined);
+        }
+        Ok(())
+    }
+    fn quarantine_outbound(&self) {
+        self.inner.outbound_failed.store(true, Ordering::Release);
     }
     pub fn identity(&self) -> Arc<DeviceIdentity> {
         Arc::clone(&self.inner.identity)
