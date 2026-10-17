@@ -24,8 +24,10 @@ Complete current Host endpoint keys/role/nonrevocation and the full genuine
 peer registration/access/nonrevocation are checked before current grant SQL.
 The grant must be Active for that full peer and exact parent generation.
 Snapshot requires every requested key in current R before any later value
-capture; W is irrelevant. Inspect retains only a private read ceiling, with no
-Original existence, requesting-peer provenance or disclosure permission.
+capture; W is irrelevant. This base Inspect qualifier supplies only a private
+read ceiling. The separate [inspection producer](settings-original-inspection-publication.md)
+adds own-peer Original/session/turn/operation provenance and every disclosed-key
+R check before projection; the base qualifier alone grants no disclosure.
 
 The actual slot must retain every original reservation field: ID/local/peer,
 canonical public provenance, family/bytes and creation/expiry. Text is borrowed
@@ -56,10 +58,11 @@ perform no SQL write, rollback or commit and do not reinterpret writer uncertain
 
 The full gate requires its reservation to exist. It cannot be used after exact
 DELETE/transfer or for queued send; those phases need their genuine consumed and
-queued associations. The Snapshot-only producer below supplies those phases
-for that closed family. Permanent Original lookup and all disclosed-key checks,
-inspection BUILD/projection/seal, Root pump and client adoption remain separate
-source gates.
+queued associations. The Snapshot producer below and the separate
+[permanent Original inspection producer](settings-original-inspection-publication.md)
+supply those phases for their respective closed families. Root pump, final
+current socket admission, send/ACK, retirement/drain and client adoption remain
+separate gates.
 No native settings snapshot or OwnerIPC forwarding is added. Source formatting
 and preservation prove no compiler, SQL/crypto/runtime, security acceptance or
 #116/#117 completion; automated validation remains deferred in #32.
@@ -107,8 +110,9 @@ comparison facts. It retains no Snapshot values, packet, plaintext or copied
 native settings. Current SQL admission and the separate socket-lifetime gate
 check the original physical connection, parent and fixed clocks, including the
 actual sealed-header creation floor. The actual ciphertext loader derives the
-Default49152 stamp from the genuine Snapshot reservation. No inspection arm,
-new queue/window, reseal, retry, Source renewal or raw row authority is added.
+Default49152 stamp from the genuine Snapshot reservation. Inspection has its
+own genuine sixth arm and Inspection90112 stamp. Neither family adds a new
+queue/window, reseal, retry, Source renewal or raw row authority.
 
 These are internal producers and currentness gates. OrdinaryOnly relay mode,
 public private-delivery refusal, Root pump integration, actual job start/send,

@@ -1,6 +1,6 @@
 # Closed Original reply data
 
-`devices::settings_reply` defines Unix-only, crate-private, Serialize-only data for the Original response lane. It has no producer, projection, incoming decoder, authority gate or client handler. This source foundation remains uncompiled and unactivated pending genuine consumers and integration validation.
+`devices::settings_reply` defines Unix-only, crate-private, Serialize-only data for the Original response lane. The DATA module creates no authority or client handler. Actual same-Core command reply projection/publication and the separate [fresh permanent-Original inspection producer](settings-original-inspection-publication.md) consume its shared validator; private transport and client activation remain incomplete.
 
 ## Complete response packet
 
@@ -39,7 +39,7 @@ The packet constructor and checked encoder enforce these shape constraints:
 - Receipt revisions are positive and within the signed SQLite range when present. Applying requires its matching unresolved write. Write revisions are exactly the successor of the matching expected revision. Changed keys are nonempty, strictly sorted, bounded to two and limited to embeddings enabled/dimensions.
 - Applied, PendingApplication and RestartRequired require the matching Applied write. Unknown may retain an unresolved write. A NotApplied write requires Failed, Unavailable, Cancelled or Conflict. Application facts require PendingApplication with an Applied write. No restart flag or reason is inferred.
 
-A later trusted projection must prove the real installed link, owning Original, current disclosure scope and actual service lookup. A NotRecorded shape alone cannot prove absence, NoEffects or retry permission. Expected revision retains its canonical Option shape; genuine paired origin/binding validation remains outside this data module. Original Unknown remains independent when a later service fact reports Applied; Original Completed does not mean Applied.
+The actual trusted projections separately prove the real installed link, owning Original, current disclosure scope and actual service lookup. A NotRecorded shape alone cannot prove absence, NoEffects or retry permission. Expected revision retains its canonical Option shape; genuine paired origin/binding validation remains outside this data module. Original Unknown remains independent when a later service fact reports Applied; Original Completed does not mean Applied.
 
 ## Concrete encoding and ownership
 
@@ -47,9 +47,9 @@ A later trusted projection must prove the real installed link, owning Original, 
 
 `SettingsReplyContractError` distinguishes Invalid, TooLarge and Encoding. Encoding retains its real structured `serde_json::Error`; Display and Debug use fixed redacted messages. Callers must not expose the underlying encoding cause as remote text. Aggregate Debug implementations omit their data, and aggregates have neither Clone nor Deserialize.
 
-A genuine reply-build permit and current same-Core publication qualification are prerequisites **before private projection or encoding**. This module implements neither. A SQL reservation, copied generation or this constructor cannot substitute for them. The future build owner must retain its permit through projection, encoding, sealing, the actual store worker join and destruction or storage consumption of all build buffers, including error paths. Later durable ciphertext send admission is a separate counted lifetime within the existing outbound window.
+A genuine reply-build permit and current same-Core publication qualification are prerequisites **before private projection or encoding**. This module implements neither. A SQL reservation, copied generation or this constructor cannot substitute for them. The actual registered build owner retains its permit through projection, encoding, sealing, the actual store worker join and destruction or storage consumption of all build buffers, including error paths. Later durable ciphertext send admission is a separate counted lifetime within the existing outbound window.
 
-Actual Inspection-family ciphertext/envelope capacity, atomic reservation transfer, current grant/pin/parent/expiry gates, socket ownership, full Host drain, decoder/adoption and manual runtime validation remain separate integration work. The [command receive contract](settings-command-receive.md), [Bind receive contract](settings-bind-receive.md) and [private ingress boundary](private-settings-ingress.md) retain their current activation limits. This foundation performs no sealing, storage, queue admission, send or execution.
+Actual Inspection-family envelope bounds, atomic reservation transfer and current grant/pin/parent/fixed-clock checks exist in the common publisher and fresh inspection producer. Final socket admission/send/ACK, retirement/full Host drain, read-client adoption and manual runtime verification remain separate. The [command receive](settings-command-receive.md), [inspection publication](settings-original-inspection-publication.md) and [private ingress](private-settings-ingress.md) contracts preserve those activation limits. This DATA module itself performs no sealing, storage, queue admission, send or execution. Exact source/SDK evidence is recorded in [implementation status](../status/implementation.md).
 
 ## Shared current persisted pins
 
