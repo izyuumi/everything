@@ -26,7 +26,8 @@ use crate::storage::{
 use access::AccessWorkState;
 pub(crate) use access::{
     AccessStatusRejection, AuthenticatedSettingsAccessSource, OwnedCommittedSettingsAccess,
-    OwnedVerifiedSettingsAccess, SettingsAccessStatusIntent,
+    OwnedVerifiedSettingsAccess, SettingsAccessStatusIntent, SettingsHostAction,
+    SettingsRemoteRequest,
 };
 pub(crate) use wire::BindingGeneration;
 pub(crate) use work::{SettingsReceiveDrain, SettingsReceiveWitness};

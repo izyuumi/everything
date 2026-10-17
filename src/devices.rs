@@ -21,7 +21,8 @@ pub(crate) use settings_connection::{
 
 #[cfg(unix)]
 pub(crate) use settings_access_reply::{
-    SettingsAccessReplyContractError, SettingsAccessReplyPacket,
+    SettingsAccessReplyContractError, SettingsAccessReplyPacket, SettingsRemoteDenial,
+    SettingsRemoteOperation, SettingsRemoteReply,
 };
 #[cfg(unix)]
 pub(crate) use settings_ingress::work::{
@@ -31,7 +32,8 @@ pub(crate) use settings_ingress::work::{
 pub(crate) use settings_ingress::{
     AccessStatusRejection, AuthenticatedSettingsAccessSource, BindingGeneration,
     OwnedCommittedSettingsAccess, OwnedVerifiedSettingsAccess, SETTINGS_CLOCK_SKEW_MS,
-    SettingsAccessStatusIntent, SettingsReceiveDrain, SettingsReceiveError, SettingsReceiveWitness,
+    SettingsAccessStatusIntent, SettingsHostAction, SettingsReceiveDrain, SettingsReceiveError,
+    SettingsReceiveWitness, SettingsRemoteRequest,
 };
 
 #[cfg(unix)]

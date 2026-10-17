@@ -14,7 +14,7 @@ use crate::protocol::{DeviceId, UnixMillis};
 
 use super::super::grants::SettingsGrantOwner;
 use super::super::service::SettingsServiceError;
-use super::Authority;
+use super::{Authority, CallerSource, SettingsCaller};
 
 const MAX_ACCESS_QUERIES: usize = 512;
 const MAX_PEER_ACCESS_QUERIES: usize = 64;
@@ -24,11 +24,49 @@ pub(super) struct PairedTransport {
     host: Option<Arc<SettingsHostIdentity>>,
     access_connection: Option<Arc<SettingsConnectionIdentity>>,
     access_queries: BTreeMap<(DeviceId, Uuid), AccessQuery>,
+    caller: Option<Arc<PairedCallerLease>>,
+}
+
+pub(in crate::host::settings) struct PairedCallerLease {
+    device_id: DeviceId,
+    connection: Arc<SettingsConnectionIdentity>,
+    expires_at: UnixMillis,
+    deadline: Instant,
 }
 
 impl PairedTransport {
     pub(super) fn close(&mut self) {
         self.access_queries.clear();
+        self.caller = None;
+    }
+
+    pub(super) fn check_caller_origin(
+        &self,
+        device_id: DeviceId,
+    ) -> Result<(), SettingsServiceError> {
+        let lease = self
+            .caller
+            .as_ref()
+            .ok_or(SettingsServiceError::OutsideScope)?;
+        if lease.device_id != device_id {
+            return Err(SettingsServiceError::OutsideScope);
+        }
+        self.check_lease(lease)
+    }
+
+    fn check_lease(&self, lease: &PairedCallerLease) -> Result<(), SettingsServiceError> {
+        if !lease.connection.is_live()
+            || self
+                .host
+                .as_ref()
+                .is_none_or(|host| !Arc::ptr_eq(host, lease.connection.host_identity()))
+        {
+            return Err(SettingsServiceError::OutsideScope);
+        }
+        if UnixMillis::now()? >= lease.expires_at || Instant::now() >= lease.deadline {
+            return Err(SettingsServiceError::Expired);
+        }
+        Ok(())
     }
 }
 
@@ -52,6 +90,92 @@ pub(in crate::host::settings) struct AccessQueryObservation {
 }
 
 impl Authority {
+    pub(in crate::host::settings) fn paired_caller(
+        self: &Arc<Self>,
+        host: &Arc<SettingsHostIdentity>,
+        source: &AuthenticatedSettingsAccessSource,
+        stop: &CancellationToken,
+    ) -> Result<SettingsCaller, SettingsServiceError> {
+        let mut sessions = self
+            .sessions
+            .lock()
+            .map_err(|_| SettingsServiceError::Poisoned)?;
+        check_access_host(self, &sessions, host, source, stop)?;
+        if sessions
+            .paired
+            .access_connection
+            .as_ref()
+            .is_none_or(|original| !Arc::ptr_eq(original, source.connection()))
+        {
+            return Err(SettingsServiceError::OutsideScope);
+        }
+        let device_id = source.verified_peer_keys().device_id;
+        let lease = Arc::new(PairedCallerLease {
+            device_id,
+            connection: Arc::clone(source.connection()),
+            expires_at: source.intent().expires_at,
+            deadline: source.original_deadline(),
+        });
+        sessions.paired.check_lease(&lease)?;
+        sessions.paired.caller = Some(Arc::clone(&lease));
+        Ok(SettingsCaller {
+            authority: Arc::clone(self),
+            source: CallerSource::PairedSettings { device_id },
+            agent_identity: None,
+            paired: Some(lease),
+        })
+    }
+
+    pub(in crate::host::settings) fn retire_paired_caller(&self, caller: &SettingsCaller) {
+        if let Ok(mut sessions) = self.sessions.lock()
+            && let (Some(current), Some(lease)) = (&sessions.paired.caller, &caller.paired)
+            && Arc::ptr_eq(current, lease)
+        {
+            sessions.paired.caller = None;
+        }
+    }
+
+    pub(in crate::host::settings) fn validate_paired_update(
+        &self,
+        caller: &SettingsCaller,
+    ) -> Result<(), SettingsServiceError> {
+        self.paired_lifetime(caller).map(|_| ())
+    }
+
+    pub(in crate::host::settings) fn paired_lifetime(
+        &self,
+        caller: &SettingsCaller,
+    ) -> Result<(UnixMillis, Instant), SettingsServiceError> {
+        let CallerSource::PairedSettings { device_id } = caller.source else {
+            return Err(SettingsServiceError::OutsideScope);
+        };
+        if !std::ptr::eq(self, Arc::as_ptr(&caller.authority)) {
+            return Err(SettingsServiceError::OutsideScope);
+        }
+        let lease = caller
+            .paired
+            .as_ref()
+            .ok_or(SettingsServiceError::OutsideScope)?;
+        let sessions = self
+            .sessions
+            .lock()
+            .map_err(|_| SettingsServiceError::Poisoned)?;
+        if sessions.closed {
+            return Err(SettingsServiceError::Stopped);
+        }
+        if lease.device_id != device_id
+            || sessions
+                .paired
+                .caller
+                .as_ref()
+                .is_none_or(|current| !Arc::ptr_eq(current, lease))
+        {
+            return Err(SettingsServiceError::OutsideScope);
+        }
+        sessions.paired.check_lease(lease)?;
+        Ok((lease.expires_at, lease.deadline))
+    }
+
     pub(in crate::host::settings) fn attach_paired_transport(
         &self,
         host: Arc<SettingsHostIdentity>,

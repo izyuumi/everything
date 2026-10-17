@@ -3,20 +3,26 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Instant;
 
-use serde::{Deserialize, Deserializer};
+use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 use thiserror::Error;
 use tokio::sync::Mutex;
 use uuid::Uuid;
 
-use super::wire::{MAX_PRIVATE_REQUEST_BYTES, canonical_uuid, object};
+use super::wire::{BindingGeneration, MAX_PRIVATE_REQUEST_BYTES, canonical_uuid, object};
 use super::{SettingsReceiveError, VerifiedSettingsEnvelope, work::PrivateWitness};
 use crate::agent::Agent;
 use crate::crypto::DevicePublicKeys;
 use crate::devices::{DeviceEndpoint, EndpointRole, SettingsConnectionIdentity};
+use crate::host::settings::contract::{
+    SETTINGS_CONTRACT_VERSION, SettingChange, SettingKey, SettingScopeKind, SettingsPatch,
+    SettingsScope,
+};
 use crate::host::settings::service::SettingsReceiptAuthority;
-use crate::protocol::{DeviceId, UnixMillis};
+use crate::protocol::{CommandId, DeviceId, UnixMillis};
 use crate::storage::{Store, StoredSettingsAccessReply, TransportInboxMetadata};
+
+const MAX_REMOTE_CHANGES: usize = 64;
 
 #[derive(Clone, PartialEq, Eq)]
 pub(crate) struct SettingsAccessStatusIntent {
@@ -24,6 +30,93 @@ pub(crate) struct SettingsAccessStatusIntent {
     pub(crate) query_id: Uuid,
     pub(crate) issued_at: UnixMillis,
     pub(crate) expires_at: UnixMillis,
+    pub(crate) request: SettingsRemoteRequest,
+}
+
+#[derive(Clone, PartialEq, Eq)]
+pub(crate) enum SettingsRemoteRequest {
+    AccessStatus,
+    Snapshot {
+        generation: BindingGeneration,
+        keys: Vec<SettingKey>,
+    },
+    Changes {
+        generation: BindingGeneration,
+        after_sequence: u64,
+        limit: usize,
+    },
+    Update {
+        generation: BindingGeneration,
+        request_id: CommandId,
+        expected_revision: u64,
+        changes: Vec<SettingChange>,
+    },
+    HostAction {
+        action: SettingsHostAction,
+    },
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum SettingsHostAction {
+    CredentialEntry,
+    PairingInvitation,
+    PairingApproval,
+    DeviceRevocation,
+    GrantChange,
+    ExecutionPolicy,
+    RecipientConsent,
+    Lifecycle,
+}
+
+impl SettingsRemoteRequest {
+    pub(crate) fn generation(&self) -> Option<&BindingGeneration> {
+        match self {
+            Self::Snapshot { generation, .. }
+            | Self::Changes { generation, .. }
+            | Self::Update { generation, .. } => Some(generation),
+            Self::AccessStatus | Self::HostAction { .. } => None,
+        }
+    }
+
+    fn valid(&self, host_id: DeviceId) -> bool {
+        if self.generation().is_some_and(|generation| {
+            generation.grant_revision == 0 || generation.grant_revision > i64::MAX as u64
+        }) {
+            return false;
+        }
+        match self {
+            Self::AccessStatus | Self::HostAction { .. } => true,
+            Self::Snapshot { keys, .. } => {
+                let mut sorted = keys.clone();
+                sorted.sort_unstable();
+                sorted.dedup();
+                !keys.is_empty()
+                    && sorted.len() == keys.len()
+                    && keys.iter().all(|key| key.scope() == SettingScopeKind::Host)
+            }
+            Self::Changes {
+                after_sequence,
+                limit,
+                ..
+            } => (1..=MAX_REMOTE_CHANGES).contains(limit) && *after_sequence <= i64::MAX as u64,
+            Self::Update {
+                request_id,
+                expected_revision,
+                changes,
+                ..
+            } => SettingsPatch {
+                contract_version: SETTINGS_CONTRACT_VERSION,
+                request_id: *request_id,
+                scope: SettingsScope::Host { host_id },
+                expected_revision: *expected_revision,
+                changes: changes.clone(),
+                confirmation: None,
+            }
+            .validate()
+            .is_ok(),
+        }
+    }
 }
 
 pub(crate) struct AuthenticatedSettingsAccessSource {
@@ -138,6 +231,7 @@ impl SettingsAccessStatusIntent {
             && self.issued_at.get() > 0
             && self.expires_at > self.issued_at
             && self.expires_at.get() - self.issued_at.get() <= 30_000
+            && self.request.valid(self.host_id)
     }
 }
 
@@ -298,10 +392,52 @@ pub(super) fn decode(bytes: &[u8]) -> DecodedAccessStatus {
     if deserializer.end().is_err() || packet.schema_version != 1 || packet.payload.version != 1 {
         return DecodedAccessStatus::Invalid;
     }
+    let (time, request) = match packet.payload.message.body {
+        Body::AccessStatus { time } => (time, SettingsRemoteRequest::AccessStatus),
+        Body::Snapshot {
+            generation,
+            keys,
+            time,
+        } => (time, SettingsRemoteRequest::Snapshot { generation, keys }),
+        Body::Changes {
+            generation,
+            after_sequence,
+            limit,
+            time,
+        } => (
+            time,
+            SettingsRemoteRequest::Changes {
+                generation,
+                after_sequence,
+                limit,
+            },
+        ),
+        Body::Update {
+            generation,
+            request_id,
+            expected_revision,
+            changes,
+            time,
+        } => {
+            let Ok(request_id) = CommandId::try_from(request_id) else {
+                return DecodedAccessStatus::Invalid;
+            };
+            (
+                time,
+                SettingsRemoteRequest::Update {
+                    generation,
+                    request_id,
+                    expected_revision,
+                    changes,
+                },
+            )
+        }
+        Body::HostAction { action, time } => (time, SettingsRemoteRequest::HostAction { action }),
+    };
     let (Ok(host_id), Ok(issued_at), Ok(expires_at)) = (
         DeviceId::try_from(packet.payload.host_id),
-        UnixMillis::try_from(packet.payload.message.body.time.issued_at),
-        UnixMillis::try_from(packet.payload.message.body.time.expires_at),
+        UnixMillis::try_from(time.issued_at),
+        UnixMillis::try_from(time.expires_at),
     ) else {
         return DecodedAccessStatus::Invalid;
     };
@@ -310,6 +446,7 @@ pub(super) fn decode(bytes: &[u8]) -> DecodedAccessStatus {
         query_id: packet.payload.message.query_id,
         issued_at,
         expires_at,
+        request,
     };
     if !intent.valid() {
         return DecodedAccessStatus::Invalid;
@@ -344,17 +481,38 @@ struct Query {
     _kind: (),
     #[serde(deserialize_with = "canonical_uuid")]
     query_id: Uuid,
-    #[serde(deserialize_with = "object")]
-    body: AccessStatus,
+    body: Body,
 }
 
 #[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct AccessStatus {
-    #[serde(rename = "kind", deserialize_with = "access_status_kind")]
-    _kind: (),
-    #[serde(deserialize_with = "object")]
-    time: RequestTime,
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+enum Body {
+    AccessStatus {
+        time: RequestTime,
+    },
+    Snapshot {
+        generation: BindingGeneration,
+        keys: Vec<SettingKey>,
+        time: RequestTime,
+    },
+    Changes {
+        generation: BindingGeneration,
+        after_sequence: u64,
+        limit: usize,
+        time: RequestTime,
+    },
+    Update {
+        generation: BindingGeneration,
+        #[serde(deserialize_with = "canonical_uuid")]
+        request_id: Uuid,
+        expected_revision: u64,
+        changes: Vec<SettingChange>,
+        time: RequestTime,
+    },
+    HostAction {
+        action: SettingsHostAction,
+        time: RequestTime,
+    },
 }
 
 #[derive(Deserialize)]
@@ -370,10 +528,6 @@ fn settings_kind<'de, D: Deserializer<'de>>(deserializer: D) -> Result<(), D::Er
 
 fn query_kind<'de, D: Deserializer<'de>>(deserializer: D) -> Result<(), D::Error> {
     require_kind(deserializer, "query")
-}
-
-fn access_status_kind<'de, D: Deserializer<'de>>(deserializer: D) -> Result<(), D::Error> {
-    require_kind(deserializer, "access_status")
 }
 
 fn require_kind<'de, D: Deserializer<'de>>(

@@ -650,6 +650,7 @@ enum SettingsOperationOrigin: SettingsWireData {
     case localOwner(requestID: UUID)
     case nativeUI(sessionID: UUID)
     case settingsAgent(sessionID: UUID, nativeSessionID: UUID)
+    case pairedDevice(deviceID: UUID)
 
     func validate() throws {
         switch self {
@@ -658,6 +659,7 @@ enum SettingsOperationOrigin: SettingsWireData {
         case .settingsAgent(let sessionID, let nativeSessionID):
             try SettingsWire.identifier(sessionID)
             try SettingsWire.identifier(nativeSessionID)
+        case .pairedDevice(let deviceID): try SettingsWire.identifier(deviceID)
         }
     }
 
@@ -673,6 +675,9 @@ enum SettingsOperationOrigin: SettingsWireData {
         case "settings_agent":
             try fields.only(["kind", "session_id", "native_session_id"])
             self = .settingsAgent(sessionID: try fields.required(UUID.self, "session_id"), nativeSessionID: try fields.required(UUID.self, "native_session_id"))
+        case "paired_device":
+            try fields.only(["kind", "device_id"])
+            self = .pairedDevice(deviceID: try fields.required(UUID.self, "device_id"))
         default: throw SettingsWireError.invalid
         }
         try validate()
@@ -691,6 +696,9 @@ enum SettingsOperationOrigin: SettingsWireData {
             try fields.encode("settings_agent", forKey: SettingsWireKey("kind"))
             try fields.encode(sessionID, forKey: SettingsWireKey("session_id"))
             try fields.encode(nativeSessionID, forKey: SettingsWireKey("native_session_id"))
+        case .pairedDevice(let deviceID):
+            try fields.encode("paired_device", forKey: SettingsWireKey("kind"))
+            try fields.encode(deviceID, forKey: SettingsWireKey("device_id"))
         }
     }
 }
@@ -1012,6 +1020,8 @@ struct SettingsOperationInspection: SettingsWireData {
             guard sessionID == binding.clientSessionID else { throw SettingsWireError.invalid }
         case .settingsAgent(_, let nativeSessionID):
             guard nativeSessionID == binding.clientSessionID else { throw SettingsWireError.invalid }
+        case .pairedDevice(let deviceID):
+            guard deviceID == binding.clientSessionID else { throw SettingsWireError.invalid }
         }
         switch phase {
         case .awaitingConfirmation(let reference):

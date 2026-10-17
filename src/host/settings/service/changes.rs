@@ -68,32 +68,7 @@ impl SettingsService {
         self.blocking(move |core| {
             core.authority
                 .require_tool(&caller, SettingsToolName::Get)?;
-            let records = core
-                .repository
-                .change_records(after_sequence.unwrap_or(0), limit)?;
-            let mut page = SettingsChangePage {
-                contract_version: SETTINGS_CONTRACT_VERSION,
-                observed_at: UnixMillis::now()?,
-                changes: Vec::new(),
-                next_sequence: None,
-            };
-            for (sequence, record) in records {
-                let Some(hint) = core.change_hint(&caller, sequence, &record)? else {
-                    page.next_sequence = Some(sequence);
-                    continue;
-                };
-                if encoded_size(&hint)? > 1024 {
-                    return Err(SettingsServiceError::Capacity);
-                }
-                let previous_cursor = page.next_sequence;
-                page.changes.push(hint);
-                page.next_sequence = Some(sequence);
-                if encoded_size(&page)? > 32 * 1024 {
-                    page.changes.pop();
-                    page.next_sequence = previous_cursor;
-                    break;
-                }
-            }
+            let page = core.change_page(&caller, after_sequence, limit, None, 32 * 1024)?;
             core.authority
                 .require_tool(&caller, SettingsToolName::Get)?;
             Ok(page)
@@ -103,6 +78,52 @@ impl SettingsService {
 }
 
 impl ServiceCore {
+    pub(super) fn change_page(
+        &self,
+        caller: &SettingsCaller,
+        after_sequence: Option<u64>,
+        limit: usize,
+        readable: Option<&[SettingKey]>,
+        maximum_bytes: usize,
+    ) -> Result<SettingsChangePage, SettingsServiceError> {
+        let records = self
+            .repository
+            .change_records(after_sequence.unwrap_or(0), limit)?;
+        let mut page = SettingsChangePage {
+            contract_version: SETTINGS_CONTRACT_VERSION,
+            observed_at: UnixMillis::now()?,
+            changes: Vec::new(),
+            next_sequence: None,
+        };
+        for (sequence, record) in records {
+            let hint = self
+                .change_hint(caller, sequence, &record)?
+                .and_then(|mut hint| match readable {
+                    None => Some(hint),
+                    Some(readable) => {
+                        hint.changed_keys.retain(|key| readable.contains(key));
+                        (!hint.changed_keys.is_empty()).then_some(hint)
+                    }
+                });
+            let Some(hint) = hint else {
+                page.next_sequence = Some(sequence);
+                continue;
+            };
+            if encoded_size(&hint)? > 1024 {
+                return Err(SettingsServiceError::Capacity);
+            }
+            let previous_cursor = page.next_sequence;
+            page.changes.push(hint);
+            page.next_sequence = Some(sequence);
+            if encoded_size(&page)? > maximum_bytes {
+                page.changes.pop();
+                page.next_sequence = previous_cursor;
+                break;
+            }
+        }
+        Ok(page)
+    }
+
     fn change_hint(
         &self,
         caller: &SettingsCaller,

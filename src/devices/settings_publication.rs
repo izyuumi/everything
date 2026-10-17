@@ -11,7 +11,7 @@ use crate::agent::Agent;
 use crate::crypto::{CryptoError, EnvelopeHeader};
 use crate::host::settings::service::{
     QualifiedSettingsAccessReply, SettingsAccessReplyFamily, SettingsReceiptAuthority,
-    SettingsReplyProjectionError,
+    SettingsRemotePayload, SettingsReplyProjectionError,
 };
 use crate::protocol::{DeviceId, ProtocolError, UnixMillis};
 use crate::relay_protocol::{MAX_RELAY_FRAME_BYTES, RELAY_SCHEMA_VERSION, RelayClientMessage};
@@ -26,6 +26,7 @@ pub(crate) struct SettingsReplySealContext<'source> {
     pub(crate) mutation: &'source OwnedMutexGuard<()>,
     pub(crate) authority: &'source SettingsReceiptAuthority,
     pub(crate) permit: &'source ReplyBuildPermit,
+    pub(crate) payload: Option<&'source SettingsRemotePayload>,
 }
 
 pub(crate) enum SettingsReplyQualification<'qualified, 'source> {
@@ -142,6 +143,7 @@ impl<'transaction, 'connection, 'source> SealedSettingsReply<'transaction, 'conn
             transaction,
             qualified,
             context.permit,
+            context.payload,
         )?;
         let (plaintext, floor, deadline) = projection.into_parts();
         Self::seal(
