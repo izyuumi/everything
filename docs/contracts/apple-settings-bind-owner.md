@@ -1,0 +1,49 @@
+# Held Apple Bind requester and reply owner
+
+This foundation extends the [actual Access owner and display cache](apple-remote-settings-wire.md) with a closed Bind original and private Bound qualification/adoption. It uses the existing strict Bind wire and CryptoKit producer. The live receiver still calls the original metadata-refusal handler. Neither classified Access/Bind receive helper nor cache/parent adopter is installed; no Settings Send, enabled Host control, command, restricted session or remote authority is activated.
+
+## One original and one retained association
+
+`requestSettingsBind()` accepts no caller Host, generation, parent, ID, time or authority flag. It needs the exact current private scope and genuine sealed Access cache/projection with a summary, an empty single Access-or-Bind pending cell and no previous Bind association. Display labels and caller-created generation data cannot supply those objects.
+
+The actor captures its original `ContinuousClock` floor before the wall floor, allocates one handle/Bind UUID and reserves the association synchronously before preparation. The request-input gate checks that same actual projection/cache/scope/pending object and fixed clocks. It spends the original request-capture flag once. Only the Identity projection reads its private validated generation and constructs the existing immutable Bind request from those captured fields. No generation or private-body getter is added; returned request fields are data, not admission authority.
+
+There is one lean Bind association for the Service lifetime. It retains the original handle, captured request-input fields, actual typed request when construction succeeds, first clocks/fixed deadlines, weak original scope and optional genuine sealed parent. It holds no received frame, proof, Committed/token, cache, Service or socket back-reference. The pending owner separately retains the actual strong scope/cache while preparation/receiving work needs them. These are two references to one original lifecycle, not another request queue or retry slot.
+
+The association is reserved before the request factory; even a later request-construction failure leaves that finite fence retired and cannot silently create another UUID. Consumption, errors, timeout, cancel, disconnect, expiry and reconnect do not remove or reset it. This intentionally refuses another Bind until a separately reviewed genuine known-parent/recovery policy exists. Retained metadata is not usable authority, a Host parent close, NoEffects or proof that any Host creator ended. The existing Access request remains independently possible once the single pending cell actually settles.
+
+## Fixed distinct clock bounds
+
+Let `Wa/Ma` be the selected cache's original wall/monotonic floors and `E/De` its already-clipped observation expiry/deadline. Bind captures `Wb/Mb` once, before any await. With the actual cached grant expiry `G`:
+
+- Original request expiry `Qb = min(Wb+30000,E)` and reply-admission deadline `Db = min(Mb+(Qb-Wb),De)`.
+- Requested parent expiry `P = min(Wb+300000,G)` and parent upper deadline `Dp = min(Mb+(P-Wb),Ma+(P-Wa))`.
+- Actual Bound body expiry `B` must be current and no later than `P` or `G`. Adopted parent deadline is exactly `Dp-(P-B)`.
+
+Checked arithmetic, signed-range typed timestamps and positive bounded intervals precede admission. The parent interval measured from the older Access floor is at most330000 milliseconds. No later response/clock observation supplies a now-plus-remaining deadline. The earlier Access floor can conservatively expire a parent early; it is not proof of a shared Host/client clock or server monotonic lifetime. The short request/reply-admission fence and longer parent lifetime remain different facts. A response header may outlive the original request interval but must expire no later than its genuine parent body; it is not forced to equal the parent expiry.
+
+## Preparation, verification and one-use adoption
+
+The existing pump can prepare the waiting typed Bind inside its original owned call. It marks Preparing before waits and checks the same current scope/cache/original, actual Store full Host pin/disabled state and real local identity around every await, including the actual `identity.sealSettings` call. The returned envelope must retain original local/Host identities, exact request expiry, creation at or after the first floor and positive duration no longer than30000 milliseconds. Prepared means ciphertext held in RAM, not sent or accepted.
+
+The one existing receive owner now holds a closed Access-or-Bind attempt. The private Bind classifier registers the actual received frame, ticket and original Prepared object/envelope before crypto/Store work. It calls the actual `receiveClassified` once. Ordinary/refused traffic already has its real durable disposition; private proof uses its real `commitMetadata` once. Unsupported family/correlation or duplicate cannot qualify Bound.
+
+After each wait the helper repeats exact issuer, registered owner/attempt/ticket, socket/scope/epoch, cancellation/stop/disable, original phase/clocks and actual full Host/local Store checks. Genuine class/frame identity, Verified/Committed references, actual Fresh metadata and full verified Host/local identity are mandatory. Reply `in_reply_to` must equal the original encrypted message ID; its separate Bind UUID must equal the original inner ID. Actual metadata generation must match the original typed request generation. A matching row, ID, copied generation, caller Boolean or enum case cannot mint qualification.
+
+The qualification constructor is file-private to Service. Its exact object identity is recorded once in the attempt; aliases, changed owner/Committed/original, retirement, expiry or prior consumption fail. The Identity body projector checks that exact gate before accessing its private Bound value. It reuses the strict decoder's closed fields, canonical IDs, body/correlation ID and message/parent generation equality, then checks actual Host/request correlations, original generation, current header, positive response duration<=60000, creation floor, actual parent bounds and header expiry<=parent expiry. Existing actual private32768/encrypted49152/original-frame364544-byte limits remain in the classifier/crypto path unchanged.
+
+The private adopter performs the final real Store/current-owner recheck, then validates, consumes, projects, clips/checks the fixed parent deadline and assigns without another await. Only its file-private Identity factory creates the lean sealed parent projection. The parent and generation have no getter; only actual expiry is visible internally. A failure after consumption spends the original and adopts no replacement. Bound is not Saved, current grant permission, consent to contact a provider or proof a later Host command will succeed.
+
+## Return, retirement and failures
+
+Preparing/Receiving retirement only invalidates usability. It retains the actual original and returned envelope/frame/class/Verified/Committed/qualification until the owning nested helper really returns or unwinds. The unchanged outer receive child invokes `finishSettingsReceive` only after that helper's existing handler/Store/ACK/drain await has returned; the closed attempt settlement then releases its private references and restores the same still-current unconsumed Prepared original or clears a consumed/retired pending cell. It never restamps an original. The lean association remains in either case.
+
+Live private activation still requires a separately reviewed classifier/adopter/send/ACK consumer. That consumer must retain this same ownership through its actual ACK/drain return; ordinary/refused traffic must not be decrypted/admitted twice. Verification alone has no committed marker. Real Store/commit/quarantine/capacity/conflict failure prevents adoption and the ordinary ACK tail, and a duplicate marker cannot re-adopt a parent. Existing structured receive/settlement errors retain both actual causes with fixed redacted diagnostics. No local error is interpreted as remote denial, Closed, NoEffects or retry permission.
+
+Scope retirement marks the matching association retired before the existing waits. It does not wait, stop the independent Host, close a server creator or establish that SQLite aborted. The actual Rust Bind creator, same-Authority parent, current grants/pins/epochs, counted publication/send and retirement remain defined by the [Bind receive](settings-bind-receive.md) and [reply](settings-bind-replies.md) contracts. The client cannot reconstruct those capabilities from labels, metadata or an ACK.
+
+## Validation and remaining gates
+
+This held source adds no Task, worker, socket, queue, waiter, schema, UI, project object, custom parser/crypto, native Owner DTO forwarding, comments, tests or fixtures. Ordinary receive/ACK/outbox behavior and Access factories/classifier/projector remain preserved except the closed shared pending/attempt bookkeeping and the pump's additional typed preparation call. The active receiver and both adoption helpers remain uninstalled.
+
+Direct official Swift grammar, exact source/other-tree preservation, links and diff checks are source validation only. Fresh independent source review and supported Apple SDK build/analyze remain required; no local typecheck, SQL, parser/crypto execution, relay, provider, Host or Apple UI observation is established. Actual sender installation, lost-response/expired-inner/known-parent/reconnect policy, commands/session requester DTOs and real transported privacy/replay/revocation/cancellation/cleanup acceptance remain explicit gates. ARC/COW is not secure erasure or exact memory-release proof. #116/#117 stay open; automated coverage remains deferred in [#32](https://github.com/izyuumi/everything/issues/32).
