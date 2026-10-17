@@ -87,3 +87,11 @@ The existing strong Access pin policy is factored into one Core-private `paired/
 The helper's private typed error preserves its actual boxed service or serde_json cause. Access maps those variants directly back to its existing Authority or Metadata variants without flattening, formatting or denial fallback. No current query/grant/original first/replay clock, reservation, packet or projection/seal/consumed behavior changes. Original and Bind inherit this same strong policy through their common current reads; their final Authority observations remain after all SQL.
 
 This factoring introduces no public/shared export, trait, authority factory, Source getter, lock/transaction acquisition, schema, native/ordinary pin change, queued/send permission or activation. Direct formatting and source inverses do not verify compiler, SQL/serializer/crypto, transport/client or security behavior; #116/#117 and deferred #32 remain open.
+
+## Retired unused status-only qualification
+
+The earlier `QualifiedSettingsAccess` type and `qualify_access_status_on`/`recheck_access_status_on` methods are removed after an audit of every tracked Rust reference found only their own definitions and construction. The earlier status-fact sections describe that historical slice; those names are no longer callable APIs. Their broad aliases had already been removed.
+
+Receipt admission still uses the actual `SettingsAccessReceiptPlan` through `check_access_receipt_on` and `recheck_access_receipt_on`. Output qualification instead requires the genuine joined `OwnedCommittedSettingsAccess` and `QualifiedSettingsAccessReply`, followed by the existing counted projection, sealer and Main publication consumer. The cleanup preserves every remaining Access declaration and method byte-for-byte, including receipt plans, shared pin/current observations, fixed clocks, structured causes, reservation checks, projection and consumed/comparison checks.
+
+This removes unused internal API without adding authority, changing the live pipeline or activating accepted private Delivery. Formatting and static source preservation establish no compilation, SQL, runtime, transport or security result. Queued-current/send/retirement/drain and client acceptance remain separate work; #116/#117 and deferred automated verification #32 remain open.
