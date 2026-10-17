@@ -580,7 +580,11 @@ fn prepare_request(
             };
             match block {
                 ContentBlock::Text(value) => text.push(InputText {
-                    kind: "input_text".to_owned(),
+                    kind: match message.role {
+                        MessageRole::Assistant => "output_text",
+                        _ => "input_text",
+                    }
+                    .to_owned(),
                     text: value.clone(),
                 }),
                 ContentBlock::ToolCall(call) => {
