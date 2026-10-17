@@ -766,3 +766,190 @@ pub(super) fn access_reply_text<'row>(
     }
     std::str::from_utf8(bytes).map_err(|_| SettingsAccessAdmissionError::Bookkeeping)
 }
+
+#[cfg(unix)]
+#[derive(Error)]
+pub(crate) enum SettingsReadAdmissionError {
+    #[error("Settings read receipt authority check failed")]
+    Authority(#[from] crate::host::settings::service::SettingsReadQualificationError),
+    #[error("Settings read replay receipt capacity is exhausted")]
+    ReplayCapacity(#[source] StorageError),
+    #[error("Settings read reply capacity is exhausted")]
+    ReplyCapacity(#[source] StorageError),
+    #[error("Settings read receipt storage failed")]
+    Storage(#[from] StorageError),
+    #[error("Settings read receipt bookkeeping failed")]
+    Bookkeeping,
+    #[error("Settings read receipt commit is uncertain")]
+    Commit(#[source] StorageError),
+    #[error("Settings read receipt rollback failed")]
+    Rollback {
+        #[source]
+        cause: Box<SettingsReadAdmissionError>,
+        rollback: StorageError,
+    },
+}
+
+#[cfg(unix)]
+impl std::fmt::Debug for SettingsReadAdmissionError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("SettingsReadAdmissionError([retained cause])")
+    }
+}
+
+#[cfg(unix)]
+impl SettingsReadAdmissionError {
+    pub(crate) fn is_capacity(&self) -> bool {
+        use crate::host::settings::service::SettingsReadQualificationError;
+
+        match self {
+            Self::ReplayCapacity(_) | Self::ReplyCapacity(_) => true,
+            Self::Authority(SettingsReadQualificationError::Authority(error)) => {
+                matches!(error.as_ref(), SettingsServiceError::Capacity)
+            }
+            _ => false,
+        }
+    }
+
+    pub(crate) fn is_policy_rejection(&self) -> bool {
+        use crate::devices::SettingsReadSourceError;
+        use crate::host::settings::service::SettingsReadQualificationError;
+
+        match self {
+            Self::Authority(SettingsReadQualificationError::Authority(error)) => matches!(
+                error.as_ref(),
+                SettingsServiceError::Expired | SettingsServiceError::OutsideScope
+            ),
+            Self::Authority(SettingsReadQualificationError::Source(
+                SettingsReadSourceError::Source(
+                    BindRejection::Expired | BindRejection::OutsideScope,
+                ),
+            )) => true,
+            _ => false,
+        }
+    }
+}
+
+#[cfg(unix)]
+pub(crate) enum SettingsReadReceiptCommit {
+    Duplicate,
+    Known,
+    Fresh { reply: StoredSettingsReadReply },
+}
+
+#[cfg(unix)]
+pub(crate) struct StoredSettingsReadReply {
+    pub(crate) reservation_id: Uuid,
+    pub(crate) local_device_id: DeviceId,
+    pub(crate) peer_device_id: DeviceId,
+    pub(crate) provenance: String,
+    pub(crate) family: crate::host::settings::service::SettingsReadReplyFamily,
+    pub(crate) created_at: UnixMillis,
+    pub(crate) expires_at: UnixMillis,
+}
+
+#[cfg(unix)]
+pub(super) fn reserve_read_reply_in(
+    connection: &Connection,
+    spec: &crate::host::settings::service::SettingsReadReservationSpec<'_>,
+) -> Result<StoredSettingsReadReply, SettingsReadAdmissionError> {
+    let reserved_bytes = i64::try_from(spec.family().reserved_bytes())
+        .map_err(|_| SettingsReadAdmissionError::Bookkeeping)?;
+    let created_at = i64::try_from(spec.created_at().get())
+        .map_err(|_| SettingsReadAdmissionError::Bookkeeping)?;
+    let expires_at = i64::try_from(spec.expires_at().get())
+        .map_err(|_| SettingsReadAdmissionError::Bookkeeping)?;
+    let parent = spec.parent();
+    let provenance = serde_json::to_string(&HostBindProvenance {
+        side: "host",
+        version: 1,
+        local_id: spec.local_device_id(),
+        peer_keys: spec.verified_peer_keys(),
+        host_epoch: parent.generation.host_epoch,
+        connection_epoch: parent.generation.connection_epoch,
+        grant: SettingsGrantReference {
+            grant_id: parent.generation.grant_id,
+            revision: parent.generation.grant_revision,
+        },
+        parent_id: Some(parent.parent_id),
+    })
+    .map_err(StorageError::from)?;
+    if provenance.len() > 2048 || created_at >= expires_at {
+        return Err(SettingsReadAdmissionError::Bookkeeping);
+    }
+    match check_outbox_capacity(
+        connection,
+        &spec.peer_device_id().to_string(),
+        spec.family().reserved_bytes(),
+    ) {
+        Err(error @ StorageError::TransportCapacity(_)) => {
+            return Err(SettingsReadAdmissionError::ReplyCapacity(error));
+        }
+        result => result?,
+    }
+    let reservation_id = Uuid::new_v4();
+    connection.execute(
+        "INSERT INTO settings_transport_reply_reservations(reservation_id,local_device_id,peer_device_id,provenance,family,reserved_bytes,created_at,expires_at) VALUES(?1,?2,?3,?4,?5,?6,?7,?8)",
+        rusqlite::params![reservation_id.to_string(),spec.local_device_id().to_string(),spec.peer_device_id().to_string(),provenance,spec.family().name(),reserved_bytes,created_at,expires_at],
+    ).map_err(StorageError::from)?;
+    let reply = StoredSettingsReadReply {
+        reservation_id,
+        local_device_id: spec.local_device_id(),
+        peer_device_id: spec.peer_device_id(),
+        provenance,
+        family: spec.family(),
+        created_at: spec.created_at(),
+        expires_at: spec.expires_at(),
+    };
+    check_read_reply_on(connection, &reply)?;
+    Ok(reply)
+}
+
+#[cfg(unix)]
+pub(super) fn check_read_reply_on(
+    connection: &Connection,
+    reply: &StoredSettingsReadReply,
+) -> Result<(), SettingsReadAdmissionError> {
+    let reserved_bytes = i64::try_from(reply.family.reserved_bytes())
+        .map_err(|_| SettingsReadAdmissionError::Bookkeeping)?;
+    let created_at = i64::try_from(reply.created_at.get())
+        .map_err(|_| SettingsReadAdmissionError::Bookkeeping)?;
+    let expires_at = i64::try_from(reply.expires_at.get())
+        .map_err(|_| SettingsReadAdmissionError::Bookkeeping)?;
+    let mut statement = connection.prepare("SELECT reservation_id,local_device_id,peer_device_id,provenance,family,reserved_bytes,created_at,expires_at FROM settings_transport_reply_reservations WHERE reservation_id=?1").map_err(StorageError::from)?;
+    let mut rows = statement
+        .query([reply.reservation_id.to_string()])
+        .map_err(StorageError::from)?;
+    let row = rows
+        .next()
+        .map_err(StorageError::from)?
+        .ok_or(SettingsReadAdmissionError::Bookkeeping)?;
+    if read_reply_text(row, 0, 36)? != reply.reservation_id.to_string()
+        || read_reply_text(row, 1, 36)? != reply.local_device_id.to_string()
+        || read_reply_text(row, 2, 36)? != reply.peer_device_id.to_string()
+        || read_reply_text(row, 3, 2048)? != reply.provenance
+        || read_reply_text(row, 4, 10)? != reply.family.name()
+        || row.get::<_, i64>(5).map_err(StorageError::from)? != reserved_bytes
+        || row.get::<_, i64>(6).map_err(StorageError::from)? != created_at
+        || row.get::<_, i64>(7).map_err(StorageError::from)? != expires_at
+    {
+        return Err(SettingsReadAdmissionError::Bookkeeping);
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+pub(super) fn read_reply_text<'row>(
+    row: &'row Row<'_>,
+    column: usize,
+    maximum: usize,
+) -> Result<&'row str, SettingsReadAdmissionError> {
+    let rusqlite::types::ValueRef::Text(bytes) = row.get_ref(column).map_err(StorageError::from)?
+    else {
+        return Err(SettingsReadAdmissionError::Bookkeeping);
+    };
+    if bytes.len() > maximum {
+        return Err(SettingsReadAdmissionError::Bookkeeping);
+    }
+    std::str::from_utf8(bytes).map_err(|_| SettingsReadAdmissionError::Bookkeeping)
+}

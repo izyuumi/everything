@@ -42,8 +42,10 @@ pub(crate) use command::{
     OwnedCommittedSettingsCommand, OwnedHistoricalSettingsCommand, OwnedVerifiedSettingsCommand,
     SettingsCommandIntent, SettingsParentReference, SettingsUpdateIntent,
 };
+use read_source::ReadWorkState;
 pub(crate) use read_source::{
-    AuthenticatedSettingsReadSource, OwnedVerifiedSettingsRead, SettingsReadSourceError,
+    AuthenticatedSettingsReadSource, OwnedCommittedSettingsRead, OwnedVerifiedSettingsRead,
+    SettingsReadSourceError,
 };
 pub(crate) use wire::{BindingGeneration, BindingIntent};
 pub(crate) use work::{PendingSettingsReceipt, SettingsReceiveDrain, SettingsReceiveWitness};
@@ -72,6 +74,12 @@ pub(crate) enum SettingsReceiveError {
     AccessAdmission(#[source] Arc<SettingsAccessAdmissionError>),
     #[error("private Settings access source validation failed")]
     AccessSource(#[source] AccessStatusRejection),
+    #[error("private Settings read receipt admission failed")]
+    ReadAdmission(#[source] Arc<crate::storage::SettingsReadAdmissionError>),
+    #[error("private Settings read source validation failed")]
+    ReadSource(#[source] Arc<SettingsReadSourceError>),
+    #[error("private Settings read envelope encoding failed")]
+    ReadEnvelopeEncoding(#[source] Arc<serde_json::Error>),
 }
 
 impl fmt::Debug for SettingsReceiveError {
@@ -88,6 +96,9 @@ impl SettingsReceiveError {
             || matches!(self, Self::CommandAdmission(error) if !error.is_capacity())
             || matches!(self, Self::AccessAdmission(error) if !error.is_capacity())
             || matches!(self, Self::AccessSource(AccessStatusRejection::Unavailable))
+            || matches!(self, Self::ReadAdmission(error) if !error.is_capacity())
+            || matches!(self, Self::ReadEnvelopeEncoding(_))
+            || matches!(self, Self::ReadSource(error) if !matches!(error.as_ref(), SettingsReadSourceError::Source(BindRejection::Expired | BindRejection::OutsideScope)))
     }
 }
 
@@ -541,6 +552,7 @@ pub(crate) enum SettingsReceiveEvent {
     CommittedCommand(OwnedCommittedSettingsCommand),
     HistoricalCommand(OwnedHistoricalSettingsCommand),
     CommittedAccess(OwnedCommittedSettingsAccess),
+    CommittedRead(OwnedCommittedSettingsRead),
     ReceiptSettled,
 }
 
@@ -555,6 +567,7 @@ enum ReplayOutcome {
     Committed(Box<OwnedCommittedSettingsBind>),
     Command,
     Access,
+    Read,
     Duplicate,
     Failure(SettingsReceiveError),
 }
@@ -647,6 +660,9 @@ impl OwnedReplay<'_> {
         if let access::DecodedAccessStatus::AccessStatus(intent) = access::decode(plaintext) {
             return self.access(record, plaintext.len(), now_ms, intent);
         }
+        if let Ok(request) = read::decode(plaintext) {
+            return self.read(record, plaintext.len(), now_ms, request);
+        }
         let reason =
             match wire::decode(plaintext) {
                 wire::DecodedBind::Bind(intent) => {
@@ -723,6 +739,7 @@ impl OwnedReplay<'_> {
         if self.command.command.is_some()
             || self.command.outcome.is_some()
             || self.command.access.is_some()
+            || self.command.read.is_some()
             || self.command.authority.is_none()
         {
             return Err(self.fail(SettingsReceiveError::Bookkeeping));
@@ -804,6 +821,116 @@ impl OwnedReplay<'_> {
                     Err(self.fail(failure))
                 }
             }
+        }
+    }
+
+    fn read(
+        &mut self,
+        record: ReplayRecord,
+        bytes: usize,
+        now_ms: u64,
+        request: read::SettingsReadRequest,
+    ) -> Result<bool, CryptoError> {
+        use crate::storage::SettingsReadReceiptCommit;
+
+        if self.command.command.is_some()
+            || self.command.outcome.is_some()
+            || self.command.access.is_some()
+            || self.command.read.is_some()
+            || self.command.authority.is_none()
+        {
+            return Err(self.fail(SettingsReceiveError::Bookkeeping));
+        }
+        let encoded = match serde_json::to_vec(&self.input.envelope) {
+            Ok(encoded) => encoded,
+            Err(error) => {
+                let failure = SettingsReceiveError::ReadEnvelopeEncoding(Arc::new(error));
+                self.command.read = Some(ReadWorkState::Rejected(failure.clone()));
+                return Err(self.fail(failure));
+            }
+        };
+        let oversized = encoded.len() > 49_152;
+        drop(encoded);
+        if oversized {
+            self.command.read = Some(ReadWorkState::Rejected(SettingsReceiveError::Capacity));
+            return Err(self.fail(SettingsReceiveError::Capacity));
+        }
+        let envelope = self.verified_envelope(&record, now_ms)?;
+        let Some(authority) = self.command.authority.take() else {
+            return Err(self.fail(SettingsReceiveError::Bookkeeping));
+        };
+        let witness = match self.input.ledger.private(self.peer.keys.device_id, bytes) {
+            Ok(witness) => witness,
+            Err(error) => {
+                self.command.authority = Some(authority);
+                self.command.read = Some(ReadWorkState::Rejected(error.clone()));
+                return Err(self.fail(error));
+            }
+        };
+        let verified =
+            match OwnedVerifiedSettingsRead::from_verified(envelope, request, authority, witness) {
+                Ok(verified) => verified,
+                Err(error) => {
+                    let policy = matches!(
+                        &error,
+                        SettingsReadSourceError::Source(
+                            BindRejection::Expired | BindRejection::OutsideScope
+                        )
+                    );
+                    let failure = SettingsReceiveError::ReadSource(Arc::new(error));
+                    self.command.read = Some(ReadWorkState::Rejected(failure.clone()));
+                    if policy {
+                        self.outcome = ReplayOutcome::Legacy;
+                        return self.legacy.record_rejected(
+                            record,
+                            now_ms,
+                            TransportInboxRejection::SettingsUnavailable,
+                        );
+                    }
+                    return Err(self.fail(failure));
+                }
+            };
+        self.command.read = Some(ReadWorkState::Verified {
+            result: None,
+            verified: Box::new(verified),
+        });
+        let Some(ReadWorkState::Verified { result, verified }) = self.command.read.as_mut() else {
+            return Err(self.fail(SettingsReceiveError::Bookkeeping));
+        };
+        *result = Some(
+            self.input
+                .context
+                .agent
+                .store()
+                .admit_settings_read(verified)
+                .map_err(Arc::new),
+        );
+        match result.as_ref() {
+            Some(Ok(SettingsReadReceiptCommit::Duplicate)) => {
+                self.outcome = ReplayOutcome::Duplicate;
+                Ok(false)
+            }
+            Some(Ok(
+                SettingsReadReceiptCommit::Known | SettingsReadReceiptCommit::Fresh { .. },
+            )) => {
+                self.outcome = ReplayOutcome::Read;
+                Ok(true)
+            }
+            Some(Err(error)) => {
+                let policy = error.is_policy_rejection();
+                let failure = SettingsReceiveError::ReadAdmission(Arc::clone(error));
+                if policy {
+                    self.outcome = ReplayOutcome::Legacy;
+                    self.legacy.record_rejected(
+                        record,
+                        now_ms,
+                        TransportInboxRejection::SettingsUnavailable,
+                    )
+                } else {
+                    Err(self.fail(failure))
+                }
+            }
+            None => Err(self.fail(SettingsReceiveError::Bookkeeping)),
         }
     }
 
@@ -944,6 +1071,13 @@ fn execute(
             })
         }
         (Ok(raw), ReplayOutcome::Access) => {
+            drop(raw);
+            Ok(WorkCompletion {
+                receipt: SettingsTransportReceipt::PrivateCommitted { message_id: id },
+                bind: None,
+            })
+        }
+        (Ok(raw), ReplayOutcome::Read) => {
             drop(raw);
             Ok(WorkCompletion {
                 receipt: SettingsTransportReceipt::PrivateCommitted { message_id: id },

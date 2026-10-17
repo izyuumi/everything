@@ -367,3 +367,82 @@ impl fmt::Debug for QualifiedSettingsReadQuery<'_, '_, '_> {
         formatter.write_str("QualifiedSettingsReadQuery([current query only])")
     }
 }
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SettingsReadReplyFamily {
+    Default,
+    Inspection,
+}
+
+impl SettingsReadReplyFamily {
+    pub(crate) fn name(self) -> &'static str {
+        match self {
+            Self::Default => "default",
+            Self::Inspection => "inspection",
+        }
+    }
+
+    pub(crate) fn reserved_bytes(self) -> usize {
+        match self {
+            Self::Default => 49_152,
+            Self::Inspection => 90_112,
+        }
+    }
+}
+
+pub(crate) struct SettingsReadReservationSpec<'query> {
+    source: &'query AuthenticatedSettingsReadSource,
+    family: SettingsReadReplyFamily,
+    created_at: UnixMillis,
+    expires_at: UnixMillis,
+}
+
+impl QualifiedSettingsReadQuery<'_, '_, '_> {
+    pub(crate) fn reply_reservation_spec(&self) -> Option<SettingsReadReservationSpec<'_>> {
+        if self.disposition != SettingsReadQueryDisposition::First {
+            return None;
+        }
+        Some(SettingsReadReservationSpec {
+            source: self.source,
+            family: match self.source.request() {
+                SettingsReadRequest::Snapshot(_) => SettingsReadReplyFamily::Default,
+                SettingsReadRequest::InspectOriginal(_) => SettingsReadReplyFamily::Inspection,
+            },
+            created_at: self.observed_wall,
+            expires_at: self.expires_at,
+        })
+    }
+}
+
+impl SettingsReadReservationSpec<'_> {
+    pub(crate) fn local_device_id(&self) -> crate::protocol::DeviceId {
+        match self.source.request() {
+            SettingsReadRequest::Snapshot(intent) => intent.host_id,
+            SettingsReadRequest::InspectOriginal(intent) => intent.host_id,
+        }
+    }
+
+    pub(crate) fn peer_device_id(&self) -> crate::protocol::DeviceId {
+        self.source.verified_peer_keys().device_id
+    }
+
+    pub(crate) fn verified_peer_keys(&self) -> &crate::crypto::DevicePublicKeys {
+        self.source.verified_peer_keys()
+    }
+
+    pub(crate) fn parent(&self) -> &SettingsParentReference {
+        read_request_parts(self.source.request()).0
+    }
+
+    pub(crate) fn family(&self) -> SettingsReadReplyFamily {
+        self.family
+    }
+
+    pub(crate) fn created_at(&self) -> UnixMillis {
+        self.created_at
+    }
+
+    pub(crate) fn expires_at(&self) -> UnixMillis {
+        self.expires_at
+    }
+}
