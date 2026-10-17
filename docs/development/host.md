@@ -108,7 +108,13 @@ Retrieve real local provenance without a model answer request:
 {"kind":"query","query":{"kind":"retrieve_memory","question":"orchard irrigation"}}
 ```
 
-Use the existing typed maintenance requests with owner `memory_enqueue`, `memory_cancel`, `memory_retry` and `apply_memory_plan`; inspect each stable identity with `memory_job`. The [composition contract](../contracts/host-composition.md) lists these routes, and [consolidation](../contracts/consolidation.md) defines their source/citation and immutable preparation rules. Optional selection requires its exact one-shot `prepare_selection` disclosure and explicit `approve_selection` before admitting the same original command; configuration alone sends no classifier request.
+Retrieval ranks chunks containing any query term, so ordinary sentences work. Use the existing typed maintenance requests with owner `memory_enqueue`, `memory_cancel`, `memory_retry` and `apply_memory_plan`; inspect each stable identity with `memory_job`. Without a maintenance model an ingest job waits in `waiting_for_model` until an explicit host plan or cancellation:
+
+```json
+{"kind":"operation","request_id":"UNIQUE_REQUEST_UUID","operation":{"kind":"apply_memory_plan","job_id":"ingest-1","plan":{"version":1,"page_path":"orchard/irrigation.md","expected_hash":null,"title":"Orchard irrigation","entries":[{"heading":"Schedule","summary":"Irrigation runs Tuesday at dawn.","source_ids":["s1"],"supersedes":[]}]}}}
+```
+
+A feature-enabled build adds `{"kind":"query","query":{"kind":"embedding_index"}}` for actual vector generation status; `rebuild_embeddings` is refused with `invalid_request` unless `memory.embeddings` in the `composition` query reports `enabled`. The [composition contract](../contracts/host-composition.md) lists these routes, and [consolidation](../contracts/consolidation.md) defines their source/citation and immutable preparation rules. Optional selection requires its exact one-shot `prepare_selection` disclosure and explicit `approve_selection` before admitting the same original command; configuration alone sends no classifier request.
 
 Opt-in embeddings additionally require a release build of both binaries:
 

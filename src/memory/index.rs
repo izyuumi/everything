@@ -123,6 +123,19 @@ impl WikiIndex {
     }
 
     pub fn search(&self, query: &str, limit: usize) -> Result<Vec<SearchHit>, WikiError> {
+        self.search_terms(query, limit, " AND ")
+    }
+
+    pub fn search_any(&self, query: &str, limit: usize) -> Result<Vec<SearchHit>, WikiError> {
+        self.search_terms(query, limit, " OR ")
+    }
+
+    fn search_terms(
+        &self,
+        query: &str,
+        limit: usize,
+        operator: &str,
+    ) -> Result<Vec<SearchHit>, WikiError> {
         if query.len() > 4_096 {
             return Err(WikiError::Limit {
                 resource: "search query bytes",
@@ -152,7 +165,7 @@ impl WikiIndex {
             .iter()
             .map(|term| format!("\"{}\"", term.replace('"', "\"\"")))
             .collect::<Vec<_>>()
-            .join(" AND ");
+            .join(operator);
         let mut statement = self.connection.prepare(
             "SELECT wiki_fts.chunk_id, wiki_fts.title, wiki_fts.heading,
                 snippet(wiki_fts, 4, '[', ']', ' … ', 48),
