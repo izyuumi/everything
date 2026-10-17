@@ -1,6 +1,8 @@
 import Foundation
 import os
 
+let settingsClockSkewMilliseconds: UInt64 = 5_000
+
 struct PairingSummary: Sendable {
     let deviceID: UUID
     let fingerprint: String
@@ -2979,7 +2981,8 @@ actor ReplicaService {
             throw WireError.unavailable
         }
         let header = committed.metadata.header
-        guard header.created >= pending.wallFloor, header.expires <= pending.request.time.expiresAt else {
+        guard header.created + settingsClockSkewMilliseconds >= pending.wallFloor,
+              header.expires <= pending.request.time.expiresAt else {
             throw WireError.invalid
         }
     }
