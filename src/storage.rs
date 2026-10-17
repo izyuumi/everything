@@ -677,10 +677,17 @@ impl Store {
             return Err(StorageError::CheckpointJournalFull);
         }
         let updated_at = conversation_updated_at.max(current.map_or(0, |(_, timestamp)| timestamp));
-        transaction.execute(
-            "INSERT INTO conversation_states(conversation_id,revision,payload,updated_at) VALUES (?1,?2,?3,?4) ON CONFLICT(conversation_id) DO UPDATE SET revision=excluded.revision,payload=excluded.payload,updated_at=excluded.updated_at",
-            params![conversation_id,revision,payload,updated_at],
-        )?;
+        if actual_revision == 0 {
+            transaction.execute(
+                "INSERT INTO conversation_states(conversation_id,revision,payload,updated_at) VALUES (?1,?2,?3,?4)",
+                params![conversation_id,revision,payload,updated_at],
+            )?;
+        } else {
+            transaction.execute(
+                "UPDATE conversation_states SET revision=?2,payload=?3,updated_at=?4 WHERE conversation_id=?1",
+                params![conversation_id,revision,payload,updated_at],
+            )?;
+        }
         transaction.execute(
             "INSERT INTO conversation_checkpoint_commands(command_id,conversation_id,expected_sequence,expected_revision,request_digest,revision,updated_at) VALUES (?1,?2,?3,?4,?5,?6,?7)",
             params![command_id,conversation_id,expected_sequence,update.expected_revision,digest,revision,updated_at],
@@ -849,10 +856,17 @@ impl Store {
             params![request.conversation_id, last, updated_at],
         )?;
         if let (Some(revision), Some(payload)) = (next_revision, encoded_state) {
-            transaction.execute(
-                "INSERT INTO conversation_states(conversation_id, revision, payload, updated_at) VALUES (?1, ?2, ?3, (SELECT updated_at FROM conversations WHERE id = ?1)) ON CONFLICT(conversation_id) DO UPDATE SET revision = excluded.revision, payload = excluded.payload, updated_at = max(conversation_states.updated_at, excluded.updated_at)",
-                params![request.conversation_id, revision, payload],
-            )?;
+            if revision == 1 {
+                transaction.execute(
+                    "INSERT INTO conversation_states(conversation_id, revision, payload, updated_at) VALUES (?1, ?2, ?3, (SELECT updated_at FROM conversations WHERE id = ?1))",
+                    params![request.conversation_id, revision, payload],
+                )?;
+            } else {
+                transaction.execute(
+                    "UPDATE conversation_states SET revision=?2,payload=?3,updated_at=max(updated_at,(SELECT updated_at FROM conversations WHERE id=?1)) WHERE conversation_id=?1",
+                    params![request.conversation_id, revision, payload],
+                )?;
+            }
         }
         if let (Some(task), Some(prepared)) = (task, prepared_task) {
             external::apply(&transaction, task, &prepared)?;
