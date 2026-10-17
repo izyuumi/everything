@@ -694,6 +694,7 @@ actor ReplicaService {
     private var settingsSnapshotOutcome: ReplicaSettingsAccessRequestStatus?
     private var settingsInspectionOutcome: ReplicaSettingsAccessRequestStatus?
     private var lastSettingsInput: SettingsInputCapture?
+    private var abandonedSettingsMessages: Set<UUID> = []
 
     private enum SettingsInputCapture: CustomStringConvertible, CustomDebugStringConvertible {
         case access(ReplicaSettingsAccessInput)
@@ -1679,6 +1680,7 @@ actor ReplicaService {
         guard capture.service === self, let scope = settingsScope, isCurrentSettingsScope(scope),
               scope.token === capture.scope, let cache = settingsAccessDisplayCache, cache.scope === scope,
               cache.requestHandle === capture.accessHandle else { throw WireError.unavailable }
+        releaseSettingsAssociations()
         if let association = settingsBindingAssociation {
             guard association.capture === capture else { throw WireError.queueFull }
             return association.handle
@@ -1770,6 +1772,7 @@ actor ReplicaService {
         if let association = settingsBindingAssociation, association.handle === handle {
             association.retired = true
         }
+        releaseSettingsAssociations()
     }
 
     func captureSettingsBindRequestInput(_ projection: ReplicaSettingsAccessProjection) throws -> ReplicaSettingsBindRequestInput {
@@ -1968,6 +1971,8 @@ actor ReplicaService {
         outbound.removeAll()
         outboundSocket = nil
         lastSettingsInput = nil
+        abandonedSettingsMessages.removeAll()
+        releaseSettingsAssociations()
         acknowledgements.removeAll()
         reconnectForCapacity = false
         status = "Disconnected"
@@ -2094,6 +2099,35 @@ actor ReplicaService {
         outbound.removeAll()
         outboundSocket = nil
         lastSettingsInput = nil
+        abandonedSettingsMessages.removeAll()
+        releaseSettingsAssociations()
+    }
+
+    private func releaseSettingsAssociations() {
+        if let association = settingsBindingAssociation,
+           association.retired || !(association.scope.map(isCurrentSettingsScope) ?? false)
+               || association.parentDeadline.map({ ContinuousClock.now >= $0 }) == true,
+           pendingSettingsBind?.association !== association,
+           !outbound.values.contains(where: { entry in
+               if case .bind(let sent) = entry { sent.original.association === association } else { false }
+           }) {
+            settingsBindingAssociation = nil
+        }
+        if let record = settingsUpdateOriginal,
+           record.status != nil || !(record.scope.map(isCurrentSettingsScope) ?? false),
+           pendingSettingsUpdate?.record !== record,
+           !outbound.values.contains(where: { entry in
+               if case .update(let sent) = entry { sent.original.record === record } else { false }
+           }) {
+            settingsUpdateOriginal = nil
+        }
+    }
+
+    private func releaseSettingsSend(_ key: OutboundID, messageID: UUID?, started: Bool, accepted: Bool) throws {
+        outbound.removeValue(forKey: key)
+        guard started, !accepted, let messageID else { return }
+        guard abandonedSettingsMessages.count < 16 else { throw WireError.timeout }
+        abandonedSettingsMessages.insert(messageID)
     }
 
     private var hasSettingsAccessSend: Bool {
@@ -2253,39 +2287,49 @@ actor ReplicaService {
             case .ordinary(let ordinary):
                 if let started = ordinary.started, started.duration(to: .now) > .seconds(15) { throw WireError.timeout }
             case .access(let sent):
-                guard try isCurrentSettingsOriginal(sent.original) || sent.original.consumed else {
-                    if settingsAccessOutcome == nil { settingsAccessOutcome = .expired }
-                    throw WireError.timeout
-                }
-                if ContinuousClock.now >= sent.original.deadline {
-                    if settingsAccessOutcome == nil { settingsAccessOutcome = .expired }
-                    throw WireError.timeout
-                }
+                let live = try isCurrentSettingsOriginal(sent.original) || sent.original.consumed
+                guard !sent.sendStarted || sent.sendReturned,
+                      !live || ContinuousClock.now >= sent.original.deadline else { continue }
+                if settingsAccessOutcome == nil { settingsAccessOutcome = .expired }
+                retirePendingSettingsAccess(sent.original)
+                try releaseSettingsSend(.access(sent.original.request.queryID), messageID: sent.envelope?.header.messageID,
+                                        started: sent.sendStarted, accepted: sent.accepted)
             case .bind(let sent):
                 let association = sent.original.association
-                guard !association.retired,
-                      try isCurrentSettingsBindOriginal(sent.original) || sent.original.consumed,
-                      ContinuousClock.now < association.deadline else { throw WireError.timeout }
+                let live = try isCurrentSettingsBindOriginal(sent.original) || sent.original.consumed
+                guard !sent.sendStarted || sent.sendReturned,
+                      association.retired || !live || ContinuousClock.now >= association.deadline else { continue }
+                if !sent.original.consumed { association.retired = true }
+                retirePendingSettingsBind(sent.original)
+                try releaseSettingsSend(.bind(association.input.bindingRequestID), messageID: sent.envelope?.header.messageID,
+                                        started: sent.sendStarted, accepted: sent.accepted)
             case .snapshot(let sent):
-                guard try isCurrentSettingsSnapshotOriginal(sent.original) || sent.original.consumed,
-                      ContinuousClock.now < sent.original.deadline else {
-                    if settingsSnapshotOutcome == nil { settingsSnapshotOutcome = .expired }
-                    throw WireError.timeout
-                }
+                let live = try isCurrentSettingsSnapshotOriginal(sent.original) || sent.original.consumed
+                guard !sent.sendStarted || sent.sendReturned,
+                      !live || ContinuousClock.now >= sent.original.deadline else { continue }
+                if settingsSnapshotOutcome == nil { settingsSnapshotOutcome = .expired }
+                retirePendingSettingsSnapshot(sent.original)
+                try releaseSettingsSend(.snapshot(sent.original.input.queryID), messageID: sent.envelope?.header.messageID,
+                                        started: sent.sendStarted, accepted: sent.accepted)
             case .inspection(let sent):
-                guard try isCurrentSettingsInspectionOriginal(sent.original) || sent.original.consumed,
-                      ContinuousClock.now < sent.original.deadline else {
-                    if settingsInspectionOutcome == nil { settingsInspectionOutcome = .expired }
-                    throw WireError.timeout
-                }
+                let live = try isCurrentSettingsInspectionOriginal(sent.original) || sent.original.consumed
+                guard !sent.sendStarted || sent.sendReturned,
+                      !live || ContinuousClock.now >= sent.original.deadline else { continue }
+                if settingsInspectionOutcome == nil { settingsInspectionOutcome = .expired }
+                retirePendingSettingsInspection(sent.original)
+                try releaseSettingsSend(.inspection(sent.original.input.queryID), messageID: sent.envelope?.header.messageID,
+                                        started: sent.sendStarted, accepted: sent.accepted)
             case .update(let sent):
-                guard try isCurrentSettingsUpdateOriginal(sent.original) || sent.original.consumed,
-                      ContinuousClock.now < sent.original.deadline else {
-                    if sent.original.record.status == nil { sent.original.record.status = .expired }
-                    throw WireError.timeout
-                }
+                let live = try isCurrentSettingsUpdateOriginal(sent.original) || sent.original.consumed
+                guard !sent.sendStarted || sent.sendReturned,
+                      !live || ContinuousClock.now >= sent.original.deadline else { continue }
+                if sent.original.record.status == nil { sent.original.record.status = .expired }
+                retirePendingSettingsUpdate(sent.original)
+                try releaseSettingsSend(.update(sent.original.input.requestID), messageID: sent.envelope?.header.messageID,
+                                        started: sent.sendStarted, accepted: sent.accepted)
             }
         }
+        releaseSettingsAssociations()
         try await sendPendingSettingsAccess(socket: socket)
         try await sendPendingSettingsBind(socket: socket)
         try await sendPendingSettingsSnapshot(socket: socket)
@@ -2349,6 +2393,8 @@ actor ReplicaService {
                 try await store.relayAccepted(id)
                 ordinary.accepted = true
                 try completeOrdinarySend(ordinary, id: id, socket: socket)
+            } else if abandonedSettingsMessages.remove(id) != nil {
+                return
             } else {
                 if let access = outbound.values.compactMap({ entry -> SettingsAccessSend? in
                     if case .access(let sent) = entry, sent.envelope?.header.messageID == id { return sent }
@@ -2542,6 +2588,7 @@ actor ReplicaService {
            socket == nil || association.scope?.socket === socket {
             association.retired = true
         }
+        releaseSettingsAssociations()
     }
 
     private func isCurrentSettingsOriginal(_ pending: PendingSettingsAccess) throws -> Bool {
@@ -2742,10 +2789,21 @@ actor ReplicaService {
             status = "Local inbox is full; delivery remains on the relay"
             reconnectForCapacity = true
             return
+        } catch let error as WireError where [.identity, .size, .expired, .invalid, .signature, .conflict, .unavailable].contains(error) {
+            try await refuseSettingsReply(ticket: ticket, socket: socket, failure: error)
         }
         acknowledgements.insert(envelope.header.messageID)
         try await socket.send(.object(["type": .string("acknowledge"), "schema_version": .unsigned(1), "message_id": .id(envelope.header.messageID)]))
         _ = try await drainInbox()
+    }
+
+    private func refuseSettingsReply(ticket: SettingsReceiveTicket, socket: RelayConnection, failure: WireError) async throws {
+        guard settingsReceive?.ticket === ticket, ticket.scope.socket === socket,
+              isCurrentSettingsScope(ticket.scope) else { throw failure }
+        try await store.checkActive(host: ticket.scope.host)
+        let localID = try await store.identityID()
+        guard localID == ticket.scope.localID, localID == identity.publicKeys.deviceID else { throw WireError.identity }
+        guard settingsReceive?.ticket === ticket, isCurrentSettingsScope(ticket.scope) else { throw failure }
     }
 
     private func sameSettingsEnvelope(_ lhs: EncryptedEnvelope, _ rhs: EncryptedEnvelope) -> Bool {
@@ -4181,6 +4239,7 @@ actor ReplicaService {
             }
         }
         settingsReceive = nil
+        releaseSettingsAssociations()
     }
 
     func requestSettingsUpdate(_ capture: ReplicaSettingsUpdateInput) throws -> ReplicaSettingsRequestHandle {
@@ -4192,6 +4251,7 @@ actor ReplicaService {
               let bindingRequest = association.request,
               try isCurrentSettingsParent(association, scope: scope) else { throw WireError.unavailable }
         if let pending = pendingSettingsUpdate, pending.capture === capture { return pending.handle }
+        releaseSettingsAssociations()
         guard settingsUpdateOriginal == nil, pendingSettingsRequest == nil, !hasPrivateSettingsSend,
               outbound.count < 16, outboundSocket === scope.socket else { throw WireError.queueFull }
         guard capture.expectedSettingsRevision > 0, capture.expectedSettingsRevision <= UInt64(Int64.max),
