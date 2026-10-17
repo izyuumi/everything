@@ -1,10 +1,14 @@
+mod outbound;
+
 use super::*;
 use crate::relay_protocol::{
     RELAY_SCHEMA_VERSION, RelayClientMessage, RelayOrigin, RelayServerMessage,
 };
+use crate::storage::TransportOutboundSelection;
 use crate::transport::remote::{RelayConnection, RemoteError};
 #[cfg(unix)]
 use futures_util::FutureExt;
+use outbound::OrdinarySendWindow;
 #[cfg(unix)]
 use std::panic::AssertUnwindSafe;
 use std::time::Duration;
@@ -28,7 +32,13 @@ impl DeviceEndpoint {
         cancellation: CancellationToken,
         status: watch::Sender<RelaySessionStatus>,
     ) -> Result<(), DeviceError> {
-        self.run_relay_owned(origin, cancellation, status, None)
+        let session = self
+            .inner
+            .session
+            .try_lock()
+            .map_err(|_| DeviceError::SessionAlreadyRunning)?;
+        self.check_outbound_health()?;
+        self.run_relay_owned(origin, cancellation, status, None, &session)
             .await
     }
 
@@ -40,20 +50,27 @@ impl DeviceEndpoint {
         status: watch::Sender<RelaySessionStatus>,
         mut owner: HostSettingsTransportOwner,
     ) -> Result<(), DeviceError> {
-        let result = AssertUnwindSafe(self.run_relay_owned(
-            origin,
-            cancellation,
-            status.clone(),
-            Some(&mut owner),
-        ))
-        .catch_unwind()
-        .await;
-        let result = match result {
-            Ok(result) => result,
-            Err(_) => {
-                owner.latch_failure();
-                Err(DeviceError::Worker)
+        let session = self.inner.session.try_lock();
+        let result = match &session {
+            Ok(session) => {
+                let result = AssertUnwindSafe(self.run_relay_owned(
+                    origin,
+                    cancellation,
+                    status.clone(),
+                    Some(&mut owner),
+                    session,
+                ))
+                .catch_unwind()
+                .await;
+                match result {
+                    Ok(result) => result,
+                    Err(_) => {
+                        owner.latch_failure();
+                        Err(DeviceError::Worker)
+                    }
+                }
             }
+            Err(_) => Err(DeviceError::SessionAlreadyRunning),
         };
         if owner.close_and_wait().await.is_err() {
             status.send_replace(RelaySessionStatus::Failed {
@@ -61,8 +78,11 @@ impl DeviceEndpoint {
             });
             std::future::pending::<()>().await;
         }
-        if result.is_ok() {
-            status.send_replace(RelaySessionStatus::Stopped);
+        if let Ok(_session) = &session {
+            self.check_outbound_health()?;
+            if result.is_ok() {
+                status.send_replace(RelaySessionStatus::Stopped);
+            }
         }
         result
     }
@@ -73,14 +93,12 @@ impl DeviceEndpoint {
         cancellation: CancellationToken,
         status: watch::Sender<RelaySessionStatus>,
         mut settings_owner: Option<&mut HostSettingsTransportOwner>,
+        _session: &tokio::sync::MutexGuard<'_, ()>,
     ) -> Result<(), DeviceError> {
-        let _session = self
-            .inner
-            .session
-            .try_lock()
-            .map_err(|_| DeviceError::SessionAlreadyRunning)?;
+        self.check_outbound_health()?;
         let mut attempt = 0_u32;
         loop {
+            self.check_outbound_health()?;
             if cancellation.is_cancelled() {
                 if settings_owner.is_none() {
                     status.send_replace(RelaySessionStatus::Stopped);
@@ -88,12 +106,14 @@ impl DeviceEndpoint {
                 return Ok(());
             }
             self.blocking(|endpoint| endpoint.ensure_active()).await?;
+            self.check_outbound_health()?;
             status.send_replace(RelaySessionStatus::Connecting { attempt });
             let connection =
                 RelayConnection::connect(origin.clone(), self.identity(), cancellation.clone())
                     .await;
             let result = match connection {
                 Ok(mut connection) => {
+                    self.check_outbound_health()?;
                     let incarnation = settings_owner
                         .as_mut()
                         .map(|owner| owner.connected_relay(self, &connection))
@@ -116,6 +136,7 @@ impl DeviceEndpoint {
                     }
                     match (result, close) {
                         (Ok(()), _) if cancellation.is_cancelled() => {
+                            self.check_outbound_health()?;
                             if settings_owner.is_none() {
                                 status.send_replace(RelaySessionStatus::Stopped);
                             }
@@ -127,6 +148,7 @@ impl DeviceEndpoint {
                     }
                 }
                 Err(RemoteError::Cancelled) if cancellation.is_cancelled() => {
+                    self.check_outbound_health()?;
                     if settings_owner.is_none() {
                         status.send_replace(RelaySessionStatus::Stopped);
                     }
@@ -148,6 +170,7 @@ impl DeviceEndpoint {
                     ),
                 )) => reason,
                 Err(DeviceError::Remote(RemoteError::Cancelled)) if cancellation.is_cancelled() => {
+                    self.check_outbound_health()?;
                     if settings_owner.is_none() {
                         status.send_replace(RelaySessionStatus::Stopped);
                     }
@@ -161,11 +184,13 @@ impl DeviceEndpoint {
                 }
                 Ok(()) => RemoteError::Closed,
             };
+            self.check_outbound_health()?;
             attempt = attempt.saturating_add(1);
             status.send_replace(RelaySessionStatus::Retrying { attempt, reason });
             let delay = Duration::from_secs(1_u64 << attempt.min(5));
             tokio::select! {
                 _ = cancellation.cancelled() => {
+                    self.check_outbound_health()?;
                     if settings_owner.is_none() {
                         status.send_replace(RelaySessionStatus::Stopped);
                     }
@@ -182,7 +207,20 @@ impl DeviceEndpoint {
         cancellation: &CancellationToken,
         status: &watch::Sender<RelaySessionStatus>,
     ) -> Result<(), DeviceError> {
-        let mut inflight = BTreeMap::new();
+        let mut window = OrdinarySendWindow::new(self.clone())?;
+        let outcome = self
+            .relay_session_loop(connection, cancellation, status, &mut window)
+            .await;
+        window.finish(outcome).await
+    }
+
+    async fn relay_session_loop(
+        &self,
+        connection: &mut RelayConnection,
+        cancellation: &CancellationToken,
+        status: &watch::Sender<RelaySessionStatus>,
+        window: &mut OrdinarySendWindow,
+    ) -> Result<(), DeviceError> {
         let mut acknowledgements = BTreeSet::new();
         let mut tick = tokio::time::interval(Duration::from_secs(1));
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -198,14 +236,12 @@ impl DeviceEndpoint {
             if let Some(frame) = frame {
                 match frame {
                     RelayServerMessage::Accepted { message_id, .. } => {
-                        if inflight.remove(&message_id).is_none() {
-                            return Err(RemoteError::Protocol.into());
-                        }
+                        let accepted = window.accepted(message_id)?;
                         self.blocking(move |endpoint| {
                             endpoint
                                 .inner
                                 .store
-                                .accept_transport_outbox(&message_id.to_string())?;
+                                .accept_transport_outbox(&accepted.into_message_id().to_string())?;
                             Ok(())
                         })
                         .await?;
@@ -252,122 +288,35 @@ impl DeviceEndpoint {
                 .await?;
             for id in &report.expired_outbox_ids {
                 if let Ok(id) = id.parse::<MessageId>() {
-                    inflight.remove(&id);
+                    window.expired(id)?;
                 }
             }
             if !report.expired_outbox_ids.is_empty() || report.archived_command_payloads > 0 {
                 status.send_replace(RelaySessionStatus::Maintenance { report });
             }
-            let expired_inflight = inflight
-                .values()
-                .any(|sent: &tokio::time::Instant| sent.elapsed() > Duration::from_secs(15));
-            if expired_inflight {
-                return Err(RemoteError::Timeout.into());
-            }
-            if inflight.len() < 16 {
-                let excluded: BTreeSet<_> = inflight.keys().copied().collect();
-                let count = 1;
-                let rows = self
-                    .blocking(move |endpoint| endpoint.prepare_outbound(now, count, &excluded))
+            window.check_timeout()?;
+            if window.has_capacity() {
+                self.check_outbound_health()?;
+                let excluded = window.excluded();
+                let candidate = self
+                    .blocking(move |endpoint| {
+                        Ok(endpoint.inner.store.next_transport_outbound_candidate(
+                            time(now)?,
+                            &excluded,
+                            TransportOutboundSelection::OrdinaryOnly,
+                        )?)
+                    })
                     .await?;
-                for envelope in rows {
+                if let Some(candidate) = candidate {
                     if cancellation.is_cancelled() {
                         return Ok(());
                     }
-                    let id = envelope.header.message_id;
-                    let copy = envelope.clone();
-                    let permitted = self
-                        .blocking(move |endpoint| {
-                            let now = UnixMillis::now()?;
-                            let peer = match endpoint.peer(copy.header.recipient) {
-                                Err(DeviceError::Storage(StorageError::RevokedDevice(_))) => {
-                                    return Ok(false);
-                                }
-                                result => result?,
-                            };
-                            Ok(endpoint.inner.store.confirm_transport_outbox(
-                                &copy.header.message_id.to_string(),
-                                &serde_json::to_vec(&copy)?,
-                                &serde_json::to_value(peer)?,
-                                time(now)?,
-                            )?)
-                        })
+                    window
+                        .prepare_and_send(candidate, now, cancellation.clone(), connection)
                         .await?;
-                    if !permitted {
-                        continue;
-                    }
-                    connection
-                        .send(&RelayClientMessage::Send {
-                            schema_version: RELAY_SCHEMA_VERSION,
-                            envelope,
-                        })
-                        .await?;
-                    inflight.insert(id, tokio::time::Instant::now());
                 }
             }
         }
-    }
-
-    fn prepare_outbound(
-        &self,
-        now: UnixMillis,
-        count: usize,
-        excluded: &BTreeSet<MessageId>,
-    ) -> Result<Vec<EncryptedEnvelope>, DeviceError> {
-        self.ensure_active()?;
-        let mut page = count + excluded.len();
-        let rows = loop {
-            match self.inner.store.pending_transport_outbox(time(now)?, page) {
-                Err(StorageError::ReadBudgetExceeded) if page > 1 => page /= 2,
-                result => break result?,
-            }
-        };
-        let mut envelopes = Vec::new();
-        for row in rows {
-            let id: MessageId = row.id.parse()?;
-            if excluded.contains(&id) {
-                continue;
-            }
-            let recipient = row.device_id.parse()?;
-            let peer = match self.peer(recipient) {
-                Err(DeviceError::Storage(StorageError::RevokedDevice(_))) => continue,
-                result => result?,
-            };
-            let envelope: EncryptedEnvelope = serde_json::from_slice(&row.envelope)?;
-            if envelope.header.message_id != id
-                || envelope.header.sender != self.public_keys().device_id
-                || envelope.header.recipient != recipient
-                || envelope.header.expires_at_ms <= now.get()
-            {
-                return Err(DeviceError::Invalid(
-                    "queued ciphertext metadata does not match endpoint",
-                ));
-            }
-            let retry_ms = 1_000_i64 << row.attempts.min(8);
-            if let Err(error) = self
-                .inner
-                .store
-                .defer_outbox(&row.id, time(now)?.saturating_add(retry_ms))
-            {
-                if matches!(
-                    &error,
-                    StorageError::NotFound { entity: "outbox message", id } if id == &row.id
-                ) && !self.inner.store.confirm_transport_outbox(
-                    &row.id,
-                    &row.envelope,
-                    &serde_json::to_value(peer)?,
-                    time(now)?,
-                )? {
-                    continue;
-                }
-                return Err(error.into());
-            }
-            envelopes.push(envelope);
-            if envelopes.len() == count {
-                break;
-            }
-        }
-        Ok(envelopes)
     }
 
     async fn blocking<T: Send + 'static>(
