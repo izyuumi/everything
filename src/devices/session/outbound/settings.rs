@@ -348,6 +348,8 @@ impl RelaySendWindow {
     ) -> Result<(), SettingsPreparationObserveFailure> {
         use SettingsPreparationObserveFailure as Failure;
 
+        let closing =
+            self.finished || self.failure.is_some() || self.endpoint.outbound_is_quarantined();
         let Some(RelaySendEntry::Settings(cell)) = self.entries.get_mut(&id) else {
             return Err(Failure::Missing);
         };
@@ -362,9 +364,12 @@ impl RelaySendWindow {
             return Err(Failure::Association);
         };
         if stop.is_none() {
-            *stop = input.stop().or_else(|| {
-                (!self.socket.is_live()).then_some(SettingsPreparationStop::ConnectionClosed)
-            });
+            *stop = closing
+                .then_some(SettingsPreparationStop::Closed)
+                .or_else(|| input.stop())
+                .or_else(|| {
+                    (!self.socket.is_live()).then_some(SettingsPreparationStop::ConnectionClosed)
+                });
         }
         if let Some(issue) = issue {
             return Err(*issue);
