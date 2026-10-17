@@ -9,7 +9,7 @@ use uuid::Uuid;
 use super::commands::EffectiveCommand;
 use super::inbox::{AppliedReceipt, CommandOrigin, CommandPhase, HostCommandRecord, InboxInput};
 use super::runtime::{HostError, HostInner, command_receipt};
-use super::worker::service::WorkerCoordinator;
+use super::worker::service::{WorkerCoordinator, native_inspection};
 use super::worker::{
     WorkerCoordinatorOperation, WorkerCoordinatorOperationResult, WorkerCoordinatorQuery,
     WorkerCoordinatorQueryResult,
@@ -20,7 +20,7 @@ use crate::protocol::{
     CommandId, ConversationEvent, EventEnvelope, MessageContent, MessageRole, UnixMillis,
 };
 use crate::scheduler::{
-    RemoteOwnerApproval, RemoteTaskSnapshot, RemoteTaskSubmission, TaskSubmission,
+    RemoteOwnerApproval, RemoteRelease, RemoteTaskSnapshot, RemoteTaskSubmission, TaskSubmission,
 };
 use crate::worker::{WorkerError, WorkerJobBinding, WorkerManifest};
 
@@ -125,6 +125,7 @@ impl HostInner {
             WorkerCoordinatorOperation::Cancel { .. }
                 | WorkerCoordinatorOperation::RevokePeer { .. }
                 | WorkerCoordinatorOperation::Discard { .. }
+                | WorkerCoordinatorOperation::Release { .. }
         ) {
             coordinator.begin_cleanup_operation().await?
         } else {
@@ -196,10 +197,24 @@ impl HostInner {
                     ));
                 }
                 drop(mutation);
-                coordinator
+                let job = coordinator
                     .endpoint()
-                    .cancel(binding.clone(), request_id, UnixMillis::now()?)
-                    .await?;
+                    .snapshot(binding.delegation_id)
+                    .await?
+                    .ok_or(HostError::Invalid(
+                        "worker cancellation delegation is unknown",
+                    ))?;
+                if job.binding != *binding {
+                    return Err(HostError::Invalid(
+                        "worker cancellation binding differs from delegation",
+                    ));
+                }
+                if !job.cancellation_requested {
+                    coordinator
+                        .endpoint()
+                        .cancel(binding.clone(), request_id, UnixMillis::now()?)
+                        .await?;
+                }
                 {
                     let _mutation = self.mutation.lock().await;
                     self.scheduler.cancel(*task_id).await?;
@@ -213,6 +228,41 @@ impl HostInner {
                 Ok(WorkerCoordinatorOperationResult::Cancellation {
                     binding: binding.clone(),
                     task: Box::new(task),
+                })
+            }
+            WorkerCoordinatorOperation::Release {
+                task_id,
+                binding,
+                expected_phase,
+                operator,
+                reason,
+            } => {
+                let task = {
+                    let _mutation = self.mutation.lock().await;
+                    let native = self.scheduler.remote_status(*task_id).await?;
+                    if worker_job_binding(&native) != *binding {
+                        return Err(HostError::Invalid(
+                            "worker release binding differs from native reservation",
+                        ));
+                    }
+                    self.scheduler
+                        .release_remote(
+                            *task_id,
+                            native.binding,
+                            RemoteRelease {
+                                request_id,
+                                expected_phase: *expected_phase,
+                                operator: operator.clone(),
+                                reason: reason.clone(),
+                                released_at: UnixMillis::now()?,
+                            },
+                        )
+                        .await?
+                };
+                self.receipt_changed();
+                Ok(WorkerCoordinatorOperationResult::Released {
+                    binding: binding.clone(),
+                    task: Box::new(native_inspection(task)?),
                 })
             }
             WorkerCoordinatorOperation::RevokePeer { device_id } => {
@@ -387,12 +437,15 @@ impl HostInner {
         };
         let authorization = owned.into_native_admission(task, request_id, Box::new(mutation))?;
         self.scheduler.admit_remote(authorization).await?;
-        self.complete_worker_record(
-            request_id,
-            snapshot.submission.task.task_id,
-            Some(message_id),
-        )
-        .await?;
+        {
+            let _mutation = self.mutation.lock().await;
+            self.complete_worker_record(
+                request_id,
+                snapshot.submission.task.task_id,
+                Some(message_id),
+            )
+            .await?;
+        }
         coordinator
             .endpoint()
             .offer_reserved(
@@ -472,6 +525,13 @@ impl HostInner {
                     .inbox
                     .record(command_id)?
                     .ok_or(HostError::Invalid("worker command disappeared"))?;
+                if record.phase == CommandPhase::Completed
+                    && let Some(existing) = record
+                        .applied_receipt
+                        .filter(|existing| existing.task_id == Some(task_id))
+                {
+                    return Ok(existing);
+                }
                 let receipt = AppliedReceipt {
                     conversation_id: record.conversation_id,
                     task_id: Some(task_id),

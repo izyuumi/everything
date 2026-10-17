@@ -18,7 +18,7 @@ use crate::protocol::{
     UnixMillis,
 };
 use crate::relay_protocol::RelayOrigin;
-use crate::scheduler::{ExecutionPolicy, RemoteBudgetCharge, RemoteTaskPhase};
+use crate::scheduler::{ExecutionPolicy, RemoteBudgetCharge, RemoteRelease, RemoteTaskPhase};
 use crate::worker::{
     DelegationState, MAX_WORKER_FILES, WorkerContext, WorkerError, WorkerJobBinding,
     WorkerManifest, WorkerModelBinding, WorkerPeerState, WorkerRejection,
@@ -297,6 +297,8 @@ pub struct WorkerNativeInspection {
     pub admitted_at: UnixMillis,
     pub last_dispatch_at: Option<UnixMillis>,
     pub result: Option<RemoteResultInspection>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub release: Option<RemoteRelease>,
 }
 
 impl WorkerNativeInspection {
@@ -312,6 +314,25 @@ impl WorkerNativeInspection {
             return Err(WorkerError::Invalid(
                 "worker native inspection charge or time",
             ));
+        }
+        if let Some(release) = &self.release {
+            release
+                .validate()
+                .map_err(|_| WorkerError::Invalid("worker native release attestation"))?;
+            if self.phase != RemoteTaskPhase::Released
+                || self.status != TaskStatus::Failed
+                || release.released_at < self.admitted_at
+                || (release.expected_phase == RemoteTaskPhase::OutcomeUnknown)
+                    != self.result.is_some()
+                || self.result.as_ref().is_some_and(|result| {
+                    result.report.outcome != RemoteTaskOutcome::Unknown
+                        || result.report.task_id != self.task_id
+                        || result.report.command_id != self.command_id
+                })
+            {
+                return Err(WorkerError::Conflict("worker native release inspection"));
+            }
+            return encoded_bound(self, MAX_WORKER_COORDINATOR_INSPECTION_BYTES);
         }
         match &self.result {
             None if self.status == TaskStatus::WaitingForChildren
@@ -581,6 +602,13 @@ pub enum WorkerCoordinatorOperation {
     RevokePeer {
         device_id: DeviceId,
     },
+    Release {
+        task_id: TaskId,
+        binding: WorkerJobBinding,
+        expected_phase: RemoteTaskPhase,
+        operator: String,
+        reason: String,
+    },
 }
 
 impl WorkerCoordinatorOperation {
@@ -608,6 +636,17 @@ impl WorkerCoordinatorOperation {
             }
             Self::Cancel { binding, .. } => binding.validate()?,
             Self::RevokePeer { .. } => {}
+            Self::Release {
+                binding,
+                expected_phase,
+                operator,
+                reason,
+                ..
+            } => {
+                binding.validate()?;
+                RemoteRelease::validate_request(*expected_phase, operator, reason)
+                    .map_err(|_| WorkerError::Invalid("worker release attestation"))?;
+            }
         }
         encoded_bound(self, MAX_WORKER_COORDINATOR_REQUEST_BYTES)
     }
@@ -728,6 +767,10 @@ pub enum WorkerCoordinatorOperationResult {
     PeerRevoked {
         peer: WorkerPeerState,
     },
+    Released {
+        binding: WorkerJobBinding,
+        task: Box<WorkerNativeInspection>,
+    },
 }
 
 impl WorkerCoordinatorOperationResult {
@@ -787,6 +830,32 @@ impl WorkerCoordinatorOperationResult {
                     || task.phase == RemoteTaskPhase::Reserved
                 {
                     return Err(WorkerError::Conflict("worker cancellation response"));
+                }
+                if let Some(result) = &task.result {
+                    report_binding(result, binding)?;
+                }
+            }
+            (
+                WorkerCoordinatorOperation::Release {
+                    task_id,
+                    binding: requested,
+                    expected_phase,
+                    operator,
+                    reason,
+                },
+                Self::Released { binding, task },
+            ) => {
+                task.validate()?;
+                if binding != requested
+                    || task.task_id != *task_id
+                    || task.release.as_ref().is_none_or(|release| {
+                        release.request_id != request_id
+                            || release.expected_phase != *expected_phase
+                            || release.operator != *operator
+                            || release.reason != *reason
+                    })
+                {
+                    return Err(WorkerError::Conflict("worker release response"));
                 }
                 if let Some(result) = &task.result {
                     report_binding(result, binding)?;

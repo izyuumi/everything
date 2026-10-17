@@ -194,6 +194,45 @@ pub enum RemoteTaskPhase {
     CancellationRequested,
     OutcomeUnknown,
     Settled,
+    Released,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RemoteRelease {
+    pub request_id: CommandId,
+    pub expected_phase: RemoteTaskPhase,
+    pub operator: String,
+    pub reason: String,
+    pub released_at: UnixMillis,
+}
+
+impl RemoteRelease {
+    pub fn validate(&self) -> Result<(), SchedulerError> {
+        Self::validate_request(self.expected_phase, &self.operator, &self.reason)
+    }
+
+    pub fn validate_request(
+        expected_phase: RemoteTaskPhase,
+        operator: &str,
+        reason: &str,
+    ) -> Result<(), SchedulerError> {
+        if !matches!(
+            expected_phase,
+            RemoteTaskPhase::CancellationRequested | RemoteTaskPhase::OutcomeUnknown
+        ) || !bounded_attestation(operator, 128)
+            || !bounded_attestation(reason, 1024)
+        {
+            return Err(SchedulerError::Invalid(
+                "invalid remote release attestation",
+            ));
+        }
+        Ok(())
+    }
+}
+
+fn bounded_attestation(value: &str, limit: usize) -> bool {
+    !value.trim().is_empty() && value.len() <= limit && !value.chars().any(char::is_control)
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -232,6 +271,8 @@ pub struct RemoteTaskSnapshot {
     pub last_dispatch_at: Option<UnixMillis>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub result: Option<RemoteResultInspection>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub release: Option<RemoteRelease>,
 }
 
 pub struct RemoteDispatchPermit {
@@ -278,6 +319,8 @@ pub(super) struct RemoteCheckpoint {
     pub last_dispatch_at: Option<UnixMillis>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub result: Option<RemoteResultInspection>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub release: Option<RemoteRelease>,
 }
 
 pub(super) fn validate_definition(
@@ -329,6 +372,8 @@ pub(super) fn validate_definition(
     }
     Ok(())
 }
+
+pub(super) const RELEASED_FAILURE_CODE: &str = "remote_released_by_owner";
 
 pub(super) fn validate_task(task: &StoredTask) -> Result<(), SchedulerError> {
     match (&task.definition.remote, &task.checkpoint.remote) {
@@ -388,6 +433,7 @@ pub(super) fn snapshot(task: &StoredTask) -> Result<RemoteTaskSnapshot, Schedule
         admitted_at: checkpoint.admitted_at,
         last_dispatch_at: checkpoint.last_dispatch_at,
         result: checkpoint.result.clone(),
+        release: checkpoint.release.clone(),
     })
 }
 
@@ -396,6 +442,44 @@ fn validate_result_state(
     definition: &RemoteDefinition,
     checkpoint: &RemoteCheckpoint,
 ) -> Result<(), SchedulerError> {
+    if let Some(release) = &checkpoint.release {
+        release.validate()?;
+        if checkpoint.phase != RemoteTaskPhase::Released
+            || task.checkpoint.task.status != TaskStatus::Failed
+            || task
+                .checkpoint
+                .task
+                .failure
+                .as_ref()
+                .is_none_or(|failure| failure.code != RELEASED_FAILURE_CODE || failure.retryable)
+            || task.checkpoint.waiting.is_some()
+            || release.released_at < checkpoint.admitted_at
+            || release.released_at > task.checkpoint.task.updated_at
+            || (release.expected_phase == RemoteTaskPhase::OutcomeUnknown)
+                != checkpoint.result.is_some()
+        {
+            return Err(SchedulerError::Invalid(
+                "invalid released remote reservation",
+            ));
+        }
+        if let Some(result) = &checkpoint.result {
+            result.validate(task.definition.initial.conversation_id)?;
+            validate_report(task, &definition.binding, &result.report)?;
+            if result.report.outcome != RemoteTaskOutcome::Unknown
+                || task.checkpoint.last_output.as_deref() != Some(result.report.summary.as_str())
+            {
+                return Err(SchedulerError::Invalid("invalid released remote result"));
+            }
+        } else if task.checkpoint.last_output.is_some() {
+            return Err(SchedulerError::Invalid(
+                "invalid released remote reservation",
+            ));
+        }
+        return Ok(());
+    }
+    if checkpoint.phase == RemoteTaskPhase::Released {
+        return Err(SchedulerError::Invalid("remote release record is missing"));
+    }
     let waiting = matches!(task.checkpoint.waiting,
         Some(super::types::WaitingReason::Remote { phase }) if phase == checkpoint.phase);
     match &checkpoint.result {
@@ -505,6 +589,14 @@ impl RemoteResultCommit {
         admission: OwnedMutexGuard<()>,
     ) -> Result<Self, SchedulerError> {
         validate_task(&task)?;
+        if task
+            .checkpoint
+            .remote
+            .as_ref()
+            .is_none_or(|checkpoint| checkpoint.release.is_some())
+        {
+            return Err(SchedulerError::OwnerDecision(task.definition.initial.id));
+        }
         let remote = task
             .definition
             .remote

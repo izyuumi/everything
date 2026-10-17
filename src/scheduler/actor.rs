@@ -20,7 +20,8 @@ use crate::protocol::{
 use crate::storage::{Store, ToolCallState};
 
 use super::remote::{
-    self, RemoteDispatchPermit, RemoteTaskAdmission, RemoteTaskBinding, RemoteTaskSnapshot,
+    self, RemoteDispatchPermit, RemoteRelease, RemoteTaskAdmission, RemoteTaskBinding,
+    RemoteTaskSnapshot,
 };
 use super::repository;
 use super::schedule_context::ScheduleCallerContext;
@@ -102,6 +103,13 @@ enum Control {
         binding: RemoteTaskBinding,
         admission: OwnedMutexGuard<()>,
         reply: oneshot::Sender<Result<RemoteDispatchPermit, SchedulerError>>,
+    },
+    ReleaseRemote {
+        task: TaskId,
+        binding: RemoteTaskBinding,
+        release: Box<RemoteRelease>,
+        admission: OwnedMutexGuard<()>,
+        reply: oneshot::Sender<Result<RemoteTaskSnapshot, SchedulerError>>,
     },
     RetireProviderUnavailable {
         task: TaskId,
@@ -420,6 +428,34 @@ impl Scheduler {
         result.await.map_err(|_| {
             SchedulerError::MutationUncertain(
                 "remote result response was lost; inspect the original receipt".into(),
+            )
+        })?
+    }
+
+    pub async fn release_remote(
+        &self,
+        task: TaskId,
+        binding: RemoteTaskBinding,
+        release: RemoteRelease,
+    ) -> Result<RemoteTaskSnapshot, SchedulerError> {
+        binding.validate()?;
+        release.validate()?;
+        let admission = Arc::clone(&self.inner.remote_admission).lock_owned().await;
+        let (reply, result) = oneshot::channel();
+        self.inner
+            .sender
+            .send(Control::ReleaseRemote {
+                task,
+                binding,
+                release: Box::new(release),
+                admission,
+                reply,
+            })
+            .await
+            .map_err(|_| SchedulerError::Stopped)?;
+        result.await.map_err(|_| {
+            SchedulerError::MutationUncertain(
+                "remote release response was lost; inspect the original task".into(),
             )
         })?
     }
@@ -1027,6 +1063,19 @@ impl Actor {
                 let result = self.remote_dispatch_permit(task, binding, admission).await;
                 let _ = reply.send(result);
             }
+            Control::ReleaseRemote {
+                task,
+                binding,
+                release,
+                admission,
+                reply,
+            } => {
+                let result = self.release_remote(task, binding, *release, admission);
+                if matches!(result, Err(SchedulerError::MutationUncertain(_))) {
+                    self.stop();
+                }
+                let _ = reply.send(result);
+            }
             Control::ScheduleContext {
                 caller,
                 workspace,
@@ -1253,7 +1302,10 @@ impl Actor {
                         )
                         .await?;
                 }
-                if saved.phase != remote::RemoteTaskPhase::Settled {
+                if !matches!(
+                    saved.phase,
+                    remote::RemoteTaskPhase::Settled | remote::RemoteTaskPhase::Released
+                ) {
                     self.remote_reserved.insert(id);
                 }
                 return Ok(existing.snapshot());
@@ -1354,6 +1406,7 @@ impl Actor {
             admitted_at: now,
             last_dispatch_at: None,
             result: None,
+            release: None,
         });
         remote::validate_task(&task)?;
         let resources = (
@@ -1458,6 +1511,58 @@ impl Actor {
             self.remote_reserved.remove(&id);
         }
         Ok(receipt)
+    }
+
+    fn release_remote(
+        &mut self,
+        id: TaskId,
+        binding: RemoteTaskBinding,
+        release: RemoteRelease,
+        _admission: OwnedMutexGuard<()>,
+    ) -> Result<RemoteTaskSnapshot, SchedulerError> {
+        let mut task = repository::load(&self.store(), id)?;
+        let saved = remote::snapshot(&task)?;
+        if saved.binding != binding {
+            return Err(SchedulerError::Conflict(id));
+        }
+        if let Some(existing) = &saved.release {
+            let mut replay = release.clone();
+            replay.released_at = existing.released_at;
+            if *existing != replay {
+                return Err(SchedulerError::Conflict(id));
+            }
+            return Ok(saved);
+        }
+        if saved.phase != release.expected_phase {
+            return Err(SchedulerError::OwnerDecision(id));
+        }
+        let now = UnixMillis::now()?;
+        let checkpoint = task
+            .checkpoint
+            .remote
+            .as_mut()
+            .ok_or(SchedulerError::Invalid("remote checkpoint is missing"))?;
+        checkpoint.phase = remote::RemoteTaskPhase::Released;
+        checkpoint.release = Some(RemoteRelease {
+            released_at: now,
+            ..release
+        });
+        task.checkpoint.waiting = None;
+        task.checkpoint.diagnostic = Some("Owner released the unresolved remote reservation; the remote outcome remains unknown, the original allowance stays charged and later worker results are refused".into());
+        task.checkpoint.task.transition(
+            TaskStatus::Failed,
+            now,
+            Some(crate::protocol::TaskFailure {
+                code: remote::RELEASED_FAILURE_CODE.into(),
+                message: "Owner released an unresolved remote reservation".into(),
+                retryable: false,
+            }),
+        )?;
+        remote::validate_task(&task)?;
+        repository::save(&self.store(), &mut task, TaskStatus::Failed)
+            .map_err(mutation_uncertain)?;
+        self.remote_reserved.remove(&id);
+        remote::snapshot(&task)
     }
 
     async fn remote_dispatch_permit(
@@ -2241,7 +2346,10 @@ impl Actor {
             }
             let mut task = repository::load(&self.store(), id)?;
             if task.definition.remote.is_some() {
-                if remote::snapshot(&task)?.phase != remote::RemoteTaskPhase::Settled {
+                if !matches!(
+                    remote::snapshot(&task)?.phase,
+                    remote::RemoteTaskPhase::Settled | remote::RemoteTaskPhase::Released
+                ) {
                     self.remote_reserved.insert(id);
                 }
                 continue;

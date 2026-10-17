@@ -2,7 +2,7 @@ use std::fs::File;
 use std::io::Read;
 use std::path::PathBuf;
 
-use clap::{ArgGroup, Args, Subcommand};
+use clap::{ArgGroup, Args, Subcommand, ValueEnum};
 use rustix::fs::{FileType, OFlags};
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
@@ -14,6 +14,7 @@ use crate::crypto::DevicePublicKeys;
 use crate::host::client::{HostClient, HostClientError};
 use crate::ipc::{OwnerOperation, OwnerOperationResult, OwnerQuery, OwnerQueryResult};
 use crate::protocol::{CommandId, DeviceId, TaskId};
+use crate::scheduler::RemoteTaskPhase;
 use crate::worker::{WorkerError, WorkerJobBinding};
 
 use super::worker::{
@@ -89,6 +90,30 @@ enum WorkerCoordinatorCommand {
         #[arg(long)]
         request_id: Option<CommandId>,
     },
+    Release {
+        #[arg(long)]
+        task: TaskId,
+        #[arg(long)]
+        delegation_id: Uuid,
+        #[arg(long)]
+        attempt_id: Uuid,
+        #[arg(long)]
+        manifest_digest: String,
+        #[arg(long, value_enum)]
+        expected_phase: ReleasablePhase,
+        #[arg(long)]
+        operator: String,
+        #[arg(long)]
+        reason: String,
+        #[arg(long)]
+        request_id: CommandId,
+    },
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum ReleasablePhase {
+    CancellationRequested,
+    OutcomeUnknown,
 }
 
 #[derive(Args)]
@@ -227,6 +252,34 @@ pub async fn run(
             WorkerCoordinatorOperation::RevokePeer { device_id: peer },
             request_id,
         ),
+        WorkerCoordinatorCommand::Release {
+            task,
+            delegation_id,
+            attempt_id,
+            manifest_digest,
+            expected_phase,
+            operator,
+            reason,
+            request_id,
+        } => (
+            WorkerCoordinatorOperation::Release {
+                task_id: task,
+                binding: WorkerJobBinding {
+                    delegation_id,
+                    attempt_id,
+                    manifest_digest,
+                },
+                expected_phase: match expected_phase {
+                    ReleasablePhase::CancellationRequested => {
+                        RemoteTaskPhase::CancellationRequested
+                    }
+                    ReleasablePhase::OutcomeUnknown => RemoteTaskPhase::OutcomeUnknown,
+                },
+                operator,
+                reason,
+            },
+            Some(request_id),
+        ),
     };
     operate(
         &client,
@@ -313,6 +366,14 @@ fn mutation_identity(operation: &WorkerCoordinatorOperation) -> Value {
         }
         WorkerCoordinatorOperation::RevokePeer { device_id } => {
             json!({"kind":"revoke_peer","device_id":device_id})
+        }
+        WorkerCoordinatorOperation::Release {
+            task_id,
+            binding,
+            expected_phase,
+            ..
+        } => {
+            json!({"kind":"release","task_id":task_id,"binding":binding,"expected_phase":expected_phase})
         }
     }
 }

@@ -628,11 +628,12 @@ impl WorkerCoordinator {
                 let jobs = self.endpoint.jobs().await?;
                 let mut unresolved = 0;
                 for job in &jobs {
-                    if self
-                        .native_job(job)
-                        .await?
-                        .is_some_and(|native| native.phase != RemoteTaskPhase::Settled)
-                    {
+                    if self.native_job(job).await?.is_some_and(|native| {
+                        !matches!(
+                            native.phase,
+                            RemoteTaskPhase::Settled | RemoteTaskPhase::Released
+                        )
+                    }) {
                         unresolved += 1;
                     }
                 }
@@ -846,6 +847,9 @@ impl WorkerCoordinator {
         let Some(mut native) = self.native_job(&job).await? else {
             return Ok(());
         };
+        if native.phase == RemoteTaskPhase::Released {
+            return Ok(());
+        }
         let revoked = self
             .endpoint
             .peers()
@@ -855,6 +859,23 @@ impl WorkerCoordinator {
             .ok_or(WorkerError::UntrustedPeer)?
             .revoked_at
             .is_some();
+        if native.task.cancel_requested
+            && !job.cancellation_requested
+            && !revoked
+            && !job.state.is_terminal()
+            && job.result.is_none()
+            && job.rejection.is_none()
+            && native.result.is_none()
+        {
+            let _operation = self.begin_cleanup_operation().await?;
+            if cancellation.is_cancelled() {
+                return Err(WorkerError::Cancelled);
+            }
+            self.endpoint
+                .cancel(job.binding.clone(), CommandId::new(), UnixMillis::now()?)
+                .await?;
+            return Ok(());
+        }
         if (job.cancellation_requested || revoked)
             && !native.task.cancel_requested
             && !native.task.task.status.is_terminal()
@@ -942,6 +963,7 @@ pub(in crate::host) fn native_inspection(
         admitted_at: native.admitted_at,
         last_dispatch_at: native.last_dispatch_at,
         result: native.result,
+        release: native.release,
     };
     inspection.validate()?;
     Ok(inspection)
