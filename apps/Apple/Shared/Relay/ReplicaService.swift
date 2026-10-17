@@ -10,6 +10,33 @@ struct ReplicaViewState: Sendable {
     let snapshot: ReplicaSnapshot
     let identity: DevicePublicKeys
     let connection: String
+    let settingsAccess: ReplicaSettingsAccessDisplayView?
+}
+
+enum ReplicaSettingsAccessDisplayFreshness: Sendable, CustomStringConvertible, CustomDebugStringConvertible {
+    case currentConnectionObservation
+    case stale
+
+    var description: String { "ReplicaSettingsAccessDisplayFreshness([redacted])" }
+    var debugDescription: String { description }
+}
+
+struct ReplicaSettingsAccessDisplayView: Sendable, CustomStringConvertible, CustomDebugStringConvertible {
+    let display: ReplicaSettingsAccessDisplay
+    let observedAt: UInt64
+    let expiresAt: UInt64
+    let freshness: ReplicaSettingsAccessDisplayFreshness
+
+    fileprivate init(display: ReplicaSettingsAccessDisplay, observedAt: UInt64,
+                     expiresAt: UInt64, freshness: ReplicaSettingsAccessDisplayFreshness) {
+        self.display = display
+        self.observedAt = observedAt
+        self.expiresAt = expiresAt
+        self.freshness = freshness
+    }
+
+    var description: String { "ReplicaSettingsAccessDisplayView([redacted])" }
+    var debugDescription: String { description }
 }
 
 final class ReplicaSettingsRequestHandle: Sendable, CustomStringConvertible, CustomDebugStringConvertible {
@@ -68,6 +95,46 @@ actor ReplicaService {
     private var settingsScope: SettingsConnectionScope?
     private var pendingSettingsAccess: PendingSettingsAccess?
     private var settingsReceive: SettingsReceiveOwner?
+    private var settingsAccessDisplayCache: SettingsAccessDisplayCache?
+
+    private final class SettingsAccessDisplayCache: CustomStringConvertible, CustomDebugStringConvertible {
+        weak var scope: SettingsConnectionScope?
+        let host: DevicePublicKeys
+        let localID: UUID
+        let projection: ReplicaSettingsAccessProjection
+        let wallFloor: UInt64
+        let monotonicFloor: ContinuousClock.Instant
+        let queryExpiresAt: UInt64
+        let queryDeadline: ContinuousClock.Instant
+        let packetExpiresAt: UInt64
+        let grantExpiresAt: UInt64?
+        let expiresAt: UInt64
+        let deadline: ContinuousClock.Instant
+        let observedAt: UInt64
+
+        init(scope: SettingsConnectionScope, projection: ReplicaSettingsAccessProjection,
+             wallFloor: UInt64, monotonicFloor: ContinuousClock.Instant,
+             queryExpiresAt: UInt64, queryDeadline: ContinuousClock.Instant,
+             packetExpiresAt: UInt64, grantExpiresAt: UInt64?, expiresAt: UInt64,
+             deadline: ContinuousClock.Instant, observedAt: UInt64) {
+            self.scope = scope
+            host = scope.host
+            localID = scope.localID
+            self.projection = projection
+            self.wallFloor = wallFloor
+            self.monotonicFloor = monotonicFloor
+            self.queryExpiresAt = queryExpiresAt
+            self.queryDeadline = queryDeadline
+            self.packetExpiresAt = packetExpiresAt
+            self.grantExpiresAt = grantExpiresAt
+            self.expiresAt = expiresAt
+            self.deadline = deadline
+            self.observedAt = observedAt
+        }
+
+        var description: String { "SettingsAccessDisplayCache([redacted])" }
+        var debugDescription: String { description }
+    }
 
     fileprivate final class SettingsConnectionScope: Sendable, CustomStringConvertible, CustomDebugStringConvertible {
         let socket: RelayConnection
@@ -213,7 +280,15 @@ actor ReplicaService {
     }
 
     func viewState() async throws -> ReplicaViewState {
-        ReplicaViewState(snapshot: try await store.snapshot(), identity: identity.publicKeys, connection: status)
+        let cache = settingsAccessDisplayCache
+        let initiallyCurrent: Bool
+        if let cache { initiallyCurrent = try isCurrentSettingsAccessDisplay(cache) }
+        else { initiallyCurrent = false }
+        let snapshot = try await store.snapshot()
+        guard settingsAccessDisplayCache === cache else { throw WireError.unavailable }
+        let settingsAccess = try await settingsAccessDisplayView(cache, snapshot: snapshot, initiallyCurrent: initiallyCurrent)
+        return ReplicaViewState(snapshot: snapshot, identity: identity.publicKeys,
+                                connection: status, settingsAccess: settingsAccess)
     }
 
     func requestSettingsAccess() throws -> ReplicaSettingsRequestHandle {
@@ -421,6 +496,7 @@ actor ReplicaService {
     }
 
     func disable() async throws {
+        settingsAccessDisplayCache = nil
         retireSettingsScope()
         disabling = true
         cancelPairing()
@@ -629,6 +705,7 @@ actor ReplicaService {
                     let own = identity.publicKeys
                     guard try fields.required("device_id").identifier == own.deviceID else { throw WireError.identity }
                     _ = try WireID.timestamp(fields.required("revoked_at"))
+                    settingsAccessDisplayCache = nil
                     retireSettingsScope()
                     try await store.disable(messageID: record.id, host: host)
                     throw WireError.revoked
@@ -920,6 +997,92 @@ actor ReplicaService {
         try checkSettingsAccessQualification(qualification, committed: qualification.committed)
         try await checkSettingsAccessReceiveStore(qualification.attempt)
         try checkSettingsAccessQualification(qualification, committed: qualification.committed)
+    }
+
+    func checkSettingsAccessDisplayProjection(_ qualification: ReplicaSettingsAccessQualification,
+                                             committed: CommittedReplicaSettingsReply) throws {
+        try checkSettingsAccessQualification(qualification, committed: committed)
+        guard let pending = try currentSettingsAccessOriginal(qualification.attempt) else {
+            throw WireError.unavailable
+        }
+        let header = committed.metadata.header
+        guard header.created >= pending.wallFloor, header.expires <= pending.request.time.expiresAt else {
+            throw WireError.invalid
+        }
+    }
+
+    private func adoptSettingsAccessDisplay(_ qualification: ReplicaSettingsAccessQualification) async throws {
+        try await recheckSettingsAccessQualification(qualification)
+        try checkSettingsAccessDisplayProjection(qualification, committed: qualification.committed)
+        guard let pending = try currentSettingsAccessOriginal(qualification.attempt) else {
+            throw WireError.unavailable
+        }
+        let scope = qualification.attempt.ticket.scope
+        let wallFloor = pending.wallFloor
+        let monotonicFloor = pending.monotonicFloor
+        let queryExpiresAt = pending.request.time.expiresAt
+        let queryDeadline = pending.deadline
+        let header = qualification.committed.metadata.header
+        let projection = try qualification.committed.projectAccessDisplay(qualifiedBy: qualification, owner: self)
+        let packetExpiry = min(queryExpiresAt, header.expires)
+        let expiresAt = projection.grantExpiresAt.map { min(packetExpiry, $0) } ?? packetExpiry
+        guard queryExpiresAt > wallFloor, queryExpiresAt - wallFloor <= 30_000,
+              queryDeadline == monotonicFloor.advanced(by: .milliseconds(Int64(queryExpiresAt - wallFloor))),
+              expiresAt > wallFloor, expiresAt <= queryExpiresAt else { throw WireError.expired }
+        let clip = queryExpiresAt - expiresAt
+        guard clip <= 30_000 else { throw WireError.expired }
+        let deadline = queryDeadline.advanced(by: .milliseconds(-Int64(clip)))
+        let wall = try WireID.now()
+        let monotonic = ContinuousClock.now
+        guard isCurrentSettingsScope(scope), wall >= wallFloor, wall < expiresAt,
+              monotonic >= monotonicFloor, monotonic < deadline else { throw WireError.expired }
+        settingsAccessDisplayCache = SettingsAccessDisplayCache(
+            scope: scope, projection: projection, wallFloor: wallFloor, monotonicFloor: monotonicFloor,
+            queryExpiresAt: queryExpiresAt, queryDeadline: queryDeadline,
+            packetExpiresAt: header.expires, grantExpiresAt: projection.grantExpiresAt,
+            expiresAt: expiresAt, deadline: deadline, observedAt: header.created
+        )
+    }
+
+    private func isCurrentSettingsAccessDisplay(_ cache: SettingsAccessDisplayCache) throws -> Bool {
+        guard let scope = cache.scope, isCurrentSettingsScope(scope),
+              scope.host == cache.host, scope.localID == cache.localID else { return false }
+        let wall = try WireID.now()
+        let monotonic = ContinuousClock.now
+        return wall >= cache.wallFloor && wall < cache.expiresAt
+            && monotonic >= cache.monotonicFloor && monotonic < cache.deadline
+    }
+
+    private func settingsAccessDisplayView(_ cache: SettingsAccessDisplayCache?, snapshot: ReplicaSnapshot,
+                                          initiallyCurrent: Bool) async throws -> ReplicaSettingsAccessDisplayView? {
+        guard settingsAccessDisplayCache === cache else { throw WireError.unavailable }
+        guard let cache else { return nil }
+        guard !snapshot.revoked, snapshot.host == cache.host,
+              identity.publicKeys.deviceID == cache.localID else {
+            settingsAccessDisplayCache = nil
+            return nil
+        }
+        var current = try isCurrentSettingsAccessDisplay(cache) && initiallyCurrent
+        do {
+            try await store.checkActive(host: cache.host)
+        } catch let error as WireError where error == .identity || error == .revoked {
+            if settingsAccessDisplayCache === cache { settingsAccessDisplayCache = nil }
+            throw error
+        }
+        guard settingsAccessDisplayCache === cache else { throw WireError.unavailable }
+        let afterHostCheck = try isCurrentSettingsAccessDisplay(cache)
+        current = current && afterHostCheck
+        let localID = try await store.identityID()
+        guard settingsAccessDisplayCache === cache else { throw WireError.unavailable }
+        let afterIdentityCheck = try isCurrentSettingsAccessDisplay(cache)
+        current = current && afterIdentityCheck
+        guard localID == cache.localID else {
+            settingsAccessDisplayCache = nil
+            throw WireError.identity
+        }
+        return ReplicaSettingsAccessDisplayView(display: cache.projection.display, observedAt: cache.observedAt,
+                                               expiresAt: cache.expiresAt,
+                                               freshness: current ? .currentConnectionObservation : .stale)
     }
 
     private func finishSettingsReceive(_ ticket: SettingsReceiveTicket) throws {
