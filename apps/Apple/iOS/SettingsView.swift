@@ -5,6 +5,8 @@ struct SettingsView: View {
     let pair: () -> Void
     @State private var origin = ""
     @State private var disabling = false
+    @State private var inspectionRequest = ""
+    @State private var inspectionOperation = ""
 
     var body: some View {
         Form {
@@ -122,6 +124,44 @@ struct SettingsView: View {
                 }
                 Text("Reads show only the granted Host values. They do not change settings or contact an AI provider. Offline observations are stale.").font(.footnote)
             }
+            Section("Inspect an existing Host request") {
+                TextField("Original request ID", text: Binding(get: { inspectionRequest }, set: { inspectionRequest = boundedIdentifierDraft($0) }))
+                    .textInputAutocapitalization(.never).autocorrectionDisabled()
+                TextField("Send operation ID (optional)", text: Binding(get: { inspectionOperation }, set: { inspectionOperation = boundedIdentifierDraft($0) }))
+                    .textInputAutocapitalization(.never).autocorrectionDisabled()
+                Button("Inspect request") {
+                    guard let target = inspectionTarget else { return }
+                    model.inspectHostSettingsOriginal(requestID: target.requestID, operationID: target.operationID)
+                }
+                .disabled(!model.canInspectHostSettingsOriginal || inspectionTarget == nil)
+                if model.hostSettingsInspectionStatus?.blocksNewRequest == true {
+                    Button("Cancel inspection", role: .cancel) { model.cancelHostSettingsInspection() }
+                }
+                Text(inspectionStatus).font(.footnote).foregroundStyle(.secondary)
+                if let observation = model.hostSettingsInspection {
+                    Text(model.hostSettingsInspectionIsCurrent ? "Current connection observation" : "Stale read-only observation")
+                        .font(.caption).foregroundStyle(.secondary)
+                    switch observation.display {
+                    case .denied(let reason):
+                        Text(reason == .grantUnavailable
+                             ? "The Host reported that Settings access is unavailable."
+                             : "The Host reported that this inspection is outside this device’s scope.")
+                    case .observation(let requestID, let operationID, let observedAt, let lookup):
+                        LabeledContent("Inspected request") { Text(verbatim: requestID.uuidString.lowercased()) }
+                        if let operationID {
+                            LabeledContent("Selected operation") { Text(verbatim: operationID.uuidString.lowercased()) }
+                        }
+                        LabeledContent("Observed") { Text(Date(timeIntervalSince1970: Double(observedAt) / 1000), style: .time) }
+                        switch lookup {
+                        case .notRecorded:
+                            Text("The Host has no recorded Original for this request.")
+                        case .recorded(let original):
+                            originalInspection(original)
+                        }
+                    }
+                }
+                Text("Enter an existing request ID. Inspection does not retry the request or change Host settings. A missing record or completed request does not by itself confirm that a setting was saved.").font(.footnote)
+            }
             Section("This iPhone") {
                 NavigationLink("Appearance and notifications", value: ClientSettingsDestination.thisDevice)
                 if let issue = model.localSettingsIssue { Text(issue).foregroundStyle(.red) }
@@ -141,6 +181,129 @@ struct SettingsView: View {
         .confirmationDialog("Permanently disable this device?", isPresented: Binding(get: { disabling }, set: { setDisabling($0) })) {
             Button("Disable device", role: .destructive) { Task { await model.disable() } }
             Button("Cancel", role: .cancel) { setDisabling(false) }
+        }
+    }
+
+    private func boundedIdentifierDraft(_ value: String) -> String {
+        var bounded = String(value.prefix(36))
+        while bounded.utf8.count > 36 { bounded.removeLast() }
+        return bounded
+    }
+
+    private func canonicalIdentifier(_ value: String) -> UUID? {
+        guard value.utf8.count == 36, let id = UUID(uuidString: value), id != WireID.zero,
+              id.uuidString.lowercased() == value else { return nil }
+        return id
+    }
+
+    private var inspectionTarget: (requestID: UUID, operationID: UUID?)? {
+        guard let requestID = canonicalIdentifier(inspectionRequest) else { return nil }
+        if inspectionOperation.isEmpty { return (requestID, nil) }
+        guard let operationID = canonicalIdentifier(inspectionOperation) else { return nil }
+        return (requestID, operationID)
+    }
+
+    private var inspectionStatus: String {
+        switch model.hostSettingsInspectionStatus {
+        case .preparing: "Preparing the original inspection."
+        case .awaitingReply: "Waiting for the Host inspection."
+        case .settling: "Finishing the original inspection."
+        case .received: "The original Host inspection was observed."
+        case .cancelled: "The inspection was cancelled."
+        case .expired: "The inspection expired without a current observation."
+        case .interrupted: "The inspection was interrupted; the request outcome is unknown."
+        case nil: "Request a current Settings binding, then explicitly inspect a known request."
+        }
+    }
+
+    @ViewBuilder
+    private func originalInspection(_ original: RemoteSettingsOriginalView) -> some View {
+        LabeledContent("Request kind", value: originalKind(original.originalKind))
+        LabeledContent("Original result", value: originalTerminal(original.terminal))
+        switch original.link {
+        case .unlinked: Text("The Original is not linked to another result.")
+        case .chat(let chatID):
+            LabeledContent("Settings chat") { Text(verbatim: chatID.uuidString.lowercased()) }
+        case .turn(let chatID, let turnID):
+            LabeledContent("Settings chat") { Text(verbatim: chatID.uuidString.lowercased()) }
+            LabeledContent("Settings turn") { Text(verbatim: turnID.uuidString.lowercased()) }
+        case .operation(let operationID):
+            LabeledContent("Linked operation") { Text(verbatim: operationID.uuidString.lowercased()) }
+        }
+        ForEach(original.mutationOperationIDs, id: \.self) { id in
+            LabeledContent("Declared operation") { Text(verbatim: id.uuidString.lowercased()) }
+        }
+        switch original.service {
+        case .notRequested: Text("No operation receipt was requested.")
+        case .notRecorded: Text("The selected operation has no recorded receipt.")
+        case .recorded(let receipt):
+            LabeledContent("Receipt operation") { Text(verbatim: receipt.operationID.uuidString.lowercased()) }
+            if let expected = receipt.expectedRevision { LabeledContent("Expected revision", value: String(expected)) }
+            LabeledContent("Receipt updated") { Text(Date(timeIntervalSince1970: Double(receipt.updatedAt) / 1000), style: .time) }
+            LabeledContent("Operation result", value: inspectionPhase(receipt.phase))
+            if let write = receipt.write {
+                LabeledContent("File expected revision", value: String(write.expectedRevision))
+                LabeledContent("File revision", value: String(write.revision))
+                LabeledContent("Changed settings", value: settingNames(write.changedKeys))
+                LabeledContent("Restart needed", value: write.restartRequired ? "Yes" : "No")
+                LabeledContent("File resolution", value: write.resolution.map { $0 == .applied ? "Applied" : "Not applied" } ?? "Unknown")
+            }
+            LabeledContent("Application", value: receipt.application.map(inspectionApplication) ?? "Not reported")
+        }
+    }
+
+    private func originalKind(_ kind: RemoteSettingsOriginalKind) -> String {
+        switch kind {
+        case .chatOpen: "Settings chat open"
+        case .send: "Settings turn"
+        case .update: "Settings update"
+        }
+    }
+
+    private func originalTerminal(_ terminal: RemoteSettingsOriginalTerminal?) -> String {
+        switch terminal {
+        case .completed: "Completed"
+        case .denied: "Denied"
+        case .suppressed: "Suppressed"
+        case .retiredLostRAM: "Retired; result unavailable"
+        case .unknown: "Unknown"
+        case nil: "No terminal result reported"
+        }
+    }
+
+    private func inspectionPhase(_ phase: RemoteSettingsOperationPhase) -> String {
+        switch phase {
+        case .applying(let expected, let revision): return "Applying revision \(revision), expected \(expected)"
+        case .finished(let state):
+            switch state {
+            case .applied(let revision): return "Saved at revision \(revision)"
+            case .pendingApplication(let revision): return "Saved at revision \(revision); application pending"
+            case .restartRequired(let revision): return "Saved at revision \(revision); restart required"
+            case .conflict(let observed): return "Conflict at revision \(observed)"
+            case .hostActionRequired: return "Action required on the Host"
+            case .unavailable(let reason): return unavailableReason(reason)
+            case .failed(let reason): return inspectionFailure(reason)
+            case .unknown: return "Unknown"
+            case .cancelled: return "Cancelled"
+            }
+        }
+    }
+
+    private func inspectionApplication(_ application: SettingsApplicationState) -> String {
+        switch application {
+        case .applied: "Applied"
+        case .restartRequired: "Restart required"
+        case .unavailable(let reason): unavailableReason(reason)
+        case .failed(let reason): inspectionFailure(reason)
+        }
+    }
+
+    private func inspectionFailure(_ reason: SettingsFailureReason) -> String {
+        switch reason {
+        case .invalidRequest: "The request was invalid."
+        case .storage: "The Host reported a storage failure."
+        case .applyFailed: "The Host could not apply the setting."
+        case .nativeActionFailed: "The native action failed."
         }
     }
 
