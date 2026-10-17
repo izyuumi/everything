@@ -94,7 +94,7 @@ actor RelayConnection {
     private func authenticate(origin: RelayOrigin, identity: DeviceIdentity) async throws {
         let deadline = ContinuousClock.now.advanced(by: .seconds(20))
         try await send(.object(["type": .string("begin_authentication"), "schema_version": .unsigned(1), "device_id": .id(localID)]))
-        let raw = try await read(seconds: 20, maximum: 4_096)
+        let raw = try Self.rejectRelayError(await read(seconds: 20, maximum: 4_096))
         let fields = try raw.object(keys: ["type", "schema_version", "challenge"], required: ["type", "schema_version", "challenge"])
         guard try fields.required("type").text == "challenge", try fields.required("schema_version").integer == 1 else { throw WireError.invalid }
         let challenge = try fields.required("challenge").object(keys: ["schema_version", "session_id", "device_id", "origin", "issued_at_ms", "expires_at_ms", "nonce"], required: ["schema_version", "session_id", "device_id", "origin", "issued_at_ms", "expires_at_ms", "nonce"])
@@ -121,7 +121,7 @@ actor RelayConnection {
         guard remaining > .zero, current < expires else { throw WireError.timeout }
         let components = remaining.components
         let seconds = Double(components.seconds) + Double(components.attoseconds) / 1_000_000_000_000_000_000
-        let result = try await read(seconds: min(seconds, Double(expires - current) / 1_000), maximum: 4_096)
+        let result = try Self.rejectRelayError(await read(seconds: min(seconds, Double(expires - current) / 1_000), maximum: 4_096))
         let authenticated = try result.object(keys: ["type", "schema_version", "device_id"], required: ["type", "schema_version", "device_id"])
         guard try authenticated.required("type").text == "authenticated", try authenticated.required("schema_version").integer == 1,
               try authenticated.required("device_id").identifier == localID else { throw WireError.identity }
@@ -162,12 +162,20 @@ actor RelayConnection {
             return ReceivedRelayFrame(frame: .delivery(envelope), originalByteCount: packet.originalByteCount)
         case "acknowledged": return ReceivedRelayFrame(frame: .acknowledged(try fields.required("message_id").identifier), originalByteCount: packet.originalByteCount)
         case "pong": return ReceivedRelayFrame(frame: .pong, originalByteCount: packet.originalByteCount)
-        case "error":
-            let code = try fields.required("code").text
-            if ["rate_limited", "queue_full", "session_already_active", "internal", "recipient_unavailable"].contains(code) { throw WireError.network }
-            throw WireError.identity
+        case "error": throw Self.relayError(try fields.required("code").text)
         default: throw WireError.invalid
         }
+    }
+
+    private static func relayError(_ code: String) -> WireError {
+        ["rate_limited", "queue_full", "session_already_active", "internal", "recipient_unavailable"].contains(code) ? .network : .identity
+    }
+
+    private static func rejectRelayError(_ raw: WireValue) throws -> WireValue {
+        guard try raw.field("type").text == "error" else { return raw }
+        let fields = try raw.object(keys: ["type", "schema_version", "code"], required: ["type", "schema_version", "code"])
+        guard try fields.required("schema_version").integer == 1 else { throw WireError.invalid }
+        throw relayError(try fields.required("code").text)
     }
 
     private func read(seconds: Double, maximum: Int) async throws -> WireValue {

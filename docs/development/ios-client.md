@@ -1,6 +1,6 @@
 # Native iOS client
 
-The optional iOS 17+ Swift 6 application is in `apps/Apple/iOS`, with E2EE records and identity handling in `apps/Apple/Shared/Crypto` and relay replication in `apps/Apple/Shared/Relay`. `EverythingIOS` is the iOS scheme in the shared Apple project. The Rust host owns execution independently of this app. This document records the source implementation and the validation that remains unavailable; it does not establish an Apple build or a successful phone-to-host conversation.
+The optional iOS 17+ Swift 6 application is in `apps/Apple/iOS`, with E2EE records and identity handling in `apps/Apple/Shared/Crypto` and relay replication in `apps/Apple/Shared/Relay`. `EverythingIOS` is the iOS scheme in the shared Apple project. The Rust host owns execution independently of this app. This document records the source implementation, the [Simulator protocol walkthrough](#simulator-protocol-walkthrough) and the validation that remains unavailable.
 
 ## Current-main integration and prerequisites
 
@@ -90,16 +90,30 @@ A separate disposable Swift executable compiled the actual Foundation-only datab
 
 The official toolchain archive's detached signature was verified using the published Swift 6.x release key `52BB7E3DE28A71BE22EC05FFEF80A866B47A981F`. Only a disposable compiler/runtime subset was extracted; no system toolchain, PATH or trust store was changed. These Linux checks do not typecheck SwiftUI, UIKit, AVFoundation, CryptoKit, Security, UserNotifications or Apple SQLite imports.
 
-The local environment has no Xcode, Apple SDK, Simulator or physical iPhone. Public CI can now perform actual Apple SDK compilation and analysis; historical billing-startup failures do not describe current availability. The earlier published client passed both schemes' SDK build and analysis in run `38827815604` attempt two, but that run predates the scene/acceptance corrections and this extraction. Fresh exact-head SDK results are required. Camera/privacy/accessibility, Keychain/file protection, native CryptoKit/Rust positive and negative interoperability, phone-to-host roundtrip, disconnected replay/event convergence, live steering/approval/revocation, notifications, scene suspension/cancellation cleanup and ATS behavior remain unverified on an Apple runtime. Do not claim these acceptance criteria from source review, Linux parsing or SDK compilation. Deferred automated verification is tracked in issue #32.
-
-On a supported macOS/Xcode installation, use the shared project scheme:
+CI and the static checks use the shared project scheme with signing disabled:
 
 ```sh
 xcodebuild -project apps/Apple/Everything.xcodeproj -scheme EverythingIOS -destination 'generic/platform=iOS Simulator' CODE_SIGNING_ALLOWED=NO build
 xcodebuild -project apps/Apple/Everything.xcodeproj -scheme EverythingIOS -destination 'generic/platform=iOS Simulator' CODE_SIGNING_ALLOWED=NO analyze
 ```
 
-Then use disposable host/relay state and an explicitly enrolled phone for the manual pairing, authenticated ciphertext exchange, restart/offline/replay, scope-limited command, denial/expiry/revocation and privacy checks. Do not use real user conversations or assert production readiness without that validation and the deferred security/automated review.
+An unsigned app has no `application-identifier` entitlement, so the iOS Keychain refuses its identity (`-34018`) and the app shows only the protected-identity error. The iOS target therefore no longer disables signing; Simulator builds are ad-hoc signed. A runnable Simulator app needs a plain build without `CODE_SIGNING_ALLOWED=NO`, for example `-destination 'platform=iOS Simulator,name=…' build`. Physical devices need the owner's development team.
+
+### Simulator protocol walkthrough
+
+On an iOS 27.0 Simulator, a plain Debug build installed, launched and opened its Keychain identity, showing the empty chat screen. A build with `CODE_SIGNING_ALLOWED=NO` showed the `-34018` failure above. Taps were not automated, so the SwiftUI screens, QR camera, approval UI and notifications were not exercised.
+
+Instead, a disposable command-line driver outside the repository compiled the actual `Shared/Crypto`, `Shared/Relay` and `Shared/Settings` sources for the Simulator. It ran inside the booted Simulator with `simctl spawn`, using a Simulator `application-identifier` entitlement, the real Keychain identity, `ReplicaService`, `ReplicaStore` and CryptoKit. It talked to a debug `everything-relay` and `everything serve` over `ws://127.0.0.1` with disposable state. The Host conversation's loopback model endpoint was unreachable, so no provider was contacted. Observations:
+
+- **Pairing.** The phone inspected the Host invitation and showed the Host's exact fingerprint. It created a request the Host approved for one selected conversation, then verified the Rust acceptance and pinned the Host. Both public identities were enrolled with the relay separately.
+- **Message roundtrip.** A message sent while the Host's relay session was down reached `relayed`. After the Host reconnected and the phone reconnected, sync applied `conversation_created`, `message_appended` (caused by the phone command), `task_created` and `task_status_changed`. The command became `completed`.
+- **Relay blindness.** The plaintext marker was absent from the relay SQLite database and WAL and present in the Host WAL.
+- **Reconnect and dedup.** Two more reconnect-and-sync runs kept the same sequences and event IDs, with no duplicates.
+- **Steering.** A steering command produced Host `steering_received` events. A second paired identity on a fresh Simulator caught up the full seven-event history.
+- **Revocation.** After relay revocation, the phone stopped with the identity error. Host owner `revoke_device` sends no revocation notice to the replica, so the client's signed revocation path was not exercised.
+- **Duplicate sessions.** A concurrent session for the same device makes the relay return `session_already_active` right after authentication. The client now retries with backoff and reconnects. The previous build treated this as a protocol violation and stopped permanently.
+
+Still unverified on an Apple runtime: UI interaction, camera, accessibility, approval resolution (no model produced a permission request), notifications, scene suspension, physical devices and ATS beyond loopback. Do not claim these from SDK compilation. Deferred automated verification is tracked in issue #32.
 
 ## Local appearance and notification preferences
 
