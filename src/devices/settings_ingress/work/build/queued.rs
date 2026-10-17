@@ -30,7 +30,7 @@ pub(in crate::devices::settings_ingress::work) struct QueuedReplyRegistry {
 }
 
 enum QueuedReplyEntry {
-    StartedReturned(StartedReturnedSettingsSend),
+    StartedReturned(Box<StartedReturnedSettingsSend>),
     Owned {
         returned: Option<ReturnedSettingsSend>,
         reply: Option<OwnedQueuedSettingsReply>,

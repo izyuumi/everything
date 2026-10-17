@@ -747,9 +747,9 @@ impl SettingsReceiveWork {
                 *witness = Some(loan);
                 return Err(SettingsStartedReturnFailure::ASSOCIATION);
             };
-            *entry = QueuedReplyEntry::StartedReturned(StartedReturnedSettingsSend {
+            *entry = QueuedReplyEntry::StartedReturned(Box::new(StartedReturnedSettingsSend {
                 payload: Some(StartedReturnPayload { owner, loan }),
-            });
+            }));
             let QueuedReplyEntry::StartedReturned(returned) = entry else {
                 return Err(SettingsStartedReturnFailure::ASSOCIATION);
             };
