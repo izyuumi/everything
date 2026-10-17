@@ -70,6 +70,68 @@ final class ReplicaSettingsAccessQualification: CustomStringConvertible, CustomD
     var debugDescription: String { description }
 }
 
+struct ReplicaSettingsBindRequestInput: CustomStringConvertible, CustomDebugStringConvertible {
+    let hostID: UUID
+    let bindingRequestID: UUID
+    let time: RemoteSettingsRequestTime
+    let requestedParentExpiresAt: UInt64
+    let grantExpiresAt: UInt64
+
+    fileprivate init(hostID: UUID, bindingRequestID: UUID, time: RemoteSettingsRequestTime,
+                     requestedParentExpiresAt: UInt64, grantExpiresAt: UInt64) {
+        self.hostID = hostID
+        self.bindingRequestID = bindingRequestID
+        self.time = time
+        self.requestedParentExpiresAt = requestedParentExpiresAt
+        self.grantExpiresAt = grantExpiresAt
+    }
+
+    var description: String { "ReplicaSettingsBindRequestInput([redacted])" }
+    var debugDescription: String { description }
+}
+
+struct ReplicaSettingsBindProjectionInput: CustomStringConvertible, CustomDebugStringConvertible {
+    let request: RemoteSettingsBindRequest
+    let requestMessageID: UUID
+    let wallFloor: UInt64
+    let grantExpiresAt: UInt64
+
+    fileprivate init(request: RemoteSettingsBindRequest, requestMessageID: UUID,
+                     wallFloor: UInt64, grantExpiresAt: UInt64) {
+        self.request = request
+        self.requestMessageID = requestMessageID
+        self.wallFloor = wallFloor
+        self.grantExpiresAt = grantExpiresAt
+    }
+
+    var description: String { "ReplicaSettingsBindProjectionInput([redacted])" }
+    var debugDescription: String { description }
+}
+
+final class ReplicaSettingsBindQualification: CustomStringConvertible, CustomDebugStringConvertible {
+    fileprivate let attempt: ReplicaService.SettingsBindReceiveAttempt
+    fileprivate let committed: CommittedReplicaSettingsReply
+
+    fileprivate init(attempt: ReplicaService.SettingsBindReceiveAttempt,
+                     committed: CommittedReplicaSettingsReply) {
+        self.attempt = attempt
+        self.committed = committed
+    }
+
+    func checkCurrent(for committed: CommittedReplicaSettingsReply,
+                      owner: isolated ReplicaService) throws {
+        try owner.checkSettingsBindQualification(self, committed: committed)
+    }
+
+    func consumeForBoundParent(for committed: CommittedReplicaSettingsReply,
+                              owner: isolated ReplicaService) throws {
+        try owner.consumeSettingsBindQualification(self, committed: committed)
+    }
+
+    var description: String { "ReplicaSettingsBindQualification([redacted])" }
+    var debugDescription: String { description }
+}
+
 actor ReplicaService {
     private let store: ReplicaStore
     private let identity: DeviceIdentity
@@ -93,11 +155,22 @@ actor ReplicaService {
     private var inflight: [UUID: ContinuousClock.Instant] = [:]
     private var acknowledgements = Set<UUID>()
     private var settingsScope: SettingsConnectionScope?
-    private var pendingSettingsAccess: PendingSettingsAccess?
+    private var pendingSettingsRequest: PendingSettingsRequest?
+
+    private var pendingSettingsAccess: PendingSettingsAccess? {
+        guard case .access(let pending) = pendingSettingsRequest else { return nil }
+        return pending
+    }
+
+    private var pendingSettingsBind: PendingSettingsBind? {
+        guard case .bind(let pending) = pendingSettingsRequest else { return nil }
+        return pending
+    }
     private var settingsReceive: SettingsReceiveOwner?
     private var settingsAccessDisplayCache: SettingsAccessDisplayCache?
+    private var settingsBindingAssociation: SettingsBindingAssociation?
 
-    private final class SettingsAccessDisplayCache: CustomStringConvertible, CustomDebugStringConvertible {
+    fileprivate final class SettingsAccessDisplayCache: CustomStringConvertible, CustomDebugStringConvertible {
         weak var scope: SettingsConnectionScope?
         let host: DevicePublicKeys
         let localID: UUID
@@ -153,13 +226,21 @@ actor ReplicaService {
         var debugDescription: String { description }
     }
 
-    fileprivate enum SettingsAccessPreparation: CustomStringConvertible, CustomDebugStringConvertible {
+    fileprivate enum SettingsRequestPreparation: CustomStringConvertible, CustomDebugStringConvertible {
         case waiting
         case preparing
         case prepared(EncryptedEnvelope)
         case receiving(EncryptedEnvelope)
 
-        var description: String { "SettingsAccessPreparation([redacted])" }
+        var description: String { "SettingsRequestPreparation([redacted])" }
+        var debugDescription: String { description }
+    }
+
+    private enum PendingSettingsRequest: CustomStringConvertible, CustomDebugStringConvertible {
+        case access(PendingSettingsAccess)
+        case bind(PendingSettingsBind)
+
+        var description: String { "PendingSettingsRequest([redacted])" }
         var debugDescription: String { description }
     }
 
@@ -170,7 +251,7 @@ actor ReplicaService {
         let wallFloor: UInt64
         let monotonicFloor: ContinuousClock.Instant
         let deadline: ContinuousClock.Instant
-        var phase = SettingsAccessPreparation.waiting
+        var phase = SettingsRequestPreparation.waiting
         var retired = false
         var consumed = false
 
@@ -189,6 +270,56 @@ actor ReplicaService {
         var debugDescription: String { description }
     }
 
+    fileprivate final class SettingsBindingAssociation: CustomStringConvertible, CustomDebugStringConvertible {
+        weak var scope: SettingsConnectionScope?
+        let handle: ReplicaSettingsRequestHandle
+        let input: ReplicaSettingsBindRequestInput
+        let wallFloor: UInt64
+        let monotonicFloor: ContinuousClock.Instant
+        let deadline: ContinuousClock.Instant
+        let requestedParentDeadline: ContinuousClock.Instant
+        var request: RemoteSettingsBindRequest?
+        var requestCaptured = false
+        var retired = false
+        var parent: ReplicaSettingsBoundParentProjection?
+        var parentDeadline: ContinuousClock.Instant?
+
+        init(scope: SettingsConnectionScope, handle: ReplicaSettingsRequestHandle,
+             input: ReplicaSettingsBindRequestInput, wallFloor: UInt64,
+             monotonicFloor: ContinuousClock.Instant, deadline: ContinuousClock.Instant,
+             requestedParentDeadline: ContinuousClock.Instant) {
+            self.scope = scope
+            self.handle = handle
+            self.input = input
+            self.wallFloor = wallFloor
+            self.monotonicFloor = monotonicFloor
+            self.deadline = deadline
+            self.requestedParentDeadline = requestedParentDeadline
+        }
+
+        var description: String { "SettingsBindingAssociation([redacted])" }
+        var debugDescription: String { description }
+    }
+
+    fileprivate final class PendingSettingsBind: CustomStringConvertible, CustomDebugStringConvertible {
+        let scope: SettingsConnectionScope
+        let cache: SettingsAccessDisplayCache
+        let association: SettingsBindingAssociation
+        var phase = SettingsRequestPreparation.waiting
+        var retired = false
+        var consumed = false
+
+        init(scope: SettingsConnectionScope, cache: SettingsAccessDisplayCache,
+             association: SettingsBindingAssociation) {
+            self.scope = scope
+            self.cache = cache
+            self.association = association
+        }
+
+        var description: String { "PendingSettingsBind([redacted])" }
+        var debugDescription: String { description }
+    }
+
     fileprivate final class SettingsReceiveTicket: Sendable, CustomStringConvertible, CustomDebugStringConvertible {
         let scope: SettingsConnectionScope
 
@@ -200,11 +331,19 @@ actor ReplicaService {
 
     private final class SettingsReceiveOwner: CustomStringConvertible, CustomDebugStringConvertible {
         let ticket: SettingsReceiveTicket
-        var attempt: SettingsAccessReceiveAttempt?
+        var attempt: SettingsReceiveAttempt?
 
         init(ticket: SettingsReceiveTicket) { self.ticket = ticket }
 
         var description: String { "SettingsReceiveOwner([redacted])" }
+        var debugDescription: String { description }
+    }
+
+    private enum SettingsReceiveAttempt: CustomStringConvertible, CustomDebugStringConvertible {
+        case access(SettingsAccessReceiveAttempt)
+        case bind(SettingsBindReceiveAttempt)
+
+        var description: String { "SettingsReceiveAttempt([redacted])" }
         var debugDescription: String { description }
     }
 
@@ -243,6 +382,45 @@ actor ReplicaService {
         }
 
         var description: String { "SettingsAccessReceiveAttempt([redacted])" }
+        var debugDescription: String { description }
+    }
+
+    fileprivate enum SettingsBindOriginal: CustomStringConvertible, CustomDebugStringConvertible {
+        case absent
+        case prepared(PendingSettingsBind, EncryptedEnvelope)
+
+        var description: String { "SettingsBindOriginal([redacted])" }
+        var debugDescription: String { description }
+    }
+
+    fileprivate final class SettingsBindReceiveAttempt: CustomStringConvertible, CustomDebugStringConvertible {
+        let issuer: ObjectIdentifier
+        let ticket: SettingsReceiveTicket
+        let received: ReceivedRelayFrame
+        let original: SettingsBindOriginal
+        var classified: ReplicaClassifiedDelivery?
+        var committed: CommittedReplicaSettingsReply?
+        var qualification = SettingsAccessQualificationState.unissued
+
+        init(issuer: ObjectIdentifier, ticket: SettingsReceiveTicket, received: ReceivedRelayFrame,
+             original: SettingsBindOriginal) {
+            self.issuer = issuer
+            self.ticket = ticket
+            self.received = received
+            self.original = original
+        }
+
+        var description: String { "SettingsBindReceiveAttempt([redacted])" }
+        var debugDescription: String { description }
+    }
+
+    private enum SettingsBindReceiveResult: CustomStringConvertible, CustomDebugStringConvertible {
+        case durable(ReplicaClassifiedDelivery)
+        case qualified(ReplicaSettingsBindQualification)
+        case duplicate(CommittedReplicaSettingsReply)
+        case refused(CommittedReplicaSettingsReply)
+
+        var description: String { "SettingsBindReceiveResult([redacted])" }
         var debugDescription: String { description }
     }
 
@@ -294,7 +472,7 @@ actor ReplicaService {
     func requestSettingsAccess() throws -> ReplicaSettingsRequestHandle {
         try Task.checkCancellation()
         guard let scope = settingsScope, isCurrentSettingsScope(scope) else { throw WireError.unavailable }
-        guard pendingSettingsAccess == nil else { throw WireError.queueFull }
+        guard pendingSettingsRequest == nil else { throw WireError.queueFull }
         let monotonicFloor = ContinuousClock.now
         let wallFloor = try WireID.now()
         let expires = wallFloor.addingReportingOverflow(30_000)
@@ -302,16 +480,94 @@ actor ReplicaService {
         let time = try RemoteSettingsRequestTime(issuedAt: wallFloor, expiresAt: expires.partialValue)
         let request = try RemoteSettingsAccessRequest(hostID: scope.host.deviceID, queryID: UUID(), time: time)
         let handle = ReplicaSettingsRequestHandle()
-        pendingSettingsAccess = PendingSettingsAccess(
+        pendingSettingsRequest = .access(PendingSettingsAccess(
             handle: handle, scope: scope, request: request, wallFloor: wallFloor,
             monotonicFloor: monotonicFloor, deadline: monotonicFloor.advanced(by: .milliseconds(30_000))
-        )
+        ))
         return handle
     }
 
+    func requestSettingsBind() throws -> ReplicaSettingsRequestHandle {
+        try Task.checkCancellation()
+        guard let scope = settingsScope, isCurrentSettingsScope(scope),
+              let cache = settingsAccessDisplayCache, cache.scope === scope else { throw WireError.unavailable }
+        guard pendingSettingsRequest == nil, settingsBindingAssociation == nil else { throw WireError.queueFull }
+        guard case .available = cache.projection.display.status,
+              let grantExpiresAt = cache.grantExpiresAt else { throw WireError.unavailable }
+        let monotonicFloor = ContinuousClock.now
+        let wallFloor = try WireID.now()
+        guard try isCurrentSettingsAccessDisplay(cache) else { throw WireError.unavailable }
+        let queryMaximum = wallFloor.addingReportingOverflow(30_000)
+        let parentMaximum = wallFloor.addingReportingOverflow(300_000)
+        guard !queryMaximum.overflow, !parentMaximum.overflow,
+              wallFloor >= cache.wallFloor, monotonicFloor >= cache.monotonicFloor else { throw WireError.expired }
+        let expiresAt = min(queryMaximum.partialValue, cache.expiresAt)
+        let parentExpiresAt = min(parentMaximum.partialValue, grantExpiresAt)
+        guard expiresAt > wallFloor, parentExpiresAt > wallFloor,
+              parentExpiresAt <= UInt64(Int64.max), parentExpiresAt - cache.wallFloor <= 330_000 else {
+            throw WireError.expired
+        }
+        let time = try RemoteSettingsRequestTime(issuedAt: wallFloor, expiresAt: expiresAt)
+        let deadline = min(monotonicFloor.advanced(by: .milliseconds(Int64(expiresAt - wallFloor))), cache.deadline)
+        let parentDeadline = min(
+            monotonicFloor.advanced(by: .milliseconds(Int64(parentExpiresAt - wallFloor))),
+            cache.monotonicFloor.advanced(by: .milliseconds(Int64(parentExpiresAt - cache.wallFloor)))
+        )
+        guard monotonicFloor < deadline, monotonicFloor < parentDeadline else { throw WireError.expired }
+        let handle = ReplicaSettingsRequestHandle()
+        let input = ReplicaSettingsBindRequestInput(hostID: scope.host.deviceID, bindingRequestID: UUID(),
+                                                   time: time, requestedParentExpiresAt: parentExpiresAt,
+                                                   grantExpiresAt: grantExpiresAt)
+        let association = SettingsBindingAssociation(
+            scope: scope, handle: handle, input: input, wallFloor: wallFloor,
+            monotonicFloor: monotonicFloor, deadline: deadline, requestedParentDeadline: parentDeadline
+        )
+        let pending = PendingSettingsBind(scope: scope, cache: cache, association: association)
+        settingsBindingAssociation = association
+        pendingSettingsRequest = .bind(pending)
+        do {
+            let request = try cache.projection.prepareBindRequest(owner: self)
+            guard pendingSettingsBind === pending, association.request == nil,
+                  request.hostID == input.hostID, request.bindingRequestID == input.bindingRequestID,
+                  request.time == input.time, request.requestedParentExpiresAt == input.requestedParentExpiresAt else {
+                throw WireError.conflict
+            }
+            association.request = request
+            return handle
+        } catch {
+            retirePendingSettingsBind(pending)
+            throw error
+        }
+    }
+
     func cancelSettings(_ handle: ReplicaSettingsRequestHandle) {
-        guard let pending = pendingSettingsAccess, pending.handle === handle else { return }
-        retirePendingSettingsAccess(pending)
+        if let pending = pendingSettingsAccess, pending.handle === handle {
+            retirePendingSettingsAccess(pending)
+        } else if let pending = pendingSettingsBind, pending.association.handle === handle {
+            retirePendingSettingsBind(pending)
+        }
+        if let association = settingsBindingAssociation, association.handle === handle {
+            association.retired = true
+        }
+    }
+
+    func captureSettingsBindRequestInput(_ projection: ReplicaSettingsAccessProjection) throws -> ReplicaSettingsBindRequestInput {
+        try Task.checkCancellation()
+        guard let pending = pendingSettingsBind, !pending.retired, !pending.consumed,
+              case .waiting = pending.phase, let cache = settingsAccessDisplayCache,
+              cache === pending.cache, cache.projection === projection,
+              cache.scope === pending.scope, try isCurrentSettingsAccessDisplay(cache),
+              settingsBindingAssociation === pending.association,
+              pending.association.scope === pending.scope, !pending.association.retired,
+              !pending.association.requestCaptured, pending.association.request == nil,
+              isCurrentSettingsScope(pending.scope) else { throw WireError.unavailable }
+        let association = pending.association
+        let monotonic = ContinuousClock.now
+        let wall = try WireID.now()
+        guard wall >= association.wallFloor, wall < association.input.time.expiresAt,
+              monotonic >= association.monotonicFloor, monotonic < association.deadline else { throw WireError.expired }
+        association.requestCaptured = true
+        return association.input
     }
 
     func configureRelay(_ value: String) async throws {
@@ -599,6 +855,7 @@ actor ReplicaService {
     private func pump(socket: RelayConnection, synchronize refresh: Bool) async throws {
         try Task.checkCancellation()
         try await preparePendingSettingsAccess(socket: socket)
+        try await preparePendingSettingsBind(socket: socket)
         try await store.checkActive()
         let inboxDrained = try await drainInbox()
         if refresh, inboxDrained {
@@ -737,7 +994,7 @@ actor ReplicaService {
         guard localID == identity.publicKeys.deviceID else { throw WireError.identity }
         try await store.checkActive(host: host)
         try checkSettingsConnection(socket: socket, epoch: captured)
-        guard settingsScope == nil, pendingSettingsAccess == nil, settingsReceive == nil else { throw WireError.queueFull }
+        guard settingsScope == nil, pendingSettingsRequest == nil, settingsReceive == nil else { throw WireError.queueFull }
         settingsScope = SettingsConnectionScope(socket: socket, host: host, localID: identity.publicKeys.deviceID, epoch: captured)
     }
 
@@ -747,7 +1004,17 @@ actor ReplicaService {
         case .preparing, .receiving: return
         case .waiting, .prepared: break
         }
-        if pendingSettingsAccess === pending { pendingSettingsAccess = nil }
+        if pendingSettingsAccess === pending { pendingSettingsRequest = nil }
+    }
+
+    private func retirePendingSettingsBind(_ pending: PendingSettingsBind) {
+        pending.retired = true
+        if !pending.consumed { pending.association.retired = true }
+        switch pending.phase {
+        case .preparing, .receiving: return
+        case .waiting, .prepared: break
+        }
+        if pendingSettingsBind === pending { pendingSettingsRequest = nil }
     }
 
     private func retireSettingsScope(socket: RelayConnection? = nil) {
@@ -756,6 +1023,13 @@ actor ReplicaService {
         }
         if let pending = pendingSettingsAccess, socket == nil || pending.scope.socket === socket {
             retirePendingSettingsAccess(pending)
+        }
+        if let pending = pendingSettingsBind, socket == nil || pending.scope.socket === socket {
+            retirePendingSettingsBind(pending)
+        }
+        if let association = settingsBindingAssociation,
+           socket == nil || association.scope?.socket === socket {
+            association.retired = true
         }
     }
 
@@ -820,6 +1094,73 @@ actor ReplicaService {
         }
     }
 
+    private func isCurrentSettingsBindOriginal(_ pending: PendingSettingsBind) throws -> Bool {
+        let association = pending.association
+        guard pendingSettingsBind === pending, !pending.retired, !pending.consumed,
+              settingsBindingAssociation === association, !association.retired,
+              association.scope === pending.scope, association.requestCaptured,
+              association.request != nil, isCurrentSettingsScope(pending.scope),
+              settingsAccessDisplayCache === pending.cache, pending.cache.scope === pending.scope,
+              try isCurrentSettingsAccessDisplay(pending.cache) else { return false }
+        let monotonic = ContinuousClock.now
+        let wall = try WireID.now()
+        return wall >= association.wallFloor && wall < association.input.time.expiresAt
+            && monotonic >= association.monotonicFloor && monotonic < association.deadline
+    }
+
+    private func checkSettingsBindStore(_ pending: PendingSettingsBind) async throws -> Bool {
+        guard try isCurrentSettingsBindOriginal(pending) else { return false }
+        let scope = pending.scope
+        try await store.checkActive(host: scope.host)
+        guard try isCurrentSettingsBindOriginal(pending) else { return false }
+        let localID = try await store.identityID()
+        guard try isCurrentSettingsBindOriginal(pending) else { return false }
+        guard localID == scope.localID else { throw WireError.identity }
+        return true
+    }
+
+    private func prepareSettingsBindEnvelope(_ pending: PendingSettingsBind) async throws -> EncryptedEnvelope? {
+        guard try isCurrentSettingsBindOriginal(pending) else { return nil }
+        guard try await checkSettingsBindStore(pending), try isCurrentSettingsBindOriginal(pending),
+              let request = pending.association.request else { return nil }
+        let envelope = try await identity.sealSettings(request, recipient: pending.scope.host)
+        guard try isCurrentSettingsBindOriginal(pending) else { return nil }
+        guard try await checkSettingsBindStore(pending), try isCurrentSettingsBindOriginal(pending) else { return nil }
+        guard envelope.header.sender == pending.scope.localID,
+              envelope.header.recipient == request.hostID,
+              envelope.header.expires == request.time.expiresAt,
+              envelope.header.created >= pending.association.wallFloor,
+              envelope.header.expires > envelope.header.created,
+              envelope.header.expires - envelope.header.created <= 30_000 else { throw WireError.identity }
+        return envelope
+    }
+
+    private func preparePendingSettingsBind(socket: RelayConnection) async throws {
+        guard let pending = pendingSettingsBind, pending.scope.socket === socket else { return }
+        guard try isCurrentSettingsBindOriginal(pending) else {
+            retirePendingSettingsBind(pending)
+            return
+        }
+        guard case .waiting = pending.phase else { return }
+        pending.phase = .preparing
+        do {
+            do {
+                let envelope = try await prepareSettingsBindEnvelope(pending)
+                if let envelope, try isCurrentSettingsBindOriginal(pending) {
+                    pending.phase = .prepared(envelope)
+                }
+            }
+            if case .preparing = pending.phase {
+                pending.phase = .waiting
+                retirePendingSettingsBind(pending)
+            }
+        } catch {
+            pending.phase = .waiting
+            retirePendingSettingsBind(pending)
+            throw error
+        }
+    }
+
     private func claimSettingsReceive(socket: RelayConnection) throws -> SettingsReceiveTicket {
         try Task.checkCancellation()
         guard let scope = settingsScope, scope.socket === socket, isCurrentSettingsScope(scope) else { throw WireError.unavailable }
@@ -864,7 +1205,7 @@ actor ReplicaService {
         }
         let attempt = SettingsAccessReceiveAttempt(issuer: ObjectIdentifier(self), ticket: ticket,
                                                    received: received, original: original)
-        owner.attempt = attempt
+        owner.attempt = .access(attempt)
         return attempt
     }
 
@@ -872,7 +1213,8 @@ actor ReplicaService {
         try Task.checkCancellation()
         guard attempt.issuer == ObjectIdentifier(self),
               let owner = settingsReceive, owner.ticket === attempt.ticket,
-              owner.attempt === attempt, isCurrentSettingsScope(attempt.ticket.scope) else {
+              case .access(let registered) = owner.attempt, registered === attempt,
+              isCurrentSettingsScope(attempt.ticket.scope) else {
             throw WireError.unavailable
         }
     }
@@ -1085,14 +1427,207 @@ actor ReplicaService {
                                                freshness: current ? .currentConnectionObservation : .stale)
     }
 
+    private func beginSettingsBindReceive(_ received: ReceivedRelayFrame,
+                                         ticket: SettingsReceiveTicket) throws -> SettingsBindReceiveAttempt {
+        try Task.checkCancellation()
+        guard let owner = settingsReceive, owner.ticket === ticket,
+              isCurrentSettingsScope(ticket.scope) else { throw WireError.unavailable }
+        guard owner.attempt == nil else { throw WireError.conflict }
+        guard case .delivery = received.frame else { throw WireError.invalid }
+        let original: SettingsBindOriginal
+        if let pending = pendingSettingsBind {
+            guard pending.scope === ticket.scope else { throw WireError.conflict }
+            let current = try isCurrentSettingsBindOriginal(pending)
+            if case .prepared(let prepared) = pending.phase, current {
+                pending.phase = .receiving(prepared)
+                original = .prepared(pending, prepared)
+            } else {
+                if !current { retirePendingSettingsBind(pending) }
+                original = .absent
+            }
+        } else {
+            original = .absent
+        }
+        let attempt = SettingsBindReceiveAttempt(issuer: ObjectIdentifier(self), ticket: ticket,
+                                                 received: received, original: original)
+        owner.attempt = .bind(attempt)
+        return attempt
+    }
+
+    private func checkSettingsBindAttempt(_ attempt: SettingsBindReceiveAttempt) throws {
+        try Task.checkCancellation()
+        guard attempt.issuer == ObjectIdentifier(self),
+              let owner = settingsReceive, owner.ticket === attempt.ticket,
+              case .bind(let registered) = owner.attempt, registered === attempt,
+              isCurrentSettingsScope(attempt.ticket.scope) else { throw WireError.unavailable }
+    }
+
+    private func currentSettingsBindOriginal(_ attempt: SettingsBindReceiveAttempt) throws -> PendingSettingsBind? {
+        guard case .prepared(let pending, let prepared) = attempt.original else { return nil }
+        guard pendingSettingsBind === pending, pending.scope === attempt.ticket.scope,
+              case .receiving(let retained) = pending.phase,
+              sameSettingsEnvelope(retained, prepared) else {
+            retireSettingsScope(socket: attempt.ticket.scope.socket)
+            throw WireError.conflict
+        }
+        guard try isCurrentSettingsBindOriginal(pending) else {
+            retirePendingSettingsBind(pending)
+            return nil
+        }
+        return pending
+    }
+
+    private func checkSettingsBindReceiveStore(_ attempt: SettingsBindReceiveAttempt) async throws {
+        try checkSettingsBindAttempt(attempt)
+        _ = try currentSettingsBindOriginal(attempt)
+        let scope = attempt.ticket.scope
+        try await store.checkActive(host: scope.host)
+        try checkSettingsBindAttempt(attempt)
+        _ = try currentSettingsBindOriginal(attempt)
+        let localID = try await store.identityID()
+        try checkSettingsBindAttempt(attempt)
+        _ = try currentSettingsBindOriginal(attempt)
+        guard localID == scope.localID else { throw WireError.identity }
+    }
+
+    private func matchesSettingsBindOriginal(_ attempt: SettingsBindReceiveAttempt,
+                                            metadata: ReplicaSettingsReplyMetadata) throws -> Bool {
+        guard let pending = try currentSettingsBindOriginal(attempt),
+              case .prepared(_, let prepared) = attempt.original,
+              let request = pending.association.request,
+              case .bind(let bindingRequestID) = metadata.correlation else { return false }
+        let scope = attempt.ticket.scope
+        return metadata.inReplyTo == prepared.header.messageID && bindingRequestID == request.bindingRequestID
+            && metadata.generation == request.generation && request.hostID == scope.host.deviceID
+            && metadata.header.sender == scope.host.deviceID && metadata.header.recipient == scope.localID
+            && prepared.header.sender == scope.localID && prepared.header.recipient == scope.host.deviceID
+            && prepared.header.expires == request.time.expiresAt
+            && prepared.header.created >= pending.association.wallFloor
+            && prepared.header.expires > prepared.header.created
+            && prepared.header.expires - prepared.header.created <= 30_000
+    }
+
+    private func classifySettingsBindReceive(_ received: ReceivedRelayFrame,
+                                            ticket: SettingsReceiveTicket) async throws -> SettingsBindReceiveResult {
+        let attempt = try beginSettingsBindReceive(received, ticket: ticket)
+        try await checkSettingsBindReceiveStore(attempt)
+        try checkSettingsBindAttempt(attempt)
+        let classified = try await identity.receiveClassified(received, host: ticket.scope.host, into: store)
+        attempt.classified = classified
+        try checkSettingsBindAttempt(attempt)
+        _ = try currentSettingsBindOriginal(attempt)
+        guard classified.matchesReceivedFrame(received) else { throw WireError.identity }
+        try await checkSettingsBindReceiveStore(attempt)
+        try checkSettingsBindAttempt(attempt)
+        let verified: VerifiedReplicaSettingsReply
+        switch classified.result {
+        case .ordinary, .refused:
+            return .durable(classified)
+        case .settingsAccess(let proof), .settingsBind(let proof):
+            verified = proof
+        }
+        guard verified.matchesVerifiedPeer(ticket.scope.host, localID: ticket.scope.localID) else {
+            throw WireError.identity
+        }
+        let committed = try await verified.commitMetadata(into: store)
+        attempt.committed = committed
+        try checkSettingsBindAttempt(attempt)
+        _ = try currentSettingsBindOriginal(attempt)
+        try await checkSettingsBindReceiveStore(attempt)
+        try checkSettingsBindAttempt(attempt)
+        guard committed.matchesVerifiedPeer(ticket.scope.host, localID: ticket.scope.localID) else {
+            throw WireError.identity
+        }
+        guard case .settingsBind = classified.result,
+              try matchesSettingsBindOriginal(attempt, metadata: verified.metadata),
+              try matchesSettingsBindOriginal(attempt, metadata: committed.metadata) else {
+            return .refused(committed)
+        }
+        guard case .fresh = committed.disposition else { return .duplicate(committed) }
+        guard case .unissued = attempt.qualification else { throw WireError.conflict }
+        let qualification = ReplicaSettingsBindQualification(attempt: attempt, committed: committed)
+        attempt.qualification = .issued(ObjectIdentifier(qualification))
+        return .qualified(qualification)
+    }
+
+    fileprivate func checkSettingsBindQualification(_ qualification: ReplicaSettingsBindQualification,
+                                                   committed: CommittedReplicaSettingsReply) throws {
+        let attempt = qualification.attempt
+        try checkSettingsBindAttempt(attempt)
+        guard qualification.committed === committed, attempt.committed === committed,
+              case .issued(let identifier) = attempt.qualification,
+              identifier == ObjectIdentifier(qualification),
+              case .fresh = committed.disposition,
+              let classified = attempt.classified, classified.matchesReceivedFrame(attempt.received),
+              case .settingsBind(let verified) = classified.result,
+              verified.matchesVerifiedPeer(attempt.ticket.scope.host, localID: attempt.ticket.scope.localID),
+              committed.matchesVerifiedPeer(attempt.ticket.scope.host, localID: attempt.ticket.scope.localID),
+              try matchesSettingsBindOriginal(attempt, metadata: verified.metadata),
+              try matchesSettingsBindOriginal(attempt, metadata: committed.metadata) else { throw WireError.unavailable }
+    }
+
+    fileprivate func consumeSettingsBindQualification(_ qualification: ReplicaSettingsBindQualification,
+                                                     committed: CommittedReplicaSettingsReply) throws {
+        try checkSettingsBindQualification(qualification, committed: committed)
+        guard let pending = try currentSettingsBindOriginal(qualification.attempt) else { throw WireError.unavailable }
+        qualification.attempt.qualification = .consumed
+        pending.consumed = true
+        retirePendingSettingsBind(pending)
+    }
+
+    private func recheckSettingsBindQualification(_ qualification: ReplicaSettingsBindQualification) async throws {
+        try checkSettingsBindQualification(qualification, committed: qualification.committed)
+        try await checkSettingsBindReceiveStore(qualification.attempt)
+        try checkSettingsBindQualification(qualification, committed: qualification.committed)
+    }
+
+    func checkSettingsBindProjection(_ qualification: ReplicaSettingsBindQualification,
+                                     committed: CommittedReplicaSettingsReply) throws -> ReplicaSettingsBindProjectionInput {
+        try checkSettingsBindQualification(qualification, committed: committed)
+        guard let pending = try currentSettingsBindOriginal(qualification.attempt),
+              case .prepared(_, let prepared) = qualification.attempt.original,
+              let request = pending.association.request else { throw WireError.unavailable }
+        let header = committed.metadata.header
+        guard header.created >= pending.association.wallFloor else { throw WireError.invalid }
+        return ReplicaSettingsBindProjectionInput(request: request, requestMessageID: prepared.header.messageID,
+                                                 wallFloor: pending.association.wallFloor,
+                                                 grantExpiresAt: pending.association.input.grantExpiresAt)
+    }
+
+    private func adoptSettingsBoundParent(_ qualification: ReplicaSettingsBindQualification) async throws {
+        try await recheckSettingsBindQualification(qualification)
+        _ = try checkSettingsBindProjection(qualification, committed: qualification.committed)
+        guard let pending = try currentSettingsBindOriginal(qualification.attempt) else { throw WireError.unavailable }
+        let association = pending.association
+        let scope = pending.scope
+        guard settingsBindingAssociation === association, association.parent == nil,
+              association.parentDeadline == nil else { throw WireError.conflict }
+        let projection = try qualification.committed.projectBoundParent(qualifiedBy: qualification, owner: self)
+        let requestedExpiry = association.input.requestedParentExpiresAt
+        guard projection.expiresAt > association.wallFloor, projection.expiresAt <= requestedExpiry else { throw WireError.expired }
+        let clip = requestedExpiry - projection.expiresAt
+        guard clip <= 300_000 else { throw WireError.expired }
+        let deadline = association.requestedParentDeadline.advanced(by: .milliseconds(-Int64(clip)))
+        let monotonic = ContinuousClock.now
+        let wall = try WireID.now()
+        guard settingsBindingAssociation === association, !association.retired,
+              association.scope === scope, isCurrentSettingsScope(scope),
+              wall >= association.wallFloor, wall < projection.expiresAt,
+              monotonic >= association.monotonicFloor, monotonic < deadline else { throw WireError.expired }
+        association.parent = projection
+        association.parentDeadline = deadline
+    }
+
     private func finishSettingsReceive(_ ticket: SettingsReceiveTicket) throws {
         guard let owner = settingsReceive, owner.ticket === ticket else {
             retireSettingsScope(socket: ticket.scope.socket)
             throw WireError.conflict
         }
-        var completion: (PendingSettingsAccess, EncryptedEnvelope, Bool)?
+        var accessCompletion: (PendingSettingsAccess, EncryptedEnvelope, Bool)?
+        var bindCompletion: (PendingSettingsBind, EncryptedEnvelope, Bool)?
         do {
-            if let attempt = owner.attempt {
+            switch owner.attempt {
+            case .access(let attempt):
                 guard attempt.issuer == ObjectIdentifier(self), attempt.ticket === ticket else {
                     retireSettingsScope(socket: ticket.scope.socket)
                     throw WireError.conflict
@@ -1104,20 +1639,47 @@ actor ReplicaService {
                         retireSettingsScope(socket: ticket.scope.socket)
                         throw WireError.conflict
                     }
-                    completion = (pending, prepared, try isCurrentSettingsOriginal(pending))
+                    accessCompletion = (pending, prepared, try isCurrentSettingsOriginal(pending))
                 }
                 attempt.classified = nil
                 attempt.committed = nil
-                owner.attempt = nil
+            case .bind(let attempt):
+                guard attempt.issuer == ObjectIdentifier(self), attempt.ticket === ticket else {
+                    retireSettingsScope(socket: ticket.scope.socket)
+                    throw WireError.conflict
+                }
+                if case .prepared(let pending, let prepared) = attempt.original {
+                    guard pendingSettingsBind === pending, pending.scope === ticket.scope,
+                          case .receiving(let retained) = pending.phase,
+                          sameSettingsEnvelope(retained, prepared) else {
+                        retireSettingsScope(socket: ticket.scope.socket)
+                        throw WireError.conflict
+                    }
+                    bindCompletion = (pending, prepared, try isCurrentSettingsBindOriginal(pending))
+                }
+                attempt.classified = nil
+                attempt.committed = nil
+            case nil: break
             }
+            owner.attempt = nil
         }
-        if let (pending, prepared, current) = completion {
+        if let (pending, prepared, current) = accessCompletion {
             if current {
                 pending.phase = .prepared(prepared)
             } else {
                 pending.retired = true
                 pending.phase = .waiting
-                pendingSettingsAccess = nil
+                pendingSettingsRequest = nil
+            }
+        }
+        if let (pending, prepared, current) = bindCompletion {
+            if current {
+                pending.phase = .prepared(prepared)
+            } else {
+                pending.retired = true
+                if !pending.consumed { pending.association.retired = true }
+                pending.phase = .waiting
+                pendingSettingsRequest = nil
             }
         }
         settingsReceive = nil

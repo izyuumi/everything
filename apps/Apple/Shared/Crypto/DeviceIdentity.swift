@@ -171,7 +171,30 @@ final class ReplicaSettingsAccessProjection: Sendable, CustomStringConvertible, 
         self.generation = generation
     }
 
+    func prepareBindRequest(owner: isolated ReplicaService) throws -> RemoteSettingsBindRequest {
+        let input = try owner.captureSettingsBindRequestInput(self)
+        guard let generation, let grantExpiresAt, grantExpiresAt == input.grantExpiresAt,
+              input.requestedParentExpiresAt <= grantExpiresAt else { throw WireError.unavailable }
+        guard case .available = display.status else { throw WireError.unavailable }
+        return try RemoteSettingsBindRequest(hostID: input.hostID, generation: generation,
+                                             bindingRequestID: input.bindingRequestID, time: input.time,
+                                             requestedParentExpiresAt: input.requestedParentExpiresAt)
+    }
+
     var description: String { "ReplicaSettingsAccessProjection([redacted])" }
+    var debugDescription: String { description }
+}
+
+final class ReplicaSettingsBoundParentProjection: Sendable, CustomStringConvertible, CustomDebugStringConvertible {
+    private let parent: RemoteSettingsParent
+    let expiresAt: UInt64
+
+    fileprivate init(parent: RemoteSettingsParent, expiresAt: UInt64) {
+        self.parent = parent
+        self.expiresAt = expiresAt
+    }
+
+    var description: String { "ReplicaSettingsBoundParentProjection([redacted])" }
     var debugDescription: String { description }
 }
 
@@ -247,6 +270,29 @@ final class VerifiedReplicaSettingsReply: Sendable, CustomStringConvertible, Cus
         }
     }
 
+    fileprivate func projectBoundParent(committed: CommittedReplicaSettingsReply,
+                                         qualification: ReplicaSettingsBindQualification,
+                                         owner: isolated ReplicaService) throws -> ReplicaSettingsBoundParentProjection {
+        guard committed.matchesVerifiedObject(self) else { throw WireError.identity }
+        let input = try owner.checkSettingsBindProjection(qualification, committed: committed)
+        let now = try WireID.now()
+        try envelope.header.validate(now: now)
+        guard envelope.header.expires > envelope.header.created,
+              envelope.header.expires - envelope.header.created <= 60_000,
+              envelope.header.created >= input.wallFloor else { throw WireError.invalid }
+        guard case .bind(let reply) = body,
+              reply.hostID == input.request.hostID,
+              reply.inReplyTo == input.requestMessageID,
+              reply.bindingRequestID == input.request.bindingRequestID,
+              reply.parent.generation == input.request.generation else { throw WireError.identity }
+        guard reply.expiresAt > now, reply.expiresAt > input.wallFloor,
+              reply.expiresAt <= input.request.requestedParentExpiresAt,
+              reply.expiresAt <= input.grantExpiresAt,
+              envelope.header.expires <= reply.expiresAt else { throw WireError.expired }
+        try qualification.consumeForBoundParent(for: committed, owner: owner)
+        return ReplicaSettingsBoundParentProjection(parent: reply.parent, expiresAt: reply.expiresAt)
+    }
+
     var description: String { "VerifiedReplicaSettingsReply([redacted])" }
     var debugDescription: String { description }
 }
@@ -274,6 +320,12 @@ final class CommittedReplicaSettingsReply: Sendable, CustomStringConvertible, Cu
                               owner: isolated ReplicaService) throws -> ReplicaSettingsAccessProjection {
         try qualification.checkCurrent(for: self, owner: owner)
         return try verified.projectAccessDisplay(committed: self, qualification: qualification, owner: owner)
+    }
+
+    func projectBoundParent(qualifiedBy qualification: ReplicaSettingsBindQualification,
+                            owner: isolated ReplicaService) throws -> ReplicaSettingsBoundParentProjection {
+        try qualification.checkCurrent(for: self, owner: owner)
+        return try verified.projectBoundParent(committed: self, qualification: qualification, owner: owner)
     }
 
     var description: String { "CommittedReplicaSettingsReply([redacted])" }
