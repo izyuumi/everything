@@ -711,7 +711,11 @@ impl Store {
 
     pub fn accept_transport_outbox(&self, message_id: &str) -> StorageResult<()> {
         validate_id(message_id)?;
-        self.connection()?.execute("DELETE FROM outbox WHERE id = ?1 AND EXISTS (SELECT 1 FROM transport_outbox t WHERE t.message_id = outbox.id)", [message_id])?;
+        let mut connection = self.connection()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        super::settings_transport::require_ordinary_outbox(&transaction, message_id)?;
+        transaction.execute("DELETE FROM outbox WHERE id = ?1 AND EXISTS (SELECT 1 FROM transport_outbox t WHERE t.message_id = outbox.id)", [message_id])?;
+        transaction.commit()?;
         Ok(())
     }
 
@@ -720,10 +724,10 @@ impl Store {
         let mut connection = self.connection()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let expired_outbox_ids = {
-            let mut statement = transaction.prepare("SELECT message_id FROM transport_outbox WHERE expires_at <= ?1 ORDER BY message_id LIMIT 1024")?;
+            let mut statement = transaction.prepare("SELECT message_id FROM transport_outbox WHERE expires_at <= ?1 AND NOT EXISTS (SELECT 1 FROM settings_transport_private_outbox AS p WHERE p.message_id = transport_outbox.message_id) ORDER BY message_id LIMIT 1024")?;
             collect_rows(statement.query_map([now], |row| row.get::<_, String>(0))?)?
         };
-        transaction.execute("DELETE FROM outbox WHERE id IN (SELECT message_id FROM transport_outbox WHERE expires_at <= ?1)", [now])?;
+        transaction.execute("DELETE FROM outbox WHERE id IN (SELECT message_id FROM transport_outbox WHERE expires_at <= ?1 AND NOT EXISTS (SELECT 1 FROM settings_transport_private_outbox AS p WHERE p.message_id = transport_outbox.message_id))", [now])?;
         let expired_replay_markers = transaction.execute(
             "DELETE FROM transport_inbox WHERE expires_at <= ?1 AND state != 'pending'",
             [now],

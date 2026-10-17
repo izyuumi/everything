@@ -49,7 +49,11 @@ The two new private tables begin empty. Their own fresh admission guards provide
 
 `require_ordinary_outbox` checks that same actual table fact before `acknowledge_outbox` changes delivery state or `confirm_transport_outbox` reads a candidate ciphertext. A tagged row returns the existing typed `StorageError::TransportConflict` with the fixed message `private settings outbox requires its owned transport`. No private payload or incoming identifier is formatted into that error. Generic confirmation cannot turn a private row into an ordinary send candidate. The private root trigger also refuses a non-null delivery flag or replacement of its ciphertext identity, recipient, bytes and creation time.
 
-Existing transport acceptance deletion, expiry/revocation deletion and valid defer bookkeeping remain available. Their deletion/cascade behavior is not a new authorization or refund guarantee. This foundation does not implement the future private candidate lookup, current-owner send gate or reply-reservation release policy, and it sends no private row.
+`accept_transport_outbox` checks the same private provenance in one Immediate transaction before its existing exact transport-root deletion and observed commit. A tagged private row returns the same fixed typed conflict before deletion. Missing ordinary identifiers remain successful no-ops.
+
+`maintain_transport` excludes actual private provenance from both its expired-identifier report query and matching expiry deletion in the same existing Immediate transaction. Ordinary expiry filters, report ordering and limit, replay-marker pruning, synchronization offers and command-payload archival remain unchanged. Private ciphertext expiry must use its actual owned disposition path rather than generic maintenance.
+
+Explicit revocation deletion and valid defer bookkeeping remain unchanged. These exclusions do not authorize private sending, release a reservation or private charge, prove no effects, retire an owner or establish clean drain. They add no private dispatcher or runtime observation.
 
 ## Future producer boundary
 
