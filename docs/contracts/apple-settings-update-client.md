@@ -4,7 +4,7 @@ The Identity/Service source implements one narrow embedding-preference Update on
 
 ## Capture and genuine Bound parent
 
-The MainActor gesture captures ContinuousClock before wall time, one Original request UUID, the actual Service, opaque foreground scope and original Bind handle before a caller Task. It captures a positive expected Settings revision and at least one optional embeddings-enabled or dimensions change. Nil means no change; `backendDefault` is an explicit dimension change. A selected dimension is bounded to 1...65536, without promising backend support.
+The MainActor gesture captures ContinuousClock before wall time, one Original request UUID, the actual Service, opaque connection scope and original Bind handle before a caller Task. It captures a positive expected Settings revision and at least one optional embeddings-enabled or dimensions change. Nil means no change; `backendDefault` is an explicit dimension change. A selected dimension is bounded to 1...65536, without promising backend support.
 
 Taking the gesture input and admitting that immutable input have separate native once fences. Admission requires the same Service, scope, socket, actual Bind association and its genuine private adopted Bound parent. An identical still-retained pending input can return its original handle; it cannot create another Original. The writable-key ceiling was copied once from the same authenticated Access summary when that Bind association was created. Each supplied preference must fit that historical ceiling. This local ceiling cannot establish current Host permission: the Host's live grant, read/write scope, supported configuration and expected-revision SQL checks remain authoritative.
 
