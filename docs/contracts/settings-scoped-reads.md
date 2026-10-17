@@ -1,63 +1,28 @@
-# Scoped Settings read DATA
+# Scoped Settings read DATA (Swift only)
 
-The registered Rust `devices/settings_ingress/read.rs` and `devices/settings_read_reply.rs` leaves define closed version-one DATA for scoped Host values and fresh permanent Original inspection. These codecs create no authority. Actual [Read sources](settings-read-sources.md), [query qualification](settings-read-qualification.md), [receipts](settings-read-receipts.md), [Snapshot publication](settings-read-replies.md) and [Original inspection publication](settings-original-inspection-publication.md) supply the separate internal consumers. The [Apple Snapshot client](apple-settings-snapshot-client.md) now supplies explicit request/send/Fresh adoption and read-only value display; Host private transport and inspection-client adoption remain incomplete. AccessSummary remains grant metadata rather than setting values.
+`apps/Apple/Shared/Settings/RemoteSettingsReadWire.swift`, registered in both EverythingMac and EverythingIOS, encodes Snapshot and Original-inspection requests and decodes their replies. There is no Rust counterpart in this tree. The Host does not answer these requests: it records such packets as rejected (`settings_unavailable`) and ACKs them; see [Access transport](settings-access-transport.md). The iOS Settings screen does not expose these controls.
 
-## Requests and correlation
+## Requests
 
-The existing outer grammar remains `schema_version:1,payload:{kind:"settings",version:1,host_id,message}`. A read message is `kind:"query",query_id,body`. Snapshot body is `kind:"snapshot",parent,keys,time`; inspection body is `kind:"inspect_original",parent,request_id,operation_id,time`. Parent has actual existing `parent_id,generation`; generation has `grant_id,grant_revision,host_epoch,connection_epoch`. Time has `issued_at,expires_at`.
+Both use the shared outer packet `schema_version:1, payload:{kind:"settings", version:1, host_id, message:{kind:"query", query_id, body}}`.
 
-The pure decoder accepts at most32768 UTF-8 bytes. Objects are closed, including every nested parent/generation/time record; canonical nonnil UUID syntax, actual integer ranges, duplicate fields and trailing input are checked through established serde decoding. The nullable inspection operation_id is required: omission, a nil/noncanonical UUID and a non-string/non-null value fail. Host/query/target identities and positive signed-range times are validated. The inner interval is at most30000ms. Snapshot keys must be a nonempty, unique, declaration-order-sorted subset of the exact five version-one Host keys; notification/OS keys are rejected. Inspection query_id differs from its target original request_id.
+| Body | Fields |
+| --- | --- |
+| Snapshot | `kind:"snapshot"`, `parent`, `keys`, `time` |
+| Original inspection | `kind:"inspect_original"`, `parent`, `request_id`, `operation_id` (nullable), `time` |
 
-This is DATA validation only. The real envelope/currentness boundaries must independently enforce the49152 complete encrypted request family, existing private-frame/ordinary limits, full requesting peer/current Host identity, fixed original wall/Instant floors, live current Bind parent/generation and current R. Query UUID and encrypted request/response IDs remain different identities; the encoder can check the supplied request MessageId differs from query_id, while each actual producer's sealer owns and checks its new response ID.
+`parent` is `parent_id` plus `generation` (`grant_id`, `grant_revision`, `host_epoch`, `connection_epoch`). `time` is `issued_at`, `expires_at`. The encoded request is at most 32,768 bytes. Snapshot keys are a nonempty, unique, declaration-ordered subset of the five version-one Host keys.
 
-## Endpoint-free values
+## Replies
 
-The response wrapper uses the existing `response,in_reply_to,correlation:{family:"query",query_id},generation,body` fields. Constructors take the typed original DATA request and derive Host/query/current-generation and inspection target/selection from it. A snapshot can satisfy only a snapshot request and must contain exactly its requested key sequence. Inspection can satisfy only inspection. Denial has generation null and only fixed grant_unavailable/outside_scope; a DATA constructor is not evidence that a denial is authorized.
+The decoder accepts only a reply matching the supplied original request: same Host, query id, parent generation and selected keys or inspection target, with `issued_at <= observed_at < expires_at`.
 
-Snapshot carries actual positive revision/observed_at, stale and1–5 sorted entries. Entry fields are key/default/desired/effective/state/unavailable_reason. The five exact key/value/default shapes are:
+| Reply | Complete packet limit |
+| --- | --- |
+| Snapshot | 32,768 bytes |
+| Original inspection | 65,536 bytes |
+| Denial | 2,048 bytes |
 
-| Key | Value | Default |
-|---|---|---|
-| models.selection | model with null selection or provider+model | null selection |
-| tools.selection | tool_selection with local or system_one+model | local |
-| memory.embeddings.enabled | boolean | false |
-| memory.embeddings.dimensions | dimensions with null or1–65536 | null/backend default |
-| memory.embeddings.model | embedding_model with null or model | null |
+Inspection lookups are `not_recorded` or `recorded`; nested Original view and receipt are bounded at 4,096 and 2,048 bytes. Input is parsed with the strict `WireValue.parse` (duplicate fields, depth and key limits) before typed decoding; UUIDs must be canonical lower-case and non-nil, times and revisions positive.
 
-Provider reuses the actual anthropic/openai finite type. Model text is at most256 actual UTF-8 bytes, nonempty after trimming and NUL-free. No endpoint, recipient, credential reference/presence, provider digest, proof, native receipt/action, framework DTO or arbitrary JSON field exists in these value types. They are display DATA, not a full recipient/binding identity or protected-update candidate.
-
-Default is exactly the existing registry default for that key. Desired/effective values must have the correct key type. The read-only embedding model has no desired value. State/reason semantics reuse effective/pending_application/restart_required/unavailable and existing finite reasons; unavailable iff reason exists, and effective requires an effective value and compatible desired value. Endpoint redaction can make pending visible values equal; the encoder does not promote that state to effective. Typed null dimensions is distinct from an absent effective value.
-
-The caller must observe current R before capturing even one private entry, preserve actual desired/effective/state and settings revision, and perform real current authorization before serialization/publication. Constructors validate that the supplied observed_at is inside the request's fixed inner interval; this does not validate the clock, current grant, source provenance or actual Host state. Receipt updated_at and observation wall times are not causal ordering tokens.
-
-## Fresh historical inspection
-
-Inspection body is `kind:"original_inspection",request_id,operation_id,observed_at,lookup`. Lookup is exactly `state:"not_recorded"` or `state:"recorded",original_generation,view`. Response generation comes from the new read's current parent; original_generation is independent immutable historical DATA. Reading an expired Original uses a new current read authority, not a renewed old Source, parent, slot or mutation.
-
-The existing [OriginalView and tiny receipt](settings-original-replies.md) remain the only payload shape and validator. The old validator body is unchanged. One sibling-visible checked OriginalView encoder now shares its2048-byte receipt and4096-byte view checks with both the old command packet and this query wrapper. No native identity/confirmation/receipt/proof or old command input is projected.
-
-Direct Update and ChatOpen requests use null operation selection. A linked Update's actual operation ID must equal the target Original ID. A Send without operation selection returns service not_requested; a selection must appear in its bounded sorted mutation-ID list and service must be not_recorded or the exact selected recorded operation. Existing kind/link/service/phase/write/application truth checks still run. These DATA relationships cannot establish actual ownership/fence membership: the [genuine same-Core historical reader](settings-original-inspection-publication.md) separately proves own Host/full-peer provenance, current R over every prior/current target and disclosed changed key, actual operation origin and immutable link. A selected declared but missing Send operation requires both possible memory keys in current R; any other missing member fails closed. Sealed own-NotRecorded becomes ineligible on row appearance.
-
-Missing Original, recorded Original with terminal Unknown, and recorded Original with service NotRecorded are distinct values. None proves NoEffects, permits retry, changes immutable mutation identity or equates an ACK/terminal Completed with Saved. ChatOpen/Send DATA does not create a restricted session; their actual session execution/ownership remains separate work, even though the inspection reader validates historical membership.
-
-## Limits, errors and integration
-
-Checked actual serialization measures complete wrappers and escaping: snapshot≤32768 bytes, Original inspection including absence≤65536, denial≤2048. Existing ciphertext reservation families remain default49152/inspection90112/denial4096. This leaf performs no crypto/family-cap assertion or reservation; the actual Snapshot and inspection producers measure their encrypted envelope against its real reserved family without truncation or fallback. Every successful encoded byte vector is Zeroizing. Whole reply/snapshot/value/lookup aggregates have no Clone or Deserialize implementation; descriptions are fixed redacted.
-
-SettingsReadContractError retains Invalid, TooLarge, actual serde_json Decoding/Encoding causes and the actual existing OriginalData error. Unexpected storage/authentication/rollback/commit/ownership failures cannot be mapped by this leaf because it performs none of those operations. The actual producers preserve typed failure and noACK/quarantine rules; codec success cannot replace those gates.
-
-Both leaves are registered; the decoder/constructor itself still creates no query history, replay disposition, capability, cache or mutation. The [private ingress](private-settings-ingress.md), [Read receipts](settings-read-receipts.md) and [transport storage](settings-transport-storage.md) contracts retain their genuine Source/currentness/owned-join requirements. Host pump/final socket/send/ACK, retirement/drain, inspection-client adoption, restricted sessions, hints, cards and native foreground actions still need their real consumers. The separate Apple Snapshot path supplies current/stale read-only value display, not Host transport activation. #116/#117 remain open. Source/SDK evidence and limits are recorded in [implementation status](../status/implementation.md); no codec/crypto/runtime or security acceptance follows. Automated coverage remains deferred to #32.
-
-## Module registration
-
-Root registers the actual Rust request and response leaves after full source review of the implementation and boxed-view refinement. The response module borrows the sibling read DATA types through the narrow parent-visible module; no raw authenticated Source or public authority alias is exposed. This makes the leaves part of the Unix compilation graph and does not install a runtime caller. Actual Source/query/receipt and separate Snapshot/inspection BUILD consumers now exist internally. Their implementation does not install a live Host sender; the separate Apple Snapshot requester/adopter is described below.
-
-## Apple DATA target registration
-
-The existing `Shared/Settings/RemoteSettingsReadWire.swift` is now registered in the shared Settings group and both actual EverythingMac and EverythingIOS source phases. Each target already includes its real `SettingsWire`, `SettingsOperationWire`, `WireValue` and `RemoteSettingsWire` dependencies. Registration adds one file reference and two target-specific build-file objects; it changes no wire source, caller, project setting, scheme, crypto, storage or runtime route.
-
-The Swift leaf encodes the same closed snapshot/Original-inspection requests within32768 complete bytes and decodes only a reply matching the supplied original DATA request. Its complete packet checks are snapshot32768, inspection65536 and fixed denial2048 bytes. The actual existing strict `WireValue.parse` validates syntax, decoded duplicate fields and existing depth/key limits before closed typed decoding. Nonnil canonical lowercase UUIDs, signed-range positive times/revisions, exact five-key shapes/order, defaults and receipt/write/application relationships remain validated. Nested OriginalView and tiny receipt bounds use the existing sorted-key re-encoding, at4096 and2048 bytes respectively; these are separately measured representations, not original received-byte counts or allocator/erasure guarantees.
-
-A successful snapshot or inspection observation must fall within its original request interval (`issued_at <= observed_at < expires_at`). The request's Host/query/current-parent generation and exact selected keys or inspection targets must match. A recorded direct Update's linked operation must also equal the target original request ID. Send selection remains limited to that original's actual bounded mutation-ID list. These are DATA consistency checks: no supplied DTO, timestamp, matching ID, history or denial label proves authenticated ownership, current grant, a live parent, effect outcome, NoEffects or permission to retry.
-
-Apple SDK build/analyze establishes target compilation only; see [implementation status](../status/implementation.md) for the exact current evidence. Static membership and DATA consistency do not establish native UI, codec/crypto execution or transported acceptance. The [live Apple Access/Bind wire](apple-remote-settings-wire.md) and [Bind owner](apple-settings-bind-owner.md) are distinct from this DATA leaf: no request owner, private receive/adoption, value cache or Settings session is installed by this DATA leaf. The separate [Snapshot client](apple-settings-snapshot-client.md) implements those actual Snapshot owners and read-only display; inspection, mutation and restricted-session clients remain absent. No native Owner DTO or secret/private-body forwarding is introduced. #116/#117 and deferred #32 remain open.
+These are DATA checks only. A decoded reply proves no authenticated ownership, current grant, effect outcome or permission to retry.

@@ -1,24 +1,16 @@
-# Apple scoped Update wire data
+# Apple Update wire data
 
-`RemoteSettingsUpdateWire.swift` defines the existing Host protocol's narrow Update command and matching Original response. Both Apple targets register this shared source. It is a data codec. The separate [Identity/Service client owner](apple-settings-update-client.md) now supplies genuine Bound capture/send and authenticated Fresh adoption; no writable control or UI caller is installed. The [Original inspection client](apple-settings-original-inspection-client.md) remains a separate read path.
+`Shared/Settings/RemoteSettingsUpdateWire.swift` is a data codec for a narrow embedding-preference Update command and its matching Original response, registered in both Apple targets. It is used only by the [Update client](apple-settings-update-client.md), which has no UI caller. The iOS Settings screen exposes only the [Access check](apple-settings-access-client.md), and the Host in this tree answers only `AccessStatus`; Update commands are recorded as rejected ([Host Access transport](settings-access-transport.md)).
 
-## Immutable request
+## Request
 
-`RemoteSettingsUpdateRequest` retains Host ID, the supplied data parent/generation, Original request ID, fixed request time, expected Settings revision and optional embedding enabled/dimensions values. Initialization, encoding and matched decoding validate nonnil identifiers, positive signed-range revisions, an issued-before-expiry interval of at most30000 milliseconds and at least one supplied preference. Typed UUIDs encode canonically.
+`RemoteSettingsUpdateRequest` holds Host ID, parent/generation, Original request ID, request time, expected Settings revision and optional embeddings enabled/dimensions values. Validation: nonnil identifiers, positive signed-range revision, issue-to-expiry at most 30,000 ms, at least one supplied preference, dimensions in 1...65536. Both option fields are always emitted; null means no change. `encoded()` builds the schema 1 / settings 1 / command / update wrapper with the bounded `WireValue` encoder. Data that resembles a parent creates no association or permission.
 
-Both option fields are emitted. Null means no change; an explicit `backendDefault` dimension selection requests a change to the default. A selected dimension is validated in1...65536 to match the existing Rust command grammar. This grants no model/backend support; the Host still validates its supported configuration and current scope. No additional embedding model is introduced.
+## Response
 
-`encoded()` builds the exact schema1/settings1/command/update wrapper with the existing bounded `WireValue` encoder. The parent constructor remains private to its original file. Supplying data that resembles a parent never creates a genuine bound association or permission.
+`decodeReply(_:matching:encryptedRequestID:)` uses the duplicate-rejecting `WireValue` parser and exact field sets. It requires command correlation, an Original body, generation equal to the request parent, matching Host and Original request IDs, and `in_reply_to` equal to the encrypted request ID. No denial, null generation or other-family fallback. It reuses `RemoteSettingsReadWire.decodeOriginalView`; Update replies require kind Update, an empty mutation list and matching receipt operation and expected revision.
 
-## Matched Original response
-
-`decodeReply(_:matching:encryptedRequestID:)` uses the existing full-input, duplicate-rejecting `WireValue` parser and exact closed field sets. The response must have command correlation, an Original body, nonnull generation equal to the request parent, exact Host and both Original request IDs, and `in_reply_to` equal to the separately supplied encrypted message ID. It accepts no denial, null generation or other-family fallback. The protocol imposes no extra inequality between Original and encrypted message IDs.
-
-The genuine new decoder calls the existing checked `RemoteSettingsReadWire.decodeOriginalView`. Only that method's visibility changes; its body and subordinate validators remain unchanged. Matched Update replies require kind Update, an empty mutation list and either unlinked/not-requested or the same Original operation with a recorded receipt. Receipt operation ID and expected revision must match the request. Write changed keys may be a subset of supplied preferences because a requested value can already match. Linked absence is rejected by this direct Update path, matching the actual Host projector; the broader inspection grammar stays unchanged.
-
-Existing receipt, phase, write-resolution, revision and application relationships remain enforced. Original Completed, transport ACK, applied state, file resolution and application are distinct facts. Receipt update time is display data, not freshness or permission.
-
-## Bounds and integration
+## Bounds
 
 | Representation | Maximum bytes |
 | --- | ---: |
@@ -27,8 +19,4 @@ Existing receipt, phase, write-resolution, revision and application relationship
 | Canonical Original view | 4096 |
 | Canonical service receipt | 2048 |
 
-Encoding and decoding preserve fixed size errors and map other failures to fixed invalid errors. No private parser diagnostics, inferred denial, retry permission or absence result is produced. The actual Identity/Service consumer applies request ciphertext49152, reply ciphertext90112 and received frame364544 separately from these plaintext/parser bounds.
-
-The codec retains immutable Foundation data without a Task, socket, Store, queue, cache or runtime. The separate client owner implements typed sealing/classification, once MainActor capture, the same private Bound parent, fixed clocks, current full Host/local Store checks, Fresh metadata, original send/helper/ACK ownership and one retained uncertain Original. It adds no UI caller, retry, reset, rebind or reconciliation. A fresh inspection of an old Original is not permission to resubmit it. Internal Host disposition exists without invocation or charge retirement; accepted Session dispatch, private ACK, normal retirement and composite drain remain incomplete.
-
-Full Root/independent source review, preservation and all62 official Swift grammar parses cover this data source. Public9687 passed both supported SDK BUILD/ANALYZE, compiling this codec for arm64/x86_64 in both targets. Its default strict Rust check failed on136 dead-code diagnostics and all-features skipped. Those SDK results exclude the later Identity/Service owner and parent withdrawal, whose current checks remain pending. No codec/crypto/SQLite/interoperability, UI, transport or security acceptance follows from source review or SDK compilation. #116/#117 remain open; automated verification remains deferred to [#32](https://github.com/izyuumi/everything/issues/32).
+Size failures keep fixed size errors; others map to fixed invalid errors. No diagnostics, inferred denial or retry permission are produced.

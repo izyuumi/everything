@@ -4,13 +4,13 @@
 
 ## Permanent connection quarantine
 
-Every Store clone shares a permanent connection-health latch. `connection()` checks it before attempting the real mutex and again after acquisition, so a waiter cannot inherit a quarantined connection. `quarantine_connection()` is crate-private and sets the shared latch without SQL. A writer must invoke it while still holding that exact Main connection mutex after an observed rollback failure, before releasing the mutex. All subsequent checked borrows return `StorageError::Quarantined`; no reset, retry, repair or alternate connection is provided.
+Every Store clone shares a permanent connection-health latch. `connection()` checks it before and after acquiring the mutex, so a waiter cannot inherit a quarantined connection. `quarantine_connection()` is crate-private and sets the latch without SQL. The Settings Access receipt writer and reply publisher call it while still holding the connection after an observed rollback failure. All later checked borrows return `StorageError::Quarantined`; there is no reset, retry or alternate connection.
 
-This protects unrelated Store users from an uncertain transaction left active after rollback failure. It does not prove whether a prior commit or rollback occurred, destroy data, retire Source/permit ownership or establish Host drain. The original structured primary and rollback errors remain with their actual worker. Writer integration, strict compilation and disposable engine/concurrency/fault observations remain separate gates; no forced failure was executed for this latch. See [ADR-0013](../decisions/ADR-0013-permanent-store-quarantine.md).
+The latch protects other Store users from an uncertain transaction. It does not prove whether a commit or rollback occurred, and does not repair data. No forced rollback failure has been executed. See [ADR-0013](../decisions/ADR-0013-permanent-store-quarantine.md).
 
 ## Initialization and migrations
 
-`Store::open(path)` opens or creates a database at an existing parent directory. Startup enables foreign keys, WAL, full synchronous durability, and a five-second busy timeout before applying pending versioned migrations in one immediate transaction. Fresh databases apply migrations `0001_initial.sql` through `0017_settings_transport.sql` in order; existing databases apply only their pending migrations. The current schema version is SQLite `user_version = 17`; newer databases are rejected. The ordered additions are:
+`Store::open(path)` opens or creates a database at an existing parent directory. Startup enables foreign keys, WAL, full synchronous durability, and a five-second busy timeout before applying pending versioned migrations in one immediate transaction. Fresh databases apply migrations `0001_initial.sql` through `0016_settings_transport.sql` in order; existing databases apply only their pending migrations. The current schema version is SQLite `user_version = 16`; newer databases are rejected. The ordered additions are:
 
 | Migration | Addition |
 | --- | --- |
@@ -29,8 +29,7 @@ This protects unrelated Store users from an uncertain transaction left active af
 | 13 | Revisioned Settings operations, native requests and immutable operation updates |
 | 14 | Restricted Settings namespace, original sessions/turn fences and cleanup attestations |
 | 15 | Immutable scoped Settings grant decisions, current heads and reserved revocation capacity |
-| 16 | Durable scoped Settings Originals, bounded lifecycle metadata and protected operation roots |
-| 17 | Private reply reservations and immutable encrypted outbox associations |
+| 16 | Private Settings reply reservations and immutable encrypted outbox associations ([transport storage](settings-transport-storage.md)) |
 
 See [scheduled storage](scheduling-storage.md), [host inbox](host-inbox.md), [schedule admission](scheduling-engine.md), [scheduled execution](scheduled-execution.md), [worker terminal sources](worker-terminal-sources.md) and [remote binding lookup](remote-binding-lookup.md) for component invariants. `open_in_memory` uses the same migrations and constraints, with SQLite's in-memory journal mode because WAL is unavailable for memory databases. There is no backup or restore API.
 
@@ -144,6 +143,4 @@ The crate-private rejection path shares ordinary inbox validation and its immedi
 
 ## Connection health observations
 
-The crate-private `Store::check_connection_health` reads the existing shared quarantine flag with Acquire ordering and the existing Main mutex poison state, returning the actual Quarantined or Poisoned error. It acquires no mutex, executes no SQL and does not clear either condition. Existing connection admission calls it before and after acquiring that same mutex; the lock result still independently preserves poisoning errors. All Store clones share the original connection and one-way quarantine flag.
-
-The narrow read permits the assigned queued-reply lifetime validator to reject an already unhealthy Store after worker waits without taking Main again. It observes health at that instant; it does not attest a transaction's origin, current SQL pins/grants/history, a true worker join, cleanup, recovery or future health. Those actual ownership/current-state gates remain required. No reset or replacement connection API is added. Source/static validation does not establish fault-injection or runtime acceptance; automated verification remains deferred to #32.
+The crate-private `Store::check_connection_health` reads the shared quarantine flag (Acquire) and the mutex poison state, returning `Quarantined` or `Poisoned`. It takes no lock, runs no SQL and clears nothing. `connection()` calls it before and after acquiring the mutex. It reports health at that instant only. Automated verification is deferred to #32.
