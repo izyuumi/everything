@@ -461,10 +461,11 @@ fn read_inspection_disclosure(
                             include_operation_keys(&mut disclosure.keys, operation)?;
                             check_inspection_history(connection, operation, &mut remaining, prior)?;
                         } else {
-                            if intent.operation_id == Some(*id) {
-                                disclosure.keys.enabled = true;
-                                disclosure.keys.dimensions = true;
+                            if intent.operation_id != Some(*id) {
+                                return Err(SettingsServiceError::CorruptJournal);
                             }
+                            disclosure.keys.enabled = true;
+                            disclosure.keys.dimensions = true;
                         }
                         disclosure.operations.push((*id, operation));
                     }

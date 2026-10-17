@@ -25,7 +25,8 @@ turn fence, including its exact remote Original relationship. All at most eight
 sorted declared members are validated against that session and actual paired-agent
 operation provenance, including unselected members. A selected declared but
 absent operation is NotRecorded; it requires current R for both possible memory
-keys. A selected ID outside the actual member set is rejected.
+keys. Any other absent declared member fails as CorruptJournal. A selected ID
+outside the actual member set is rejected.
 
 Before disclosure, current R covers every Original intent key, operation target
 and actual write-changed key. W never substitutes R. One shared 8192-update
