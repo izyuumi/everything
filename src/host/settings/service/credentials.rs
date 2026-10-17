@@ -4,6 +4,7 @@ use std::time::Instant;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
+use crate::credentials::CredentialError;
 use crate::host::credentials::{CredentialVault, SecretTransfer};
 use crate::host::selection::SelectionSettings;
 use crate::protocol::UnixMillis;
@@ -16,7 +17,8 @@ use crate::host::settings::actions::{
 };
 use crate::host::settings::authority::{CallerSource, SettingsCaller, SettingsOperationOrigin};
 use crate::host::settings::contract::{
-    NativeSettingsAction, SettingsActionRequest, SettingsCredentialBinding, SettingsOperationState,
+    NativeSettingsAction, SettingsActionRequest, SettingsCredentialBinding, SettingsFailureReason,
+    SettingsOperationState, SettingsUnavailableReason,
 };
 use crate::host::settings::operations::{
     NativeRequest, OperationIdentity, SettingsOperationInspection,
@@ -104,7 +106,10 @@ impl SettingsService {
             Ok(effect) => effect,
             Err(cause) => {
                 return self
-                    .blocking(move |core| core.finish_credential_attempt(&claim, Err(cause)))
+                    .blocking(move |core| {
+                        let outcome = core.settle_unwritten_credential(&claim, cause);
+                        core.finish_credential_attempt(&claim, outcome)
+                    })
                     .await;
             }
         };
@@ -229,39 +234,98 @@ impl ServiceCore {
         vault: &CredentialVault,
         secret: SecretTransfer,
     ) -> Result<SettingsOperationInspection, SettingsServiceError> {
-        let outcome = (|| {
+        let admitted = (|| {
             self.require_resolved_file()?;
             let binding = self.credential_binding(&effect.claim.identity)?;
+            let state = effect
+                .claim
+                .state
+                .lock()
+                .map_err(|_| SettingsServiceError::Poisoned)?;
+            validate_current(&self.authority, &self.settings, &effect.claim.identity)?;
+            if !state.host_effect_started {
+                return Err(SettingsServiceError::OutsideScope);
+            }
+            if effect.claim.cancellation.is_cancelled() {
+                return Err(SettingsServiceError::Cancelled);
+            }
+            if state.closed
+                || Instant::now() >= effect.claim.deadline
+                || UnixMillis::now()?.get() >= effect.claim.identity.binding.expires_at.get()
             {
-                let state = effect
-                    .claim
-                    .state
-                    .lock()
-                    .map_err(|_| SettingsServiceError::Poisoned)?;
-                validate_current(&self.authority, &self.settings, &effect.claim.identity)?;
-                if state.closed
-                    || !state.host_effect_started
-                    || effect.claim.cancellation.is_cancelled()
-                    || Instant::now() >= effect.claim.deadline
-                    || UnixMillis::now()?.get() >= effect.claim.identity.binding.expires_at.get()
-                {
-                    return Err(SettingsServiceError::Expired);
+                return Err(SettingsServiceError::Expired);
+            }
+            Ok(binding)
+        })();
+        let outcome = match admitted {
+            Err(cause) => self.settle_unwritten_credential(&effect.claim, cause),
+            Ok(binding) => match vault.store_settings_credential(&binding, secret) {
+                Err(
+                    cause @ (CredentialError::Busy
+                    | CredentialError::InvalidKey
+                    | CredentialError::InvalidSecret
+                    | CredentialError::Unsupported),
+                ) => self.settle_unwritten_credential(&effect.claim, cause.into()),
+                Err(cause) => Err(cause.into()),
+                Ok(()) => self.repository.finish(
+                    &effect.claim.identity,
+                    effect.claim.native.native_request_id,
+                    self.result(
+                        &effect.claim.identity,
+                        SettingsOperationState::Completed {
+                            receipt_id: Uuid::new_v4(),
+                        },
+                    ),
+                    None,
+                ),
+            },
+        };
+        self.finish_credential_attempt(&effect.claim, outcome)
+    }
+
+    fn settle_unwritten_credential(
+        &self,
+        claim: &ActionClaim,
+        cause: SettingsServiceError,
+    ) -> Result<SettingsOperationInspection, SettingsServiceError> {
+        let state = match &cause {
+            SettingsServiceError::Credential(CredentialError::Unsupported) => {
+                SettingsOperationState::Unavailable {
+                    reason: SettingsUnavailableReason::NativeActionUnavailable,
                 }
             }
-            vault.store_settings_credential(&binding, secret)?;
-            self.repository.finish(
-                &effect.claim.identity,
-                effect.claim.native.native_request_id,
-                self.result(
-                    &effect.claim.identity,
-                    SettingsOperationState::Completed {
-                        receipt_id: Uuid::new_v4(),
-                    },
-                ),
-                None,
-            )
-        })();
-        self.finish_credential_attempt(&effect.claim, outcome)
+            SettingsServiceError::Credential(
+                CredentialError::Busy
+                | CredentialError::InvalidKey
+                | CredentialError::InvalidSecret,
+            ) => SettingsOperationState::Failed {
+                reason: SettingsFailureReason::Storage,
+            },
+            SettingsServiceError::Credential(_) => return Err(cause),
+            SettingsServiceError::Cancelled => SettingsOperationState::Cancelled,
+            _ if claim.cancellation.is_cancelled() => SettingsOperationState::Cancelled,
+            SettingsServiceError::Expired => SettingsOperationState::Unavailable {
+                reason: SettingsUnavailableReason::Expired,
+            },
+            SettingsServiceError::Conflict => match (
+                claim.identity.binding.expected_revision,
+                self.settings.snapshot(),
+            ) {
+                (Some(expected), Ok(snapshot)) if snapshot.revision != expected => {
+                    SettingsOperationState::Conflict {
+                        observed_revision: snapshot.revision,
+                    }
+                }
+                _ => return Err(cause),
+            },
+            _ => return Err(cause),
+        };
+        self.repository.finish(
+            &claim.identity,
+            claim.native.native_request_id,
+            self.result(&claim.identity, state),
+            None,
+        )
     }
 
     fn finish_credential_attempt(
