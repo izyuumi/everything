@@ -10,7 +10,7 @@
 
 `MaintenanceRequest` is tagged by `kind` and rejects unknown fields:
 
-- `ingest { topic, sources }`: topic at most 256 bytes, one to sixteen sources, total text at most 64 KiB. Each `MemorySource { id, locator, title, text }` has a unique bounded ID, title at most 256 bytes, absolute locator at most 2,048 bytes, and evidence text at most 16 KiB. No source is fetched.
+- `ingest { topic, sources }`: topic at most 256 bytes, one to sixteen sources, total text at most 64 KiB. Each `MemorySource { id, locator, title, text }` has a unique bounded ID, title at most 256 bytes, absolute `https`, `http`, `file` or `everything` locator without credentials at most 2,048 bytes, and evidence text at most 16 KiB. No source is fetched. Host owner IPC rejects an invalid request or plan with `invalid_request` and the violated rule or bound, such as the disallowed locator scheme; it never echoes source text.
 - `query { question }`: one line, at most 4 KiB and 64 terms. It returns lexical evidence and optionally a real model answer.
 - `lint { after_path, max_pages }`: exclusive canonical-path cursor and a page limit of 1–64. A result cursor is absent when the scan is exhausted.
 

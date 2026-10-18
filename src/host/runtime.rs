@@ -1394,16 +1394,18 @@ pub(super) fn public_failure(error: &HostError) -> LocalFailure {
             "scheduler operation requires an owner decision or is unavailable",
         ),
         HostError::Consolidation(
-            crate::memory::consolidate::ConsolidationError::Invalid(_)
-            | crate::memory::consolidate::ConsolidationError::Limit { .. },
+            error @ (crate::memory::consolidate::ConsolidationError::Invalid(_)
+            | crate::memory::consolidate::ConsolidationError::Limit { .. }),
         )
         | HostError::Memory(super::memory::MemoryError::Consolidation(
-            crate::memory::consolidate::ConsolidationError::Invalid(_)
-            | crate::memory::consolidate::ConsolidationError::Limit { .. },
-        )) => (
-            LocalFailureCode::InvalidRequest,
-            "memory request or plan is invalid or exceeds a documented bound",
-        ),
+            error @ (crate::memory::consolidate::ConsolidationError::Invalid(_)
+            | crate::memory::consolidate::ConsolidationError::Limit { .. }),
+        )) => {
+            return LocalFailure {
+                code: LocalFailureCode::InvalidRequest,
+                message: format!("memory request or plan rejected: {error}"),
+            };
+        }
         HostError::Consolidation(crate::memory::consolidate::ConsolidationError::NotFound(_)) => {
             (LocalFailureCode::InvalidRequest, "memory job was not found")
         }
