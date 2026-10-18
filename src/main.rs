@@ -1008,11 +1008,46 @@ async fn proxy_chat(
                     reported = execution.diagnostic;
                 }
             }
-            OwnerQueryResult::Task { task, .. } => {
-                eprintln!(
-                    "host task {task_id} stopped at {:?}; inspect owner task/approval metadata before an explicit resume",
-                    task.status
-                );
+            OwnerQueryResult::Task { task, execution } => {
+                match &execution.waiting {
+                    Some(waiting) => eprintln!(
+                        "host task {task_id} stopped at {waiting:?}; inspect owner task/approval metadata before an explicit resume"
+                    ),
+                    None => eprintln!(
+                        "host task {task_id} stopped at {:?}; inspect owner task/approval metadata before an explicit resume",
+                        task.status
+                    ),
+                }
+                if let Some(diagnostic) = &execution.diagnostic {
+                    eprintln!("host task {task_id} diagnostic: {diagnostic}");
+                }
+                if matches!(
+                    execution.waiting,
+                    Some(everything::scheduler::WaitingReason::ProviderUnavailable)
+                ) && let ProviderEndpoint::Loopback(endpoint) = &information.endpoint
+                    && let OwnerQueryResult::Settings { settings } = client
+                        .query(OwnerQuery::Settings, cancellation.clone())
+                        .await?
+                    && !settings.model_credentials.iter().any(|binding| {
+                        binding.provider == information.provider
+                            && binding.endpoint == information.endpoint
+                    })
+                {
+                    let variable = match information.provider {
+                        ProviderKind::Anthropic => "ANTHROPIC_API_KEY",
+                        ProviderKind::OpenAi => "OPENAI_API_KEY",
+                    };
+                    let binding = everything::host::settings::ModelCredentialReference {
+                        provider: information.provider,
+                        endpoint: information.endpoint.clone(),
+                        reference: uuid::Uuid::new_v4(),
+                        storage: everything::host::settings::CredentialStorage::Session,
+                    };
+                    eprintln!(
+                        "the host does not read {variable} for loopback endpoint {endpoint}; with {variable} set, run `everything owner --request-file FILE` with {} and add the same binding to settings model_credentials",
+                        serde_json::json!({"kind": "credential_environment", "binding": binding})
+                    );
+                }
                 return Err(CliError::ToolPaused);
             }
             OwnerQueryResult::LegacyForeground { .. } => {
