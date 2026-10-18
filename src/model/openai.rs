@@ -1531,7 +1531,13 @@ impl StreamState {
             .get_mut(index)
             .ok_or_else(|| protocol("invalid content block index"))?;
         check_block_kind(&block.kind, refusal)?;
-        if block.data != value {
+        let matches = block.data == value
+            || matches!(block.kind, PendingKind::Function { .. })
+                && serde_json::from_str::<Value>(&block.data)
+                    .ok()
+                    .zip(serde_json::from_str::<Value>(value).ok())
+                    .is_some_and(|(streamed, completed)| streamed == completed);
+        if !matches {
             return Err(protocol("completed block differs from streamed deltas"));
         }
         block.done = true;
