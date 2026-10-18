@@ -1275,7 +1275,7 @@ impl StreamState {
                 arguments,
             } => {
                 self.check_item(output_index, &item_id)?;
-                self.complete_block(output_index, None, &arguments, None)?;
+                self.complete_arguments(output_index, &arguments, &mut progress.events)?;
             }
             WireEvent::PartDone {
                 output_index,
@@ -1327,7 +1327,7 @@ impl StreamState {
                         {
                             return Err(protocol("function call did not complete"));
                         }
-                        self.complete_block(output_index, None, &arguments, None)?;
+                        self.complete_arguments(output_index, &arguments, &mut progress.events)?;
                     }
                     WireItem::Reasoning {
                         encrypted_content: None,
@@ -1542,6 +1542,27 @@ impl StreamState {
         }
         block.done = true;
         Ok(())
+    }
+
+    fn complete_arguments(
+        &mut self,
+        output: u32,
+        value: &str,
+        events: &mut Vec<ModelEvent>,
+    ) -> Result<(), ModelError> {
+        let unstreamed = self
+            .locations
+            .get(&(output, None))
+            .and_then(|index| self.blocks.get(*index))
+            .is_some_and(|block| block.data.is_empty() && !block.done);
+        if unstreamed && !value.is_empty() {
+            let index = self.append(output, None, value, None)?;
+            events.push(ModelEvent::ToolCallArgumentsDelta {
+                index,
+                delta: value.to_owned(),
+            });
+        }
+        self.complete_block(output, None, value, None)
     }
 }
 
