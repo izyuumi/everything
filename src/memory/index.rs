@@ -168,18 +168,18 @@ impl WikiIndex {
             .join(operator);
         let mut statement = self.connection.prepare(
             "SELECT wiki_fts.chunk_id, wiki_fts.title, wiki_fts.heading,
-                snippet(wiki_fts, 4, '[', ']', ' … ', 48),
+                snippet(wiki_fts, 4, '', '', ' … ', 48),
                 bm25(wiki_fts, 0.0, 0.0, 4.0, 2.0, 1.0),
                 wiki_chunks.page_path, wiki_chunks.start_line, wiki_chunks.end_line,
                 typeof(wiki_fts.chunk_id)='text' AND typeof(wiki_fts.title)='text'
                     AND typeof(wiki_fts.heading)='text'
-                    AND typeof(snippet(wiki_fts, 4, '[', ']', ' … ', 48))='text'
+                    AND typeof(snippet(wiki_fts, 4, '', '', ' … ', 48))='text'
                     AND typeof(wiki_chunks.page_path)='text'
                     AND typeof(wiki_chunks.start_line)='integer'
                     AND typeof(wiki_chunks.end_line)='integer',
                 length(CAST(wiki_fts.chunk_id AS BLOB))+length(CAST(wiki_fts.title AS BLOB))
                     +length(CAST(wiki_fts.heading AS BLOB))
-                    +length(CAST(snippet(wiki_fts, 4, '[', ']', ' … ', 48) AS BLOB))
+                    +length(CAST(snippet(wiki_fts, 4, '', '', ' … ', 48) AS BLOB))
                     +length(CAST(wiki_chunks.page_path AS BLOB))+16
             FROM wiki_fts JOIN wiki_chunks ON wiki_chunks.id = wiki_fts.chunk_id
             WHERE wiki_fts MATCH ?1
