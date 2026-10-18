@@ -962,6 +962,7 @@ async fn proxy_chat(
         command_id
     };
     let task_id = TaskId::try_from(*command_id.as_uuid()).map_err(AgentError::from)?;
+    let mut reported = None;
     loop {
         match client
             .query(OwnerQuery::Task { task_id }, cancellation.clone())
@@ -998,7 +999,15 @@ async fn proxy_chat(
                     && matches!(
                         execution.waiting,
                         Some(everything::scheduler::WaitingReason::Children { .. })
-                    )) => {}
+                    )) =>
+            {
+                if execution.diagnostic != reported {
+                    if let Some(diagnostic) = &execution.diagnostic {
+                        eprintln!("host task {task_id} {:?}: {diagnostic}", task.status);
+                    }
+                    reported = execution.diagnostic;
+                }
+            }
             OwnerQueryResult::Task { task, .. } => {
                 eprintln!(
                     "host task {task_id} stopped at {:?}; inspect owner task/approval metadata before an explicit resume",

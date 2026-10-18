@@ -72,15 +72,17 @@ impl ProcessGroup {
             return Ok(());
         }
         self.armed = false;
-        rustix::process::waitid(
+        let exited = rustix::process::waitid(
             WaitId::Pid(self.pid),
             WaitIdOptions::EXITED | WaitIdOptions::NOWAIT | WaitIdOptions::NOHANG,
-        )?;
+        )?
+        .is_some();
         let group = rustix::process::kill_process_group(self.pid, Signal::KILL);
         let leader = rustix::process::kill_process(self.pid, Signal::KILL);
         for result in [group, leader] {
             match result {
                 Ok(()) | Err(rustix::io::Errno::SRCH) => {}
+                Err(rustix::io::Errno::PERM) if exited => {}
                 Err(error) => return Err(error.into()),
             }
         }
