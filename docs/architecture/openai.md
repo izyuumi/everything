@@ -28,7 +28,7 @@ Only parsed, completed native function calls can appear in a successful response
 
 Authoritative `ContentBlockCompleted` events are emitted after validation of the terminal response, followed by cumulative usage and one `Completed` event. Presentation deltas can precede these events. Consumers must require the terminal success event before treating the turn as successfully completed. Input/output usage and optional cached/reasoning subsets are preserved, with consistency checks. An assistant response may have no visible content when a reasoning-only response reaches its output cap; the provider foundation permits that case.
 
-Unknown output item or content kinds and unsupported stream events fail explicitly. Recognized reasoning and annotation metadata events are not displayed as assistant text. Truncated streams, mismatched final content, malformed JSON, missing completed reasoning, and invalid stream ordering produce sanitized protocol errors. A stream ends after a terminal success or error.
+Unknown output item or content kinds and unsupported stream events fail explicitly. Recognized reasoning and annotation metadata events are not displayed as assistant text. `reasoning_text` content parts are accepted only on reasoning items and are not displayed; they are rejected on assistant messages. Truncated streams, mismatched final content, malformed JSON, missing completed reasoning, and invalid stream ordering produce sanitized protocol errors. A stream ends after a terminal success or error.
 
 ## Stateless native continuation
 
@@ -36,7 +36,7 @@ Opaque continuation is tagged `openai` and has its own internal version. It reta
 
 Each retained turn is anchored to the exact local assistant-history prefix using the established `sha2` SHA-256 implementation over serialized model messages. Prefix hashes are calculated in one pass. Reconstruction verifies the anchor and reinserts reasoning and phases in their original positions. This is a local consistency check, not authentication or a new cryptographic protocol.
 
-A model change, history edits, role changes, or compaction that remove an anchored turn cause a continuation error. The context builder must intentionally clear continuation when replacing history. The adapter never silently drops reasoning, guesses matching turns, or duplicates a remote history chain. Native continuation is limited to 4 MiB by the provider contract; exceeding it fails explicitly. Provider response IDs are retained as local metadata only.
+A model change, history edits, role changes, or compaction that remove an anchored turn cause a continuation error. The context builder must intentionally clear continuation when replacing history. The adapter never silently drops encrypted reasoning, guesses matching turns, or duplicates a remote history chain. A completed reasoning item without encrypted content is a protocol error on non-loopback endpoints. On a loopback endpoint, such as a local OpenAI-compatible server that streams plaintext `reasoning_text` instead, it has no replayable state: it is neither retained in continuation nor replayed, and later requests send only the visible local history. Native continuation is limited to 4 MiB by the provider contract; exceeding it fails explicitly. Provider response IDs are retained as local metadata only.
 
 ## Resource and security boundaries
 
