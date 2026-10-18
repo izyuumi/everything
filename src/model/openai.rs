@@ -242,6 +242,7 @@ impl ModelProvider for OpenAiProvider {
         }
         let idle_timeout = self.config.idle_timeout;
         let accounting = self.config.accounting.clone();
+        let loopback = is_loopback_endpoint(&self.config.endpoint);
         let raw = async_stream::try_stream! {
             let mut bytes = response.bytes_stream();
             let mut limits = RawLimits::default();
@@ -254,7 +255,10 @@ impl ModelProvider for OpenAiProvider {
         let stream = async_stream::try_stream! {
             let events = raw.eventsource();
             futures_util::pin_mut!(events);
-            let mut state = StreamState::default();
+            let mut state = StreamState {
+                loopback,
+                ..StreamState::default()
+            };
             loop {
                 let next = tokio::select! {
                     biased;
@@ -988,6 +992,7 @@ enum WirePart {
     Refusal {
         refusal: String,
     },
+    ReasoningText {},
     #[serde(other)]
     Unknown,
 }
@@ -997,7 +1002,9 @@ impl WirePart {
         match self {
             Self::OutputText { text } => Ok((text, false)),
             Self::Refusal { refusal } => Ok((refusal, true)),
-            Self::Unknown => Err(protocol("unsupported output content part")),
+            Self::ReasoningText {} | Self::Unknown => {
+                Err(protocol("unsupported output content part"))
+            }
         }
     }
 }
@@ -1074,6 +1081,7 @@ struct StreamState {
     reasoning: BTreeMap<u32, StoredReasoning>,
     locations: HashMap<(u32, Option<u32>), usize>,
     blocks: Vec<PendingBlock>,
+    loopback: bool,
 }
 
 #[derive(Default)]
@@ -1208,7 +1216,9 @@ impl StreamState {
                 part,
             } => {
                 self.check_item(output_index, &item_id)?;
-                self.add_text(output_index, content_index, part, &mut progress.events)?;
+                if !self.is_reasoning_part(output_index, &part) {
+                    self.add_text(output_index, content_index, part, &mut progress.events)?;
+                }
             }
             WireEvent::TextDelta {
                 output_index,
@@ -1274,8 +1284,10 @@ impl StreamState {
                 part,
             } => {
                 self.check_item(output_index, &item_id)?;
-                let (text, refusal) = part.text()?;
-                self.complete_block(output_index, Some(content_index), text, Some(refusal))?;
+                if !self.is_reasoning_part(output_index, &part) {
+                    let (text, refusal) = part.text()?;
+                    self.complete_block(output_index, Some(content_index), text, Some(refusal))?;
+                }
             }
             WireEvent::ItemDone { output_index, item } => {
                 if self.items.get(&output_index) != Some(&item.identity()?)
@@ -1317,6 +1329,10 @@ impl StreamState {
                         }
                         self.complete_block(output_index, None, &arguments, None)?;
                     }
+                    WireItem::Reasoning {
+                        encrypted_content: None,
+                        ..
+                    } if self.loopback => {}
                     WireItem::Reasoning {
                         id,
                         summary,
@@ -1391,6 +1407,14 @@ impl StreamState {
             ));
         }
         Ok(())
+    }
+
+    fn is_reasoning_part(&self, output_index: u32, part: &WirePart) -> bool {
+        matches!(part, WirePart::ReasoningText {})
+            && matches!(
+                self.items.get(&output_index),
+                Some(ItemIdentity::Reasoning(_))
+            )
     }
 
     fn add_text(
@@ -1684,10 +1708,11 @@ fn finish_response(
             WireItem::Reasoning {
                 encrypted_content, ..
             } => {
-                let item = state
-                    .reasoning
-                    .get(&(output_index as u32))
-                    .ok_or_else(|| protocol("reasoning output was not completed"))?;
+                let item = match state.reasoning.get(&(output_index as u32)) {
+                    Some(item) => item,
+                    None if state.loopback && encrypted_content.is_none() => continue,
+                    None => return Err(protocol("reasoning output was not completed")),
+                };
                 if encrypted_content
                     .as_ref()
                     .is_some_and(|encrypted| encrypted != &item.encrypted_content)
