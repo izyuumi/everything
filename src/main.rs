@@ -1008,6 +1008,12 @@ async fn proxy_chat(
                     reported = execution.diagnostic;
                 }
             }
+            OwnerQueryResult::Task { task, .. }
+                if task.status == everything::protocol::TaskStatus::AwaitingPermission =>
+            {
+                print_host_approvals(client, conversation_id, task_id, &cancellation).await?;
+                return Err(CliError::ToolPaused);
+            }
             OwnerQueryResult::Task { task, execution } => {
                 match &execution.waiting {
                     Some(waiting) => eprintln!(
@@ -1082,6 +1088,65 @@ async fn proxy_chat(
                 cancellation.clone(),
             )
             .await?;
+    }
+}
+
+async fn print_host_approvals(
+    client: &everything::host::client::HostClient,
+    conversation_id: ConversationId,
+    task_id: everything::protocol::TaskId,
+    cancellation: &CancellationToken,
+) -> Result<(), CliError> {
+    use everything::ipc::{ApprovalLookup, OwnerQuery, OwnerQueryResult};
+    let mut cursor = None;
+    loop {
+        let OwnerQueryResult::Approvals {
+            approvals,
+            next_cursor,
+        } = client
+            .query(
+                OwnerQuery::Approvals {
+                    conversation_id,
+                    limit: 100,
+                    cursor,
+                },
+                cancellation.clone(),
+            )
+            .await?
+        else {
+            return Err(CliError::OwnerInput);
+        };
+        for summary in approvals
+            .into_iter()
+            .filter(|summary| summary.task_id == task_id.to_string())
+        {
+            let OwnerQueryResult::Approval { approval } = client
+                .query(
+                    OwnerQuery::Approval {
+                        conversation_id,
+                        lookup: ApprovalLookup::Approval(summary.id),
+                    },
+                    cancellation.clone(),
+                )
+                .await?
+            else {
+                return Err(CliError::OwnerInput);
+            };
+            if let Some(approval) = approval.filter(|approval| {
+                approval.status == everything::permissions::ApprovalStatus::Pending
+            }) {
+                let request = serde_json::to_string_pretty(&approval.request)
+                    .map_err(|_| CliError::Serialization)?;
+                eprintln!(
+                    "exact operation approval required:\n{request}\nresume with --tools --resume --approve {} or --deny {}",
+                    approval.request.id, approval.request.id
+                );
+            }
+        }
+        match next_cursor {
+            Some(next) => cursor = Some(next),
+            None => return Ok(()),
+        }
     }
 }
 
