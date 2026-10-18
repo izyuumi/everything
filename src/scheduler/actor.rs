@@ -29,6 +29,8 @@ use super::types::*;
 use super::worker::{self, ExecutionOutcome, ExecutionStop};
 use super::workspace;
 
+const BROKER_QUARANTINED: &str = "Tool broker is quarantined by unresolved tool cleanup; this task stays queued until the owner inspects the tool_recovery query and records acknowledge_cleanup for each requirement";
+
 #[derive(Clone)]
 pub struct Scheduler {
     pub(super) inner: Arc<HandleInner>,
@@ -2411,8 +2413,16 @@ impl Actor {
                 continue;
             }
             if self.services.broker.is_quarantined() {
+                if task.checkpoint.diagnostic.is_none() {
+                    task.checkpoint.diagnostic = Some(BROKER_QUARANTINED.into());
+                    let status = task.checkpoint.task.status;
+                    repository::save(&self.store(), &mut task, status)?;
+                }
                 self.queue.push_back(id);
                 continue;
+            }
+            if task.checkpoint.diagnostic.as_deref() == Some(BROKER_QUARANTINED) {
+                task.checkpoint.diagnostic = None;
             }
             let child = task.definition.initial.parent_task_id.is_some();
             let running = self
