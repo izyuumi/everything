@@ -2069,12 +2069,15 @@ fn validate_locator(locator: &str) -> Result<(), ConsolidationError> {
     let parsed = url::Url::parse(locator).map_err(|_| {
         ConsolidationError::Invalid("source locator must be an absolute URL".into())
     })?;
-    if !matches!(parsed.scheme(), "https" | "http" | "file" | "everything")
-        || !parsed.username().is_empty()
-        || parsed.password().is_some()
-    {
+    if !matches!(parsed.scheme(), "https" | "http" | "file" | "everything") {
+        return Err(ConsolidationError::Invalid(format!(
+            "source locator scheme '{:.32}' is not allowed; expected https, http, file or everything",
+            parsed.scheme()
+        )));
+    }
+    if !parsed.username().is_empty() || parsed.password().is_some() {
         return Err(ConsolidationError::Invalid(
-            "source locator scheme or credentials are forbidden".into(),
+            "source locator cannot contain credentials".into(),
         ));
     }
     Ok(())
