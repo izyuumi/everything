@@ -68,6 +68,25 @@ For a model credential, the input can select `credential_environment` with an ex
 
 Pairing begins with an explicit owner operation returning an invitation and full host fingerprint. Approval supplies the real responder request, its full confirmed fingerprint, a label, and the chosen conversation/command/permission access. Invitation material is a secret out-of-band pairing capability. The host does not print it during ordinary status or debugging. Device revocation uses the explicit owner operation; relay enrollment and relay-side revocation are separate operator actions.
 
+## Optional Sign in with ChatGPT
+
+OpenAI can use your ChatGPT plan instead of an API key ([design](../architecture/openai.md#optional-sign-in-with-chatgpt)). This is optional and never required. With a running host:
+
+```sh
+everything chatgpt sign-in --storage native        # prints the authorize URL and opens the browser
+everything chatgpt sign-in --storage native --no-browser --timeout-seconds 600
+everything chatgpt select --reference UUID --storage native   # use the plan for official OpenAI
+everything chatgpt status
+everything chatgpt sign-out
+everything chatgpt deselect                         # back to API keys; stays signed in
+```
+
+`sign-in` uses the ChatGPT binding already selected in settings. If none is selected, it needs `--storage` (and `--reference` to reuse an earlier sign-in). Otherwise it creates a new reference and prints the exact `select` command after success. Signing in never changes settings by itself. `select` adds the `{"source":"chatgpt"}` binding through a revision-checked `replace_settings`; it refuses if the official OpenAI endpoint already has another credential binding. `deselect` removes it. The CLI waits in 25-second owner `wait` calls. Ctrl-C sends `cancel`, which closes the loopback listener. Output is the nonsecret status: signed in, plan usage, email, access expiry, whether a client is registered, the `https://chatgpt.com/settings/usage` link, the attempt and revocation outcome.
+
+The underlying owner operation is `{"kind":"operation","operation":{"kind":"chatgpt","operation":{…}}}` with `status`, `sign_in` (`binding`, `timeout_seconds` 30–1800), `wait` (`attempt_id`, `timeout_ms` ≤ 30000), `cancel` (`attempt_id`) or `sign_out`. A `binding` is `{"provider":"openai","endpoint":{"kind":"official"},"reference":"UUID","storage":"session"|"native","source":"chatgpt"}`. These requests carry no secret and use the ordinary file route. Session records are lost when the host restarts; use `native` to keep the sign-in. A selected but signed-out binding makes OpenAI tasks stop as provider-unavailable with "not signed in with ChatGPT; sign in with ChatGPT or use an API key". The host never falls back to `OPENAI_API_KEY` for that endpoint while the binding is selected.
+
+OpenAI offers this for open-source tools and personal projects that run locally. Paid or remotely hosted apps need OpenAI's waitlist. It is a preview, and request restrictions may change. To disconnect Everything entirely, use ChatGPT Settings.
+
 ## Explicit resume and drain recovery
 
 `chat --resume` wakes an existing managed task without changing its captured policy. Workspace, mode and budget overrides are rejected on host resumes. An uncertain provider attempt requires an explicit one-use retry bound to its current attempt ID. A known cancellation/interrupted-tool boundary requires the separate exact command, checkpoint revision, phase, and owner request ID. The CLI's explicit retry option selects the matching typed operation; generic owner JSON can preserve the same request ID after an ambiguous response. A changed attempt or checkpoint cannot reuse an earlier approval.
