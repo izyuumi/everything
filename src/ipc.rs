@@ -287,6 +287,10 @@ pub enum OwnerOperation {
     ChatGpt {
         operation: crate::host::chatgpt::ChatGptOperation,
     },
+    #[serde(rename = "chatgpt_models")]
+    ChatGptModels {
+        binding: crate::host::settings::ModelCredentialReference,
+    },
     BeginPairing {
         lifetime_ms: u64,
     },
@@ -407,6 +411,7 @@ impl OwnerOperation {
             .map(|_| ())
             .map_err(|_| "invalid pairing approval"),
             Self::ChatGpt { operation } => operation.validate(),
+            Self::ChatGptModels { binding } => crate::host::chatgpt::validate_binding(binding),
             _ => Ok(()),
         }
     }
@@ -814,6 +819,11 @@ pub enum OwnerOperationResult {
     ChatGpt {
         status: Box<crate::host::chatgpt::ChatGptStatus>,
     },
+    #[serde(rename = "chatgpt_models")]
+    ChatGptModels {
+        binding: crate::host::settings::ModelCredentialReference,
+        models: Vec<crate::host::chatgpt::ChatGptModel>,
+    },
 }
 
 impl OwnerOperationResult {
@@ -1015,6 +1025,13 @@ impl OwnerOperationResult {
                 Self::ChatGpt { status },
             ) => status.binding == *binding,
             (OwnerOperation::ChatGpt { .. }, Self::ChatGpt { status }) => status.attempt.is_some(),
+            (
+                OwnerOperation::ChatGptModels { binding },
+                Self::ChatGptModels {
+                    binding: returned,
+                    models,
+                },
+            ) => returned == binding && models.len() <= 1_024,
             _ => false,
         };
         if !valid {

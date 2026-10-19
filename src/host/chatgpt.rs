@@ -43,6 +43,9 @@ const REFRESH_MARGIN_SECONDS: i64 = 300;
 const CLOCK_SKEW_SECONDS: i64 = 60;
 const MAX_CALLBACK_BYTES: usize = 8 * 1_024;
 const MAX_RESPONSE_BYTES: usize = 64 * 1_024;
+const MODELS: &str = "https://api.openai.com/v1/models";
+const MAX_MODELS_BYTES: usize = 4 * 1_024 * 1_024;
+const MAX_MODELS: usize = 1_024;
 const UNUSABLE_REFRESH: [&str; 6] = [
     "invalid_grant",
     "invalid_refresh_token",
@@ -81,8 +84,20 @@ pub enum ChatGptError {
     HostId,
     #[error("ChatGPT sign-in was cancelled")]
     Cancelled,
+    #[error("ChatGPT model list failed: {0}")]
+    Models(&'static str),
+    #[error(transparent)]
+    Model(#[from] ModelError),
     #[error(transparent)]
     Credential(#[from] CredentialError),
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ChatGptModel {
+    pub slug: String,
+    pub display_name: Option<String>,
+    pub visibility: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -129,7 +144,7 @@ impl ChatGptOperation {
     }
 }
 
-fn validate_binding(binding: &ModelCredentialReference) -> Result<(), &'static str> {
+pub fn validate_binding(binding: &ModelCredentialReference) -> Result<(), &'static str> {
     if binding.source != ModelCredentialSource::ChatGpt
         || binding.provider != ProviderKind::OpenAi
         || binding.endpoint != ProviderEndpoint::Official
@@ -330,6 +345,87 @@ impl ChatGptAccounts {
             }
             ChatGptOperation::SignOut { binding } => self.sign_out(binding).await,
         }
+    }
+
+    pub async fn models(
+        &self,
+        binding: ModelCredentialReference,
+        cancellation: CancellationToken,
+    ) -> Result<Vec<ChatGptModel>, ChatGptError> {
+        use futures_util::StreamExt;
+        validate_binding(&binding).map_err(ChatGptError::Invalid)?;
+        let bearer = ChatGptBearer {
+            vault: self.vault.clone(),
+            http: self.http.clone(),
+            binding,
+        };
+        let mut token = bearer.access_token(cancellation.clone()).await?;
+        let request = self
+            .http
+            .get(MODELS)
+            .header(reqwest::header::ACCEPT, "application/json")
+            .bearer_auth(&token);
+        token.zeroize();
+        let response = tokio::select! {
+            biased;
+            _ = cancellation.cancelled() => return Err(ChatGptError::Cancelled),
+            response = request.send() => response.map_err(|_| ChatGptError::Models("the request failed"))?,
+        };
+        let status = response.status();
+        let retry_after_ms = crate::model::openai::retry_after(response.headers());
+        let mut body = Vec::new();
+        let mut chunks = response.bytes_stream();
+        loop {
+            let chunk = tokio::select! {
+                biased;
+                _ = cancellation.cancelled() => return Err(ChatGptError::Cancelled),
+                chunk = chunks.next() => chunk,
+            };
+            let Some(chunk) = chunk else {
+                break;
+            };
+            let chunk =
+                chunk.map_err(|_| ChatGptError::Models("the response could not be read"))?;
+            if body.len() + chunk.len() > MAX_MODELS_BYTES {
+                return Err(ChatGptError::Models("the response exceeds its byte limit"));
+            }
+            body.extend_from_slice(&chunk);
+        }
+        if !status.is_success() {
+            return Err(
+                crate::model::openai::chatgpt_body_error(status, retry_after_ms, &body).into(),
+            );
+        }
+        let value: Value = serde_json::from_slice(&body)
+            .map_err(|_| ChatGptError::Models("the response is not JSON"))?;
+        let models = value["models"]
+            .as_array()
+            .ok_or(ChatGptError::Models("the response has no models array"))?;
+        if models.len() > MAX_MODELS {
+            return Err(ChatGptError::Models("the response lists too many models"));
+        }
+        models
+            .iter()
+            .map(|model| {
+                let text = |field: &str, maximum: usize| {
+                    model[field]
+                        .as_str()
+                        .filter(|value| {
+                            !value.is_empty()
+                                && value.len() <= maximum
+                                && !value.chars().any(char::is_control)
+                        })
+                        .map(str::to_owned)
+                };
+                Ok(ChatGptModel {
+                    slug: text("slug", 256)
+                        .filter(|slug| !slug.chars().any(char::is_whitespace))
+                        .ok_or(ChatGptError::Models("a model has an invalid slug"))?,
+                    display_name: text("display_name", 256),
+                    visibility: text("visibility", 64),
+                })
+            })
+            .collect()
     }
 
     fn pending(&self, attempt_id: Uuid) -> Result<Arc<Pending>, ChatGptError> {

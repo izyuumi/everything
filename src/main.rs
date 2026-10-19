@@ -66,6 +66,7 @@ struct ChatGptArguments {
 enum ChatGptCommand {
     SignIn(ChatGptSignInArguments),
     Status(ChatGptBindingArguments),
+    Models(ChatGptModelsArguments),
     SignOut(ChatGptBindingArguments),
     Select(ChatGptBindingArguments),
     Deselect,
@@ -77,6 +78,16 @@ struct ChatGptBindingArguments {
     reference: Option<uuid::Uuid>,
     #[arg(long, value_enum)]
     storage: Option<StorageArgument>,
+}
+
+#[derive(Args)]
+struct ChatGptModelsArguments {
+    #[command(flatten)]
+    binding: ChatGptBindingArguments,
+    #[arg(long)]
+    all: bool,
+    #[arg(long)]
+    json: bool,
 }
 
 #[derive(Args)]
@@ -704,6 +715,43 @@ async fn chatgpt_cli(
                     .await?,
             )
             .await
+        }
+        ChatGptCommand::Models(arguments) => {
+            let binding = resolve(&arguments.binding, false)?;
+            let everything::ipc::OwnerOperationResult::ChatGptModels { models, .. } = client
+                .operate(
+                    everything::ipc::OwnerOperation::ChatGptModels { binding },
+                    CommandId::new(),
+                    cancellation,
+                )
+                .await?
+            else {
+                return Err(CliError::OwnerInput);
+            };
+            let models: Vec<_> = models
+                .into_iter()
+                .filter(|model| arguments.all || model.visibility.as_deref() == Some("list"))
+                .collect();
+            if arguments.json {
+                return write_json(models).await;
+            }
+            let mut lines = String::new();
+            for model in &models {
+                let name = model.display_name.as_deref().unwrap_or("-");
+                if arguments.all {
+                    let visibility = model.visibility.as_deref().unwrap_or("-");
+                    lines.push_str(&format!("{}\t{name}\t{visibility}\n", model.slug));
+                } else {
+                    lines.push_str(&format!("{}\t{name}\n", model.slug));
+                }
+            }
+            if models.is_empty() {
+                eprintln!("the ChatGPT plan lists no models; try --all");
+            }
+            let mut output = tokio::io::stdout();
+            output.write_all(lines.as_bytes()).await?;
+            output.flush().await?;
+            Ok(())
         }
         ChatGptCommand::SignOut(arguments) => {
             let binding = resolve(&arguments, false)?;
