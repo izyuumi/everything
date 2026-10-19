@@ -32,6 +32,7 @@ const MAX_STREAM_EVENTS: usize = 262_144;
 const MAX_OUTPUT_ITEMS: usize = 1_024;
 const EXCERPT_READ_BYTES: usize = 512;
 const EXCERPT_BYTES: usize = 500;
+const FUNCTION_NAMESPACE: &str = "functions";
 const MODELS_HINT: &str =
     "; run `everything chatgpt models` to list models your ChatGPT plan can use";
 
@@ -369,6 +370,7 @@ impl ModelProvider for OpenAiProvider {
             futures_util::pin_mut!(events);
             let mut state = StreamState {
                 loopback,
+                chatgpt_plan,
                 ..StreamState::default()
             };
             loop {
@@ -384,7 +386,7 @@ impl ModelProvider for OpenAiProvider {
                         eventsource_stream::EventStreamError::Transport(error) => error,
                         _ => protocol("invalid server-sent event framing"),
                     }))
-                    .and_then(|event| decode_event(&event, accounting.as_deref()));
+                    .and_then(|event| decode_event(&event, accounting.as_deref(), chatgpt_plan));
                 let frame = match (parsed, &fallback) {
                     (Err(ModelError::Protocol { .. }), Some(head)) => {
                         Err(not_event_stream(content_type.as_deref(), head))
@@ -466,7 +468,7 @@ struct WireRequest<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     instructions: Option<&'a str>,
     input: Vec<InputItem>,
-    tools: Vec<WireTool<'a>>,
+    tools: Vec<WireToolEntry<'a>>,
     tool_choice: Value,
     stream: bool,
     store: bool,
@@ -490,6 +492,19 @@ struct WireTool<'a> {
     strict: bool,
 }
 
+#[derive(Serialize)]
+#[serde(untagged)]
+enum WireToolEntry<'a> {
+    Tool(WireTool<'a>),
+    Namespace {
+        #[serde(rename = "type")]
+        kind: &'static str,
+        name: &'static str,
+        description: &'static str,
+        tools: Vec<WireTool<'a>>,
+    },
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum InputItem {
@@ -502,6 +517,8 @@ enum InputItem {
     FunctionCall {
         call_id: String,
         name: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        namespace: Option<String>,
         arguments: String,
     },
     FunctionCallOutput {
@@ -727,6 +744,7 @@ fn prepare_request(
                     input.push(InputItem::FunctionCall {
                         call_id: call.id.clone(),
                         name: call.name.clone(),
+                        namespace: chatgpt_plan.then(|| FUNCTION_NAMESPACE.to_owned()),
                         arguments: serde_json::to_string(&call.arguments)
                             .map_err(|_| invalid("arguments", "cannot encode tool arguments"))?,
                     });
@@ -760,21 +778,38 @@ fn prepare_request(
             chatgpt_plan,
         );
     }
-    let tools = request
+    let specific = match &request.tool_choice {
+        ToolChoice::Specific { name } if chatgpt_plan => Some(name),
+        _ => None,
+    };
+    let functions = request
         .tools
         .iter()
+        .filter(|tool| specific.is_none_or(|name| &tool.name == name))
         .map(|tool| WireTool {
             kind: "function",
             name: &tool.name,
             description: &tool.description,
             parameters: &tool.input_schema,
             strict: false,
-        })
-        .collect();
+        });
+    let tools = if !chatgpt_plan {
+        functions.map(WireToolEntry::Tool).collect()
+    } else if request.tools.is_empty() {
+        Vec::new()
+    } else {
+        vec![WireToolEntry::Namespace {
+            kind: "namespace",
+            name: FUNCTION_NAMESPACE,
+            description: "",
+            tools: functions.collect(),
+        }]
+    };
     let tool_choice = match &request.tool_choice {
         ToolChoice::Auto => Value::String("auto".to_owned()),
         ToolChoice::None => Value::String("none".to_owned()),
         ToolChoice::Required => Value::String("required".to_owned()),
+        ToolChoice::Specific { .. } if chatgpt_plan => Value::String("required".to_owned()),
         ToolChoice::Specific { name } => serde_json::json!({"type": "function", "name": name}),
     };
     let native = WireRequest {
@@ -938,9 +973,11 @@ impl RawLimits {
 
 #[derive(Deserialize)]
 struct WireFrame {
-    sequence_number: u64,
+    sequence_number: Option<u64>,
     #[serde(flatten)]
     event: WireEvent,
+    #[serde(skip)]
+    unknown: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -1094,7 +1131,7 @@ struct OutputTokenDetails {
     reasoning_tokens: u64,
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum WireItem {
     Message {
@@ -1108,6 +1145,7 @@ enum WireItem {
         id: String,
         call_id: String,
         name: String,
+        namespace: Option<String>,
         arguments: String,
         status: Option<String>,
     },
@@ -1127,7 +1165,7 @@ struct ReasoningSummary {
     text: String,
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum WirePart {
     OutputText {
@@ -1162,6 +1200,7 @@ enum ItemIdentity {
         name: String,
     },
     Reasoning(String),
+    Ignored,
 }
 
 impl ItemIdentity {
@@ -1169,19 +1208,32 @@ impl ItemIdentity {
         match self {
             Self::Message(id) | Self::Reasoning(id) => id,
             Self::Function { id, .. } => id,
+            Self::Ignored => "",
         }
     }
 }
 
 impl WireItem {
-    fn identity(&self) -> Result<ItemIdentity, ModelError> {
+    fn identity(&self, chatgpt_plan: bool) -> Result<ItemIdentity, ModelError> {
         let identity = match self {
+            Self::Unknown if chatgpt_plan => return Ok(ItemIdentity::Ignored),
             Self::Message { id, role, .. } if role == "assistant" => {
                 ItemIdentity::Message(id.clone())
             }
             Self::FunctionCall {
-                id, call_id, name, ..
+                id,
+                call_id,
+                name,
+                namespace,
+                ..
             } => {
+                if chatgpt_plan
+                    && namespace
+                        .as_deref()
+                        .is_some_and(|namespace| namespace != FUNCTION_NAMESPACE)
+                {
+                    return Err(protocol("unsupported provider function namespace"));
+                }
                 bounded_identifier(call_id)?;
                 validate_tool_name(name).map_err(|_| protocol("invalid provider function name"))?;
                 ItemIdentity::Function {
@@ -1226,6 +1278,8 @@ struct StreamState {
     locations: HashMap<(u32, Option<u32>), usize>,
     blocks: Vec<PendingBlock>,
     loopback: bool,
+    chatgpt_plan: bool,
+    done_items: BTreeMap<u32, WireItem>,
 }
 
 #[derive(Default)]
@@ -1240,13 +1294,13 @@ impl StreamState {
         if self.event_count > MAX_STREAM_EVENTS {
             return Err(protocol("stream event count exceeds its limit"));
         }
-        if self
-            .sequence
-            .is_some_and(|previous| frame.sequence_number <= previous)
-        {
+        if self.chatgpt_plan && matches!(frame.event, WireEvent::Unknown) {
+            return Ok(Progress::default());
+        }
+        if self.sequence.is_some() && frame.sequence_number <= self.sequence {
             return Err(protocol("stream sequence numbers must strictly increase"));
         }
-        self.sequence = Some(frame.sequence_number);
+        self.sequence = frame.sequence_number;
         if let WireEvent::Error { code } = &frame.event {
             return Err(provider_error(
                 code.as_deref().map_or("unknown", |code| code),
@@ -1299,8 +1353,13 @@ impl StreamState {
                 {
                     return Err(protocol("invalid output item ordering or count"));
                 }
-                let identity = item.identity()?;
-                if !self.item_ids.insert(identity.id().to_owned()) {
+                if matches!(item, WireItem::Unknown) && !self.chatgpt_plan {
+                    return Err(unsupported("unsupported output item", frame.unknown));
+                }
+                let identity = item.identity(self.chatgpt_plan)?;
+                if identity != ItemIdentity::Ignored
+                    && !self.item_ids.insert(identity.id().to_owned())
+                {
                     return Err(protocol("duplicate output item identifier"));
                 }
                 if let ItemIdentity::Function { call_id, .. } = &identity
@@ -1349,8 +1408,7 @@ impl StreamState {
                             });
                         }
                     }
-                    WireItem::Reasoning { .. } => {}
-                    WireItem::Unknown => return Err(protocol("unsupported output item")),
+                    WireItem::Reasoning { .. } | WireItem::Unknown => {}
                 }
             }
             WireEvent::PartAdded {
@@ -1434,10 +1492,16 @@ impl StreamState {
                 }
             }
             WireEvent::ItemDone { output_index, item } => {
-                if self.items.get(&output_index) != Some(&item.identity()?)
+                if matches!(item, WireItem::Unknown) && !self.chatgpt_plan {
+                    return Err(unsupported("unsupported completed item", frame.unknown));
+                }
+                if self.items.get(&output_index) != Some(&item.identity(self.chatgpt_plan)?)
                     || self.completed_items.contains(&output_index)
                 {
                     return Err(protocol("completed output item does not match its start"));
+                }
+                if self.chatgpt_plan {
+                    self.done_items.insert(output_index, item.clone());
                 }
                 match item {
                     WireItem::Message { content, .. } => {
@@ -1504,12 +1568,15 @@ impl StreamState {
                             })?;
                         self.reasoning.insert(output_index, item);
                     }
-                    WireItem::Unknown => return Err(protocol("unsupported completed item")),
+                    WireItem::Unknown => {}
                 }
                 self.completed_items.insert(output_index);
             }
-            WireEvent::Completed { response } | WireEvent::Incomplete { response } => {
+            WireEvent::Completed { mut response } | WireEvent::Incomplete { mut response } => {
                 self.check_response(&response)?;
+                if self.chatgpt_plan && response.output.is_empty() {
+                    response.output = std::mem::take(&mut self.done_items).into_values().collect();
+                }
                 if response.output.len() != self.items.len()
                     || self.completed_items.len() != self.items.len()
                 {
@@ -1518,14 +1585,16 @@ impl StreamState {
                     ));
                 }
                 for (index, item) in response.output.iter().enumerate() {
-                    if self.items.get(&(index as u32)) != Some(&item.identity()?) {
+                    if self.items.get(&(index as u32)) != Some(&item.identity(self.chatgpt_plan)?) {
                         return Err(protocol("terminal output item does not match the stream"));
                     }
                 }
                 progress.response = Some(response);
             }
             WireEvent::Metadata => {}
-            WireEvent::Unknown => return Err(protocol("unsupported stream event")),
+            WireEvent::Unknown => {
+                return Err(unsupported("unsupported stream event", frame.unknown));
+            }
             WireEvent::Created { .. } | WireEvent::Error { .. } | WireEvent::Failed { .. } => {
                 return Err(protocol("invalid stream state"));
             }
@@ -1897,6 +1966,7 @@ fn finish_response(
                     item: item.clone(),
                 });
             }
+            WireItem::Unknown if state.chatgpt_plan => {}
             WireItem::Unknown => return Err(protocol("unsupported terminal output item")),
         }
     }
@@ -2111,6 +2181,7 @@ async fn read_body(
 fn decode_event(
     event: &eventsource_stream::Event,
     accounting: Option<&ProviderAccounting>,
+    chatgpt_plan: bool,
 ) -> Result<WireFrame, ModelError> {
     if event.data.len() > MAX_SSE_EVENT_BYTES {
         return Err(protocol("server-sent event exceeds its byte limit"));
@@ -2118,8 +2189,39 @@ fn decode_event(
     if let Some(accounting) = accounting {
         observe_terminal_usage(&event.data, accounting)?;
     }
-    let frame: WireFrame = serde_json::from_str(&event.data)
+    let mut frame: WireFrame = serde_json::from_str(&event.data)
         .map_err(|_| protocol("invalid server-sent event JSON"))?;
+    let unknown_event = matches!(frame.event, WireEvent::Unknown);
+    if chatgpt_plan && unknown_event {
+        return Ok(frame);
+    }
+    if frame.sequence_number.is_none() {
+        return Err(protocol("invalid server-sent event JSON"));
+    }
+    if !chatgpt_plan
+        && matches!(
+            frame.event,
+            WireEvent::Unknown
+                | WireEvent::ItemAdded {
+                    item: WireItem::Unknown,
+                    ..
+                }
+                | WireEvent::ItemDone {
+                    item: WireItem::Unknown,
+                    ..
+                }
+        )
+    {
+        let value = serde_json::from_str::<Value>(&event.data).unwrap_or_default();
+        let name = if unknown_event {
+            value["type"]
+                .as_str()
+                .or(Some(event.event.as_str()).filter(|name| *name != "message"))
+        } else {
+            value["item"]["type"].as_str()
+        };
+        frame.unknown = name.map(wire_name).filter(|name| !name.is_empty());
+    }
     if event.event != "message"
         && !event.event.is_empty()
         && frame.event.kind().is_some_and(|kind| event.event != kind)
@@ -2402,6 +2504,23 @@ fn protocol(message: &str) -> ModelError {
     ModelError::Protocol {
         message: message.to_owned(),
     }
+}
+
+fn unsupported(message: &str, name: Option<String>) -> ModelError {
+    protocol(&format!(
+        "{message}: {}",
+        name.as_deref().unwrap_or("unnamed")
+    ))
+}
+
+fn wire_name(value: &str) -> String {
+    value
+        .chars()
+        .filter(|character| {
+            character.is_ascii_alphanumeric() || matches!(character, '.' | '_' | '-')
+        })
+        .take(64)
+        .collect()
 }
 
 fn transport(message: &str) -> ModelError {
