@@ -1432,6 +1432,31 @@ pub(super) fn public_failure(error: &HostError) -> LocalFailure {
             LocalFailureCode::Unavailable,
             "memory service is shutting down",
         ),
+        HostError::ChatGpt(
+            error @ (super::chatgpt::ChatGptError::Model(_)
+            | super::chatgpt::ChatGptError::Models(_)
+            | super::chatgpt::ChatGptError::SignedOut
+            | super::chatgpt::ChatGptError::PlanUsageDisabled
+            | super::chatgpt::ChatGptError::SessionEnded
+            | super::chatgpt::ChatGptError::InvalidClient
+            | super::chatgpt::ChatGptError::Transport(_)
+            | super::chatgpt::ChatGptError::Invalid(_)),
+        ) => {
+            let mut message = error.to_string();
+            let mut end = message.len().min(1_024);
+            while !message.is_char_boundary(end) {
+                end -= 1;
+            }
+            message.truncate(end);
+            return LocalFailure {
+                code: if matches!(error, super::chatgpt::ChatGptError::Invalid(_)) {
+                    LocalFailureCode::InvalidRequest
+                } else {
+                    LocalFailureCode::Unavailable
+                },
+                message,
+            };
+        }
         _ => (
             LocalFailureCode::Internal,
             "host operation failed; durable acceptance may already exist",
