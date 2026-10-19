@@ -50,6 +50,8 @@ final class HostModel {
     var toolsEnabled = false
     var contextTokens = "32768"
     var serviceStatus: String?
+    var chatGPTStatus: JSONValue = .null
+    var chatGPTBusy = false
     var pendingAction: OwnerRequest?
     var pendingActionLabel = ""
     @ObservationIgnored private let client: OwnerIPCClient
@@ -496,6 +498,7 @@ final class HostModel {
             guard result["kind"].string == "settings" else { throw OwnerClientError.invalidResponse }
             if original == connection, !closing, !Task.isCancelled { try adoptSettings(result["settings"]) }
         } catch { if !Task.isCancelled { message = error.localizedDescription } }
+        await refreshChatGPT()
     }
 
     private func adoptSettings(_ value: JSONValue) throws {
@@ -527,6 +530,97 @@ final class HostModel {
             updated = try updated.replacing("context_tokens", with: .unsigned(tokens))
             await apply(.operation("replace_settings", fields: ["expected_revision": .unsigned(revision), "settings": updated]), label: "Settings", expectedKind: "settings")
         } catch { message = error.localizedDescription }
+    }
+
+    var chatGPTBinding: JSONValue? {
+        settings["model_credentials"].array?.first { $0["source"].string == "chatgpt" }
+    }
+
+    var chatGPTSelectable: Bool {
+        settings["model_credentials"].array?.contains {
+            $0["provider"].string == "openai" && $0["endpoint"]["kind"].string == "official"
+        } == false
+    }
+
+    func refreshChatGPT() async {
+        guard let binding = chatGPTBinding else { chatGPTStatus = .null; return }
+        let original = connection
+        do {
+            let status = try await chatGPT(["kind": .string("status"), "binding": binding], connection: original)
+            if original == connection, !closing { chatGPTStatus = status }
+        } catch { if original == connection, !closing { message = error.localizedDescription } }
+    }
+
+    func continueWithChatGPT() async {
+        guard canMutate, !chatGPTBusy, let revision = settings["revision"].unsigned else { return }
+        let configured = chatGPTBinding
+        guard configured != nil || chatGPTSelectable else {
+            message = "The official OpenAI endpoint already uses another credential reference. Remove it before using your ChatGPT plan."
+            return
+        }
+        let binding = configured ?? .object([
+            "provider": .string("openai"), "endpoint": .object(["kind": .string("official")]),
+            "reference": .string(UUID().uuidString.lowercased()), "storage": .string("native"), "source": .string("chatgpt")
+        ])
+        chatGPTBusy = true
+        defer { chatGPTBusy = false }
+        let original = connection
+        do {
+            var status = try await chatGPT(["kind": .string("sign_in"), "binding": binding, "timeout_seconds": .unsigned(600)], connection: original)
+            guard let attempt = status["attempt"]["attempt_id"].string,
+                  let url = status["attempt"]["authorize_url"].string.flatMap(URL.init(string:)),
+                  url.scheme == "https", url.host == "auth.openai.com" else { throw OwnerClientError.invalidResponse }
+            NSWorkspace.shared.open(url)
+            message = "Continue with ChatGPT in your browser."
+            while status["attempt"]["phase"]["kind"].string == "pending" {
+                do {
+                    status = try await chatGPT(["kind": .string("wait"), "attempt_id": .string(attempt), "timeout_ms": .unsigned(25_000)], connection: original)
+                } catch {
+                    _ = try? await chatGPT(["kind": .string("cancel"), "attempt_id": .string(attempt)], connection: original)
+                    throw error
+                }
+            }
+            guard original == connection, !closing else { return }
+            chatGPTStatus = status
+            let phase = status["attempt"]["phase"]
+            guard phase["kind"].string == "completed" else {
+                message = "ChatGPT sign-in did not complete: " + (phase["reason"].string ?? phase["kind"].string ?? "unknown")
+                return
+            }
+            message = status["plan_usage_enabled"].bool == true ? "Using ChatGPT plan." : "Signed in, but ChatGPT plan usage was not granted. API keys remain available."
+            if configured == nil, let credentials = settings["model_credentials"].array {
+                let updated = try settings.replacing("model_credentials", with: .array(credentials + [binding]))
+                await apply(.operation("replace_settings", fields: ["expected_revision": .unsigned(revision), "settings": updated]), label: "ChatGPT plan selection", expectedKind: "settings")
+            }
+        } catch { if original == connection, !closing { message = error.localizedDescription } }
+    }
+
+    func signOutChatGPT() async {
+        guard canMutate, !chatGPTBusy, let binding = chatGPTBinding else { return }
+        chatGPTBusy = true
+        defer { chatGPTBusy = false }
+        let original = connection
+        do {
+            let status = try await chatGPT(["kind": .string("sign_out"), "binding": binding], connection: original)
+            guard original == connection, !closing else { return }
+            chatGPTStatus = status
+            message = status["revocation"].string == "unconfirmed" ? "Signed out locally. OpenAI did not confirm revocation; you can disconnect Everything in ChatGPT settings." : "Signed out of ChatGPT."
+        } catch { if original == connection, !closing { message = error.localizedDescription } }
+    }
+
+    func stopUsingChatGPT() async {
+        guard canMutate, let revision = settings["revision"].unsigned, let credentials = settings["model_credentials"].array else { return }
+        do {
+            let updated = try settings.replacing("model_credentials", with: .array(credentials.filter { $0["source"].string != "chatgpt" }))
+            await apply(.operation("replace_settings", fields: ["expected_revision": .unsigned(revision), "settings": updated]), label: "API-key credential selection", expectedKind: "settings")
+            await refreshChatGPT()
+        } catch { message = error.localizedDescription }
+    }
+
+    private func chatGPT(_ operation: [String: JSONValue], connection original: OwnerConnection) async throws -> JSONValue {
+        let result = try await client.request(.operation("chatgpt", fields: ["operation": .object(operation)]), connection: original)
+        guard result["kind"].string == "chatgpt", result["status"]["signed_in"].bool != nil else { throw OwnerClientError.invalidResponse }
+        return result["status"]
     }
 
     func manageService(_ action: String) async {
