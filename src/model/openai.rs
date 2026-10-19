@@ -30,6 +30,10 @@ const MAX_SSE_EVENT_BYTES: usize = MAX_REQUEST_BYTES + 64 * 1_024;
 const MAX_STREAM_BYTES: usize = 128 * 1_024 * 1_024;
 const MAX_STREAM_EVENTS: usize = 262_144;
 const MAX_OUTPUT_ITEMS: usize = 1_024;
+const EXCERPT_READ_BYTES: usize = 512;
+const EXCERPT_BYTES: usize = 500;
+const MODELS_HINT: &str =
+    "; run `everything chatgpt models` to list models your ChatGPT plan can use";
 
 #[async_trait]
 pub trait OpenAiBearer: Send + Sync {
@@ -283,27 +287,77 @@ impl ModelProvider for OpenAiProvider {
             }
             return Err(http_error(response.status(), response.headers()));
         }
-        if response
-            .headers()
-            .get(CONTENT_TYPE)
-            .and_then(|value| value.to_str().ok())
+        let status = response.status();
+        let retry_after_ms = retry_after(response.headers());
+        let content_type = response.headers().get(CONTENT_TYPE).map(|value| {
+            value
+                .to_str()
+                .map_or_else(|_| "unreadable".to_owned(), str::to_owned)
+        });
+        let media_type = content_type
+            .as_deref()
             .and_then(|value| value.split(';').next())
-            .is_none_or(|value| !value.trim().eq_ignore_ascii_case("text/event-stream"))
-        {
-            return Err(protocol("expected a server-sent event response"));
+            .map(|value| value.trim().to_ascii_lowercase());
+        let event_stream = media_type.as_deref() == Some("text/event-stream");
+        let idle_timeout = self.config.idle_timeout;
+        let content_length = response.content_length();
+        let mut bytes = response.bytes_stream();
+        let mut head = Vec::new();
+        if !event_stream && !chatgpt_plan {
+            let _ = tokio::time::timeout(
+                Duration::from_secs(2),
+                read_body(
+                    &mut bytes,
+                    &mut head,
+                    EXCERPT_READ_BYTES,
+                    Duration::from_secs(2),
+                    &cancellation,
+                    |_| false,
+                ),
+            )
+            .await;
+            return Err(not_event_stream(content_type.as_deref(), &head));
         }
-        if response
-            .content_length()
-            .is_some_and(|length| length > MAX_STREAM_BYTES as u64)
-        {
+        if content_length.is_some_and(|length| length > MAX_STREAM_BYTES as u64) {
             return Err(protocol("stream body exceeds its byte limit"));
         }
-        let idle_timeout = self.config.idle_timeout;
+        let mut fallback = None;
+        if !event_stream {
+            read_body(
+                &mut bytes,
+                &mut head,
+                MAX_SSE_EVENT_BYTES,
+                idle_timeout,
+                &cancellation,
+                |head| head.iter().any(|byte| !byte.is_ascii_whitespace()),
+            )
+            .await?;
+            let json = media_type
+                .as_deref()
+                .is_some_and(|value| value == "application/json" || value.ends_with("+json"));
+            if json || head.iter().find(|byte| !byte.is_ascii_whitespace()) == Some(&b'{') {
+                read_body(
+                    &mut bytes,
+                    &mut head,
+                    MAX_SSE_EVENT_BYTES + 1,
+                    idle_timeout,
+                    &cancellation,
+                    |_| false,
+                )
+                .await?;
+                head = json_events(status, retry_after_ms, content_type.as_deref(), &head)?;
+            } else {
+                fallback = Some(head[..head.len().min(EXCERPT_READ_BYTES)].to_vec());
+            }
+        }
         let accounting = self.config.accounting.clone();
         let loopback = is_loopback_endpoint(&self.config.endpoint);
         let raw = async_stream::try_stream! {
-            let mut bytes = response.bytes_stream();
             let mut limits = RawLimits::default();
+            if !head.is_empty() {
+                limits.observe(&head)?;
+                yield bytes::Bytes::from(head);
+            }
             while let Some(chunk) = bytes.next().await {
                 let chunk = chunk.map_err(map_transport_error)?;
                 limits.observe(&chunk)?;
@@ -325,22 +379,19 @@ impl ModelProvider for OpenAiProvider {
                         next.map_err(|_| transport("event stream idle timeout"))
                     },
                 }?;
-                let event = next.ok_or_else(|| protocol("stream ended without a terminal event"))?
-                    .map_err(|error| match error {
+                let parsed = next.ok_or_else(|| protocol("stream ended without a terminal event"))
+                    .and_then(|event| event.map_err(|error| match error {
                         eventsource_stream::EventStreamError::Transport(error) => error,
                         _ => protocol("invalid server-sent event framing"),
-                    })?;
-                if event.data.len() > MAX_SSE_EVENT_BYTES {
-                    Err(protocol("server-sent event exceeds its byte limit"))?;
-                }
-                if let Some(accounting) = &accounting {
-                    observe_terminal_usage(&event.data, accounting)?;
-                }
-                let frame: WireFrame = serde_json::from_str(&event.data)
-                    .map_err(|_| protocol("invalid server-sent event JSON"))?;
-                if event.event != "message" && !event.event.is_empty() && frame.event.kind().is_some_and(|kind| event.event != kind) {
-                    Err(protocol("server-sent event type does not match its payload"))?;
-                }
+                    }))
+                    .and_then(|event| decode_event(&event, accounting.as_deref()));
+                let frame = match (parsed, &fallback) {
+                    (Err(ModelError::Protocol { .. }), Some(head)) => {
+                        Err(not_event_stream(content_type.as_deref(), head))
+                    }
+                    (parsed, _) => parsed,
+                }?;
+                fallback = None;
                 let progress = state.apply(frame)?;
                 for event in progress.events {
                     if cancellation.is_cancelled() {
@@ -2018,7 +2069,7 @@ fn http_error(status: StatusCode, headers: &HeaderMap) -> ModelError {
     }
 }
 
-fn retry_after(headers: &HeaderMap) -> Option<u64> {
+pub(crate) fn retry_after(headers: &HeaderMap) -> Option<u64> {
     let millis = headers
         .get("retry-after-ms")
         .and_then(|value| value.to_str().ok())
@@ -2033,6 +2084,174 @@ fn retry_after(headers: &HeaderMap) -> Option<u64> {
     millis.map(|value| value.min(3_600_000))
 }
 
+async fn read_body(
+    chunks: &mut (impl futures_util::Stream<Item = reqwest::Result<bytes::Bytes>> + Unpin),
+    buffer: &mut Vec<u8>,
+    limit: usize,
+    idle_timeout: Duration,
+    cancellation: &CancellationToken,
+    done: impl Fn(&[u8]) -> bool,
+) -> Result<(), ModelError> {
+    while buffer.len() < limit && !done(buffer) {
+        let next = tokio::select! {
+            biased;
+            _ = cancellation.cancelled() => return Err(ModelError::Cancelled),
+            next = tokio::time::timeout(idle_timeout, chunks.next()) => {
+                next.map_err(|_| transport("event stream idle timeout"))?
+            },
+        };
+        let Some(chunk) = next else {
+            break;
+        };
+        buffer.extend_from_slice(&chunk.map_err(map_transport_error)?);
+    }
+    Ok(())
+}
+
+fn decode_event(
+    event: &eventsource_stream::Event,
+    accounting: Option<&ProviderAccounting>,
+) -> Result<WireFrame, ModelError> {
+    if event.data.len() > MAX_SSE_EVENT_BYTES {
+        return Err(protocol("server-sent event exceeds its byte limit"));
+    }
+    if let Some(accounting) = accounting {
+        observe_terminal_usage(&event.data, accounting)?;
+    }
+    let frame: WireFrame = serde_json::from_str(&event.data)
+        .map_err(|_| protocol("invalid server-sent event JSON"))?;
+    if event.event != "message"
+        && !event.event.is_empty()
+        && frame.event.kind().is_some_and(|kind| event.event != kind)
+    {
+        return Err(protocol(
+            "server-sent event type does not match its payload",
+        ));
+    }
+    Ok(frame)
+}
+
+fn json_events(
+    status: StatusCode,
+    retry_after_ms: Option<u64>,
+    content_type: Option<&str>,
+    body: &[u8],
+) -> Result<Vec<u8>, ModelError> {
+    let diagnostic = || not_event_stream(content_type, body);
+    if body.len() > MAX_SSE_EVENT_BYTES {
+        return Err(diagnostic());
+    }
+    let value = serde_json::from_slice::<Value>(body).map_err(|_| diagnostic())?;
+    if value["object"] == "response"
+        && let Some(output) = value["output"].as_array()
+    {
+        let terminal = match value["status"].as_str() {
+            Some("completed") => "response.completed",
+            Some("incomplete") => "response.incomplete",
+            Some("failed") => "response.failed",
+            _ => return Err(diagnostic()),
+        };
+        let mut created = value.clone();
+        created["output"] = Value::Array(Vec::new());
+        created["status"] = Value::from("in_progress");
+        let mut frames = vec![serde_json::json!({"type": "response.created", "response": created})];
+        for (index, item) in output.iter().enumerate() {
+            frames.push(serde_json::json!({"type": "response.output_item.added", "output_index": index, "item": item}));
+            frames.push(serde_json::json!({"type": "response.output_item.done", "output_index": index, "item": item}));
+        }
+        frames.push(serde_json::json!({"type": terminal, "response": value}));
+        let mut events = Vec::new();
+        for (sequence, mut frame) in frames.into_iter().enumerate() {
+            frame["sequence_number"] = Value::from(sequence);
+            events.extend_from_slice(b"data: ");
+            serde_json::to_writer(&mut events, &frame).map_err(|_| diagnostic())?;
+            events.extend_from_slice(b"\n\n");
+        }
+        return Ok(events);
+    }
+    if value["error"].is_object() || value["detail"].is_string() {
+        return Err(chatgpt_body_error(status, retry_after_ms, body));
+    }
+    Err(diagnostic())
+}
+
+fn not_event_stream(content_type: Option<&str>, body: &[u8]) -> ModelError {
+    let content_type =
+        content_type.map_or_else(|| "none".to_owned(), |value| excerpt(value.as_bytes(), 100));
+    let body = excerpt(&body[..body.len().min(EXCERPT_READ_BYTES)], EXCERPT_BYTES);
+    let body = if body.is_empty() {
+        "empty".to_owned()
+    } else {
+        format!("\"{body}\"")
+    };
+    ModelError::Protocol {
+        message: format!(
+            "expected a server-sent event response (content type: {content_type}; body: {body})"
+        ),
+    }
+}
+
+fn excerpt(bytes: &[u8], limit: usize) -> String {
+    let mut collapsed = String::new();
+    let mut space = false;
+    for character in String::from_utf8_lossy(bytes).chars() {
+        if character.is_whitespace() {
+            space = true;
+            continue;
+        }
+        if space && !collapsed.is_empty() {
+            collapsed.push(' ');
+        }
+        space = false;
+        if character.is_control() {
+            collapsed.extend(character.escape_default());
+        } else {
+            collapsed.push(character);
+        }
+    }
+    let token =
+        |character: char| character.is_ascii_alphanumeric() || "-_.~+/=".contains(character);
+    let mut redacted = String::with_capacity(collapsed.len());
+    let mut rest = collapsed.as_str();
+    let mut secret_follows = false;
+    while let Some(start) = rest.find(token) {
+        redacted.push_str(&rest[..start]);
+        let tail = &rest[start..];
+        let end = tail
+            .find(|character| !token(character))
+            .unwrap_or(tail.len());
+        let word = &tail[..end];
+        if secret_follows || word.starts_with("sk-") || word.starts_with("eyJ") || word.len() >= 64
+        {
+            redacted.push_str("[redacted]");
+        } else {
+            redacted.push_str(word);
+        }
+        let lower = word.to_ascii_lowercase();
+        secret_follows = [
+            "bearer",
+            "token",
+            "authorization",
+            "secret",
+            "key",
+            "password",
+        ]
+        .iter()
+        .any(|marker| lower.ends_with(marker));
+        rest = &tail[end..];
+    }
+    redacted.push_str(rest);
+    if redacted.len() > limit {
+        let mut end = limit;
+        while !redacted.is_char_boundary(end) {
+            end -= 1;
+        }
+        redacted.truncate(end);
+        redacted.push('…');
+    }
+    redacted
+}
+
 async fn chatgpt_http_error(response: reqwest::Response) -> ModelError {
     let status = response.status();
     let retry_after_ms = retry_after(response.headers());
@@ -2044,22 +2263,52 @@ async fn chatgpt_http_error(response: reqwest::Response) -> ModelError {
             _ => break,
         }
     }
-    let value = serde_json::from_slice::<Value>(&body).unwrap_or(Value::Null);
-    if let Some(error) = value["error"]["code"].as_str().and_then(chatgpt_code_error) {
-        return error;
-    }
+    chatgpt_body_error(status, retry_after_ms, &body)
+}
+
+pub(crate) fn chatgpt_body_error(
+    status: StatusCode,
+    retry_after_ms: Option<u64>,
+    body: &[u8],
+) -> ModelError {
+    let value = serde_json::from_slice::<Value>(body).unwrap_or(Value::Null);
     let detail: String = value["detail"]
         .as_str()
+        .or_else(|| value["error"]["message"].as_str())
         .unwrap_or_default()
         .chars()
         .filter(|character| !character.is_control())
         .take(200)
         .collect();
+    let lower = detail.to_lowercase();
+    let model_hint = (value["error"]["code"] == "subscription_sharing_unsupported_capability"
+        && value["error"]["param"] == "model")
+        || (lower.contains("not supported") && lower.contains("chatgpt account"));
     let detail = if detail.is_empty() {
         String::new()
     } else {
         format!(": {detail}")
     };
+    let mut error = chatgpt_status_error(status, retry_after_ms, &value, &detail, model_hint);
+    if model_hint && let ModelError::Provider { message, .. } = &mut error {
+        message.push_str(MODELS_HINT);
+    }
+    error
+}
+
+fn chatgpt_status_error(
+    status: StatusCode,
+    retry_after_ms: Option<u64>,
+    value: &Value,
+    detail: &str,
+    model_hint: bool,
+) -> ModelError {
+    if let Some(mut error) = value["error"]["code"].as_str().and_then(chatgpt_code_error) {
+        if model_hint && let ModelError::Provider { message, .. } = &mut error {
+            message.push_str(detail);
+        }
+        return error;
+    }
     match status {
         StatusCode::UNAUTHORIZED => ModelError::Provider {
             code: None,
