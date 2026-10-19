@@ -175,7 +175,8 @@ pub struct ChatGptStatus {
 #[serde(deny_unknown_fields)]
 pub struct ChatGptAttempt {
     pub attempt_id: Uuid,
-    pub authorize_url: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authorize_url: Option<String>,
     pub redirect_uri: String,
     pub expires_at_ms: u64,
     pub phase: ChatGptAttemptPhase,
@@ -257,12 +258,14 @@ struct Pending {
 
 impl Pending {
     fn view(&self) -> ChatGptAttempt {
+        let phase = self.phase.borrow().clone();
         ChatGptAttempt {
             attempt_id: self.attempt_id,
-            authorize_url: self.authorize_url.clone(),
+            authorize_url: (phase == ChatGptAttemptPhase::Pending)
+                .then(|| self.authorize_url.clone()),
             redirect_uri: self.redirect_uri.clone(),
             expires_at_ms: self.expires_at_ms,
-            phase: self.phase.borrow().clone(),
+            phase,
         }
     }
 }

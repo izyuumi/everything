@@ -65,7 +65,7 @@ struct ChatGptArguments {
 #[derive(Subcommand)]
 enum ChatGptCommand {
     SignIn(ChatGptSignInArguments),
-    Status(ChatGptBindingArguments),
+    Status(ChatGptStatusArguments),
     Models(ChatGptModelsArguments),
     SignOut(ChatGptBindingArguments),
     Select(ChatGptBindingArguments),
@@ -78,6 +78,16 @@ struct ChatGptBindingArguments {
     reference: Option<uuid::Uuid>,
     #[arg(long, value_enum)]
     storage: Option<StorageArgument>,
+}
+
+#[derive(Args)]
+struct ChatGptStatusArguments {
+    #[command(flatten)]
+    binding: ChatGptBindingArguments,
+    #[arg(long)]
+    json: bool,
+    #[arg(long)]
+    show_email: bool,
 }
 
 #[derive(Args)]
@@ -709,12 +719,15 @@ async fn chatgpt_cli(
     };
     match command {
         ChatGptCommand::Status(arguments) => {
-            let binding = resolve(&arguments, false)?;
-            write_json(
+            let binding = resolve(&arguments.binding, false)?;
+            let status =
                 chatgpt_operate(&client, ChatGptOperation::Status { binding }, cancellation)
-                    .await?,
-            )
-            .await
+                    .await?;
+            if arguments.json || arguments.show_email {
+                write_json(status).await
+            } else {
+                write_json(mask_email(status)).await
+            }
         }
         ChatGptCommand::Models(arguments) => {
             let binding = resolve(&arguments.binding, false)?;
@@ -763,7 +776,7 @@ async fn chatgpt_cli(
                     "signed out locally, but OpenAI did not confirm revocation; disconnect Everything in ChatGPT settings if needed"
                 );
             }
-            write_json(status).await
+            write_json(mask_email(status)).await
         }
         ChatGptCommand::Select(arguments) => {
             let binding = resolve(&arguments, false)?;
@@ -828,6 +841,17 @@ async fn chatgpt_operate(
     }
 }
 
+fn mask_email(
+    mut status: everything::host::chatgpt::ChatGptStatus,
+) -> everything::host::chatgpt::ChatGptStatus {
+    status.email = status.email.map(|email| {
+        email
+            .rsplit_once('@')
+            .map_or_else(|| "…".to_owned(), |(_, domain)| format!("…@{domain}"))
+    });
+    status
+}
+
 async fn chatgpt_replace_settings(
     client: &everything::host::client::HostClient,
     settings: everything::host::settings::HostSettings,
@@ -869,9 +893,10 @@ async fn chatgpt_sign_in(
     )
     .await?;
     let attempt = status.attempt.ok_or(CliError::OwnerInput)?;
+    let authorize_url = attempt.authorize_url.ok_or(CliError::OwnerInput)?;
     eprintln!(
-        "Continue with ChatGPT in your browser:\n{}\nWaiting for the callback on {}; press Ctrl-C to cancel.",
-        attempt.authorize_url, attempt.redirect_uri
+        "Continue with ChatGPT in your browser:\n{authorize_url}\nWaiting for the callback on {}; press Ctrl-C to cancel.",
+        attempt.redirect_uri
     );
     if !arguments.no_browser {
         let program = if cfg!(target_os = "macos") {
@@ -880,7 +905,7 @@ async fn chatgpt_sign_in(
             "xdg-open"
         };
         let opened = tokio::process::Command::new(program)
-            .arg(&attempt.authorize_url)
+            .arg(&authorize_url)
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
@@ -932,7 +957,7 @@ async fn chatgpt_sign_in(
         .filter(|current| current.attempt_id == attempt.attempt_id)
         .map(|current| current.phase.clone());
     let plan_usage_enabled = status.plan_usage_enabled;
-    write_json(status).await?;
+    write_json(mask_email(status)).await?;
     match phase {
         Some(ChatGptAttemptPhase::Completed) => {
             if !plan_usage_enabled {
