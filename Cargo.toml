@@ -35,6 +35,7 @@ hkdf = "0.12"
 hmac = "0.12"
 rand_core = { version = "0.6", features = ["getrandom"] }
 zeroize = "1"
+ring = "0.17"
 reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
 eventsource-stream = "0.2"
 async-stream = "0.3"

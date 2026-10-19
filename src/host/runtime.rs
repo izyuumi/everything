@@ -85,6 +85,8 @@ pub enum HostError {
     #[error(transparent)]
     McpSessionBootstrap(#[from] super::credentials::McpSessionBootstrapError),
     #[error(transparent)]
+    ChatGpt(#[from] super::chatgpt::ChatGptError),
+    #[error(transparent)]
     WorkerProtocol(#[from] crate::worker::WorkerError),
     #[error(transparent)]
     Json(#[from] serde_json::Error),
@@ -139,6 +141,7 @@ pub(super) struct HostInner {
     pub(super) settings_service: SettingsService,
     pub(super) settings_agents: Arc<super::settings::agent::SettingsAgentRuntime>,
     pub(super) credentials: CredentialVault,
+    pub(super) chatgpt: super::chatgpt::ChatGptAccounts,
     pub(super) devices: DeviceEndpoint,
     pub(super) registry: Arc<ToolRegistry>,
     pub(super) authorizer: Arc<Authorizer>,
@@ -272,6 +275,8 @@ impl HostService {
         if cancellation.is_cancelled() {
             return Err(crate::credentials::CredentialError::Cancelled.into());
         }
+        let chatgpt =
+            super::chatgpt::ChatGptAccounts::new(credentials.clone(), Arc::clone(&lease))?;
         let mcp = super::mcp::McpService::start(
             effective.mcp.clone(),
             Arc::new(credentials.clone()),
@@ -443,6 +448,7 @@ impl HostService {
             settings_service,
             settings_agents,
             credentials,
+            chatgpt,
             devices,
             registry,
             authorizer,

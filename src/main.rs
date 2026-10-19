@@ -52,6 +52,56 @@ enum Command {
     Init(InitArguments),
     Chat(ChatArguments),
     Status(StatusArguments),
+    #[command(name = "chatgpt")]
+    ChatGpt(ChatGptArguments),
+}
+
+#[derive(Args)]
+struct ChatGptArguments {
+    #[command(subcommand)]
+    command: ChatGptCommand,
+}
+
+#[derive(Subcommand)]
+enum ChatGptCommand {
+    SignIn(ChatGptSignInArguments),
+    Status(ChatGptBindingArguments),
+    SignOut(ChatGptBindingArguments),
+    Select(ChatGptBindingArguments),
+    Deselect,
+}
+
+#[derive(Args)]
+struct ChatGptBindingArguments {
+    #[arg(long, requires = "storage")]
+    reference: Option<uuid::Uuid>,
+    #[arg(long, value_enum)]
+    storage: Option<StorageArgument>,
+}
+
+#[derive(Args)]
+struct ChatGptSignInArguments {
+    #[command(flatten)]
+    binding: ChatGptBindingArguments,
+    #[arg(long)]
+    no_browser: bool,
+    #[arg(long, default_value_t = 600)]
+    timeout_seconds: u64,
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum StorageArgument {
+    Session,
+    Native,
+}
+
+impl From<StorageArgument> for everything::host::settings::CredentialStorage {
+    fn from(value: StorageArgument) -> Self {
+        match value {
+            StorageArgument::Session => Self::Session,
+            StorageArgument::Native => Self::Native,
+        }
+    }
 }
 
 enum AgentCommand {
@@ -334,6 +384,8 @@ enum CliError {
     ToolPaused,
     #[error("invalid tool options: {0}")]
     ToolOptions(&'static str),
+    #[error("{0}")]
+    ChatGpt(String),
 }
 
 fn main() -> ExitCode {
@@ -415,6 +467,9 @@ async fn execute(arguments: Arguments, cancellation: CancellationToken) -> Resul
             .await;
         }
         Command::Owner(arguments) => return owner_cli(state_dir, arguments, cancellation).await,
+        Command::ChatGpt(arguments) => {
+            return chatgpt_cli(state_dir, arguments.command, cancellation).await;
+        }
         Command::Service(arguments) => {
             return write_json(
                 everything::service::cli::manage(arguments, state_dir, cancellation).await?,
@@ -592,6 +647,275 @@ async fn owner_cli(
             eprintln!("owner request {request_id}; reuse this ID for an explicit retry");
             write_json(client.operate(*operation, request_id, cancellation).await?).await
         }
+    }
+}
+
+async fn chatgpt_cli(
+    state: PathBuf,
+    command: ChatGptCommand,
+    cancellation: CancellationToken,
+) -> Result<(), CliError> {
+    use everything::host::chatgpt::{ChatGptOperation, ChatGptRevocation};
+    use everything::host::settings::{ModelCredentialReference, ModelCredentialSource};
+    use everything::ipc::{OwnerQuery, OwnerQueryResult};
+    let client = everything::host::client::HostClient::new(state)?;
+    let OwnerQueryResult::Settings { settings } = client
+        .query(OwnerQuery::Settings, cancellation.clone())
+        .await?
+    else {
+        return Err(CliError::OwnerInput);
+    };
+    let configured = settings
+        .model_credentials
+        .iter()
+        .find(|binding| binding.source == ModelCredentialSource::ChatGpt)
+        .cloned();
+    let resolve = |arguments: &ChatGptBindingArguments, create: bool| {
+        let storage = arguments.storage.map(Into::into);
+        let binding = |reference, storage| ModelCredentialReference {
+            provider: ProviderKind::OpenAi,
+            endpoint: ProviderEndpoint::Official,
+            reference,
+            storage,
+            source: ModelCredentialSource::ChatGpt,
+        };
+        match (&configured, arguments.reference, storage) {
+            (Some(configured), reference, storage)
+                if reference.is_none_or(|value| value == configured.reference)
+                    && storage.is_none_or(|value| value == configured.storage) =>
+            {
+                Ok(configured.clone())
+            }
+            (Some(_), _, _) => Err(CliError::ChatGpt(
+                "--reference/--storage differ from the ChatGPT binding selected in settings".into(),
+            )),
+            (None, Some(reference), Some(storage)) => Ok(binding(reference, storage)),
+            (None, None, Some(storage)) if create => Ok(binding(uuid::Uuid::new_v4(), storage)),
+            (None, _, _) => Err(CliError::ChatGpt(
+                "no ChatGPT binding is selected in settings; pass --storage session|native (and --reference for an existing sign-in)".into(),
+            )),
+        }
+    };
+    match command {
+        ChatGptCommand::Status(arguments) => {
+            let binding = resolve(&arguments, false)?;
+            write_json(
+                chatgpt_operate(&client, ChatGptOperation::Status { binding }, cancellation)
+                    .await?,
+            )
+            .await
+        }
+        ChatGptCommand::SignOut(arguments) => {
+            let binding = resolve(&arguments, false)?;
+            let status =
+                chatgpt_operate(&client, ChatGptOperation::SignOut { binding }, cancellation)
+                    .await?;
+            if status.revocation == Some(ChatGptRevocation::Unconfirmed) {
+                eprintln!(
+                    "signed out locally, but OpenAI did not confirm revocation; disconnect Everything in ChatGPT settings if needed"
+                );
+            }
+            write_json(status).await
+        }
+        ChatGptCommand::Select(arguments) => {
+            let binding = resolve(&arguments, false)?;
+            if let Some(existing) = settings.model_credentials.iter().find(|existing| {
+                existing.provider == ProviderKind::OpenAi
+                    && existing.endpoint == ProviderEndpoint::Official
+            }) {
+                return Err(CliError::ChatGpt(if *existing == binding {
+                    "ChatGPT plan usage is already selected for the official OpenAI endpoint".into()
+                } else {
+                    format!(
+                        "the official OpenAI endpoint already uses credential reference {}; remove it from settings model_credentials before selecting ChatGPT",
+                        existing.reference
+                    )
+                }));
+            }
+            let mut updated = (*settings).clone();
+            updated.model_credentials.push(binding);
+            chatgpt_replace_settings(&client, updated, settings.revision, cancellation).await
+        }
+        ChatGptCommand::Deselect => {
+            if configured.is_none() {
+                return Err(CliError::ChatGpt(
+                    "ChatGPT plan usage is not selected in settings".into(),
+                ));
+            }
+            let mut updated = (*settings).clone();
+            updated
+                .model_credentials
+                .retain(|binding| binding.source != ModelCredentialSource::ChatGpt);
+            chatgpt_replace_settings(&client, updated, settings.revision, cancellation).await
+        }
+        ChatGptCommand::SignIn(arguments) => {
+            let binding = resolve(&arguments.binding, true)?;
+            chatgpt_sign_in(
+                &client,
+                binding,
+                configured.is_some(),
+                arguments,
+                cancellation,
+            )
+            .await
+        }
+    }
+}
+
+async fn chatgpt_operate(
+    client: &everything::host::client::HostClient,
+    operation: everything::host::chatgpt::ChatGptOperation,
+    cancellation: CancellationToken,
+) -> Result<everything::host::chatgpt::ChatGptStatus, CliError> {
+    match client
+        .operate(
+            everything::ipc::OwnerOperation::ChatGpt { operation },
+            CommandId::new(),
+            cancellation,
+        )
+        .await?
+    {
+        everything::ipc::OwnerOperationResult::ChatGpt { status } => Ok(*status),
+        _ => Err(CliError::OwnerInput),
+    }
+}
+
+async fn chatgpt_replace_settings(
+    client: &everything::host::client::HostClient,
+    settings: everything::host::settings::HostSettings,
+    expected_revision: u64,
+    cancellation: CancellationToken,
+) -> Result<(), CliError> {
+    let request_id = CommandId::new();
+    eprintln!("owner request {request_id}; reuse this ID for an explicit retry");
+    write_json(
+        client
+            .operate(
+                everything::ipc::OwnerOperation::ReplaceSettings {
+                    expected_revision,
+                    settings: Box::new(settings),
+                },
+                request_id,
+                cancellation,
+            )
+            .await?,
+    )
+    .await
+}
+
+async fn chatgpt_sign_in(
+    client: &everything::host::client::HostClient,
+    binding: everything::host::settings::ModelCredentialReference,
+    selected: bool,
+    arguments: ChatGptSignInArguments,
+    cancellation: CancellationToken,
+) -> Result<(), CliError> {
+    use everything::host::chatgpt::{ChatGptAttemptPhase, ChatGptOperation};
+    let status = chatgpt_operate(
+        client,
+        ChatGptOperation::SignIn {
+            binding: binding.clone(),
+            timeout_seconds: arguments.timeout_seconds,
+        },
+        cancellation.clone(),
+    )
+    .await?;
+    let attempt = status.attempt.ok_or(CliError::OwnerInput)?;
+    eprintln!(
+        "Continue with ChatGPT in your browser:\n{}\nWaiting for the callback on {}; press Ctrl-C to cancel.",
+        attempt.authorize_url, attempt.redirect_uri
+    );
+    if !arguments.no_browser {
+        let program = if cfg!(target_os = "macos") {
+            "open"
+        } else {
+            "xdg-open"
+        };
+        let opened = tokio::process::Command::new(program)
+            .arg(&attempt.authorize_url)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .await;
+        if !opened.is_ok_and(|status| status.success()) {
+            eprintln!("could not open a browser; open the URL above manually");
+        }
+    }
+    let status = loop {
+        let waited = chatgpt_operate(
+            client,
+            ChatGptOperation::Wait {
+                attempt_id: attempt.attempt_id,
+                timeout_ms: 25_000,
+            },
+            cancellation.clone(),
+        )
+        .await;
+        match waited {
+            Ok(status)
+                if status.attempt.as_ref().is_some_and(|current| {
+                    current.attempt_id == attempt.attempt_id
+                        && current.phase == ChatGptAttemptPhase::Pending
+                }) => {}
+            Ok(status) => break status,
+            Err(_) if cancellation.is_cancelled() => {
+                let _ = tokio::time::timeout(
+                    std::time::Duration::from_secs(10),
+                    chatgpt_operate(
+                        client,
+                        ChatGptOperation::Cancel {
+                            attempt_id: attempt.attempt_id,
+                        },
+                        CancellationToken::new(),
+                    ),
+                )
+                .await;
+                return Err(CliError::ChatGpt(
+                    "ChatGPT sign-in cancelled; the loopback listener was stopped".into(),
+                ));
+            }
+            Err(error) => return Err(error),
+        }
+    };
+    let phase = status
+        .attempt
+        .as_ref()
+        .filter(|current| current.attempt_id == attempt.attempt_id)
+        .map(|current| current.phase.clone());
+    let plan_usage_enabled = status.plan_usage_enabled;
+    write_json(status).await?;
+    match phase {
+        Some(ChatGptAttemptPhase::Completed) => {
+            if !plan_usage_enabled {
+                eprintln!(
+                    "signed in, but ChatGPT plan usage was not granted; sign in again and allow plan usage, or keep using an API key"
+                );
+            }
+            if !selected {
+                eprintln!(
+                    "ChatGPT plan usage is not selected; API-key credentials remain in use. Select it with: everything chatgpt select --reference {} --storage {}",
+                    binding.reference,
+                    match binding.storage {
+                        everything::host::settings::CredentialStorage::Session => "session",
+                        everything::host::settings::CredentialStorage::Native => "native",
+                    }
+                );
+            }
+            Ok(())
+        }
+        Some(ChatGptAttemptPhase::Failed { reason }) => Err(CliError::ChatGpt(format!(
+            "ChatGPT sign-in did not complete: {reason}"
+        ))),
+        Some(ChatGptAttemptPhase::Expired) => Err(CliError::ChatGpt(
+            "ChatGPT sign-in expired before the browser returned".into(),
+        )),
+        Some(ChatGptAttemptPhase::Cancelled) => {
+            Err(CliError::ChatGpt("ChatGPT sign-in was cancelled".into()))
+        }
+        _ => Err(CliError::ChatGpt(
+            "ChatGPT sign-in was replaced by another attempt".into(),
+        )),
     }
 }
 
@@ -1048,6 +1372,7 @@ async fn proxy_chat(
                         endpoint: information.endpoint.clone(),
                         reference: uuid::Uuid::new_v4(),
                         storage: everything::host::settings::CredentialStorage::Session,
+                        source: Default::default(),
                     };
                     eprintln!(
                         "the host does not read {variable} for loopback endpoint {endpoint}; with {variable} set, run `everything owner --request-file FILE` with {} and add the same binding to settings model_credentials",

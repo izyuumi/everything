@@ -283,6 +283,10 @@ pub enum OwnerOperation {
     Credential {
         operation: crate::host::credentials::CredentialOperation,
     },
+    #[serde(rename = "chatgpt")]
+    ChatGpt {
+        operation: crate::host::chatgpt::ChatGptOperation,
+    },
     BeginPairing {
         lifetime_ms: u64,
     },
@@ -402,6 +406,7 @@ impl OwnerOperation {
             )
             .map(|_| ())
             .map_err(|_| "invalid pairing approval"),
+            Self::ChatGpt { operation } => operation.validate(),
             _ => Ok(()),
         }
     }
@@ -805,6 +810,10 @@ pub enum OwnerOperationResult {
     ToolRecovery {
         report: crate::tools::broker::RecoveryReport,
     },
+    #[serde(rename = "chatgpt")]
+    ChatGpt {
+        status: Box<crate::host::chatgpt::ChatGptStatus>,
+    },
 }
 
 impl OwnerOperationResult {
@@ -996,6 +1005,16 @@ impl OwnerOperationResult {
                 Self::Applied,
             ) => true,
             (OwnerOperation::ResumeInterrupted { .. }, Self::Applied) => true,
+            (
+                OwnerOperation::ChatGpt {
+                    operation:
+                        crate::host::chatgpt::ChatGptOperation::Status { binding }
+                        | crate::host::chatgpt::ChatGptOperation::SignIn { binding, .. }
+                        | crate::host::chatgpt::ChatGptOperation::SignOut { binding },
+                },
+                Self::ChatGpt { status },
+            ) => status.binding == *binding,
+            (OwnerOperation::ChatGpt { .. }, Self::ChatGpt { status }) => status.attempt.is_some(),
             _ => false,
         };
         if !valid {

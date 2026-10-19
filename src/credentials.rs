@@ -6,7 +6,7 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio_util::sync::CancellationToken;
 use zeroize::{Zeroize, Zeroizing};
 
-const MAX_SECRET_BYTES: usize = 8_192;
+const MAX_SECRET_BYTES: usize = 32_768;
 const READ_TIMEOUT: Duration = Duration::from_secs(3);
 
 #[derive(Debug, Error, Clone, Copy, PartialEq, Eq)]

@@ -31,9 +31,20 @@ const MAX_STREAM_BYTES: usize = 128 * 1_024 * 1_024;
 const MAX_STREAM_EVENTS: usize = 262_144;
 const MAX_OUTPUT_ITEMS: usize = 1_024;
 
+#[async_trait]
+pub trait OpenAiBearer: Send + Sync {
+    async fn bearer(&self, cancellation: CancellationToken) -> Result<String, ModelError>;
+}
+
+#[derive(Clone)]
+enum Authorization {
+    ApiKey(HeaderValue),
+    ChatGptPlan(Arc<dyn OpenAiBearer>),
+}
+
 #[derive(Clone)]
 pub struct OpenAiConfig {
-    authorization: HeaderValue,
+    authorization: Authorization,
     endpoint: Url,
     connect_timeout: Duration,
     request_timeout: Duration,
@@ -56,7 +67,19 @@ impl OpenAiConfig {
             .map_err(|_| invalid("api_key", "cannot be encoded as an authorization header"))?;
         authorization.set_sensitive(true);
         Ok(Self {
-            authorization,
+            authorization: Authorization::ApiKey(authorization),
+            endpoint: Url::parse(DEFAULT_ENDPOINT)
+                .map_err(|_| invalid("endpoint", "the official endpoint is invalid"))?,
+            connect_timeout: Duration::from_secs(10),
+            request_timeout: Duration::from_secs(600),
+            idle_timeout: Duration::from_secs(120),
+            accounting: None,
+        })
+    }
+
+    pub fn chatgpt_plan(bearer: Arc<dyn OpenAiBearer>) -> Result<Self, ModelError> {
+        Ok(Self {
+            authorization: Authorization::ChatGptPlan(bearer),
             endpoint: Url::parse(DEFAULT_ENDPOINT)
                 .map_err(|_| invalid("endpoint", "the official endpoint is invalid"))?,
             connect_timeout: Duration::from_secs(10),
@@ -72,11 +95,23 @@ impl OpenAiConfig {
     }
 
     pub fn with_endpoint(mut self, endpoint: &str) -> Result<Self, ModelError> {
+        if self.uses_chatgpt_plan() {
+            return Err(invalid(
+                "endpoint",
+                "ChatGPT plan usage requires the official endpoint",
+            ));
+        }
         self.endpoint = parse_endpoint(endpoint, false)?;
         Ok(self)
     }
 
     pub fn with_loopback_endpoint(mut self, endpoint: &str) -> Result<Self, ModelError> {
+        if self.uses_chatgpt_plan() {
+            return Err(invalid(
+                "endpoint",
+                "ChatGPT plan usage requires the official endpoint",
+            ));
+        }
         self.endpoint = parse_endpoint(endpoint, true)?;
         Ok(self)
     }
@@ -104,6 +139,10 @@ impl OpenAiConfig {
         self.idle_timeout = idle;
         Ok(self)
     }
+
+    fn uses_chatgpt_plan(&self) -> bool {
+        matches!(self.authorization, Authorization::ChatGptPlan(_))
+    }
 }
 
 impl fmt::Debug for OpenAiConfig {
@@ -117,6 +156,7 @@ impl fmt::Debug for OpenAiConfig {
             .field("connect_timeout", &self.connect_timeout)
             .field("request_timeout", &self.request_timeout)
             .field("idle_timeout", &self.idle_timeout)
+            .field("chatgpt_plan", &self.uses_chatgpt_plan())
             .finish_non_exhaustive()
     }
 }
@@ -191,11 +231,12 @@ impl ModelProvider for OpenAiProvider {
         }
         let mut request = ProviderWork::new(request, self.config.accounting.as_ref())?;
         request.fork_preparation()?;
+        let chatgpt_plan = self.config.uses_chatgpt_plan();
         let preparation = tokio::task::spawn_blocking(move || {
             request.prepare(|request| {
                 request.validate()?;
                 let continuation = read_continuation(&request)?;
-                let body = prepare_request(&request, &continuation)?;
+                let body = prepare_request(&request, &continuation, chatgpt_plan)?;
                 Ok::<_, ModelError>((request, continuation, body))
             })
         });
@@ -212,17 +253,34 @@ impl ModelProvider for OpenAiProvider {
         if cancellation.is_cancelled() {
             return Err(ModelError::Cancelled);
         }
+        let authorization = match &self.config.authorization {
+            Authorization::ApiKey(value) => value.clone(),
+            Authorization::ChatGptPlan(bearer) => {
+                let token = tokio::select! {
+                    biased;
+                    _ = cancellation.cancelled() => return Err(ModelError::Cancelled),
+                    token = bearer.bearer(cancellation.clone()) => token?,
+                };
+                let mut value = HeaderValue::from_str(&format!("Bearer {token}"))
+                    .map_err(|_| ModelError::Authentication)?;
+                value.set_sensitive(true);
+                value
+            }
+        };
         let response = tokio::select! {
             biased;
             _ = cancellation.cancelled() => return Err(ModelError::Cancelled),
             response = self.client.post(self.config.endpoint.clone())
-                .header(AUTHORIZATION, self.config.authorization.clone())
+                .header(AUTHORIZATION, authorization)
                 .header(CONTENT_TYPE, "application/json")
                 .header(ACCEPT, "text/event-stream")
                 .body(body)
                 .send() => response.map_err(map_transport_error)?,
         };
         if !response.status().is_success() {
+            if chatgpt_plan {
+                return Err(chatgpt_http_error(response).await);
+            }
             return Err(http_error(response.status(), response.headers()));
         }
         if response
@@ -362,7 +420,8 @@ struct WireRequest<'a> {
     stream: bool,
     store: bool,
     include: [&'static str; 1],
-    truncation: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    truncation: Option<&'static str>,
     parallel_tool_calls: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     max_output_tokens: Option<u32>,
@@ -531,8 +590,10 @@ fn read_continuation(request: &ModelRequest) -> Result<ContinuationState, ModelE
 fn prepare_request(
     request: &ModelRequest,
     continuation: &ContinuationState,
+    chatgpt_plan: bool,
 ) -> Result<Vec<u8>, ModelError> {
     if request.temperature.is_some()
+        && !chatgpt_plan
         && (request.model.starts_with("o1")
             || request.model.starts_with("o3")
             || request.model.starts_with("o4")
@@ -562,7 +623,13 @@ fn prepare_request(
                 })
                 .map(|phase| phase.phase.as_str());
             if current_phase != phase {
-                flush_text(&mut input, &mut text, message.role, current_phase);
+                flush_text(
+                    &mut input,
+                    &mut text,
+                    message.role,
+                    current_phase,
+                    chatgpt_plan,
+                );
                 current_phase = phase;
             }
             if let Some(turn) = turn {
@@ -571,7 +638,13 @@ fn prepare_request(
                     .iter()
                     .filter(|item| item.before_block == block_index)
                 {
-                    flush_text(&mut input, &mut text, message.role, current_phase);
+                    flush_text(
+                        &mut input,
+                        &mut text,
+                        message.role,
+                        current_phase,
+                        chatgpt_plan,
+                    );
                     input.push(InputItem::Reasoning {
                         id: insertion.item.id.clone(),
                         summary: insertion.item.summary.clone(),
@@ -592,7 +665,13 @@ fn prepare_request(
                     text: value.clone(),
                 }),
                 ContentBlock::ToolCall(call) => {
-                    flush_text(&mut input, &mut text, message.role, current_phase);
+                    flush_text(
+                        &mut input,
+                        &mut text,
+                        message.role,
+                        current_phase,
+                        chatgpt_plan,
+                    );
                     validate_tool_name(&call.name)?;
                     input.push(InputItem::FunctionCall {
                         call_id: call.id.clone(),
@@ -602,7 +681,13 @@ fn prepare_request(
                     });
                 }
                 ContentBlock::ToolResult(result) => {
-                    flush_text(&mut input, &mut text, message.role, current_phase);
+                    flush_text(
+                        &mut input,
+                        &mut text,
+                        message.role,
+                        current_phase,
+                        chatgpt_plan,
+                    );
                     let output = if result.is_error {
                         serde_json::json!({"is_error": true, "output": result.output})
                     } else {
@@ -616,7 +701,13 @@ fn prepare_request(
                 }
             }
         }
-        flush_text(&mut input, &mut text, message.role, current_phase);
+        flush_text(
+            &mut input,
+            &mut text,
+            message.role,
+            current_phase,
+            chatgpt_plan,
+        );
     }
     let tools = request
         .tools
@@ -644,10 +735,10 @@ fn prepare_request(
         stream: true,
         store: false,
         include: ["reasoning.encrypted_content"],
-        truncation: "disabled",
+        truncation: (!chatgpt_plan).then_some("disabled"),
         parallel_tool_calls: true,
-        max_output_tokens: request.max_output_tokens,
-        temperature: request.temperature,
+        max_output_tokens: request.max_output_tokens.filter(|_| !chatgpt_plan),
+        temperature: request.temperature.filter(|_| !chatgpt_plan),
     };
     let mut body = BoundedBody(Vec::new());
     serde_json::to_writer(&mut body, &native)
@@ -660,9 +751,11 @@ fn flush_text(
     text: &mut Vec<InputText>,
     role: MessageRole,
     phase: Option<&str>,
+    chatgpt_plan: bool,
 ) {
     if !text.is_empty() {
         let role = match role {
+            MessageRole::System if chatgpt_plan => "developer",
             MessageRole::System => "system",
             MessageRole::User => "user",
             MessageRole::Assistant => "assistant",
@@ -1940,7 +2033,95 @@ fn retry_after(headers: &HeaderMap) -> Option<u64> {
     millis.map(|value| value.min(3_600_000))
 }
 
+async fn chatgpt_http_error(response: reqwest::Response) -> ModelError {
+    let status = response.status();
+    let retry_after_ms = retry_after(response.headers());
+    let mut body = Vec::new();
+    let mut chunks = response.bytes_stream();
+    while body.len() < 16 * 1_024 {
+        match tokio::time::timeout(Duration::from_secs(10), chunks.next()).await {
+            Ok(Some(Ok(chunk))) => body.extend_from_slice(&chunk[..chunk.len().min(16 * 1_024)]),
+            _ => break,
+        }
+    }
+    let value = serde_json::from_slice::<Value>(&body).unwrap_or(Value::Null);
+    if let Some(error) = value["error"]["code"].as_str().and_then(chatgpt_code_error) {
+        return error;
+    }
+    let detail: String = value["detail"]
+        .as_str()
+        .unwrap_or_default()
+        .chars()
+        .filter(|character| !character.is_control())
+        .take(200)
+        .collect();
+    let detail = if detail.is_empty() {
+        String::new()
+    } else {
+        format!(": {detail}")
+    };
+    match status {
+        StatusCode::UNAUTHORIZED => ModelError::Provider {
+            code: None,
+            message: format!(
+                "ChatGPT plan request was not accepted (HTTP 401){detail}; check the selected ChatGPT account and granted plan usage, sign in with ChatGPT again or use an API key"
+            ),
+            retryable: false,
+        },
+        StatusCode::FORBIDDEN => ModelError::Provider {
+            code: None,
+            message: format!("ChatGPT plan request was refused by policy (HTTP 403){detail}"),
+            retryable: false,
+        },
+        StatusCode::SERVICE_UNAVAILABLE => ModelError::Provider {
+            code: None,
+            message: format!("ChatGPT plan routing is unavailable (HTTP 503){detail}"),
+            retryable: true,
+        },
+        StatusCode::TOO_MANY_REQUESTS => ModelError::RateLimited { retry_after_ms },
+        _ => ModelError::Provider {
+            code: None,
+            message: format!("OpenAI returned HTTP {}{detail}", status.as_u16()),
+            retryable: status.is_server_error() || status == StatusCode::REQUEST_TIMEOUT,
+        },
+    }
+}
+
+fn chatgpt_code_error(code: &str) -> Option<ModelError> {
+    if !code.starts_with("subscription_sharing_") && !code.starts_with("chatpass_v2_") {
+        return None;
+    }
+    let code = code
+        .chars()
+        .filter(|character| character.is_ascii_alphanumeric() || *character == '_')
+        .take(64)
+        .collect::<String>();
+    let message = match code.as_str() {
+        "subscription_sharing_usage_limit_exceeded" => {
+            "ChatGPT plan usage limit reached; manage usage at https://chatgpt.com/settings/usage"
+        }
+        "subscription_sharing_user_not_eligible" => {
+            "ChatGPT plan usage is unavailable for this account, workspace or policy; use an API key instead"
+        }
+        "subscription_sharing_unsupported_capability" => {
+            "ChatGPT plan usage does not support a field, tool or model in this request"
+        }
+        _ => "ChatGPT plan usage rejected the request",
+    };
+    Some(ModelError::Provider {
+        retryable: matches!(
+            code.as_str(),
+            "subscription_sharing_usage_unavailable" | "subscription_sharing_user_unavailable"
+        ),
+        code: Some(code),
+        message: message.to_owned(),
+    })
+}
+
 fn provider_error(code: &str) -> ModelError {
+    if let Some(error) = chatgpt_code_error(code) {
+        return error;
+    }
     match code {
         "invalid_api_key" | "authentication_error" => ModelError::Authentication,
         "rate_limit_exceeded" | "rate_limit_error" => ModelError::RateLimited {
