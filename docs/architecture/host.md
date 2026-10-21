@@ -42,6 +42,10 @@ One supervised publication worker reads task and resolved-permission sources in 
 
 The worker completes its initial finite source pass before scheduler activation while owner IPC remains available. Scheduler and command receipt hints trigger rescans, with a one-second audit and a 250-millisecond minimum interval. Per-identifier failures advance the cursor and update bounded diagnostics. A separate metadata watch wakes owner conversation waits without waking native execution. OwnerQuery::Publication reports actual pass completion, appended events and failures.
 
+## Live assistant text
+
+The scheduler worker records the running task's provisional assistant text for its current model attempt in one bounded in-memory entry and bumps the existing scheduler change hint. The `task` owner query returns it as optional `live_text`; the CLI proxy and the macOS task inspector poll it. It is never appended to the journal, checkpointed, replayed or synchronized. See [live assistant text](../contracts/owner-ipc.md#live-assistant-text) and [ADR-0014](../decisions/ADR-0014-live-assistant-text.md).
+
 ## Optional relay
 
 The default host performs no relay connection. An explicit owner setting selects the exact relay origin. Origin edits persist with `restart_required`; a running session continues using its captured origin until restart. The relay worker uses the actual device endpoint's authenticated encrypted transport and reports its connection state through owner IPC. Its failure leaves local execution available. Enrollment of relay device public identities is an explicit operator action separate from application pairing.
