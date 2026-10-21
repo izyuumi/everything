@@ -955,6 +955,7 @@ async fn proxy_chat(
                 conversation_id,
                 command_id,
                 information.last_sequence,
+                "",
                 cancellation,
             )
             .await;
@@ -963,6 +964,8 @@ async fn proxy_chat(
     };
     let task_id = TaskId::try_from(*command_id.as_uuid()).map_err(AgentError::from)?;
     let mut reported = None;
+    let mut streamed = None::<everything::scheduler::LiveText>;
+    let mut output = tokio::io::stdout();
     loop {
         match client
             .query(OwnerQuery::Task { task_id }, cancellation.clone())
@@ -985,6 +988,7 @@ async fn proxy_chat(
                     conversation_id,
                     command_id,
                     information.last_sequence,
+                    streamed.as_ref().map_or("", |live| live.text.as_str()),
                     cancellation,
                 )
                 .await;
@@ -1006,6 +1010,25 @@ async fn proxy_chat(
                         eprintln!("host task {task_id} {:?}: {diagnostic}", task.status);
                     }
                     reported = execution.diagnostic;
+                }
+                if let Some(live) = execution.live_text {
+                    if streamed
+                        .as_ref()
+                        .is_some_and(|previous| previous.attempt_id != live.attempt_id)
+                        && streamed
+                            .take()
+                            .is_some_and(|previous| !previous.text.is_empty())
+                    {
+                        output.write_all(b"\n").await?;
+                    }
+                    let printed = streamed
+                        .as_ref()
+                        .map_or("", |previous| previous.text.as_str());
+                    if let Some(rest) = live.text.strip_prefix(printed) {
+                        output.write_all(rest.as_bytes()).await?;
+                        output.flush().await?;
+                        streamed = Some(live);
+                    }
                 }
             }
             OwnerQueryResult::Task { task, .. }
@@ -1155,6 +1178,7 @@ async fn proxy_reply(
     conversation_id: ConversationId,
     command_id: CommandId,
     through: u64,
+    streamed: &str,
     cancellation: CancellationToken,
 ) -> Result<(), CliError> {
     let messages = proxy_messages(client, conversation_id, through, cancellation).await?;
@@ -1173,7 +1197,19 @@ async fn proxy_reply(
         .ok_or(CliError::ToolOptions(
             "no committed final assistant response is available",
         ))?;
-    print_message(&response.message).await
+    let authoritative = message_text(&response.message);
+    let mut output = tokio::io::stdout();
+    match authoritative.strip_prefix(streamed) {
+        Some(rest) => output.write_all(rest.as_bytes()).await?,
+        None => {
+            output.write_all(b"\n").await?;
+            eprintln!("saved response differs from provisional output; authoritative text follows");
+            output.write_all(authoritative.as_bytes()).await?;
+        }
+    }
+    output.write_all(b"\n").await?;
+    output.flush().await?;
+    Ok(())
 }
 
 async fn chat(
