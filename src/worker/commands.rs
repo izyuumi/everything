@@ -989,6 +989,7 @@ async fn handle_payload(
                             cancel_requested: snapshot.cancel_requested,
                             waiting: snapshot.waiting,
                             diagnostic: snapshot.diagnostic,
+                            live_text: None,
                         },
                     }
                 }

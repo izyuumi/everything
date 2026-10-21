@@ -19,9 +19,9 @@ pub use remote::{
 pub use schedule_context::ScheduleCallerContext;
 pub use tools::{SCHEDULER_TOOL_NAMES, SchedulerToolBinding, SchedulerTools};
 pub use types::{
-    DiscoveryServices, ExecutionPolicy, PreparedTaskInputs, SchedulerError, SchedulerLimits,
-    SchedulerServices, TaskPreparation, TaskPreparationRequest, TaskProviderFactory, TaskSnapshot,
-    TaskSubmission, WaitingReason,
+    DiscoveryServices, ExecutionPolicy, LiveText, PreparedTaskInputs, SchedulerError,
+    SchedulerLimits, SchedulerServices, TaskPreparation, TaskPreparationRequest,
+    TaskProviderFactory, TaskSnapshot, TaskSubmission, WaitingReason,
 };
 
 pub fn task_snapshot(

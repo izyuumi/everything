@@ -105,6 +105,7 @@ impl HostInner {
                         cancel_requested: snapshot.cancel_requested,
                         waiting: snapshot.waiting,
                         diagnostic: snapshot.diagnostic,
+                        live_text: self.scheduler.live_text(task_id),
                     },
                 }),
                 Err(SchedulerError::NotOwned(_)) => {

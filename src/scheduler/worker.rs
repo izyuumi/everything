@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -5,7 +6,8 @@ use futures_util::StreamExt;
 use tokio_util::sync::CancellationToken;
 
 use crate::agent::{
-    Conversation, LoopStatus, PauseReason, ProviderResume, ToolRunSetup, TurnEvent,
+    Conversation, LoopStatus, MAX_CHAT_TEXT_BYTES, PauseReason, ProviderResume, ToolRunSetup,
+    TurnEvent,
 };
 use crate::context::TaskContext;
 use crate::model::ToolDefinition;
@@ -15,7 +17,7 @@ use crate::tools::ToolDescriptor;
 
 use super::repository;
 use super::types::{
-    ResumeTarget, SchedulerError, SchedulerServices, StoredTask, TaskPreparation,
+    LiveText, ResumeTarget, SchedulerError, SchedulerServices, StoredTask, TaskPreparation,
     TaskPreparationRequest, WaitingReason, store,
 };
 
@@ -49,6 +51,7 @@ pub(super) async fn execute(
     cancellation: CancellationToken,
     resume: Option<ResumeTarget>,
     changed: tokio::sync::watch::Sender<u64>,
+    live: tokio::sync::watch::Sender<HashMap<TaskId, LiveText>>,
     preparation: Option<Arc<dyn TaskPreparation>>,
 ) -> ExecutionOutcome {
     let task_id = task.definition.initial.id;
@@ -58,9 +61,13 @@ pub(super) async fn execute(
         &cancellation,
         resume,
         &changed,
+        &live,
         preparation,
     )
     .await;
+    live.send_modify(|texts| {
+        texts.remove(&task_id);
+    });
     changed.send_modify(|revision| *revision = revision.wrapping_add(1));
     ExecutionOutcome { task_id, stop }
 }
@@ -71,6 +78,7 @@ async fn run(
     cancellation: &CancellationToken,
     resume: Option<ResumeTarget>,
     changed: &tokio::sync::watch::Sender<u64>,
+    live: &tokio::sync::watch::Sender<HashMap<TaskId, LiveText>>,
     preparation_service: Option<Arc<dyn TaskPreparation>>,
 ) -> ExecutionStop {
     let conversation_id = task.definition.initial.conversation_id;
@@ -217,6 +225,29 @@ async fn run(
     match stream {
         Ok(mut stream) => {
             while let Some(event) = stream.next().await {
+                match &event {
+                    Ok(TurnEvent::ModelAttemptStarted { attempt_id }) => {
+                        live.send_modify(|texts| {
+                            texts.insert(
+                                task.definition.initial.id,
+                                LiveText {
+                                    attempt_id: *attempt_id,
+                                    text: String::new(),
+                                },
+                            );
+                        });
+                    }
+                    Ok(TurnEvent::ProvisionalText { delta, .. }) => {
+                        live.send_modify(|texts| {
+                            if let Some(live) = texts.get_mut(&task.definition.initial.id)
+                                && live.text.len() + delta.len() <= MAX_CHAT_TEXT_BYTES
+                            {
+                                live.text.push_str(delta);
+                            }
+                        });
+                    }
+                    _ => {}
+                }
                 changed.send_modify(|revision| *revision = revision.wrapping_add(1));
                 match event {
                     Ok(TurnEvent::RunCompleted { run }) => {
