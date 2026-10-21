@@ -284,6 +284,12 @@ pub enum WaitingReason {
     },
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LiveText {
+    pub attempt_id: CommandId,
+    pub text: String,
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 pub struct TaskSnapshot {
     pub task: TaskRecord,

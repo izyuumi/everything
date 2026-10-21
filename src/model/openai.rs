@@ -30,10 +30,26 @@ const MAX_SSE_EVENT_BYTES: usize = MAX_REQUEST_BYTES + 64 * 1_024;
 const MAX_STREAM_BYTES: usize = 128 * 1_024 * 1_024;
 const MAX_STREAM_EVENTS: usize = 262_144;
 const MAX_OUTPUT_ITEMS: usize = 1_024;
+const EXCERPT_READ_BYTES: usize = 512;
+const EXCERPT_BYTES: usize = 500;
+const FUNCTION_NAMESPACE: &str = "functions";
+const MODELS_HINT: &str =
+    "; run `everything chatgpt models` to list models your ChatGPT plan can use";
+
+#[async_trait]
+pub trait OpenAiBearer: Send + Sync {
+    async fn bearer(&self, cancellation: CancellationToken) -> Result<String, ModelError>;
+}
+
+#[derive(Clone)]
+enum Authorization {
+    ApiKey(HeaderValue),
+    ChatGptPlan(Arc<dyn OpenAiBearer>),
+}
 
 #[derive(Clone)]
 pub struct OpenAiConfig {
-    authorization: HeaderValue,
+    authorization: Authorization,
     endpoint: Url,
     connect_timeout: Duration,
     request_timeout: Duration,
@@ -56,7 +72,19 @@ impl OpenAiConfig {
             .map_err(|_| invalid("api_key", "cannot be encoded as an authorization header"))?;
         authorization.set_sensitive(true);
         Ok(Self {
-            authorization,
+            authorization: Authorization::ApiKey(authorization),
+            endpoint: Url::parse(DEFAULT_ENDPOINT)
+                .map_err(|_| invalid("endpoint", "the official endpoint is invalid"))?,
+            connect_timeout: Duration::from_secs(10),
+            request_timeout: Duration::from_secs(600),
+            idle_timeout: Duration::from_secs(120),
+            accounting: None,
+        })
+    }
+
+    pub fn chatgpt_plan(bearer: Arc<dyn OpenAiBearer>) -> Result<Self, ModelError> {
+        Ok(Self {
+            authorization: Authorization::ChatGptPlan(bearer),
             endpoint: Url::parse(DEFAULT_ENDPOINT)
                 .map_err(|_| invalid("endpoint", "the official endpoint is invalid"))?,
             connect_timeout: Duration::from_secs(10),
@@ -72,11 +100,23 @@ impl OpenAiConfig {
     }
 
     pub fn with_endpoint(mut self, endpoint: &str) -> Result<Self, ModelError> {
+        if self.uses_chatgpt_plan() {
+            return Err(invalid(
+                "endpoint",
+                "ChatGPT plan usage requires the official endpoint",
+            ));
+        }
         self.endpoint = parse_endpoint(endpoint, false)?;
         Ok(self)
     }
 
     pub fn with_loopback_endpoint(mut self, endpoint: &str) -> Result<Self, ModelError> {
+        if self.uses_chatgpt_plan() {
+            return Err(invalid(
+                "endpoint",
+                "ChatGPT plan usage requires the official endpoint",
+            ));
+        }
         self.endpoint = parse_endpoint(endpoint, true)?;
         Ok(self)
     }
@@ -104,6 +144,10 @@ impl OpenAiConfig {
         self.idle_timeout = idle;
         Ok(self)
     }
+
+    fn uses_chatgpt_plan(&self) -> bool {
+        matches!(self.authorization, Authorization::ChatGptPlan(_))
+    }
 }
 
 impl fmt::Debug for OpenAiConfig {
@@ -117,6 +161,7 @@ impl fmt::Debug for OpenAiConfig {
             .field("connect_timeout", &self.connect_timeout)
             .field("request_timeout", &self.request_timeout)
             .field("idle_timeout", &self.idle_timeout)
+            .field("chatgpt_plan", &self.uses_chatgpt_plan())
             .finish_non_exhaustive()
     }
 }
@@ -191,11 +236,12 @@ impl ModelProvider for OpenAiProvider {
         }
         let mut request = ProviderWork::new(request, self.config.accounting.as_ref())?;
         request.fork_preparation()?;
+        let chatgpt_plan = self.config.uses_chatgpt_plan();
         let preparation = tokio::task::spawn_blocking(move || {
             request.prepare(|request| {
                 request.validate()?;
                 let continuation = read_continuation(&request)?;
-                let body = prepare_request(&request, &continuation)?;
+                let body = prepare_request(&request, &continuation, chatgpt_plan)?;
                 Ok::<_, ModelError>((request, continuation, body))
             })
         });
@@ -212,40 +258,107 @@ impl ModelProvider for OpenAiProvider {
         if cancellation.is_cancelled() {
             return Err(ModelError::Cancelled);
         }
+        let authorization = match &self.config.authorization {
+            Authorization::ApiKey(value) => value.clone(),
+            Authorization::ChatGptPlan(bearer) => {
+                let token = tokio::select! {
+                    biased;
+                    _ = cancellation.cancelled() => return Err(ModelError::Cancelled),
+                    token = bearer.bearer(cancellation.clone()) => token?,
+                };
+                let mut value = HeaderValue::from_str(&format!("Bearer {token}"))
+                    .map_err(|_| ModelError::Authentication)?;
+                value.set_sensitive(true);
+                value
+            }
+        };
         let response = tokio::select! {
             biased;
             _ = cancellation.cancelled() => return Err(ModelError::Cancelled),
             response = self.client.post(self.config.endpoint.clone())
-                .header(AUTHORIZATION, self.config.authorization.clone())
+                .header(AUTHORIZATION, authorization)
                 .header(CONTENT_TYPE, "application/json")
                 .header(ACCEPT, "text/event-stream")
                 .body(body)
                 .send() => response.map_err(map_transport_error)?,
         };
         if !response.status().is_success() {
+            if chatgpt_plan {
+                return Err(chatgpt_http_error(response).await);
+            }
             return Err(http_error(response.status(), response.headers()));
         }
-        if response
-            .headers()
-            .get(CONTENT_TYPE)
-            .and_then(|value| value.to_str().ok())
+        let status = response.status();
+        let retry_after_ms = retry_after(response.headers());
+        let content_type = response.headers().get(CONTENT_TYPE).map(|value| {
+            value
+                .to_str()
+                .map_or_else(|_| "unreadable".to_owned(), str::to_owned)
+        });
+        let media_type = content_type
+            .as_deref()
             .and_then(|value| value.split(';').next())
-            .is_none_or(|value| !value.trim().eq_ignore_ascii_case("text/event-stream"))
-        {
-            return Err(protocol("expected a server-sent event response"));
+            .map(|value| value.trim().to_ascii_lowercase());
+        let event_stream = media_type.as_deref() == Some("text/event-stream");
+        let idle_timeout = self.config.idle_timeout;
+        let content_length = response.content_length();
+        let mut bytes = response.bytes_stream();
+        let mut head = Vec::new();
+        if !event_stream && !chatgpt_plan {
+            let _ = tokio::time::timeout(
+                Duration::from_secs(2),
+                read_body(
+                    &mut bytes,
+                    &mut head,
+                    EXCERPT_READ_BYTES,
+                    Duration::from_secs(2),
+                    &cancellation,
+                    |_| false,
+                ),
+            )
+            .await;
+            return Err(not_event_stream(content_type.as_deref(), &head));
         }
-        if response
-            .content_length()
-            .is_some_and(|length| length > MAX_STREAM_BYTES as u64)
-        {
+        if content_length.is_some_and(|length| length > MAX_STREAM_BYTES as u64) {
             return Err(protocol("stream body exceeds its byte limit"));
         }
-        let idle_timeout = self.config.idle_timeout;
+        let mut fallback = None;
+        if !event_stream {
+            read_body(
+                &mut bytes,
+                &mut head,
+                MAX_SSE_EVENT_BYTES,
+                idle_timeout,
+                &cancellation,
+                |head| head.iter().any(|byte| !byte.is_ascii_whitespace()),
+            )
+            .await?;
+            let json = media_type
+                .as_deref()
+                .is_some_and(|value| value == "application/json" || value.ends_with("+json"));
+            if json || head.iter().find(|byte| !byte.is_ascii_whitespace()) == Some(&b'{') {
+                read_body(
+                    &mut bytes,
+                    &mut head,
+                    MAX_SSE_EVENT_BYTES + 1,
+                    idle_timeout,
+                    &cancellation,
+                    |_| false,
+                )
+                .await?;
+                head = json_events(status, retry_after_ms, content_type.as_deref(), &head)?;
+            } else {
+                fallback = Some(head[..head.len().min(EXCERPT_READ_BYTES)].to_vec());
+            }
+        }
         let accounting = self.config.accounting.clone();
         let loopback = is_loopback_endpoint(&self.config.endpoint);
         let raw = async_stream::try_stream! {
-            let mut bytes = response.bytes_stream();
             let mut limits = RawLimits::default();
+            if !head.is_empty() {
+                limits.observe(&head)?;
+                yield bytes::Bytes::from(head);
+            }
             while let Some(chunk) = bytes.next().await {
                 let chunk = chunk.map_err(map_transport_error)?;
                 limits.observe(&chunk)?;
@@ -257,6 +370,7 @@ impl ModelProvider for OpenAiProvider {
             futures_util::pin_mut!(events);
             let mut state = StreamState {
                 loopback,
+                chatgpt_plan,
                 ..StreamState::default()
             };
             loop {
@@ -267,22 +381,19 @@ impl ModelProvider for OpenAiProvider {
                         next.map_err(|_| transport("event stream idle timeout"))
                     },
                 }?;
-                let event = next.ok_or_else(|| protocol("stream ended without a terminal event"))?
-                    .map_err(|error| match error {
+                let parsed = next.ok_or_else(|| protocol("stream ended without a terminal event"))
+                    .and_then(|event| event.map_err(|error| match error {
                         eventsource_stream::EventStreamError::Transport(error) => error,
                         _ => protocol("invalid server-sent event framing"),
-                    })?;
-                if event.data.len() > MAX_SSE_EVENT_BYTES {
-                    Err(protocol("server-sent event exceeds its byte limit"))?;
-                }
-                if let Some(accounting) = &accounting {
-                    observe_terminal_usage(&event.data, accounting)?;
-                }
-                let frame: WireFrame = serde_json::from_str(&event.data)
-                    .map_err(|_| protocol("invalid server-sent event JSON"))?;
-                if event.event != "message" && !event.event.is_empty() && frame.event.kind().is_some_and(|kind| event.event != kind) {
-                    Err(protocol("server-sent event type does not match its payload"))?;
-                }
+                    }))
+                    .and_then(|event| decode_event(&event, accounting.as_deref(), chatgpt_plan));
+                let frame = match (parsed, &fallback) {
+                    (Err(ModelError::Protocol { .. }), Some(head)) => {
+                        Err(not_event_stream(content_type.as_deref(), head))
+                    }
+                    (parsed, _) => parsed,
+                }?;
+                fallback = None;
                 let progress = state.apply(frame)?;
                 for event in progress.events {
                     if cancellation.is_cancelled() {
@@ -357,12 +468,13 @@ struct WireRequest<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     instructions: Option<&'a str>,
     input: Vec<InputItem>,
-    tools: Vec<WireTool<'a>>,
+    tools: Vec<WireToolEntry<'a>>,
     tool_choice: Value,
     stream: bool,
     store: bool,
     include: [&'static str; 1],
-    truncation: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    truncation: Option<&'static str>,
     parallel_tool_calls: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     max_output_tokens: Option<u32>,
@@ -380,6 +492,19 @@ struct WireTool<'a> {
     strict: bool,
 }
 
+#[derive(Serialize)]
+#[serde(untagged)]
+enum WireToolEntry<'a> {
+    Tool(WireTool<'a>),
+    Namespace {
+        #[serde(rename = "type")]
+        kind: &'static str,
+        name: &'static str,
+        description: &'static str,
+        tools: Vec<WireTool<'a>>,
+    },
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum InputItem {
@@ -392,6 +517,8 @@ enum InputItem {
     FunctionCall {
         call_id: String,
         name: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        namespace: Option<String>,
         arguments: String,
     },
     FunctionCallOutput {
@@ -531,8 +658,10 @@ fn read_continuation(request: &ModelRequest) -> Result<ContinuationState, ModelE
 fn prepare_request(
     request: &ModelRequest,
     continuation: &ContinuationState,
+    chatgpt_plan: bool,
 ) -> Result<Vec<u8>, ModelError> {
     if request.temperature.is_some()
+        && !chatgpt_plan
         && (request.model.starts_with("o1")
             || request.model.starts_with("o3")
             || request.model.starts_with("o4")
@@ -562,7 +691,13 @@ fn prepare_request(
                 })
                 .map(|phase| phase.phase.as_str());
             if current_phase != phase {
-                flush_text(&mut input, &mut text, message.role, current_phase);
+                flush_text(
+                    &mut input,
+                    &mut text,
+                    message.role,
+                    current_phase,
+                    chatgpt_plan,
+                );
                 current_phase = phase;
             }
             if let Some(turn) = turn {
@@ -571,7 +706,13 @@ fn prepare_request(
                     .iter()
                     .filter(|item| item.before_block == block_index)
                 {
-                    flush_text(&mut input, &mut text, message.role, current_phase);
+                    flush_text(
+                        &mut input,
+                        &mut text,
+                        message.role,
+                        current_phase,
+                        chatgpt_plan,
+                    );
                     input.push(InputItem::Reasoning {
                         id: insertion.item.id.clone(),
                         summary: insertion.item.summary.clone(),
@@ -592,17 +733,30 @@ fn prepare_request(
                     text: value.clone(),
                 }),
                 ContentBlock::ToolCall(call) => {
-                    flush_text(&mut input, &mut text, message.role, current_phase);
+                    flush_text(
+                        &mut input,
+                        &mut text,
+                        message.role,
+                        current_phase,
+                        chatgpt_plan,
+                    );
                     validate_tool_name(&call.name)?;
                     input.push(InputItem::FunctionCall {
                         call_id: call.id.clone(),
                         name: call.name.clone(),
+                        namespace: chatgpt_plan.then(|| FUNCTION_NAMESPACE.to_owned()),
                         arguments: serde_json::to_string(&call.arguments)
                             .map_err(|_| invalid("arguments", "cannot encode tool arguments"))?,
                     });
                 }
                 ContentBlock::ToolResult(result) => {
-                    flush_text(&mut input, &mut text, message.role, current_phase);
+                    flush_text(
+                        &mut input,
+                        &mut text,
+                        message.role,
+                        current_phase,
+                        chatgpt_plan,
+                    );
                     let output = if result.is_error {
                         serde_json::json!({"is_error": true, "output": result.output})
                     } else {
@@ -616,23 +770,46 @@ fn prepare_request(
                 }
             }
         }
-        flush_text(&mut input, &mut text, message.role, current_phase);
+        flush_text(
+            &mut input,
+            &mut text,
+            message.role,
+            current_phase,
+            chatgpt_plan,
+        );
     }
-    let tools = request
+    let specific = match &request.tool_choice {
+        ToolChoice::Specific { name } if chatgpt_plan => Some(name),
+        _ => None,
+    };
+    let functions = request
         .tools
         .iter()
+        .filter(|tool| specific.is_none_or(|name| &tool.name == name))
         .map(|tool| WireTool {
             kind: "function",
             name: &tool.name,
             description: &tool.description,
             parameters: &tool.input_schema,
             strict: false,
-        })
-        .collect();
+        });
+    let tools = if !chatgpt_plan {
+        functions.map(WireToolEntry::Tool).collect()
+    } else if request.tools.is_empty() {
+        Vec::new()
+    } else {
+        vec![WireToolEntry::Namespace {
+            kind: "namespace",
+            name: FUNCTION_NAMESPACE,
+            description: "",
+            tools: functions.collect(),
+        }]
+    };
     let tool_choice = match &request.tool_choice {
         ToolChoice::Auto => Value::String("auto".to_owned()),
         ToolChoice::None => Value::String("none".to_owned()),
         ToolChoice::Required => Value::String("required".to_owned()),
+        ToolChoice::Specific { .. } if chatgpt_plan => Value::String("required".to_owned()),
         ToolChoice::Specific { name } => serde_json::json!({"type": "function", "name": name}),
     };
     let native = WireRequest {
@@ -644,10 +821,10 @@ fn prepare_request(
         stream: true,
         store: false,
         include: ["reasoning.encrypted_content"],
-        truncation: "disabled",
+        truncation: (!chatgpt_plan).then_some("disabled"),
         parallel_tool_calls: true,
-        max_output_tokens: request.max_output_tokens,
-        temperature: request.temperature,
+        max_output_tokens: request.max_output_tokens.filter(|_| !chatgpt_plan),
+        temperature: request.temperature.filter(|_| !chatgpt_plan),
     };
     let mut body = BoundedBody(Vec::new());
     serde_json::to_writer(&mut body, &native)
@@ -660,9 +837,11 @@ fn flush_text(
     text: &mut Vec<InputText>,
     role: MessageRole,
     phase: Option<&str>,
+    chatgpt_plan: bool,
 ) {
     if !text.is_empty() {
         let role = match role {
+            MessageRole::System if chatgpt_plan => "developer",
             MessageRole::System => "system",
             MessageRole::User => "user",
             MessageRole::Assistant => "assistant",
@@ -794,9 +973,11 @@ impl RawLimits {
 
 #[derive(Deserialize)]
 struct WireFrame {
-    sequence_number: u64,
+    sequence_number: Option<u64>,
     #[serde(flatten)]
     event: WireEvent,
+    #[serde(skip)]
+    unknown: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -950,7 +1131,7 @@ struct OutputTokenDetails {
     reasoning_tokens: u64,
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum WireItem {
     Message {
@@ -964,6 +1145,7 @@ enum WireItem {
         id: String,
         call_id: String,
         name: String,
+        namespace: Option<String>,
         arguments: String,
         status: Option<String>,
     },
@@ -983,7 +1165,7 @@ struct ReasoningSummary {
     text: String,
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum WirePart {
     OutputText {
@@ -1018,6 +1200,7 @@ enum ItemIdentity {
         name: String,
     },
     Reasoning(String),
+    Ignored,
 }
 
 impl ItemIdentity {
@@ -1025,19 +1208,32 @@ impl ItemIdentity {
         match self {
             Self::Message(id) | Self::Reasoning(id) => id,
             Self::Function { id, .. } => id,
+            Self::Ignored => "",
         }
     }
 }
 
 impl WireItem {
-    fn identity(&self) -> Result<ItemIdentity, ModelError> {
+    fn identity(&self, chatgpt_plan: bool) -> Result<ItemIdentity, ModelError> {
         let identity = match self {
+            Self::Unknown if chatgpt_plan => return Ok(ItemIdentity::Ignored),
             Self::Message { id, role, .. } if role == "assistant" => {
                 ItemIdentity::Message(id.clone())
             }
             Self::FunctionCall {
-                id, call_id, name, ..
+                id,
+                call_id,
+                name,
+                namespace,
+                ..
             } => {
+                if chatgpt_plan
+                    && namespace
+                        .as_deref()
+                        .is_some_and(|namespace| namespace != FUNCTION_NAMESPACE)
+                {
+                    return Err(protocol("unsupported provider function namespace"));
+                }
                 bounded_identifier(call_id)?;
                 validate_tool_name(name).map_err(|_| protocol("invalid provider function name"))?;
                 ItemIdentity::Function {
@@ -1082,6 +1278,8 @@ struct StreamState {
     locations: HashMap<(u32, Option<u32>), usize>,
     blocks: Vec<PendingBlock>,
     loopback: bool,
+    chatgpt_plan: bool,
+    done_items: BTreeMap<u32, WireItem>,
 }
 
 #[derive(Default)]
@@ -1096,13 +1294,13 @@ impl StreamState {
         if self.event_count > MAX_STREAM_EVENTS {
             return Err(protocol("stream event count exceeds its limit"));
         }
-        if self
-            .sequence
-            .is_some_and(|previous| frame.sequence_number <= previous)
-        {
+        if self.chatgpt_plan && matches!(frame.event, WireEvent::Unknown) {
+            return Ok(Progress::default());
+        }
+        if self.sequence.is_some() && frame.sequence_number <= self.sequence {
             return Err(protocol("stream sequence numbers must strictly increase"));
         }
-        self.sequence = Some(frame.sequence_number);
+        self.sequence = frame.sequence_number;
         if let WireEvent::Error { code } = &frame.event {
             return Err(provider_error(
                 code.as_deref().map_or("unknown", |code| code),
@@ -1155,8 +1353,13 @@ impl StreamState {
                 {
                     return Err(protocol("invalid output item ordering or count"));
                 }
-                let identity = item.identity()?;
-                if !self.item_ids.insert(identity.id().to_owned()) {
+                if matches!(item, WireItem::Unknown) && !self.chatgpt_plan {
+                    return Err(unsupported("unsupported output item", frame.unknown));
+                }
+                let identity = item.identity(self.chatgpt_plan)?;
+                if identity != ItemIdentity::Ignored
+                    && !self.item_ids.insert(identity.id().to_owned())
+                {
                     return Err(protocol("duplicate output item identifier"));
                 }
                 if let ItemIdentity::Function { call_id, .. } = &identity
@@ -1205,8 +1408,7 @@ impl StreamState {
                             });
                         }
                     }
-                    WireItem::Reasoning { .. } => {}
-                    WireItem::Unknown => return Err(protocol("unsupported output item")),
+                    WireItem::Reasoning { .. } | WireItem::Unknown => {}
                 }
             }
             WireEvent::PartAdded {
@@ -1290,10 +1492,16 @@ impl StreamState {
                 }
             }
             WireEvent::ItemDone { output_index, item } => {
-                if self.items.get(&output_index) != Some(&item.identity()?)
+                if matches!(item, WireItem::Unknown) && !self.chatgpt_plan {
+                    return Err(unsupported("unsupported completed item", frame.unknown));
+                }
+                if self.items.get(&output_index) != Some(&item.identity(self.chatgpt_plan)?)
                     || self.completed_items.contains(&output_index)
                 {
                     return Err(protocol("completed output item does not match its start"));
+                }
+                if self.chatgpt_plan {
+                    self.done_items.insert(output_index, item.clone());
                 }
                 match item {
                     WireItem::Message { content, .. } => {
@@ -1360,12 +1568,15 @@ impl StreamState {
                             })?;
                         self.reasoning.insert(output_index, item);
                     }
-                    WireItem::Unknown => return Err(protocol("unsupported completed item")),
+                    WireItem::Unknown => {}
                 }
                 self.completed_items.insert(output_index);
             }
-            WireEvent::Completed { response } | WireEvent::Incomplete { response } => {
+            WireEvent::Completed { mut response } | WireEvent::Incomplete { mut response } => {
                 self.check_response(&response)?;
+                if self.chatgpt_plan && response.output.is_empty() {
+                    response.output = std::mem::take(&mut self.done_items).into_values().collect();
+                }
                 if response.output.len() != self.items.len()
                     || self.completed_items.len() != self.items.len()
                 {
@@ -1374,14 +1585,16 @@ impl StreamState {
                     ));
                 }
                 for (index, item) in response.output.iter().enumerate() {
-                    if self.items.get(&(index as u32)) != Some(&item.identity()?) {
+                    if self.items.get(&(index as u32)) != Some(&item.identity(self.chatgpt_plan)?) {
                         return Err(protocol("terminal output item does not match the stream"));
                     }
                 }
                 progress.response = Some(response);
             }
             WireEvent::Metadata => {}
-            WireEvent::Unknown => return Err(protocol("unsupported stream event")),
+            WireEvent::Unknown => {
+                return Err(unsupported("unsupported stream event", frame.unknown));
+            }
             WireEvent::Created { .. } | WireEvent::Error { .. } | WireEvent::Failed { .. } => {
                 return Err(protocol("invalid stream state"));
             }
@@ -1753,6 +1966,7 @@ fn finish_response(
                     item: item.clone(),
                 });
             }
+            WireItem::Unknown if state.chatgpt_plan => {}
             WireItem::Unknown => return Err(protocol("unsupported terminal output item")),
         }
     }
@@ -1925,7 +2139,7 @@ fn http_error(status: StatusCode, headers: &HeaderMap) -> ModelError {
     }
 }
 
-fn retry_after(headers: &HeaderMap) -> Option<u64> {
+pub(crate) fn retry_after(headers: &HeaderMap) -> Option<u64> {
     let millis = headers
         .get("retry-after-ms")
         .and_then(|value| value.to_str().ok())
@@ -1940,7 +2154,325 @@ fn retry_after(headers: &HeaderMap) -> Option<u64> {
     millis.map(|value| value.min(3_600_000))
 }
 
+async fn read_body(
+    chunks: &mut (impl futures_util::Stream<Item = reqwest::Result<bytes::Bytes>> + Unpin),
+    buffer: &mut Vec<u8>,
+    limit: usize,
+    idle_timeout: Duration,
+    cancellation: &CancellationToken,
+    done: impl Fn(&[u8]) -> bool,
+) -> Result<(), ModelError> {
+    while buffer.len() < limit && !done(buffer) {
+        let next = tokio::select! {
+            biased;
+            _ = cancellation.cancelled() => return Err(ModelError::Cancelled),
+            next = tokio::time::timeout(idle_timeout, chunks.next()) => {
+                next.map_err(|_| transport("event stream idle timeout"))?
+            },
+        };
+        let Some(chunk) = next else {
+            break;
+        };
+        buffer.extend_from_slice(&chunk.map_err(map_transport_error)?);
+    }
+    Ok(())
+}
+
+fn decode_event(
+    event: &eventsource_stream::Event,
+    accounting: Option<&ProviderAccounting>,
+    chatgpt_plan: bool,
+) -> Result<WireFrame, ModelError> {
+    if event.data.len() > MAX_SSE_EVENT_BYTES {
+        return Err(protocol("server-sent event exceeds its byte limit"));
+    }
+    if let Some(accounting) = accounting {
+        observe_terminal_usage(&event.data, accounting)?;
+    }
+    let mut frame: WireFrame = serde_json::from_str(&event.data)
+        .map_err(|_| protocol("invalid server-sent event JSON"))?;
+    let unknown_event = matches!(frame.event, WireEvent::Unknown);
+    if chatgpt_plan && unknown_event {
+        return Ok(frame);
+    }
+    if frame.sequence_number.is_none() {
+        return Err(protocol("invalid server-sent event JSON"));
+    }
+    if !chatgpt_plan
+        && matches!(
+            frame.event,
+            WireEvent::Unknown
+                | WireEvent::ItemAdded {
+                    item: WireItem::Unknown,
+                    ..
+                }
+                | WireEvent::ItemDone {
+                    item: WireItem::Unknown,
+                    ..
+                }
+        )
+    {
+        let value = serde_json::from_str::<Value>(&event.data).unwrap_or_default();
+        let name = if unknown_event {
+            value["type"]
+                .as_str()
+                .or(Some(event.event.as_str()).filter(|name| *name != "message"))
+        } else {
+            value["item"]["type"].as_str()
+        };
+        frame.unknown = name.map(wire_name).filter(|name| !name.is_empty());
+    }
+    if event.event != "message"
+        && !event.event.is_empty()
+        && frame.event.kind().is_some_and(|kind| event.event != kind)
+    {
+        return Err(protocol(
+            "server-sent event type does not match its payload",
+        ));
+    }
+    Ok(frame)
+}
+
+fn json_events(
+    status: StatusCode,
+    retry_after_ms: Option<u64>,
+    content_type: Option<&str>,
+    body: &[u8],
+) -> Result<Vec<u8>, ModelError> {
+    let diagnostic = || not_event_stream(content_type, body);
+    if body.len() > MAX_SSE_EVENT_BYTES {
+        return Err(diagnostic());
+    }
+    let value = serde_json::from_slice::<Value>(body).map_err(|_| diagnostic())?;
+    if value["object"] == "response"
+        && let Some(output) = value["output"].as_array()
+    {
+        let terminal = match value["status"].as_str() {
+            Some("completed") => "response.completed",
+            Some("incomplete") => "response.incomplete",
+            Some("failed") => "response.failed",
+            _ => return Err(diagnostic()),
+        };
+        let mut created = value.clone();
+        created["output"] = Value::Array(Vec::new());
+        created["status"] = Value::from("in_progress");
+        let mut frames = vec![serde_json::json!({"type": "response.created", "response": created})];
+        for (index, item) in output.iter().enumerate() {
+            frames.push(serde_json::json!({"type": "response.output_item.added", "output_index": index, "item": item}));
+            frames.push(serde_json::json!({"type": "response.output_item.done", "output_index": index, "item": item}));
+        }
+        frames.push(serde_json::json!({"type": terminal, "response": value}));
+        let mut events = Vec::new();
+        for (sequence, mut frame) in frames.into_iter().enumerate() {
+            frame["sequence_number"] = Value::from(sequence);
+            events.extend_from_slice(b"data: ");
+            serde_json::to_writer(&mut events, &frame).map_err(|_| diagnostic())?;
+            events.extend_from_slice(b"\n\n");
+        }
+        return Ok(events);
+    }
+    if value["error"].is_object() || value["detail"].is_string() {
+        return Err(chatgpt_body_error(status, retry_after_ms, body));
+    }
+    Err(diagnostic())
+}
+
+fn not_event_stream(content_type: Option<&str>, body: &[u8]) -> ModelError {
+    let content_type =
+        content_type.map_or_else(|| "none".to_owned(), |value| excerpt(value.as_bytes(), 100));
+    let body = excerpt(&body[..body.len().min(EXCERPT_READ_BYTES)], EXCERPT_BYTES);
+    let body = if body.is_empty() {
+        "empty".to_owned()
+    } else {
+        format!("\"{body}\"")
+    };
+    ModelError::Protocol {
+        message: format!(
+            "expected a server-sent event response (content type: {content_type}; body: {body})"
+        ),
+    }
+}
+
+fn excerpt(bytes: &[u8], limit: usize) -> String {
+    let mut collapsed = String::new();
+    let mut space = false;
+    for character in String::from_utf8_lossy(bytes).chars() {
+        if character.is_whitespace() {
+            space = true;
+            continue;
+        }
+        if space && !collapsed.is_empty() {
+            collapsed.push(' ');
+        }
+        space = false;
+        if character.is_control() {
+            collapsed.extend(character.escape_default());
+        } else {
+            collapsed.push(character);
+        }
+    }
+    let token =
+        |character: char| character.is_ascii_alphanumeric() || "-_.~+/=".contains(character);
+    let mut redacted = String::with_capacity(collapsed.len());
+    let mut rest = collapsed.as_str();
+    let mut secret_follows = false;
+    while let Some(start) = rest.find(token) {
+        redacted.push_str(&rest[..start]);
+        let tail = &rest[start..];
+        let end = tail
+            .find(|character| !token(character))
+            .unwrap_or(tail.len());
+        let word = &tail[..end];
+        if secret_follows || word.starts_with("sk-") || word.starts_with("eyJ") || word.len() >= 64
+        {
+            redacted.push_str("[redacted]");
+        } else {
+            redacted.push_str(word);
+        }
+        let lower = word.to_ascii_lowercase();
+        secret_follows = [
+            "bearer",
+            "token",
+            "authorization",
+            "secret",
+            "key",
+            "password",
+        ]
+        .iter()
+        .any(|marker| lower.ends_with(marker));
+        rest = &tail[end..];
+    }
+    redacted.push_str(rest);
+    if redacted.len() > limit {
+        let mut end = limit;
+        while !redacted.is_char_boundary(end) {
+            end -= 1;
+        }
+        redacted.truncate(end);
+        redacted.push('…');
+    }
+    redacted
+}
+
+async fn chatgpt_http_error(response: reqwest::Response) -> ModelError {
+    let status = response.status();
+    let retry_after_ms = retry_after(response.headers());
+    let mut body = Vec::new();
+    let mut chunks = response.bytes_stream();
+    while body.len() < 16 * 1_024 {
+        match tokio::time::timeout(Duration::from_secs(10), chunks.next()).await {
+            Ok(Some(Ok(chunk))) => body.extend_from_slice(&chunk[..chunk.len().min(16 * 1_024)]),
+            _ => break,
+        }
+    }
+    chatgpt_body_error(status, retry_after_ms, &body)
+}
+
+pub(crate) fn chatgpt_body_error(
+    status: StatusCode,
+    retry_after_ms: Option<u64>,
+    body: &[u8],
+) -> ModelError {
+    let value = serde_json::from_slice::<Value>(body).unwrap_or(Value::Null);
+    let detail: String = value["detail"]
+        .as_str()
+        .or_else(|| value["error"]["message"].as_str())
+        .unwrap_or_default()
+        .chars()
+        .filter(|character| !character.is_control())
+        .take(200)
+        .collect();
+    let lower = detail.to_lowercase();
+    let model_hint = (value["error"]["code"] == "subscription_sharing_unsupported_capability"
+        && value["error"]["param"] == "model")
+        || (lower.contains("not supported") && lower.contains("chatgpt account"));
+    let detail = if detail.is_empty() {
+        String::new()
+    } else {
+        format!(": {detail}")
+    };
+    let mut error = chatgpt_status_error(status, retry_after_ms, &value, &detail, model_hint);
+    if model_hint && let ModelError::Provider { message, .. } = &mut error {
+        message.push_str(MODELS_HINT);
+    }
+    error
+}
+
+fn chatgpt_status_error(
+    status: StatusCode,
+    retry_after_ms: Option<u64>,
+    value: &Value,
+    detail: &str,
+    model_hint: bool,
+) -> ModelError {
+    if let Some(mut error) = value["error"]["code"].as_str().and_then(chatgpt_code_error) {
+        if model_hint && let ModelError::Provider { message, .. } = &mut error {
+            message.push_str(detail);
+        }
+        return error;
+    }
+    match status {
+        StatusCode::UNAUTHORIZED => ModelError::Provider {
+            code: None,
+            message: format!(
+                "ChatGPT plan request was not accepted (HTTP 401){detail}; check the selected ChatGPT account and granted plan usage, sign in with ChatGPT again or use an API key"
+            ),
+            retryable: false,
+        },
+        StatusCode::FORBIDDEN => ModelError::Provider {
+            code: None,
+            message: format!("ChatGPT plan request was refused by policy (HTTP 403){detail}"),
+            retryable: false,
+        },
+        StatusCode::SERVICE_UNAVAILABLE => ModelError::Provider {
+            code: None,
+            message: format!("ChatGPT plan routing is unavailable (HTTP 503){detail}"),
+            retryable: true,
+        },
+        StatusCode::TOO_MANY_REQUESTS => ModelError::RateLimited { retry_after_ms },
+        _ => ModelError::Provider {
+            code: None,
+            message: format!("OpenAI returned HTTP {}{detail}", status.as_u16()),
+            retryable: status.is_server_error() || status == StatusCode::REQUEST_TIMEOUT,
+        },
+    }
+}
+
+fn chatgpt_code_error(code: &str) -> Option<ModelError> {
+    if !code.starts_with("subscription_sharing_") && !code.starts_with("chatpass_v2_") {
+        return None;
+    }
+    let code = code
+        .chars()
+        .filter(|character| character.is_ascii_alphanumeric() || *character == '_')
+        .take(64)
+        .collect::<String>();
+    let message = match code.as_str() {
+        "subscription_sharing_usage_limit_exceeded" => {
+            "ChatGPT plan usage limit reached; manage usage at https://chatgpt.com/settings/usage"
+        }
+        "subscription_sharing_user_not_eligible" => {
+            "ChatGPT plan usage is unavailable for this account, workspace or policy; use an API key instead"
+        }
+        "subscription_sharing_unsupported_capability" => {
+            "ChatGPT plan usage does not support a field, tool or model in this request"
+        }
+        _ => "ChatGPT plan usage rejected the request",
+    };
+    Some(ModelError::Provider {
+        retryable: matches!(
+            code.as_str(),
+            "subscription_sharing_usage_unavailable" | "subscription_sharing_user_unavailable"
+        ),
+        code: Some(code),
+        message: message.to_owned(),
+    })
+}
+
 fn provider_error(code: &str) -> ModelError {
+    if let Some(error) = chatgpt_code_error(code) {
+        return error;
+    }
     match code {
         "invalid_api_key" | "authentication_error" => ModelError::Authentication,
         "rate_limit_exceeded" | "rate_limit_error" => ModelError::RateLimited {
@@ -1972,6 +2504,23 @@ fn protocol(message: &str) -> ModelError {
     ModelError::Protocol {
         message: message.to_owned(),
     }
+}
+
+fn unsupported(message: &str, name: Option<String>) -> ModelError {
+    protocol(&format!(
+        "{message}: {}",
+        name.as_deref().unwrap_or("unnamed")
+    ))
+}
+
+fn wire_name(value: &str) -> String {
+    value
+        .chars()
+        .filter(|character| {
+            character.is_ascii_alphanumeric() || matches!(character, '.' | '_' | '-')
+        })
+        .take(64)
+        .collect()
 }
 
 fn transport(message: &str) -> ModelError {

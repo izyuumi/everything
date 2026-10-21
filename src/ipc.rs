@@ -283,6 +283,14 @@ pub enum OwnerOperation {
     Credential {
         operation: crate::host::credentials::CredentialOperation,
     },
+    #[serde(rename = "chatgpt")]
+    ChatGpt {
+        operation: crate::host::chatgpt::ChatGptOperation,
+    },
+    #[serde(rename = "chatgpt_models")]
+    ChatGptModels {
+        binding: crate::host::settings::ModelCredentialReference,
+    },
     BeginPairing {
         lifetime_ms: u64,
     },
@@ -402,6 +410,8 @@ impl OwnerOperation {
             )
             .map(|_| ())
             .map_err(|_| "invalid pairing approval"),
+            Self::ChatGpt { operation } => operation.validate(),
+            Self::ChatGptModels { binding } => crate::host::chatgpt::validate_binding(binding),
             _ => Ok(()),
         }
     }
@@ -742,6 +752,8 @@ pub struct TaskExecutionMetadata {
     pub cancel_requested: bool,
     pub waiting: Option<crate::scheduler::WaitingReason>,
     pub diagnostic: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub live_text: Option<crate::scheduler::LiveText>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -804,6 +816,15 @@ pub enum OwnerOperationResult {
     },
     ToolRecovery {
         report: crate::tools::broker::RecoveryReport,
+    },
+    #[serde(rename = "chatgpt")]
+    ChatGpt {
+        status: Box<crate::host::chatgpt::ChatGptStatus>,
+    },
+    #[serde(rename = "chatgpt_models")]
+    ChatGptModels {
+        binding: crate::host::settings::ModelCredentialReference,
+        models: Vec<crate::host::chatgpt::ChatGptModel>,
     },
 }
 
@@ -996,6 +1017,23 @@ impl OwnerOperationResult {
                 Self::Applied,
             ) => true,
             (OwnerOperation::ResumeInterrupted { .. }, Self::Applied) => true,
+            (
+                OwnerOperation::ChatGpt {
+                    operation:
+                        crate::host::chatgpt::ChatGptOperation::Status { binding }
+                        | crate::host::chatgpt::ChatGptOperation::SignIn { binding, .. }
+                        | crate::host::chatgpt::ChatGptOperation::SignOut { binding },
+                },
+                Self::ChatGpt { status },
+            ) => status.binding == *binding,
+            (OwnerOperation::ChatGpt { .. }, Self::ChatGpt { status }) => status.attempt.is_some(),
+            (
+                OwnerOperation::ChatGptModels { binding },
+                Self::ChatGptModels {
+                    binding: returned,
+                    models,
+                },
+            ) => returned == binding && models.len() <= 1_024,
             _ => false,
         };
         if !valid {

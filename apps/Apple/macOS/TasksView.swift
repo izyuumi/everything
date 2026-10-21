@@ -41,6 +41,10 @@ struct TaskDetailsView: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 12) {
                     Text(task.instruction).textSelection(.enabled)
+                    if let live = model.taskDetails["execution"]["live_text"]["text"].string, !live.isEmpty {
+                        Text("Response in progress").font(.headline)
+                        Text(live).textSelection(.enabled)
+                    }
                     Text(model.taskDetails.formatted).font(.system(.caption, design: .monospaced)).textSelection(.enabled)
                 }.frame(maxWidth: .infinity, alignment: .leading)
             }
@@ -59,6 +63,12 @@ struct TaskDetailsView: View {
         }
         .padding(20).frame(width: 620, height: 520)
         .task(id: model.lastRefresh) { await model.inspect(task) }
+        .task(id: task.id) {
+            while !Task.isCancelled {
+                do { try await Task.sleep(for: .seconds(1)) } catch { return }
+                if ["queued", "running"].contains(model.taskDetails["task"]["status"].string ?? task.status) { await model.inspect(task) }
+            }
+        }
         .confirmationDialog("Cancel this task?", isPresented: $confirmingCancel, titleVisibility: .visible) {
             Button("Cancel task", role: .destructive) { Task { await model.cancel(task) } }
         } message: {

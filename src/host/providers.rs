@@ -12,8 +12,11 @@ use crate::model::anthropic::{AnthropicConfig, AnthropicProvider};
 use crate::model::openai::{OpenAiConfig, OpenAiProvider};
 use crate::model::{ModelError, ModelProvider};
 
+use super::chatgpt::ChatGptBearer;
 use super::credentials::CredentialVault;
-use super::settings::{CredentialStorage, HostSettings, SettingsError, SettingsRepository};
+use super::settings::{
+    CredentialStorage, HostSettings, ModelCredentialSource, SettingsError, SettingsRepository,
+};
 
 #[derive(Debug, Error)]
 pub enum HostProviderError {
@@ -23,6 +26,8 @@ pub enum HostProviderError {
     Settings(#[from] SettingsError),
     #[error(transparent)]
     Model(#[from] ModelError),
+    #[error(transparent)]
+    ChatGpt(#[from] super::chatgpt::ChatGptError),
     #[error("the selected provider endpoint has no configured credential")]
     MissingCredential,
     #[error("the saved conversation configuration is invalid")]
@@ -89,6 +94,27 @@ impl HostProviderFactory {
             .map_err(|_| HostProviderError::Worker)??;
         let credential_generation = self.credentials.model_generation()?;
         let (configuration, binding) = settings_configuration(&settings, credential_generation)?;
+        if let Some(provider) = self
+            .chatgpt_provider(&configuration, &settings, cancellation.clone())
+            .await?
+        {
+            let accounting = Arc::new(ProviderAccounting::default());
+            let provider: Arc<dyn ModelProvider> = Arc::new(OpenAiProvider::with_config(
+                provider.with_accounting(Arc::clone(&accounting)),
+            )?);
+            if cancellation.is_cancelled() {
+                return Err(CredentialError::Cancelled.into());
+            }
+            if self.credentials.model_generation()? != credential_generation {
+                return Err(CredentialError::Busy.into());
+            }
+            return Ok(CapturedSettingsProvider {
+                configuration,
+                binding,
+                provider,
+                accounting,
+            });
+        }
         let credential = self
             .credentials
             .resolve(&configuration, &settings, cancellation.clone())
@@ -174,6 +200,12 @@ impl HostProviderFactory {
         let settings = tokio::task::spawn_blocking(move || repository.snapshot())
             .await
             .map_err(|_| HostProviderError::Worker)??;
+        if let Some(provider) = self
+            .chatgpt_provider(configuration, &settings, cancellation.clone())
+            .await?
+        {
+            return Ok(Arc::new(OpenAiProvider::with_config(provider)?));
+        }
         let credential = self
             .credentials
             .resolve(configuration, &settings, cancellation.clone())
@@ -202,6 +234,23 @@ impl HostProviderFactory {
             }
         };
         Ok(provider)
+    }
+
+    async fn chatgpt_provider(
+        &self,
+        configuration: &ConversationConfig,
+        settings: &HostSettings,
+        cancellation: CancellationToken,
+    ) -> Result<Option<OpenAiConfig>, HostProviderError> {
+        let Some(binding) = settings
+            .credential_for(configuration)
+            .filter(|binding| binding.source == ModelCredentialSource::ChatGpt)
+        else {
+            return Ok(None);
+        };
+        let bearer =
+            ChatGptBearer::new(self.credentials.clone(), binding.clone(), cancellation).await?;
+        Ok(Some(OpenAiConfig::chatgpt_plan(Arc::new(bearer))?))
     }
 }
 

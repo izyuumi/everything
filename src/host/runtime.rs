@@ -85,6 +85,8 @@ pub enum HostError {
     #[error(transparent)]
     McpSessionBootstrap(#[from] super::credentials::McpSessionBootstrapError),
     #[error(transparent)]
+    ChatGpt(#[from] super::chatgpt::ChatGptError),
+    #[error(transparent)]
     WorkerProtocol(#[from] crate::worker::WorkerError),
     #[error(transparent)]
     Json(#[from] serde_json::Error),
@@ -139,6 +141,7 @@ pub(super) struct HostInner {
     pub(super) settings_service: SettingsService,
     pub(super) settings_agents: Arc<super::settings::agent::SettingsAgentRuntime>,
     pub(super) credentials: CredentialVault,
+    pub(super) chatgpt: super::chatgpt::ChatGptAccounts,
     pub(super) devices: DeviceEndpoint,
     pub(super) registry: Arc<ToolRegistry>,
     pub(super) authorizer: Arc<Authorizer>,
@@ -278,6 +281,8 @@ impl HostService {
         if cancellation.is_cancelled() {
             return Err(crate::credentials::CredentialError::Cancelled.into());
         }
+        let chatgpt =
+            super::chatgpt::ChatGptAccounts::new(credentials.clone(), Arc::clone(&lease))?;
         let mcp = super::mcp::McpService::start(
             effective.mcp.clone(),
             Arc::new(credentials.clone()),
@@ -449,6 +454,7 @@ impl HostService {
             settings_service,
             settings_agents,
             credentials,
+            chatgpt,
             devices,
             registry,
             authorizer,
@@ -1432,6 +1438,31 @@ pub(super) fn public_failure(error: &HostError) -> LocalFailure {
             LocalFailureCode::Unavailable,
             "memory service is shutting down",
         ),
+        HostError::ChatGpt(
+            error @ (super::chatgpt::ChatGptError::Model(_)
+            | super::chatgpt::ChatGptError::Models(_)
+            | super::chatgpt::ChatGptError::SignedOut
+            | super::chatgpt::ChatGptError::PlanUsageDisabled
+            | super::chatgpt::ChatGptError::SessionEnded
+            | super::chatgpt::ChatGptError::InvalidClient
+            | super::chatgpt::ChatGptError::Transport(_)
+            | super::chatgpt::ChatGptError::Invalid(_)),
+        ) => {
+            let mut message = error.to_string();
+            let mut end = message.len().min(1_024);
+            while !message.is_char_boundary(end) {
+                end -= 1;
+            }
+            message.truncate(end);
+            return LocalFailure {
+                code: if matches!(error, super::chatgpt::ChatGptError::Invalid(_)) {
+                    LocalFailureCode::InvalidRequest
+                } else {
+                    LocalFailureCode::Unavailable
+                },
+                message,
+            };
+        }
         _ => (
             LocalFailureCode::Internal,
             "host operation failed; durable acceptance may already exist",

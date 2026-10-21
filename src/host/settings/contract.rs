@@ -627,6 +627,7 @@ impl SettingsModelCredentialBinding {
             endpoint: self.endpoint.as_native(),
             reference: self.reference,
             storage: self.storage,
+            source: Default::default(),
         }
     }
 }
