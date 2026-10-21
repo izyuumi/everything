@@ -135,6 +135,8 @@ enum AgentCommand {
 struct ServeArguments {
     #[arg(long, value_name = "PATH")]
     mcp_credential_environment_file: Option<PathBuf>,
+    #[arg(long, env = "EVERYTHING_MAX_PARALLEL_TASKS", value_name = "1-4", value_parser = clap::value_parser!(u8).range(1..=4))]
+    max_parallel_tasks: Option<u8>,
 }
 
 #[derive(Args)]
@@ -471,9 +473,14 @@ async fn execute(arguments: Arguments, cancellation: CancellationToken) -> Resul
             .await;
         }
         Command::Serve(arguments) => {
+            let mut limits = everything::scheduler::SchedulerLimits::default();
+            if let Some(maximum) = arguments.max_parallel_tasks {
+                limits.max_primary_tasks = maximum.into();
+            }
             return everything::host::runtime::HostService::start_with_mcp_session_bootstrap(
                 &state_dir,
                 arguments.mcp_credential_environment_file,
+                limits,
                 cancellation.clone(),
             )
             .await?
