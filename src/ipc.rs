@@ -752,6 +752,8 @@ pub struct TaskExecutionMetadata {
     pub cancel_requested: bool,
     pub waiting: Option<crate::scheduler::WaitingReason>,
     pub diagnostic: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub live_text: Option<crate::scheduler::LiveText>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

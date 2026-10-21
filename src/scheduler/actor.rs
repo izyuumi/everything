@@ -40,6 +40,7 @@ pub(super) struct HandleInner {
     sender: mpsc::Sender<Control>,
     shutdown_grace: std::time::Duration,
     changed: watch::Sender<u64>,
+    live: watch::Sender<HashMap<TaskId, LiveText>>,
     drained: watch::Receiver<Option<ShutdownReport>>,
     remote_admission: Arc<Mutex<()>>,
 }
@@ -191,6 +192,8 @@ impl Scheduler {
         let (ready, started) = oneshot::channel();
         let (changed, _) = watch::channel(0);
         let actor_changed = changed.clone();
+        let (live, _) = watch::channel(HashMap::new());
+        let actor_live = live.clone();
         let (drained_sender, drained) = watch::channel(None);
         let runtime = tokio::runtime::Handle::current();
         let shutdown_grace = limits.shutdown_grace;
@@ -201,6 +204,7 @@ impl Scheduler {
                     limits,
                     receiver,
                     actor_changed,
+                    actor_live,
                     drained_sender,
                     preparation,
                 );
@@ -222,6 +226,7 @@ impl Scheduler {
                 sender,
                 shutdown_grace,
                 changed,
+                live,
                 drained,
                 remote_admission: Arc::new(Mutex::new(())),
             }),
@@ -304,6 +309,10 @@ impl Scheduler {
 
     pub fn subscribe(&self) -> watch::Receiver<u64> {
         self.inner.changed.subscribe()
+    }
+
+    pub fn live_text(&self, task: TaskId) -> Option<LiveText> {
+        self.inner.live.borrow().get(&task).cloned()
     }
 
     pub async fn activate(&self) -> Result<(), SchedulerError> {
@@ -699,6 +708,7 @@ struct Actor {
     shutdown: Vec<oneshot::Sender<ShutdownReport>>,
     controls_closed: bool,
     changed: watch::Sender<u64>,
+    live: watch::Sender<HashMap<TaskId, LiveText>>,
     drained: watch::Sender<Option<ShutdownReport>>,
 }
 
@@ -708,6 +718,7 @@ impl Actor {
         limits: SchedulerLimits,
         receiver: mpsc::Receiver<Control>,
         changed: watch::Sender<u64>,
+        live: watch::Sender<HashMap<TaskId, LiveText>>,
         drained: watch::Sender<Option<ShutdownReport>>,
         preparation: Option<Arc<dyn TaskPreparation>>,
     ) -> Self {
@@ -728,6 +739,7 @@ impl Actor {
             shutdown: Vec::new(),
             controls_closed: false,
             changed,
+            live,
             drained,
         }
     }
@@ -2470,6 +2482,7 @@ impl Actor {
             let preparation = self.preparation.clone();
             let worker_cancellation = cancellation.clone();
             let changed = self.changed.clone();
+            let live = self.live.clone();
             let handle = self.workers.spawn(async move {
                 worker::execute(
                     services,
@@ -2477,6 +2490,7 @@ impl Actor {
                     worker_cancellation,
                     resume,
                     changed,
+                    live,
                     preparation,
                 )
                 .await
