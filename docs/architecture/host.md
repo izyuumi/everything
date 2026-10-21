@@ -44,7 +44,7 @@ The worker completes its initial finite source pass before scheduler activation 
 
 ## Live assistant text
 
-The scheduler worker records the running task's provisional assistant text for its current model attempt in one bounded in-memory entry and bumps the existing scheduler change hint. The `task` owner query returns it as optional `live_text`; the CLI proxy and the macOS task inspector poll it. It is never appended to the journal, checkpointed, replayed or synchronized. See [live assistant text](../contracts/owner-ipc.md#live-assistant-text) and [ADR-0014](../decisions/ADR-0014-live-assistant-text.md).
+The scheduler worker records the running task's provisional assistant text for its current model attempt in one bounded in-memory entry and bumps the existing scheduler change hint. The `task` owner query returns it as optional `live_text`; the CLI proxy and the macOS task inspector poll it. It is never appended to the journal, checkpointed, replayed or synchronized. See [live assistant text](../contracts/owner-ipc.md#live-assistant-text) and [ADR-0015](../decisions/ADR-0015-live-assistant-text.md).
 
 ## Optional relay
 

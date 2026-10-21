@@ -1,4 +1,4 @@
-# ADR-0014: Polled non-durable live assistant text
+# ADR-0015: Polled non-durable live assistant text
 
 Status: Accepted. Hosted provider streaming through the Host is unverified.
 
