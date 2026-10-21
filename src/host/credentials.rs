@@ -25,6 +25,7 @@ const MAX_MODEL_SESSION_CREDENTIALS: usize = 16;
 #[cfg(unix)]
 const MAX_BOOTSTRAP_FILE_BYTES: usize = 64 * 1_024;
 const MAX_BOOTSTRAP_SECRET_BYTES: usize = 256 * 1_024;
+const MAX_PRINTABLE_SECRET_BYTES: usize = 8_192;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -123,7 +124,11 @@ pub struct CredentialVault {
     session: Arc<Mutex<BTreeMap<String, Arc<CredentialSecret>>>>,
     environment: Arc<Vec<EnvironmentCredential>>,
     model_generation: Arc<Mutex<ModelCredentialGeneration>>,
+    chatgpt: Arc<tokio::sync::Mutex<BTreeMap<String, Arc<CredentialSecret>>>>,
 }
+
+pub(super) type ChatGptRecords =
+    tokio::sync::OwnedMutexGuard<BTreeMap<String, Arc<CredentialSecret>>>;
 
 #[derive(Default)]
 struct ModelCredentialGeneration {
@@ -195,6 +200,70 @@ impl CredentialVault {
             session: Arc::new(Mutex::new(BTreeMap::new())),
             environment: Arc::new(environment),
             model_generation: Arc::new(Mutex::new(ModelCredentialGeneration::default())),
+            chatgpt: Arc::new(tokio::sync::Mutex::new(BTreeMap::new())),
+        }
+    }
+
+    pub(super) async fn chatgpt_records(&self) -> ChatGptRecords {
+        Arc::clone(&self.chatgpt).lock_owned().await
+    }
+
+    pub(super) async fn read_binding(
+        &self,
+        binding: &ModelCredentialReference,
+        cancellation: CancellationToken,
+    ) -> Result<Option<Arc<CredentialSecret>>, CredentialError> {
+        if cancellation.is_cancelled() {
+            return Err(CredentialError::Cancelled);
+        }
+        match binding.storage {
+            CredentialStorage::Session => Ok(self
+                .session
+                .lock()
+                .map_err(|_| CredentialError::Unavailable)?
+                .get(&format!("model:{}", binding.scope_key()))
+                .cloned()),
+            CredentialStorage::Native => self
+                .native
+                .read(binding.credential_key()?, cancellation)
+                .await
+                .map(|secret| secret.map(Arc::new)),
+        }
+    }
+
+    pub(super) async fn write_binding(
+        &self,
+        binding: &ModelCredentialReference,
+        secret: CredentialSecret,
+        tracked: bool,
+    ) -> Result<(), CredentialError> {
+        binding
+            .validate()
+            .map_err(|_| CredentialError::InvalidKey)?;
+        match binding.storage {
+            CredentialStorage::Session => self.store_session(
+                format!("model:{}", binding.scope_key()),
+                Arc::new(secret),
+                tracked,
+            ),
+            CredentialStorage::Native => {
+                let key = binding.credential_key()?;
+                let mutation = if tracked {
+                    Some(self.begin_model_mutation()?)
+                } else {
+                    None
+                };
+                let native = self.native.clone();
+                tokio::spawn(async move {
+                    let result = native.store(key, secret).await;
+                    match mutation {
+                        Some(mutation) => mutation.complete(result),
+                        None => result,
+                    }
+                })
+                .await
+                .map_err(|_| CredentialError::Worker)?
+            }
         }
     }
 
@@ -295,6 +364,11 @@ impl CredentialVault {
     pub async fn apply(&self, operation: CredentialOperation) -> Result<(), CredentialError> {
         match &operation {
             CredentialOperation::Store { binding, .. }
+                if binding.source == super::settings::ModelCredentialSource::ChatGpt =>
+            {
+                return Err(CredentialError::InvalidKey);
+            }
+            CredentialOperation::Store { binding, .. }
             | CredentialOperation::Remove { binding } => {
                 binding
                     .validate()
@@ -324,28 +398,38 @@ impl CredentialVault {
                     .map_err(|_| CredentialError::Worker)?
                 }
             },
-            CredentialOperation::Remove { binding } => match binding.storage {
-                CredentialStorage::Session => {
-                    let mut session = self
-                        .session
-                        .lock()
-                        .map_err(|_| CredentialError::Unavailable)?;
-                    let mutation = self.begin_model_mutation()?;
-                    session.remove(&format!("model:{}", binding.scope_key()));
-                    mutation.finish()
+            CredentialOperation::Remove { binding } => {
+                let _records = if binding.source == super::settings::ModelCredentialSource::ChatGpt
+                {
+                    let mut records = self.chatgpt_records().await;
+                    records.remove(&binding.scope_key());
+                    Some(records)
+                } else {
+                    None
+                };
+                match binding.storage {
+                    CredentialStorage::Session => {
+                        let mut session = self
+                            .session
+                            .lock()
+                            .map_err(|_| CredentialError::Unavailable)?;
+                        let mutation = self.begin_model_mutation()?;
+                        session.remove(&format!("model:{}", binding.scope_key()));
+                        mutation.finish()
+                    }
+                    CredentialStorage::Native => {
+                        let key = binding.credential_key()?;
+                        let mutation = self.begin_model_mutation()?;
+                        let native = self.native.clone();
+                        tokio::spawn(async move {
+                            let result = native.delete(key).await;
+                            mutation.complete(result)
+                        })
+                        .await
+                        .map_err(|_| CredentialError::Worker)?
+                    }
                 }
-                CredentialStorage::Native => {
-                    let key = binding.credential_key()?;
-                    let mutation = self.begin_model_mutation()?;
-                    let native = self.native.clone();
-                    tokio::spawn(async move {
-                        let result = native.delete(key).await;
-                        mutation.complete(result)
-                    })
-                    .await
-                    .map_err(|_| CredentialError::Worker)?
-                }
-            },
+            }
             CredentialOperation::StoreMcp { binding, secret } => match binding.storage {
                 CredentialStorage::Session => {
                     self.store_session(format!("mcp:{}", binding.scope_key()?), secret.0, false)
@@ -516,6 +600,9 @@ fn system_one_key(
 }
 
 fn printable_secret(bytes: Vec<u8>) -> Result<CredentialSecret, CredentialError> {
+    if bytes.len() > MAX_PRINTABLE_SECRET_BYTES {
+        return Err(CredentialError::InvalidSecret);
+    }
     let secret = CredentialSecret::new(bytes)?;
     let text = std::str::from_utf8(secret.expose()).map_err(|_| CredentialError::InvalidSecret)?;
     if text.trim().is_empty() || text.chars().any(char::is_control) {

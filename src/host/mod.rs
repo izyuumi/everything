@@ -1,3 +1,4 @@
+pub mod chatgpt;
 pub mod client;
 mod commands;
 pub mod composition;
