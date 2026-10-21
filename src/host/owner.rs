@@ -515,6 +515,13 @@ impl HostInner {
                 self.credentials.apply(operation).await?;
                 Ok(OwnerOperationResult::Applied)
             }
+            OwnerOperation::ChatGpt { operation } => Ok(OwnerOperationResult::ChatGpt {
+                status: Box::new(self.chatgpt.operate(operation, cancellation).await?),
+            }),
+            OwnerOperation::ChatGptModels { binding } => Ok(OwnerOperationResult::ChatGptModels {
+                models: self.chatgpt.models(binding.clone(), cancellation).await?,
+                binding,
+            }),
             OwnerOperation::ReplaceSettings { .. } | OwnerOperation::ReconcileSettings { .. } => {
                 Err(HostError::Invalid(
                     "settings replacement requires authenticated owner ingress",

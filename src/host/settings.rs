@@ -76,6 +76,8 @@ pub struct ModelCredentialReference {
     pub endpoint: ProviderEndpoint,
     pub reference: Uuid,
     pub storage: CredentialStorage,
+    #[serde(default, skip_serializing_if = "ModelCredentialSource::is_api_key")]
+    pub source: ModelCredentialSource,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -83,6 +85,21 @@ pub struct ModelCredentialReference {
 pub enum CredentialStorage {
     Session,
     Native,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ModelCredentialSource {
+    #[default]
+    #[serde(rename = "api_key")]
+    ApiKey,
+    #[serde(rename = "chatgpt")]
+    ChatGpt,
+}
+
+impl ModelCredentialSource {
+    pub fn is_api_key(&self) -> bool {
+        *self == Self::ApiKey
+    }
 }
 
 impl ModelCredentialReference {
@@ -102,6 +119,9 @@ impl ModelCredentialReference {
         digest.update(endpoint.as_bytes());
         digest.update([0]);
         digest.update(self.reference.as_bytes());
+        if self.source == ModelCredentialSource::ChatGpt {
+            digest.update(b"\0chatgpt");
+        }
         format!("{:x}", digest.finalize())
     }
 
@@ -109,6 +129,14 @@ impl ModelCredentialReference {
         if self.reference.is_nil() {
             return Err(SettingsError::Invalid(
                 "credential references must be non-nil UUIDs",
+            ));
+        }
+        if self.source == ModelCredentialSource::ChatGpt
+            && (self.provider != ProviderKind::OpenAi
+                || self.endpoint != ProviderEndpoint::Official)
+        {
+            return Err(SettingsError::Invalid(
+                "Sign in with ChatGPT applies only to the official OpenAI endpoint",
             ));
         }
         if let ProviderEndpoint::Loopback(endpoint) = &self.endpoint

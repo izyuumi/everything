@@ -112,6 +112,31 @@ struct SettingsView: View {
                 Text("Existing tasks keep their captured authority. Other settings and credential references are preserved by revision-checked updates. Use Models or Tool Selection for native credential entry.")
                     .font(.caption).foregroundStyle(.secondary)
             }.disabled(!model.connected || model.draining)
+            Section("Use your ChatGPT plan for OpenAI (optional)") {
+                let status = model.chatGPTStatus
+                if model.chatGPTBinding != nil, status["signed_in"].bool == true {
+                    if let email = status["email"].string { LabeledContent("ChatGPT account", value: email) }
+                    if status["plan_usage_enabled"].bool == true {
+                        Label("Using ChatGPT plan", systemImage: "checkmark.circle")
+                    } else {
+                        Text("Signed in, but ChatGPT plan usage was not granted. Continue with ChatGPT again to allow it, or use an API key.")
+                    }
+                    Link("Manage usage", destination: URL(string: "https://chatgpt.com/settings/usage")!)
+                    HStack {
+                        Button("Sign out") { Task { await model.signOutChatGPT() } }
+                        Button("Use API keys instead") { Task { await model.stopUsingChatGPT() } }
+                    }
+                } else {
+                    Button("Continue with ChatGPT") { Task { await model.continueWithChatGPT() } }
+                        .disabled(model.chatGPTBusy)
+                    if model.chatGPTBinding != nil {
+                        Button("Use API keys instead") { Task { await model.stopUsingChatGPT() } }
+                    }
+                }
+                if model.chatGPTBusy { ProgressView("Waiting for ChatGPT sign-in in your browser…") }
+                Text("Optional. API keys remain the default for OpenAI and every other provider. Signing in selects your ChatGPT plan for the official OpenAI endpoint; tokens stay in the Keychain. Offered by OpenAI as a preview for personal, locally run use, and its behavior may change.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }.disabled(!model.canMutate || model.settings == .null)
             Section("Per-user background service") {
                 if let status = model.serviceStatus { Text(status) }
                 HStack {
