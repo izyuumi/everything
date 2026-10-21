@@ -7,7 +7,7 @@ cargo build --release --bin everything --locked
 target/release/everything --state-dir /absolute/private/state serve
 ```
 
-`serve` owns the agent independently of clients. Closing an attached CLI does not cancel admitted work. The private absolute state path must fit the portable 100-byte Unix socket limit. Do not run a second host over that state directory.
+`serve` owns the agent independently of clients. Closing an attached CLI does not cancel admitted work. Tasks of different conversations run in parallel, up to four by default; `--max-parallel-tasks N` or `EVERYTHING_MAX_PARALLEL_TASKS=N` sets 1–4, and 1 restores serial execution. A second message to a conversation whose task is still active is refused as busy rather than run beside it. The private absolute state path must fit the portable 100-byte Unix socket limit. Do not run a second host over that state directory.
 
 While it serves, ordinary `init`, `chat`, and `status` commands proxy through owner IPC instead of opening another Agent or Tool Broker:
 
