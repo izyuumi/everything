@@ -226,7 +226,7 @@ pub struct SchedulerLimits {
 impl Default for SchedulerLimits {
     fn default() -> Self {
         Self {
-            max_primary_tasks: 1,
+            max_primary_tasks: 4,
             max_subagents: 3,
             max_pending_tasks: 128,
             shutdown_grace: Duration::from_secs(10),

@@ -176,13 +176,19 @@ enum HostWorker {
 
 impl HostService {
     pub async fn start(state_directory: impl AsRef<Path>) -> Result<Self, HostError> {
-        Self::start_with_mcp_session_bootstrap(state_directory, None, CancellationToken::new())
-            .await
+        Self::start_with_mcp_session_bootstrap(
+            state_directory,
+            None,
+            SchedulerLimits::default(),
+            CancellationToken::new(),
+        )
+        .await
     }
 
     pub async fn start_with_mcp_session_bootstrap(
         state_directory: impl AsRef<Path>,
         binding_file: Option<PathBuf>,
+        scheduler_limits: SchedulerLimits,
         cancellation: CancellationToken,
     ) -> Result<Self, HostError> {
         LocalServer::validate_state_path(state_directory.as_ref())?;
@@ -388,7 +394,7 @@ impl HostService {
                 providers,
                 discovery: Some(discovery),
             },
-            SchedulerLimits::default(),
+            scheduler_limits,
             composition.clone(),
         )
         .await?;
