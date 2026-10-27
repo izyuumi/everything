@@ -1,5 +1,7 @@
 # Persistent native CLI
 
+For an interactive full-screen chat against a running Host, use [`everything tui`](tui.md).
+
 Build with `cargo build --release --locked`. `everything --state-dir /absolute/private/path` places the global state option before the subcommand. `EVERYTHING_STATE_DIR` supplies the same default; otherwise the CLI uses `$HOME/.everything`. The state directory is created with owner-only permissions and validated on every foreground open. One host owns its exclusive lock.
 
 ## Initialize and inspect
