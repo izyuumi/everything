@@ -54,6 +54,19 @@ enum Command {
     Status(StatusArguments),
     #[command(name = "chatgpt")]
     ChatGpt(ChatGptArguments),
+    Tui(TuiArguments),
+}
+
+#[derive(Args)]
+struct TuiArguments {
+    #[arg(long, conflicts_with = "resume_latest")]
+    conversation: Option<ConversationId>,
+    #[arg(short = 'c', long = "continue")]
+    resume_latest: bool,
+    #[arg(long, value_enum)]
+    provider: Option<ProviderArgument>,
+    #[arg(long)]
+    model: Option<String>,
 }
 
 #[derive(Args)]
@@ -409,6 +422,8 @@ enum CliError {
     ToolOptions(&'static str),
     #[error("{0}")]
     ChatGpt(String),
+    #[error(transparent)]
+    Tui(#[from] everything::tui::TuiError),
 }
 
 fn main() -> ExitCode {
@@ -495,6 +510,21 @@ async fn execute(arguments: Arguments, cancellation: CancellationToken) -> Resul
             .await;
         }
         Command::Owner(arguments) => return owner_cli(state_dir, arguments, cancellation).await,
+        Command::Tui(arguments) => {
+            return everything::tui::run(
+                state_dir,
+                everything::tui::Options {
+                    conversation: arguments.conversation,
+                    resume_latest: arguments.resume_latest,
+                    provider: arguments.provider.map(Into::into),
+                    model: arguments.model,
+                    default_instructions: DEFAULT_INSTRUCTIONS,
+                },
+                cancellation,
+            )
+            .await
+            .map_err(CliError::from);
+        }
         Command::ChatGpt(arguments) => {
             return chatgpt_cli(state_dir, arguments.command, cancellation).await;
         }
