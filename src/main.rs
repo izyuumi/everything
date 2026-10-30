@@ -206,6 +206,10 @@ enum SensitiveOwnerInput {
         request_id: CommandId,
         operation: everything::host::credentials::CredentialOperation,
     },
+    VaultPut {
+        request_id: CommandId,
+        item: everything::vault::VaultPutRequest,
+    },
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -690,6 +694,20 @@ async fn owner_cli(
                 )
                 .await
             }
+            SensitiveOwnerInput::VaultPut { request_id, item } => {
+                write_sensitive_json(
+                    output,
+                    client
+                        .operate(
+                            everything::ipc::OwnerOperation::VaultPut { item },
+                            request_id,
+                            cancellation.clone(),
+                        )
+                        .await?,
+                    cancellation,
+                )
+                .await
+            }
         };
     }
     let request_file = arguments.request_file.ok_or(CliError::OwnerInput)?;
@@ -779,6 +797,7 @@ async fn owner_cli(
             if matches!(
                 &*operation,
                 everything::ipc::OwnerOperation::Credential { .. }
+                    | everything::ipc::OwnerOperation::VaultPut { .. }
             ) {
                 return Err(CliError::SensitiveOwnerInput);
             }

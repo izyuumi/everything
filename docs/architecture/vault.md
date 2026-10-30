@@ -1,12 +1,12 @@
 # Credential vault
 
-Status: **designed, not implemented.** Tracker [#215](https://github.com/izyuumi/everything/issues/215). Decision: [ADR-0016](../decisions/ADR-0016-credential-vault.md). Wire shapes, grammar and limits: [vault contract](../contracts/vault.md).
+Status: **core implemented, agent use not yet.** [#217](https://github.com/izyuumi/everything/issues/217) added the vault core, the local provider and owner IPC; search, use and request below are still designed only. Tracker [#215](https://github.com/izyuumi/everything/issues/215). Decision: [ADR-0016](../decisions/ADR-0016-credential-vault.md). Wire shapes, grammar and limits: [vault contract](../contracts/vault.md).
 
 The vault lets the agent use the owner's secrets by reference. The model sees item metadata and `vault://` references; the Host resolves values inside the Tool Broker and hands them to one approved destination.
 
 ## Module map
 
-Planned files. None exist yet.
+The first four files exist; the provider files are planned.
 
 | path | role | issue |
 | --- | --- | --- |
@@ -17,7 +17,7 @@ Planned files. None exist yet.
 | `src/vault/onepassword.rs` | 1Password provider over the `op` CLI | [#220](https://github.com/izyuumi/everything/issues/220) |
 | `src/vault/protonpass.rs` | Proton Pass provider over `pass-cli` | [#221](https://github.com/izyuumi/everything/issues/221) |
 
-It sits next to [`src/host/credentials.rs`](../../src/host/credentials.rs), whose existing `CredentialVault` keeps model, System One and MCP credentials, and shares its `NativeCredentialStore` handle from [`src/credentials.rs`](../../src/credentials.rs). Owner IPC gains `vault_list`/`vault_put`/`vault_remove` (#217); the `everything vault` CLI, TUI masked field and onboarding step come in [#218](https://github.com/izyuumi/everything/issues/218); agent tools, leases, broker injection and the per-task redactor in [#219](https://github.com/izyuumi/everything/issues/219); macOS settings and approval rendering in [#222](https://github.com/izyuumi/everything/issues/222); iOS approval rendering in [#223](https://github.com/izyuumi/everything/issues/223).
+It sits next to [`src/host/credentials.rs`](../../src/host/credentials.rs), whose existing `CredentialVault` keeps model, System One and MCP credentials, and shares its `NativeCredentialStore` handle from [`src/credentials.rs`](../../src/credentials.rs). The Host holds one `VaultService` (built at start from the shared Store and the same `NativeCredentialStore` handle, so vault and model credential calls share one admission permit) and serves owner IPC `vault_list`/`vault_put`/`vault_remove` (#217); the `everything vault` CLI, TUI masked field and onboarding step come in [#218](https://github.com/izyuumi/everything/issues/218); agent tools, leases, broker injection and the per-task redactor in [#219](https://github.com/izyuumi/everything/issues/219); macOS settings and approval rendering in [#222](https://github.com/izyuumi/everything/issues/222); iOS approval rendering in [#223](https://github.com/izyuumi/everything/issues/223).
 
 ## Data flow
 
