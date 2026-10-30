@@ -1,5 +1,5 @@
-use crate::error::RelayError;
-use everything::{
+use super::error::RelayError;
+use crate::{
     crypto::{DevicePublicKeys, EncryptedEnvelope},
     protocol::{DeviceId, MessageId},
 };

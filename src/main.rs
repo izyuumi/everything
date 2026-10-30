@@ -55,6 +55,7 @@ enum Command {
     #[command(name = "chatgpt")]
     ChatGpt(ChatGptArguments),
     Tui(TuiArguments),
+    Relay(everything::relay::cli::RelayArguments),
 }
 
 #[derive(Args)]
@@ -424,6 +425,8 @@ enum CliError {
     ChatGpt(String),
     #[error(transparent)]
     Tui(#[from] everything::tui::TuiError),
+    #[error(transparent)]
+    Relay(#[from] everything::relay::cli::RelayCommandError),
 }
 
 fn main() -> ExitCode {
@@ -524,6 +527,11 @@ async fn execute(arguments: Arguments, cancellation: CancellationToken) -> Resul
             )
             .await
             .map_err(CliError::from);
+        }
+        Command::Relay(arguments) => {
+            return everything::relay::cli::run(arguments, state_dir, cancellation)
+                .await
+                .map_err(CliError::from);
         }
         Command::ChatGpt(arguments) => {
             return chatgpt_cli(state_dir, arguments.command, cancellation).await;

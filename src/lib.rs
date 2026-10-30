@@ -10,6 +10,8 @@ pub mod memory;
 pub mod model;
 pub mod permissions;
 pub mod protocol;
+#[cfg(unix)]
+pub mod relay;
 pub mod relay_protocol;
 pub mod scheduler;
 pub mod scheduling;

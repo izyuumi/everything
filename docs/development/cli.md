@@ -48,6 +48,10 @@ Initialization supports explicit `--conversation` and `--command-id` values for 
 
 `everything chatgpt sign-in|status|models|sign-out|select|deselect` lets a running host use your ChatGPT plan for the official OpenAI endpoint instead of an API key. It is optional. See the [host guide](host.md#optional-sign-in-with-chatgpt). `models` lists the model slugs your plan accepts. `status` masks the account email to its domain unless `--json` or `--show-email` is given. The foreground path without a host always uses `OPENAI_API_KEY`.
 
+## Optional relay
+
+`everything relay on --origin wss://relay.example.com` and `everything relay off` set or clear this Host's relay origin, offline through the state lease or through a running Host's owner settings (which then needs a restart). `everything relay serve|enroll|revoke|devices` run or administer the blind relay server on `--database PATH`, defaulting to `relay.sqlite3` in the state directory. `everything relay status` prints JSON for both the Host connection and that server database. See [relay](../architecture/relay.md).
+
 ## Local proxy and verification boundaries
 
 A new conversation can explicitly select a local proxy using `--loopback-endpoint http://127.0.0.1:PORT/v1/messages` for Anthropic, or `/v1/responses` for OpenAI. Literal IPv6 loopback is also supported. The full endpoint is persisted as immutable configuration; later commands retain it without repeating the flag. External custom endpoints, endpoint credentials, queries, and fragments are rejected. The foreground path still reads credentials from the selected environment variable. A running host does not: a loopback endpoint needs an explicit `credential_environment` binding, described in the [host guide](host.md#owner-inspection-and-configuration). When a proxied task stops as provider-unavailable without such a binding, the CLI prints the input to use.

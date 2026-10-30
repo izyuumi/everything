@@ -75,7 +75,7 @@ Exact commands, logs and artifact provenance are `/tmp/everything-focused-worker
 
 - libeverything.rlib: `73ca0397e78387607dc75874a8ece6ea247fd2e7b936a6c9868d6622fe2225ca`.
 - everything: `d0dce14bb3c0ea527ea1735ce41d250adca01a9655658aae656103e6c41c4339`.
-- everything-relay: `f0c2dfb21b71c324425e2314685bcbaef16d50257b2d5aaf7ede12fdedd45240`.
+- everything-relay (the separate relay binary that predates `everything relay serve`): `f0c2dfb21b71c324425e2314685bcbaef16d50257b2d5aaf7ede12fdedd45240`.
 
 The first focused production Host/native-Gate/encrypted-relay/executor walkthrough passed on 2026-10-16 against those exact copied artifacts, using the unchanged external driver `c189622fcc8f7143275e111a832a1bafd5e3f407dcaf2be3b880b31797f0d791`. All 88 recorded operations/probes used the real CLI, same-user Host owner IPC and genuine executor; no direct state mutation, seeded phase or injected worker packet supplied this run.
 
@@ -91,7 +91,7 @@ Earlier aggregate d273, temporary/manual bridge f824, executor f045, seeded Unkn
 
 ## macOS loopback delegation walkthrough, 2026-10-17
 
-The #29 gap-closure branch was checked with a debug build on macOS (Apple Silicon). All state lived in disposable directories under the gitignored `target/`. The setup ran a real `everything-relay` on `ws://127.0.0.1:18930`, Host `serve` with `worker.relay_origin`, and the dedicated executor `worker serve`. The model was a scratch loopback fake that speaks the OpenAI Responses SSE wire protocol. The Host used `owner` settings replacement, `worker coordinator identity/pin-peer/prepare/delegate/inspect/cancel/revoke`, and ordinary owner `cancel_task`. The executor used `worker identity/credential store/serve/inspect/credential delete`. The relay used `enroll`. The worker credential was a fake non-secret value stored in the login Keychain under the worker-purpose key. It was deleted afterwards with the same binary.
+The #29 gap-closure branch was checked with a debug build on macOS (Apple Silicon). All state lived in disposable directories under the gitignored `target/`. The setup ran a real `everything-relay` (the separate relay binary that predates `everything relay serve`) on `ws://127.0.0.1:18930`, Host `serve` with `worker.relay_origin`, and the dedicated executor `worker serve`. The model was a scratch loopback fake that speaks the OpenAI Responses SSE wire protocol. The Host used `owner` settings replacement, `worker coordinator identity/pin-peer/prepare/delegate/inspect/cancel/revoke`, and ordinary owner `cancel_task`. The executor used `worker identity/credential store/serve/inspect/credential delete`. The relay used `enroll`. The worker credential was a fake non-secret value stored in the login Keychain under the worker-purpose key. It was deleted afterwards with the same binary.
 
 Observed:
 
