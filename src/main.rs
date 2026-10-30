@@ -32,9 +32,13 @@ use tokio_util::sync::CancellationToken;
 use zeroize::Zeroizing;
 
 const DEFAULT_INSTRUCTIONS: &str = "You are Everything, a helpful assistant.";
+const VERSION: &str = match option_env!("EVERYTHING_VERSION") {
+    Some(version) => version,
+    None => env!("CARGO_PKG_VERSION"),
+};
 
 #[derive(Parser)]
-#[command(version, about = "Local-first native AI conversations")]
+#[command(version = VERSION, about = "Local-first native AI conversations")]
 struct Arguments {
     #[arg(long, env = "EVERYTHING_STATE_DIR", value_name = "PATH")]
     state_dir: Option<PathBuf>,

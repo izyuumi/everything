@@ -1,6 +1,6 @@
 # POC integration CI
 
-Normal pull requests and pushes to main run the lightweight Validate and Apple validation workflows. Branch pushes have no separate automatic workflow run. Both workflows also support explicit manual dispatch. Per-workflow/event/PR-or-ref concurrency cancels superseded runs without cancelling another PR, main or a separately selected manual run.
+Normal pull requests and pushes to main run the lightweight Validate and Apple validation workflows. Branch pushes have no separate automatic workflow run. Both workflows also support explicit manual dispatch. Per-workflow/event/PR-or-ref concurrency cancels superseded runs without cancelling another PR, main or a separately selected manual run. Pushes to main also run the [Release](releases.md) workflow, which publishes the CLI beta and gates nothing.
 
 ## Normal merge feedback
 

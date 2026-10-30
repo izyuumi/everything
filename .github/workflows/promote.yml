@@ -1,0 +1,28 @@
+name: Promote
+on:
+  pull_request:
+    types: [closed]
+    branches: [main]
+permissions: {}
+concurrency:
+  group: release
+  cancel-in-progress: false
+jobs:
+  promote:
+    if: github.repository == 'izyuumi/everything' && vars.EVERYTHING_RELEASES == 'enabled' && github.event.pull_request.merged && github.event.pull_request.head.ref == 'release' && github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPO: ${{ github.repository }}
+      BODY: ${{ github.event.pull_request.body }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - run: |
+          line() { printf '%s\n' "$BODY" | tr -d '\r' | sed -n "s/^$1: *\([^ ]*\).*/\1/p" | tail -1; }
+          scripts/release.sh --promote "$(line Release-Build)" "$(line Release-Commit)" "$(line Release-Digest)"

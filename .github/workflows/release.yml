@@ -1,0 +1,137 @@
+name: Release
+on:
+  push:
+    branches: [main]
+    paths-ignore: [CHANGELOG.md]
+  workflow_dispatch:
+permissions: {}
+concurrency:
+  group: release
+  cancel-in-progress: false
+jobs:
+  next:
+    if: github.repository == 'izyuumi/everything' && vars.EVERYTHING_RELEASES == 'enabled'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      version: ${{ steps.next.outputs.version }}
+      build: ${{ steps.next.outputs.build }}
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPO: ${{ github.repository }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - id: next
+        run: scripts/release.sh --next | tee -a "$GITHUB_OUTPUT"
+
+  build:
+    needs: next
+    if: github.repository == 'izyuumi/everything' && vars.EVERYTHING_RELEASES == 'enabled'
+    name: build (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            os: macos-latest
+          - target: x86_64-apple-darwin
+            os: macos-latest
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-22.04
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-22.04-arm
+    env:
+      VERSION: ${{ needs.next.outputs.version }}
+      BUILD: ${{ needs.next.outputs.build }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - name: Signing identity and notary profile
+        if: runner.os == 'macOS'
+        env:
+          DEVELOPER_ID_P12: ${{ secrets.DEVELOPER_ID_P12 }}
+          DEVELOPER_ID_PASSWORD: ${{ secrets.DEVELOPER_ID_PASSWORD }}
+          ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+          ASC_KEY_P8: ${{ secrets.ASC_KEY_P8 }}
+        run: |
+          set -eu
+          if [ -z "$DEVELOPER_ID_P12" ] || [ -z "$DEVELOPER_ID_PASSWORD" ]; then
+            echo "::warning::DEVELOPER_ID_P12 or DEVELOPER_ID_PASSWORD is not set; the macOS binaries ship unsigned and unnotarized."
+            exit 0
+          fi
+          KEYCHAIN="$RUNNER_TEMP/release.keychain-db"
+          KEYCHAIN_PASSWORD=$(openssl rand -base64 24)
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          printf '%s' "$DEVELOPER_ID_P12" | base64 -d > "$RUNNER_TEMP/developer-id.p12"
+          security import "$RUNNER_TEMP/developer-id.p12" -P "$DEVELOPER_ID_PASSWORD" -A -t cert -f pkcs12 -k "$KEYCHAIN"
+          rm "$RUNNER_TEMP/developer-id.p12"
+          curl -fsSL -o "$RUNNER_TEMP/DeveloperIDG2CA.cer" https://www.apple.com/certificateauthority/DeveloperIDG2CA.cer
+          security import "$RUNNER_TEMP/DeveloperIDG2CA.cer" -t cert -k "$KEYCHAIN" 2>&1 | grep -v 'already exists' || true
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN" >/dev/null
+          security list-keychains -d user -s "$KEYCHAIN" login.keychain-db
+          security default-keychain -s "$KEYCHAIN"
+          IDENTITY=$(security find-identity -v -p codesigning "$KEYCHAIN" | sed -n 's/.*"\(Developer ID Application: .*\)"$/\1/p' | head -1)
+          [ -n "$IDENTITY" ] || { echo "DEVELOPER_ID_P12 holds no Developer ID Application identity" >&2; exit 1; }
+          echo "SIGN_IDENTITY=$IDENTITY" >> "$GITHUB_ENV"
+          if [ -z "$ASC_KEY_ID" ] || [ -z "$ASC_ISSUER_ID" ] || [ -z "$ASC_KEY_P8" ]; then
+            echo "::warning::ASC_KEY_ID, ASC_ISSUER_ID or ASC_KEY_P8 is not set; the macOS binaries ship signed but unnotarized."
+            exit 0
+          fi
+          umask 077
+          printf '%s' "$ASC_KEY_P8" | base64 -d > "$RUNNER_TEMP/AuthKey.p8"
+          xcrun notarytool store-credentials everything-notary --keychain "$KEYCHAIN" \
+            --key "$RUNNER_TEMP/AuthKey.p8" --key-id "$ASC_KEY_ID" --issuer "$ASC_ISSUER_ID"
+          rm "$RUNNER_TEMP/AuthKey.p8"
+          echo "NOTARY_PROFILE=everything-notary" >> "$GITHUB_ENV"
+      - run: scripts/release_build.sh "${{ matrix.target }}" "$RUNNER_TEMP/dist"
+      - name: Forget signing credentials
+        if: always() && runner.os == 'macOS'
+        run: security delete-keychain "$RUNNER_TEMP/release.keychain-db" 2>/dev/null || true
+      - uses: actions/upload-artifact@v4
+        with:
+          name: everything-${{ matrix.target }}
+          path: ${{ runner.temp }}/dist/everything-${{ matrix.target }}.tar.gz
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    needs: [next, build]
+    if: github.repository == 'izyuumi/everything' && vars.EVERYTHING_RELEASES == 'enabled'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+      pull-requests: write
+      actions: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPO: ${{ github.repository }}
+      VERSION: ${{ needs.next.outputs.version }}
+      BUILD: ${{ needs.next.outputs.build }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: everything-*
+          path: ${{ runner.temp }}/dist
+          merge-multiple: true
+      - run: scripts/release.sh --publish "$RUNNER_TEMP/dist"
