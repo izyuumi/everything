@@ -31,6 +31,8 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio_util::sync::CancellationToken;
 use zeroize::Zeroizing;
 
+mod queries;
+
 const DEFAULT_INSTRUCTIONS: &str = "You are Everything, a helpful assistant.";
 const VERSION: &str = match option_env!("EVERYTHING_VERSION") {
     Some(version) => version,
@@ -61,6 +63,12 @@ enum Command {
     Tui(TuiArguments),
     Relay(everything::relay::cli::RelayArguments),
     Update(everything::update::UpdateArguments),
+    Cancel(queries::CancelArguments),
+    Tasks(queries::TasksArguments),
+    Approvals(queries::ApprovalsArguments),
+    Conversations(queries::ListArguments),
+    Schedules(queries::ListArguments),
+    Memory(queries::MemoryArguments),
 }
 
 #[derive(Args, Default)]
@@ -390,6 +398,10 @@ enum CliError {
     HostClient(#[from] everything::host::client::HostClientError),
     #[error("invalid owner JSON input; use a bounded query or operation object")]
     OwnerInput,
+    #[error("invalid owner JSON input: {0}")]
+    OwnerJson(String),
+    #[error("detached from the host task; check it with `everything tasks`")]
+    Detached,
     #[error("native settings and credential input require the private stdin route")]
     SensitiveOwnerInput,
     #[error("private owner input or output was cancelled or exceeded its deadline")]
@@ -476,7 +488,9 @@ async fn run_cli(arguments: Arguments) -> ExitCode {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             eprintln!("everything: {error}");
-            if matches!(error, CliError::Agent(ref error) if error.is_cancelled()) {
+            if matches!(error, CliError::Detached)
+                || matches!(error, CliError::Agent(ref error) if error.is_cancelled())
+            {
                 ExitCode::from(130)
             } else {
                 ExitCode::FAILURE
@@ -529,6 +543,30 @@ async fn execute(arguments: Arguments, cancellation: CancellationToken) -> Resul
             .await;
         }
         Command::Owner(arguments) => return owner_cli(state_dir, arguments, cancellation).await,
+        Command::Cancel(arguments) => {
+            let client = everything::host::client::HostClient::new(state_dir)?;
+            return queries::cancel(&client, arguments, cancellation).await;
+        }
+        Command::Tasks(arguments) => {
+            let client = everything::host::client::HostClient::new(state_dir)?;
+            return queries::tasks(&client, arguments, cancellation).await;
+        }
+        Command::Approvals(arguments) => {
+            let client = everything::host::client::HostClient::new(state_dir)?;
+            return queries::approvals(&client, arguments, cancellation).await;
+        }
+        Command::Conversations(arguments) => {
+            let client = everything::host::client::HostClient::new(state_dir)?;
+            return queries::conversations(&client, arguments, cancellation).await;
+        }
+        Command::Schedules(arguments) => {
+            let client = everything::host::client::HostClient::new(state_dir)?;
+            return queries::schedules(&client, arguments, cancellation).await;
+        }
+        Command::Memory(arguments) => {
+            let client = everything::host::client::HostClient::new(state_dir)?;
+            return queries::memory(&client, arguments, cancellation).await;
+        }
         Command::Tui(arguments) => {
             return everything::tui::run(
                 state_dir,
@@ -672,7 +710,16 @@ async fn owner_cli(
         if bytes.len() > 1_048_576 {
             return Err(CliError::OwnerInput);
         }
-        serde_json::from_slice::<OwnerInput>(&bytes).map_err(|_| CliError::OwnerInput)
+        serde_json::from_slice::<OwnerInput>(&bytes).map_err(|error| {
+            CliError::OwnerJson(
+                serde_json::from_slice(&bytes)
+                    .ok()
+                    .and_then(|mut value| {
+                        everything::ipc::decode_json::<OwnerInput>(&mut value).err()
+                    })
+                    .map_or_else(|| error.to_string(), |error| error.to_string()),
+            )
+        })
     })
     .await
     .map_err(|_| CliError::Worker)??;
@@ -705,7 +752,18 @@ async fn owner_cli(
         OwnerInput::Query { query } => write_json(client.query(query, cancellation).await?).await,
         OwnerInput::Command { command } => {
             let typed: everything::protocol::CommandEnvelope =
-                serde_json::from_value(command.clone()).map_err(|_| CliError::OwnerInput)?;
+                everything::ipc::decode_json(&mut command.clone()).map_err(|error| {
+                    CliError::OwnerJson(
+                        everything::ipc::JsonFieldError {
+                            path: match error.path.as_str() {
+                                "" => "command".to_owned(),
+                                path => format!("command.{path}"),
+                            },
+                            message: error.message,
+                        }
+                        .to_string(),
+                    )
+                })?;
             if serde_json::to_value(&typed).map_err(|_| CliError::Serialization)? != command {
                 return Err(CliError::OwnerInput);
             }
@@ -1209,7 +1267,7 @@ async fn proxy_chat(
         (None, Some(path)) => Some(read_message(path).await?),
         _ => None,
     };
-    let (conversation_id, mut information) = match arguments.conversation {
+    let (conversation_id, information) = match arguments.conversation {
         Some(conversation_id) => match client
             .query(
                 OwnerQuery::Conversation { conversation_id },
@@ -1404,6 +1462,55 @@ async fn proxy_chat(
     };
     let task_id = TaskId::try_from(*command_id.as_uuid()).map_err(AgentError::from)?;
     let wait = !arguments.no_wait && io::stdin().is_terminal() && io::stdout().is_terminal();
+    match follow_host_task(
+        client,
+        conversation_id,
+        command_id,
+        task_id,
+        information,
+        wait,
+        cancellation.clone(),
+    )
+    .await
+    {
+        Err(_) if cancellation.is_cancelled() => {
+            interrupt_host_task(client, conversation_id, task_id).await
+        }
+        result => result,
+    }
+}
+
+async fn interrupt_host_task(
+    client: &everything::host::client::HostClient,
+    conversation_id: ConversationId,
+    task_id: everything::protocol::TaskId,
+) -> Result<(), CliError> {
+    eprintln!("\ncancelling host task {task_id}; press Ctrl-C again to detach");
+    let detach = CancellationToken::new();
+    tokio::select! {
+        Ok(()) = shutdown_signal() => {
+            eprintln!(
+                "\nconversation {conversation_id} task {task_id}; closing this CLI leaves admitted work in the host"
+            );
+            Err(CliError::Detached)
+        }
+        result = queries::cancel_task(client, task_id, &detach) => {
+            eprintln!("{}", queries::describe_cancellation(&result?));
+            Err(AgentError::Cancelled.into())
+        }
+    }
+}
+
+async fn follow_host_task(
+    client: &everything::host::client::HostClient,
+    conversation_id: ConversationId,
+    command_id: CommandId,
+    task_id: everything::protocol::TaskId,
+    mut information: everything::ipc::ConversationSummary,
+    wait: bool,
+    cancellation: CancellationToken,
+) -> Result<(), CliError> {
+    use everything::ipc::{OwnerQuery, OwnerQueryResult};
     let mut lines = None;
     let mut reported = None;
     let mut streamed = None::<everything::scheduler::LiveText>;
@@ -1743,10 +1850,7 @@ async fn await_host_approval(
         eprint!("approve? [y]es / [n]o (or decide in another client): ");
         let answer = loop {
             tokio::select! {
-                () = cancellation.cancelled() => {
-                    eprintln!("\nthe approval stays pending\n{}", resume_hint(conversation_id, &request.id));
-                    return Err(AgentError::Cancelled.into());
-                }
+                () = cancellation.cancelled() => return Err(AgentError::Cancelled.into()),
                 line = lines.recv() => break line,
                 () = tokio::time::sleep(std::time::Duration::from_millis(500)) => {
                     let OwnerQueryResult::Approval { approval } = client

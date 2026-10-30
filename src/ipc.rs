@@ -207,6 +207,150 @@ fn default_approval_page_limit() -> usize {
     20
 }
 
+#[derive(Debug)]
+pub struct JsonFieldError {
+    pub path: String,
+    pub message: String,
+}
+
+impl std::fmt::Display for JsonFieldError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.path.is_empty() {
+            formatter.write_str(&self.message)
+        } else {
+            write!(formatter, "field `{}`: {}", self.path, self.message)
+        }
+    }
+}
+
+impl std::error::Error for JsonFieldError {}
+
+pub fn decode_json<T: serde::de::DeserializeOwned>(
+    value: &mut serde_json::Value,
+) -> Result<T, JsonFieldError> {
+    let message = match T::deserialize(&*value) {
+        Ok(decoded) => return Ok(decoded),
+        Err(error) => error.to_string(),
+    };
+    Err(JsonFieldError {
+        path: json_error_path::<T>(value, &message),
+        message,
+    })
+}
+
+fn json_error_path<T: serde::de::DeserializeOwned>(
+    value: &mut serde_json::Value,
+    message: &str,
+) -> String {
+    use serde_json::Value;
+    let mut pointer = String::new();
+    let mut path = String::new();
+    let mut budget = 256_usize;
+    let variant = message
+        .strip_prefix("unknown variant `")
+        .and_then(|rest| rest.split_once('`'))
+        .map(|(name, _)| name);
+    loop {
+        let (keys, array) = match value.pointer(&pointer) {
+            Some(Value::Object(map)) => (map.keys().cloned().collect::<Vec<_>>(), false),
+            Some(Value::Array(items)) => (
+                (0..items.len()).map(|index| index.to_string()).collect(),
+                true,
+            ),
+            _ => break,
+        };
+        let mut chosen = None;
+        let mut fallback = None;
+        for key in keys {
+            if budget == 0 {
+                return path;
+            }
+            budget -= 1;
+            if !probe_json::<T>(value, &pointer, &key, None)
+                .is_some_and(|error| error.as_deref() != Some(message))
+            {
+                continue;
+            }
+            if !probe_json::<T>(value, &pointer, &key, Some(Value::String("\u{1}".into())))
+                .flatten()
+                .is_some_and(|error| error.starts_with("unknown variant"))
+            {
+                chosen = Some(key);
+                break;
+            }
+            if fallback.is_none()
+                && variant.is_some_and(|name| {
+                    value
+                        .pointer(&format!("{pointer}/{}", escape_pointer(&key)))
+                        .and_then(Value::as_str)
+                        == Some(name)
+                })
+            {
+                fallback = Some(key);
+            }
+        }
+        let Some(key) = chosen.or(fallback) else {
+            break;
+        };
+        pointer = format!("{pointer}/{}", escape_pointer(&key));
+        if array {
+            path = format!("{path}[{key}]");
+        } else if path.is_empty() {
+            path = key;
+        } else {
+            path = format!("{path}.{key}");
+        }
+    }
+    path
+}
+
+fn escape_pointer(key: &str) -> String {
+    key.replace('~', "~0").replace('/', "~1")
+}
+
+fn probe_json<T: serde::de::DeserializeOwned>(
+    value: &mut serde_json::Value,
+    pointer: &str,
+    key: &str,
+    replacement: Option<serde_json::Value>,
+) -> Option<Option<String>> {
+    use serde_json::Value;
+    let removal = replacement.is_none();
+    let original = match (value.pointer_mut(pointer)?, replacement) {
+        (Value::Object(map), None) => map.remove(key)?,
+        (Value::Object(map), Some(replacement)) => {
+            std::mem::replace(map.get_mut(key)?, replacement)
+        }
+        (Value::Array(items), None) => {
+            let index = key
+                .parse::<usize>()
+                .ok()
+                .filter(|index| *index < items.len())?;
+            items.remove(index)
+        }
+        (Value::Array(items), Some(replacement)) => {
+            std::mem::replace(items.get_mut(key.parse::<usize>().ok()?)?, replacement)
+        }
+        _ => return None,
+    };
+    let error = T::deserialize(&*value).err().map(|error| error.to_string());
+    match value.pointer_mut(pointer)? {
+        Value::Object(map) => {
+            map.insert(key.to_owned(), original);
+        }
+        Value::Array(items) => {
+            let index = key.parse::<usize>().ok()?;
+            if removal {
+                items.insert(index, original);
+            } else {
+                *items.get_mut(index)? = original;
+            }
+        }
+        _ => return None,
+    }
+    Some(error)
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(
     tag = "by",

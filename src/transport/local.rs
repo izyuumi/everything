@@ -713,8 +713,24 @@ async fn handle_connection(
     } else {
         None
     };
-    let request: LocalRequest = serde_json::from_value(original)
-        .map_err(|_| LocalError::Protocol("invalid JSON frame or schema"))?;
+    let request = match LocalRequest::deserialize(&original) {
+        Ok(request) => request,
+        Err(_) => {
+            let (original, path) = tokio::task::spawn_blocking(move || {
+                let mut original = original;
+                let path = (received_bytes <= MAX_LOCAL_COMMAND_BYTES)
+                    .then(|| crate::ipc::decode_json::<LocalRequest>(&mut original).err())
+                    .flatten()
+                    .map(|error| error.path)
+                    .unwrap_or_default();
+                (original, path)
+            })
+            .await
+            .map_err(|_| LocalError::Worker)?;
+            reject_undecodable(&mut stream, &original, &path, &options, &cancellation).await?;
+            return Err(LocalError::Protocol("invalid JSON frame or schema"));
+        }
+    };
     request.validate()?;
     if received_bytes > request.maximum_encoded_bytes() {
         return Err(LocalError::Protocol("request frame exceeds its byte limit"));
@@ -771,6 +787,43 @@ async fn handle_connection(
         biased;
         _ = cancellation.cancelled() => Err(LocalError::Cancelled),
         written = tokio::time::timeout(options.frame_timeout, write_frame(&mut stream, &response)) => written.map_err(|_| LocalError::Timeout)?,
+    }
+}
+
+async fn reject_undecodable(
+    stream: &mut UnixStream,
+    original: &Value,
+    path: &str,
+    options: &LocalOptions,
+    cancellation: &CancellationToken,
+) -> Result<(), LocalError> {
+    let (Some(schema_version), Some(request_id)) = (
+        original
+            .get("schema_version")
+            .and_then(|value| SchemaVersion::deserialize(value).ok()),
+        original
+            .get("request_id")
+            .and_then(|value| CommandId::deserialize(value).ok()),
+    ) else {
+        return Ok(());
+    };
+    let path: String = if path.is_empty() {
+        "request".into()
+    } else {
+        path.escape_debug().take(256).collect()
+    };
+    let response = LocalResponse {
+        schema_version,
+        request_id,
+        payload: rejection(
+            LocalFailureCode::InvalidRequest,
+            &format!("invalid owner request field `{path}`; check its name, type and value"),
+        ),
+    };
+    tokio::select! {
+        biased;
+        _ = cancellation.cancelled() => Err(LocalError::Cancelled),
+        written = tokio::time::timeout(options.frame_timeout, write_frame(stream, &response)) => written.map_err(|_| LocalError::Timeout)?,
     }
 }
 
