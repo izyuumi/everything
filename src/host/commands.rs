@@ -384,14 +384,21 @@ impl HostInner {
                         ));
                     }
                 };
-                let accepted = self
+                let accepted = match self
                     .agent
                     .accept_text(TextCommand {
                         conversation_id: record.conversation_id,
                         command_id: record.command_id,
                         text,
                     })
-                    .await?;
+                    .await
+                {
+                    Err(AgentError::PendingTurn(pending)) => {
+                        self.ensure_turn_open(pending).await?;
+                        return Err(AgentError::PendingTurn(pending).into());
+                    }
+                    result => result?,
+                };
                 match accepted {
                     TextAcceptance::Pending { message_id, .. } => {
                         let task_id = TaskId::try_from(*record.command_id.as_uuid())?;
@@ -692,6 +699,13 @@ impl HostInner {
                 })
                 .await;
         }
+        if let Some(pending) = conversation
+            .info
+            .pending_command_id
+            .filter(|pending| *pending != command_id)
+        {
+            self.ensure_turn_open(pending).await?;
+        }
         let options = options.clone();
         let output = conversation.config.max_output_tokens;
         self.blocking(move |host| {
@@ -729,6 +743,17 @@ impl HostInner {
             Ok(EffectiveCommand::Turn { execution: policy })
         })
         .await
+    }
+
+    async fn ensure_turn_open(self: &Arc<Self>, pending: CommandId) -> Result<(), HostError> {
+        let task_id = TaskId::try_from(*pending.as_uuid())?;
+        match self.scheduler.status(task_id).await {
+            Ok(task) if task.task.status.is_terminal() => {
+                Err(HostError::ConversationBlocked(task_id))
+            }
+            Ok(_) | Err(SchedulerError::NotFound(_) | SchedulerError::NotOwned(_)) => Ok(()),
+            Err(error) => Err(error.into()),
+        }
     }
 }
 

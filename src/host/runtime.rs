@@ -12,7 +12,7 @@ use crate::agent::{Agent, AgentError, ConversationConfig};
 use crate::devices::{DeviceEndpoint, DeviceError, EndpointRole, HostSettingsTransport};
 use crate::ipc::CommandReceipt;
 use crate::permissions::{Authorizer, ToolScopeRule};
-use crate::protocol::{ProtocolError, UnixMillis};
+use crate::protocol::{ProtocolError, TaskId, UnixMillis};
 use crate::scheduler::{
     DiscoveryServices, Scheduler, SchedulerError, SchedulerLimits, SchedulerServices,
     SchedulerToolBinding, SchedulerTools, TaskProviderFactory,
@@ -98,6 +98,10 @@ pub enum HostError {
         "legacy foreground task requires stopping the host and explicitly resuming or settling it through the foreground CLI"
     )]
     LegacyForeground,
+    #[error(
+        "this conversation's last task {0} was cancelled or failed before its turn completed and its outcome may be uncertain; it cannot accept new messages, start a new conversation"
+    )]
+    ConversationBlocked(TaskId),
     #[error(
         "host is draining; only inspection and explicit tool cleanup controls remain available"
     )]
@@ -1353,6 +1357,12 @@ pub(super) fn public_failure(error: &HostError) -> LocalFailure {
             LocalFailureCode::Unavailable,
             "legacy foreground task requires stopping the host and explicitly resuming or settling it through the foreground CLI",
         ),
+        HostError::ConversationBlocked(_) => {
+            return LocalFailure {
+                code: LocalFailureCode::InvalidRequest,
+                message: error.to_string(),
+            };
+        }
         HostError::Inbox(InboxError::OriginDenied)
         | HostError::SettingsService(SettingsServiceError::OutsideScope)
         | HostError::Device(DeviceError::AccessDenied | DeviceError::EndpointRevoked) => (
