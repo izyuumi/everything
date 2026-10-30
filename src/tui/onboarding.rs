@@ -25,6 +25,7 @@ use crate::ipc::{OwnerOperation, OwnerOperationResult};
 use crate::model::{Message, MessageRole, ModelEvent, ModelRequest};
 use crate::service::ServiceError;
 use crate::service::cli::{ServiceArguments, ServiceCommand, ServiceReport, manage};
+use crate::vault::{VaultItemMetadata, VaultPutRequest};
 
 const MAX_INPUT: usize = 8_192;
 const OPENAI_MODEL: &str = "gpt-5";
@@ -489,14 +490,16 @@ enum Step {
     Verify,
     Save,
     Service,
+    Vault,
 }
 
-const STEPS: [Step; 5] = [
+const STEPS: [Step; 6] = [
     Step::Welcome,
     Step::Provider,
     Step::Verify,
     Step::Save,
     Step::Service,
+    Step::Vault,
 ];
 
 enum Flow {
@@ -582,7 +585,11 @@ pub async fn run(
                 .iter()
                 .position(|step| *step == target)
                 .unwrap_or(STEPS.len()),
-            Flow::Skip => return Ok(None),
+            Flow::Skip if step == Step::Vault => break,
+            Flow::Skip => STEPS
+                .iter()
+                .position(|step| *step == Step::Vault)
+                .unwrap_or(STEPS.len()),
         };
     }
     Ok(wizard.saved)
@@ -596,6 +603,7 @@ impl Wizard<'_, '_> {
             Step::Verify => self.verify().await,
             Step::Save => self.save().await,
             Step::Service => self.service().await,
+            Step::Vault => self.vault().await,
         }
     }
 
@@ -1149,6 +1157,102 @@ impl Wizard<'_, '_> {
                 &["Continue".to_owned()],
                 0,
             )
+            .await?;
+        Ok(Flow::Next)
+    }
+}
+
+impl Wizard<'_, '_> {
+    async fn vault(&mut self) -> Result<Flow, TuiError> {
+        let title = "Connect a password manager";
+        let body = [
+            text("Optional: keep logins and API secrets in a vault on this machine."),
+            dim(
+                "Tasks can use vault items once the vault tools land (#219); the model will only see names and vault:// references, never values.",
+            ),
+        ];
+        let options = [
+            "Skip".to_owned(),
+            "1Password".to_owned(),
+            "Proton Pass".to_owned(),
+            "Add an API secret to the local vault (system keychain)".to_owned(),
+        ];
+        let (name, issue) = match self.screen.choose(title, &body, &options, 0).await? {
+            Some(1) => ("1Password", 220),
+            Some(2) => ("Proton Pass", 221),
+            Some(3) => return self.local_secret().await,
+            _ => return Ok(Flow::Next),
+        };
+        let body = [
+            colored(
+                WARN,
+                format!(
+                    "{name} is not available yet; it is tracked in https://github.com/izyuumi/everything/issues/{issue}.",
+                ),
+            ),
+            dim("Nothing was connected. You can add local secrets with `everything vault add`."),
+        ];
+        self.screen
+            .choose(title, &body, &["Continue".to_owned()], 0)
+            .await?;
+        Ok(Flow::Next)
+    }
+
+    async fn local_secret(&mut self) -> Result<Flow, TuiError> {
+        let title = "Add an API secret";
+        let body = [dim(
+            "A name you and the model will see, for example GitHub token.",
+        )];
+        let Some(label) = self.screen.input(title, &body, "Label:", "", false).await? else {
+            return Ok(Flow::Goto(Step::Vault));
+        };
+        let metadata = VaultItemMetadata::ApiSecret {
+            label: label.trim().to_owned(),
+            env_name: None,
+            service: None,
+        };
+        let message = if let Err(error) = metadata.validate() {
+            colored(ERROR, error.to_string())
+        } else {
+            let body = [
+                text(format!(
+                    "Paste or type the secret for {}. It is never shown.",
+                    metadata.label()
+                )),
+                dim("It goes straight to the host's keychain-backed vault."),
+            ];
+            let Some(mut value) = self.screen.input(title, &body, "Secret:", "", true).await?
+            else {
+                return Ok(Flow::Goto(Step::Vault));
+            };
+            match SecretTransfer::new(std::mem::take(&mut *value)) {
+                Err(_) => colored(
+                    ERROR,
+                    "the secret must be printable text; nothing was saved",
+                ),
+                Ok(secret) => {
+                    let item = VaultPutRequest {
+                        metadata,
+                        secrets: [("value".to_owned(), secret)].into(),
+                    };
+                    let work = self.host.operate(OwnerOperation::VaultPut { item });
+                    let body = [text("Saving to the local vault…")];
+                    match self.screen.wait(title, &body, work).await? {
+                        Some(Ok(OwnerOperationResult::VaultItemAdded { reference })) => {
+                            colored(OK, format!("Saved as {reference}."))
+                        }
+                        Some(Ok(_)) => colored(ERROR, "unexpected vault response"),
+                        Some(Err(error)) => colored(ERROR, format!("Could not save: {error}")),
+                        None => colored(
+                            WARN,
+                            "Saving was interrupted; check `everything vault list`.",
+                        ),
+                    }
+                }
+            }
+        };
+        self.screen
+            .choose(title, &[message], &["Continue".to_owned()], 0)
             .await?;
         Ok(Flow::Next)
     }

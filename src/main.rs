@@ -32,6 +32,7 @@ use tokio_util::sync::CancellationToken;
 use zeroize::Zeroizing;
 
 mod queries;
+mod vault_cli;
 
 const DEFAULT_INSTRUCTIONS: &str = "You are Everything, a helpful assistant.";
 const VERSION: &str = match option_env!("EVERYTHING_VERSION") {
@@ -69,6 +70,7 @@ enum Command {
     Conversations(queries::ListArguments),
     Schedules(queries::ListArguments),
     Memory(queries::MemoryArguments),
+    Vault(vault_cli::VaultArguments),
 }
 
 #[derive(Args, Default)]
@@ -459,6 +461,14 @@ enum CliError {
     Relay(#[from] everything::relay::cli::RelayCommandError),
     #[error(transparent)]
     Update(#[from] everything::update::UpdateError),
+    #[error(transparent)]
+    Vault(#[from] everything::vault::VaultError),
+    #[error("{0} does not apply to {1} items")]
+    VaultFlag(&'static str, String),
+    #[error("{0} is not a secret field of {1} items")]
+    VaultField(String, String),
+    #[error("{0}")]
+    VaultInput(&'static str),
 }
 
 fn main() -> ExitCode {
@@ -573,6 +583,10 @@ async fn execute(arguments: Arguments, cancellation: CancellationToken) -> Resul
         Command::Memory(arguments) => {
             let client = everything::host::client::HostClient::new(state_dir)?;
             return queries::memory(&client, arguments, cancellation).await;
+        }
+        Command::Vault(arguments) => {
+            let client = everything::host::client::HostClient::new(state_dir)?;
+            return vault_cli::run(&client, arguments, cancellation).await;
         }
         Command::Tui(arguments) => {
             return everything::tui::run(

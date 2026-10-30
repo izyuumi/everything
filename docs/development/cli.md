@@ -63,6 +63,24 @@ Limits default to 20 and the host accepts 1–100. `tasks` uses the owner query'
 
 In host-proxied `chat`, the first Ctrl-C after the turn is admitted (while text streams, while waiting, or at the in-place approval prompt) cancels the task the same way and prints the outcome, exiting 130. A second Ctrl-C while that cancellation is pending detaches instead, printing the usual `closing this CLI leaves admitted work in the host` line. Ctrl-C before admission still just stops the CLI.
 
+## Credential vault
+
+`everything vault` manages the local [credential vault](../contracts/vault.md) of a running host over owner IPC:
+
+```sh
+everything vault status                     # provider statuses and host-managed model credentials
+everything vault list [--limit N]           # ref, kind, label, secret field names, detail
+everything vault add KIND --label LABEL [metadata flags] [--field FIELD]...
+everything vault remove ID|vault://local/ID
+everything vault connect|disconnect onepassword|protonpass
+```
+
+`status`, `list`, `add` and `remove` accept `--json` for the raw response. `status` lists `local` (`ready` with its Keychain service name, or `unavailable` with the sanitized store error), `1password` and `protonpass` as unavailable (#220, #221), then each model credential binding from settings as `host_managed`: API keys show `configured`, ChatGPT bindings `signed_in`, `signed_out` or `unknown` from the host's status. Model credentials are never vault items and cannot be listed or used through the vault. `list` prints non-ready providers and incomplete (`pending`/`removing`) rows on stderr with the command that removes them.
+
+`add` takes `login`, `api-secret`, `card` or `identity`. Metadata comes only from flags: `--site HOST` (repeatable) and `--username` for logins, `--env-name` and `--service` for API secrets, `--brand`, `--last4`, `--expiry-month` and `--expiry-year` for cards. A flag that does not belong to the kind is an error. `--field` chooses the secret fields to enter, in order; the default is `password`, `value` or `number`, and identity items need at least one of `email`, `phone`, `address`. There is no argv or environment route for a secret. When stdin is a terminal each field is read with echo off (raw mode, nothing echoed; Esc or Ctrl-C cancels). Otherwise stdin must hold exactly one line per field, at most 8192 bytes each. Buffers are pre-sized and zeroized, and the values travel only in the `vault_put` owner operation. It prints the new `vault://local/<uuid>` reference.
+
+`connect` and `disconnect` fail with `vault provider 1password is not available yet; see #220` (or `protonpass`, #221) until those providers exist.
+
 ## Optional ChatGPT plan
 
 `everything chatgpt sign-in|status|models|sign-out|select|deselect` lets a running host use your ChatGPT plan for the official OpenAI endpoint instead of an API key. It is optional. See the [host guide](host.md#optional-sign-in-with-chatgpt). `models` lists the model slugs your plan accepts. `status` masks the account email to its domain unless `--json` or `--show-email` is given. The foreground path without a host always uses `OPENAI_API_KEY`.
