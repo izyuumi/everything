@@ -1,6 +1,14 @@
-use crate::{
+use super::{
     database::{DELIVERY_WINDOW, Database},
     error::RelayError,
+};
+use crate::{
+    crypto::DevicePublicKeys,
+    protocol::{DeviceId, MessageId, UnixMillis},
+    relay_protocol::{
+        AUTH_CHALLENGE_LIFETIME_MS, MAX_RELAY_FRAME_BYTES, RELAY_SCHEMA_VERSION, RelayChallenge,
+        RelayClientMessage, RelayErrorCode, RelayOrigin, RelayServerMessage,
+    },
 };
 use axum::{
     Router,
@@ -11,14 +19,6 @@ use axum::{
     http::StatusCode,
     response::{IntoResponse, Response},
     routing::get,
-};
-use everything::{
-    crypto::DevicePublicKeys,
-    protocol::{DeviceId, MessageId, UnixMillis},
-    relay_protocol::{
-        AUTH_CHALLENGE_LIFETIME_MS, MAX_RELAY_FRAME_BYTES, RELAY_SCHEMA_VERSION, RelayChallenge,
-        RelayClientMessage, RelayErrorCode, RelayOrigin, RelayServerMessage,
-    },
 };
 use hyper::server::conn::http1;
 use hyper_util::{

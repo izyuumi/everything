@@ -1,4 +1,4 @@
-use everything::{crypto::CryptoError, relay_protocol::RelayProtocolError};
+use crate::{crypto::CryptoError, relay_protocol::RelayProtocolError};
 use thiserror::Error;
 use tokio_rusqlite::rusqlite;
 

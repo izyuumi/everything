@@ -8,8 +8,6 @@ description = "Local-first native AI agent host"
 default-run = "everything"
 
 [workspace]
-members = ["relay"]
-default-members = [".", "relay"]
 resolver = "3"
 
 [dependencies]
@@ -56,6 +54,10 @@ croner = "=4.0.1"
 ratatui = "0.29"
 crossterm = { version = "0.28", features = ["event-stream"] }
 unicode-width = "0.2"
+axum = { version = "0.8", default-features = false, features = ["http1", "tokio", "ws"] }
+tokio-rusqlite = { version = "0.7", features = ["bundled"] }
+hyper = { version = "1", features = ["http1", "server"] }
+hyper-util = { version = "0.1", features = ["tokio", "service"] }
 
 [features]
 default = []

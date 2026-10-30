@@ -1,18 +1,24 @@
 # Blind relay
 
-The optional `everything-relay` binary routes signed encrypted envelopes between explicitly enrolled devices. The native host remains authoritative. The relay has no conversation decryption keys, model credentials, plaintext application commands, or command IDs. It persists public identities, routing metadata, encrypted envelope JSON, and deduplication digests in a dedicated SQLite database.
+The optional relay server, `everything relay serve`, routes signed encrypted envelopes between explicitly enrolled devices. It ships inside the single `everything` binary; there is no separate relay executable or workspace crate. The native host remains authoritative. The relay has no conversation decryption keys, model credentials, plaintext application commands, or command IDs. It persists public identities, routing metadata, encrypted envelope JSON, and deduplication digests in a dedicated SQLite database.
 
-`src/relay_protocol.rs` is the shared client/server wire contract. `relay/src/server.rs` owns HTTP/WebSocket admission, challenge authentication, sessions, delivery, and cancellation. `relay/src/database.rs` owns enrollment, sticky revocation, durable queues, quotas, deduplication, and rate accounting. SQLite runs on the `tokio-rusqlite` worker thread with the same rusqlite 0.37 version used by the host.
+`src/relay_protocol.rs` is the shared client/server wire contract. `src/relay/server.rs` owns HTTP/WebSocket admission, challenge authentication, sessions, delivery, and cancellation. `src/relay/database.rs` owns enrollment, sticky revocation, durable queues, quotas, deduplication, and rate accounting. `src/relay/cli.rs` owns the `everything relay` subcommands. SQLite runs on the `tokio-rusqlite` worker thread with the same rusqlite 0.37 version used by the host.
+
+## Host connection
+
+`everything relay on --origin wss://relay.example.com` sets the host's `relay_origin` setting; `everything relay on` without `--origin` keeps an already configured origin and fails if none exists. `everything relay off` clears it. When no host is running, the command takes the state lease and edits `host-settings-v1.json` directly; the next `everything serve` connects. When a host is running, the command uses owner `replace_settings` with the current revision and reports `restart_required: true`, because the relay session starts only at host startup. Both print JSON with `host_running`, `origin` and `restart_required`.
+
+`everything relay status` prints one JSON object with both sides. `host` reports `host_running`, `origin` and the `connection` state: the running host's owner `transport` query, which shows the origin that host started with until it restarts, or `disabled`/`stopped` from settings when no host runs. `server` reports the relay database path and its pruned queue/device counts, or `null` status when that database file does not exist; status never creates a relay database.
 
 ## Operator setup
 
-The database path is required before the subcommand. It must be a dedicated relay database, separate from host storage. Newly created directories use mode 0700 on Unix, and the database file uses mode 0600. The process rejects a database symlink/nonregular file and unsupported application/schema IDs.
+Server subcommands accept `--database PATH`; the default is `relay.sqlite3` in the state directory (`--state-dir`, `EVERYTHING_STATE_DIR`, or `$HOME/.everything`). It must be a dedicated relay database, separate from host storage. Newly created directories use mode 0700 on Unix, and the database file uses mode 0600. The process rejects a database symlink/nonregular file and unsupported application/schema IDs.
 
 ```sh
-cargo build --release -p everything-relay
-./target/release/everything-relay --database /var/lib/everything-relay/relay.sqlite3 enroll --keys /secure-transfer/host-public.json
-./target/release/everything-relay --database /var/lib/everything-relay/relay.sqlite3 enroll --keys /secure-transfer/phone-public.json
-./target/release/everything-relay --database /var/lib/everything-relay/relay.sqlite3 serve --origin wss://relay.example.com
+cargo build --release --locked
+./target/release/everything relay enroll --database /var/lib/everything-relay/relay.sqlite3 --keys /secure-transfer/host-public.json
+./target/release/everything relay enroll --database /var/lib/everything-relay/relay.sqlite3 --keys /secure-transfer/phone-public.json
+./target/release/everything relay serve --database /var/lib/everything-relay/relay.sqlite3 --origin wss://relay.example.com
 ```
 
 An identity file contains only the `DevicePublicKeys` JSON representation: device UUID and base64 Ed25519/X25519 public keys. Enrollment is a local operator decision after identity verification. No remote enrollment endpoint, trust-on-first-use registration, administrative bearer-token service, or automatic enrollment during host/client pairing exists. Exporting and safely transferring a paired device's public identity is a client/host integration responsibility. The file reader rejects files over 4096 bytes and unknown identity fields.
@@ -20,12 +26,12 @@ An identity file contains only the `DevicePublicKeys` JSON representation: devic
 Enrollment of the same active UUID and identical keys is idempotent. Different keys for an existing UUID are rejected. Revocation is permanent for that UUID, including re-enrollment with the original keys; a replacement identity needs a new UUID and a new explicit enrollment. Device records, including revoked records, are bounded at 4096 and are not automatically removed.
 
 ```sh
-./target/release/everything-relay --database /var/lib/everything-relay/relay.sqlite3 devices
-./target/release/everything-relay --database /var/lib/everything-relay/relay.sqlite3 status
-./target/release/everything-relay --database /var/lib/everything-relay/relay.sqlite3 revoke DEVICE_UUID
+./target/release/everything relay devices --database /var/lib/everything-relay/relay.sqlite3
+./target/release/everything relay status --database /var/lib/everything-relay/relay.sqlite3
+./target/release/everything relay revoke --database /var/lib/everything-relay/relay.sqlite3 DEVICE_UUID
 ```
 
-The default backend bind address is `127.0.0.1:8787`. `/ws` is the WebSocket endpoint; `/health` returns HTTP 204 without identity or queue data. The binary serves HTTP/1 without TLS. For remote use, terminate TLS at an operator-managed reverse proxy, forward WebSocket upgrades to the loopback backend, bound proxy request sizes and connection rates, and prevent direct public backend access. Set `--origin` to the exact configured public `wss://` origin the clients expect. TLS provisioning, certificates, reverse-proxy deployment, and service installation are not performed by this binary. Loopback development may use `--origin ws://127.0.0.1:8787`; plaintext `ws://` origins on nonloopback hosts are rejected.
+The default backend bind address is `127.0.0.1:8787`. `/ws` is the WebSocket endpoint; `/health` returns HTTP 204 without identity or queue data. The server speaks HTTP/1 without TLS. For remote use, terminate TLS at an operator-managed reverse proxy, forward WebSocket upgrades to the loopback backend, bound proxy request sizes and connection rates, and prevent direct public backend access. Set `--origin` to the exact configured public `wss://` origin the clients expect. TLS provisioning, certificates, reverse-proxy deployment, and service installation are not performed by `everything relay serve`. Loopback development may use `--origin ws://127.0.0.1:8787`; plaintext `ws://` origins on nonloopback hosts are rejected.
 
 ## Origin and authentication contract
 
@@ -59,7 +65,7 @@ Connected recipients receive up to 16 pending envelopes at a time. A broadcast w
 
 A receiver sends `Acknowledge { message_id }` only after committing authenticated plaintext to its durable replay-protected inbox. The relay deletes a queued message only when the acknowledging socket is its recipient, then emits `Acknowledged`. Repeated or unknown recipient acknowledgments are idempotent. The relay cannot validate the receiver's inbox transaction and cannot prove a client actually processed a message. Clients must not acknowledge before durable acceptance.
 
-Expiry removes both queued ciphertext and deduplication metadata. It runs on enqueue, at the `status` command, and every 30 seconds while serving. Pending queries exclude expired messages. Immediately before each individual write, the server rechecks active recipient, active sender, queued-row existence, and current expiry, so a slow batch does not keep earlier authorization alive. One write already in flight when a device is revoked or an envelope expires can complete; its write timeout is five seconds. Endpoint revocation and expiry checks remain necessary.
+Expiry removes both queued ciphertext and deduplication metadata. It runs on enqueue, at `everything relay status` when the database exists, and every 30 seconds while serving. Pending queries exclude expired messages. Immediately before each individual write, the server rechecks active recipient, active sender, queued-row existence, and current expiry, so a slow batch does not keep earlier authorization alive. One write already in flight when a device is revoked or an envelope expires can complete; its write timeout is five seconds. Endpoint revocation and expiry checks remain necessary.
 
 Revocation atomically marks a device inactive and removes queued traffic both to and from it. New authentication, sends, and acknowledgments then fail. Idle active sockets discover revocation at the next heartbeat, at most 30 seconds later, while every operation and delivery checks current state. Revocation cannot retract frames already delivered or erase plaintext/key material at a peer.
 
