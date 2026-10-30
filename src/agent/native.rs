@@ -253,6 +253,21 @@ impl NativeCheckpoint {
         self.turn.is_some()
     }
 
+    pub(super) fn memory_use(&self) -> Option<MemoryUse> {
+        self.turn
+            .as_ref()
+            .map(|turn| MemoryUse {
+                command_id: turn.command_id,
+                excerpts: turn.definition.memory.len(),
+            })
+            .or_else(|| {
+                self.last_run.as_ref().map(|run| MemoryUse {
+                    command_id: run.command_id,
+                    excerpts: run.memory_excerpts,
+                })
+            })
+    }
+
     pub(super) fn status(&self) -> LoopStatus {
         self.turn
             .as_ref()
@@ -759,6 +774,14 @@ pub struct NativeRunInfo {
     pub reported_input_tokens: u64,
     pub reported_output_tokens: u64,
     pub deadline_ms: u64,
+    #[serde(default)]
+    pub memory_excerpts: usize,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct MemoryUse {
+    pub command_id: CommandId,
+    pub excerpts: usize,
 }
 
 impl Conversation {
@@ -2070,6 +2093,7 @@ fn run_info(turn: &NativeTurn) -> NativeRunInfo {
         reported_input_tokens: turn.reported_input_tokens,
         reported_output_tokens: turn.reported_output_tokens,
         deadline_ms: turn.deadline_ms,
+        memory_excerpts: turn.definition.memory.len(),
     }
 }
 

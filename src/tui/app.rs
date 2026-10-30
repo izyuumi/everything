@@ -645,7 +645,7 @@ impl App {
         match event.event {
             TurnEvent::Live(text) => turn.live = text,
             TurnEvent::Note(note) => turn.notes.push(note),
-            TurnEvent::Done(text) => {
+            TurnEvent::Done(text, memories) => {
                 let elapsed = turn.started.elapsed().as_secs_f32();
                 self.finish_turn(false);
                 if text.is_empty() {
@@ -658,9 +658,14 @@ impl App {
                         .or_else(|| self.model.clone())
                         .unwrap_or_default();
                     self.last_reply = Some(text.clone());
+                    let memory = match memories {
+                        0 => String::new(),
+                        1 => " · used 1 memory".to_owned(),
+                        count => format!(" · used {count} memories"),
+                    };
                     self.entries.push(Entry::Assistant {
                         text,
-                        footer: format!("{model} · {elapsed:.1}s"),
+                        footer: format!("{model} · {elapsed:.1}s{memory}"),
                     });
                 }
                 self.refresh().await;

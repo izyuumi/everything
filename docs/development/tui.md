@@ -34,7 +34,7 @@ Esc goes back (on the first screen it skips), Ctrl+C or SIGTERM exits cleanly an
 
 ## Layout
 
-The transcript starts with a banner (model, conversation, tools, Host state directory, cwd). User turns are prefixed `❯`; replies render Markdown under `◈ Everything` with a model/duration footer. Single newlines in replies are shown as line breaks. While a task runs, provisional text from the `task` query's [`live_text`](../contracts/owner-ipc.md#live-assistant-text) streams under a spinner; the committed final message replaces it. The input sits above a status bar showing model, provider, title, message count, tool mode, state, elapsed time and queued messages. Source lives in `src/tui/` (`host` IPC adapter, `app` state, `render`, `markdown`, `input`, `theme`).
+The transcript starts with a banner (model, conversation, tools, Host state directory, cwd). User turns are prefixed `❯`; replies render Markdown under `◈ Everything` with a model/duration footer, extended with `used N memories` when the Host retrieved Wiki memory excerpts for that reply. Single newlines in replies are shown as line breaks. While a task runs, provisional text from the `task` query's [`live_text`](../contracts/owner-ipc.md#live-assistant-text) streams under a spinner; the committed final message replaces it. The input sits above a status bar showing model, provider, title, message count, tool mode, state, elapsed time and queued messages. Source lives in `src/tui/` (`host` IPC adapter, `app` state, `render`, `markdown`, `input`, `theme`).
 
 ## Commands and keys
 

@@ -27,6 +27,8 @@ const SEARCH_ENTRIES: usize = 4096;
 const SEARCH_FILES: usize = 1024;
 const SEARCH_DEPTH: usize = 16;
 const SEARCH_DURATION: Duration = Duration::from_secs(5);
+const SEARCH_EXCERPT_BYTES: usize = 256;
+const SEARCH_CONTEXT_BYTES: usize = 96;
 const WRITE_BYTES: usize = 262_144;
 
 #[derive(Clone, Copy)]
@@ -638,11 +640,20 @@ impl SearchState<'_> {
                 break;
             }
             if let Some(index) = line.find(self.query) {
-                let snippet =
-                    self.redactor
-                        .range(&bytes, start + index..start + line.len(), 256, incomplete);
+                let mut from = index
+                    .saturating_sub(SEARCH_CONTEXT_BYTES)
+                    .min(line.len().saturating_sub(SEARCH_EXCERPT_BYTES));
+                while !line.is_char_boundary(from) {
+                    from -= 1;
+                }
+                let snippet = self.redactor.range(
+                    &bytes,
+                    start + from..start + line.len(),
+                    SEARCH_EXCERPT_BYTES,
+                    incomplete,
+                );
                 let rendered_path = self.redactor.apply(path, 1024, false);
-                let entry = json!({"path":rendered_path.text,"line":number+1,"text":snippet.text,"truncated":snippet.truncated || index>0,"redacted":snippet.redacted || rendered_path.redacted});
+                let entry = json!({"path":rendered_path.text,"line":number+1,"text":snippet.text,"truncated":snippet.truncated || from>0,"redacted":snippet.redacted || rendered_path.redacted});
                 self.matches.push(entry);
                 if serde_json::to_vec(&self.matches).map_or(true, |bytes| bytes.len() > 45_000) {
                     self.matches.pop();

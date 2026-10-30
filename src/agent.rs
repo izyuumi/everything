@@ -8,7 +8,7 @@ mod steering;
 
 pub use control_events::{PermissionPublicationReceipt, TaskPublicationReceipt};
 pub use native::{
-    LoopLimits, LoopStatus, NativeRunInfo, PauseReason, ProviderResume, ToolRunSetup,
+    LoopLimits, LoopStatus, MemoryUse, NativeRunInfo, PauseReason, ProviderResume, ToolRunSetup,
 };
 pub use remote::{RemoteResultInspection, RemoteResultReceipt, VerifiedRemoteOutcome};
 pub use scheduled::{ScheduledResultCommand, ScheduledResultReceipt};
@@ -237,6 +237,8 @@ pub struct ConversationInfo {
     pub pending_command_id: Option<CommandId>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub native_status: Option<LoopStatus>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub memory_use: Option<MemoryUse>,
 }
 
 #[derive(Clone, Debug)]
@@ -941,6 +943,10 @@ fn info(
             .native
             .as_ref()
             .map(native::NativeCheckpoint::status),
+        memory_use: checkpoint
+            .native
+            .as_ref()
+            .and_then(native::NativeCheckpoint::memory_use),
     })
 }
 

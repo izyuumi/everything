@@ -1415,7 +1415,7 @@ async fn proxy_chat(
                 client,
                 conversation_id,
                 command_id,
-                information.last_sequence,
+                &information,
                 "",
                 cancellation,
             )
@@ -1448,7 +1448,7 @@ async fn proxy_chat(
                     client,
                     conversation_id,
                     command_id,
-                    information.last_sequence,
+                    &information,
                     streamed.as_ref().map_or("", |live| live.text.as_str()),
                     cancellation,
                 )
@@ -1639,11 +1639,17 @@ async fn proxy_reply(
     client: &everything::host::client::HostClient,
     conversation_id: ConversationId,
     command_id: CommandId,
-    through: u64,
+    information: &everything::ipc::ConversationSummary,
     streamed: &str,
     cancellation: CancellationToken,
 ) -> Result<(), CliError> {
-    let messages = proxy_messages(client, conversation_id, through, cancellation).await?;
+    let messages = proxy_messages(
+        client,
+        conversation_id,
+        information.last_sequence,
+        cancellation,
+    )
+    .await?;
     let response = messages
         .into_iter()
         .rev()
@@ -1671,6 +1677,21 @@ async fn proxy_reply(
     }
     output.write_all(b"\n").await?;
     output.flush().await?;
+    if let Some(memory) = information
+        .memory_use
+        .filter(|memory| memory.command_id == command_id && memory.excerpts > 0)
+    {
+        eprintln!(
+            "used {} {}",
+            memory.excerpts,
+            if memory.excerpts == 1 {
+                "memory"
+            } else {
+                "memories"
+            }
+        );
+    }
+    eprintln!("saved message {}", response.message.id);
     Ok(())
 }
 
