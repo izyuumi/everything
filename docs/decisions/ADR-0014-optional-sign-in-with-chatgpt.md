@@ -1,6 +1,6 @@
 # ADR-0014: Optional Sign in with ChatGPT for the OpenAI provider
 
-Status: Accepted. The real ChatGPT login, token refresh, revocation and live inference are unverified ([#201](https://github.com/izyuumi/everything/issues/201)).
+Status: Accepted. A real ChatGPT login, token refresh and live plan-usage inference were observed on the owner's Mac; revocation and live SIWC tool calls are unverified ([#201](https://github.com/izyuumi/everything/issues/201)).
 
 ## Context
 
