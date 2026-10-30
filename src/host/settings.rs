@@ -203,6 +203,8 @@ pub struct HostSettings {
     pub selection: super::selection::SelectionSettings,
     #[serde(default)]
     pub preference_overrides: HostPreferenceOverrides,
+    #[serde(default, skip_serializing_if = "crate::vault::VaultSettings::is_empty")]
+    pub vault: crate::vault::VaultSettings,
 }
 
 impl HostSettings {
@@ -276,6 +278,9 @@ impl HostSettings {
             .configuration()
             .map_err(|_| SettingsError::Invalid("invalid optional selection configuration"))?;
         self.preference_overrides.validate()?;
+        self.vault
+            .validate()
+            .map_err(|_| SettingsError::Invalid("invalid vault configuration"))?;
         let encoded = serde_json::to_vec(self)
             .map_err(|_| SettingsError::Invalid("settings could not be encoded"))?;
         if encoded.len() > MAX_SETTINGS_BYTES {
@@ -323,6 +328,7 @@ impl SettingsRepository {
                     mcp: Default::default(),
                     selection: Default::default(),
                     preference_overrides: Default::default(),
+                    vault: Default::default(),
                 };
                 settings.validate()?;
                 write_settings(&lease, &settings)?;

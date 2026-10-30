@@ -18,7 +18,7 @@ use super::task::{
     MAX_TASK_SECRETS, VAULT_REQUEST, VAULT_SEARCH, VAULT_USE, VaultDestination, VaultTasks,
     VaultUse, env_bindings,
 };
-use super::{VaultItemKind, VaultItemMetadata, VaultItemSummary, VaultService};
+use super::{VaultItemKind, VaultItemMetadata, VaultItemSummary};
 
 const MAX_SEARCH_RESULTS: usize = 20;
 
@@ -162,7 +162,7 @@ impl Tool for VaultTool {
             .ok_or_else(|| self.refused("the vault is not available in this runtime"))?;
         context.check_cancelled()?;
         match self.access {
-            VaultAccess::Search => self.search(runtime, arguments).await,
+            VaultAccess::Search => self.search(runtime, context, arguments).await,
             VaultAccess::Use => self.bind(runtime, context, arguments).await,
             VaultAccess::Request => self.request(runtime, arguments).await,
         }
@@ -180,6 +180,7 @@ impl VaultTool {
     async fn search(
         &self,
         runtime: &VaultRuntime,
+        context: &ToolExecutionContext,
         arguments: Value,
     ) -> Result<ToolOutput, ToolError> {
         let arguments: SearchArguments = serde_json::from_value(arguments)
@@ -193,16 +194,21 @@ impl VaultTool {
         if !(1..=MAX_SEARCH_RESULTS).contains(&arguments.limit) {
             return Err(self.refused("limit must be between 1 and 20"));
         }
-        let items = runtime
+        let found = runtime
             .tasks
             .service()
-            .search(query, &arguments.kinds, arguments.limit)
+            .search(
+                query,
+                &arguments.kinds,
+                arguments.limit,
+                context.cancellation().child_token(),
+            )
             .await
             .map_err(|error| self.refused(error.to_string()))?;
         Ok(ToolOutput {
             content: json!({
-                "items": items,
-                "unavailable_providers": VaultService::unavailable_providers(),
+                "items": found.items,
+                "unavailable_providers": found.unavailable,
             }),
             is_error: false,
         })
@@ -356,7 +362,7 @@ impl VaultTool {
         let found = runtime
             .tasks
             .service()
-            .search(&arguments.label, &[arguments.kind], MAX_SEARCH_RESULTS)
+            .search_local(&arguments.label, &[arguments.kind], MAX_SEARCH_RESULTS)
             .await
             .map_err(|error| self.refused(error.to_string()))?
             .into_iter()

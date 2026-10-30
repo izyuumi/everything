@@ -225,6 +225,7 @@ impl VaultProvider for LocalVaultProvider {
         query: &str,
         kinds: &[VaultItemKind],
         limit: usize,
+        _cancellation: CancellationToken,
     ) -> Result<Vec<VaultItemSummary>, VaultError> {
         let rows = self
             .blocking(move |store| {

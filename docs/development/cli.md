@@ -72,14 +72,15 @@ everything vault status                     # provider statuses and host-managed
 everything vault list [--limit N]           # ref, kind, label, secret field names, detail
 everything vault add KIND --label LABEL [metadata flags] [--field FIELD]...
 everything vault remove ID|vault://local/ID
-everything vault connect|disconnect onepassword|protonpass
+everything vault connect onepassword [--binary /absolute/path/op] [--account ACCOUNT_UUID] [--json]
+everything vault disconnect onepassword
 ```
 
-`status`, `list`, `add` and `remove` accept `--json` for the raw response. `status` lists `local` (`ready` with its Keychain service name, or `unavailable` with the sanitized store error), `1password` and `protonpass` as unavailable (#220, #221), then each model credential binding from settings as `host_managed`: API keys show `configured`, ChatGPT bindings `signed_in`, `signed_out` or `unknown` from the host's status. Model credentials are never vault items and cannot be listed or used through the vault. `list` prints non-ready providers and incomplete (`pending`/`removing`) rows on stderr with the command that removes them.
+`status`, `list`, `add` and `remove` accept `--json` for the raw response. `status` lists `local` (`ready` with its Keychain service name, or `unavailable` with the sanitized store error), `1password` (`disconnected`, `locked`, `ready` with the account UUID and pinned `op` path, or `unavailable` when the pinned binary is gone) and `protonpass` as unavailable (#221), then each model credential binding from settings as `host_managed`: API keys show `configured`, ChatGPT bindings `signed_in`, `signed_out` or `unknown` from the host's status. Model credentials are never vault items and cannot be listed or used through the vault. `list` prints non-ready providers and incomplete (`pending`/`removing`) rows on stderr with the command that removes them.
 
 `add` takes `login`, `api-secret`, `card` or `identity`. Metadata comes only from flags: `--site HOST` (repeatable) and `--username` for logins, `--env-name` and `--service` for API secrets, `--brand`, `--last4`, `--expiry-month` and `--expiry-year` for cards. A flag that does not belong to the kind is an error. `--field` chooses the secret fields to enter, in order; the default is `password`, `value` or `number`, and identity items need at least one of `email`, `phone`, `address`. There is no argv or environment route for a secret. When stdin is a terminal each field is read with echo off (raw mode, nothing echoed; Esc or Ctrl-C cancels). Otherwise stdin must hold exactly one line per field, at most 8192 bytes each. Buffers are pre-sized and zeroized, and the values travel only in the `vault_put` owner operation. It prints the new `vault://local/<uuid>` reference.
 
-`connect` and `disconnect` fail with `vault provider 1password is not available yet; see #220` (or `protonpass`, #221) until those providers exist.
+`connect onepassword` finds `op` on the CLI's `PATH` (or takes `--binary`), prints the path it pins, and sends it to the Host, which checks for `op` 2.x and lists accounts. With one account it is chosen; with several, a terminal asks for a number and other input needs `--account`. The Host then runs `op whoami` for that account (the 1Password approval prompt) and saves the path and account UUID in settings. `disconnect onepassword` runs `op signout` and removes them; a failed sign-out is logged and the connection is still removed. `protonpass` fails with `vault provider protonpass is not available yet; see #221`. See [1Password setup](onepassword.md).
 
 ## Optional ChatGPT plan
 
