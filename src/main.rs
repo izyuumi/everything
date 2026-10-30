@@ -43,7 +43,7 @@ struct Arguments {
     #[arg(long, env = "EVERYTHING_STATE_DIR", value_name = "PATH")]
     state_dir: Option<PathBuf>,
     #[command(subcommand)]
-    command: Command,
+    command: Option<Command>,
 }
 
 #[derive(Subcommand)]
@@ -62,7 +62,7 @@ enum Command {
     Relay(everything::relay::cli::RelayArguments),
 }
 
-#[derive(Args)]
+#[derive(Args, Default)]
 struct TuiArguments {
     #[arg(long, conflicts_with = "resume_latest")]
     conversation: Option<ConversationId>,
@@ -477,7 +477,7 @@ async fn run_cli(arguments: Arguments) -> ExitCode {
 }
 
 async fn execute(arguments: Arguments, cancellation: CancellationToken) -> Result<(), CliError> {
-    if matches!(&arguments.command, Command::Worker(_)) && arguments.state_dir.is_none() {
+    if matches!(&arguments.command, Some(Command::Worker(_))) && arguments.state_dir.is_none() {
         return Err(CliError::WorkerStateDirectory);
     }
     let state_dir = arguments
@@ -487,7 +487,10 @@ async fn execute(arguments: Arguments, cancellation: CancellationToken) -> Resul
     if cancellation.is_cancelled() {
         return Err(AgentError::Cancelled.into());
     }
-    let command = match arguments.command {
+    let command = match arguments
+        .command
+        .unwrap_or(Command::Tui(TuiArguments::default()))
+    {
         Command::Worker(arguments) => {
             return write_json(
                 everything::worker::commands::run(arguments, state_dir, cancellation).await?,
@@ -525,6 +528,7 @@ async fn execute(arguments: Arguments, cancellation: CancellationToken) -> Resul
                     resume_latest: arguments.resume_latest,
                     provider: arguments.provider.map(Into::into),
                     model: arguments.model,
+                    endpoint: None,
                     default_instructions: DEFAULT_INSTRUCTIONS,
                 },
                 cancellation,

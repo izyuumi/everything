@@ -139,6 +139,7 @@ pub struct Options {
     pub resume_latest: bool,
     pub provider: Option<ProviderKind>,
     pub model: Option<String>,
+    pub endpoint: Option<ProviderEndpoint>,
     pub default_instructions: &'static str,
 }
 
@@ -149,6 +150,7 @@ pub struct App {
     pub conversation: Option<ConversationSummary>,
     pub provider: ProviderKind,
     pub model: Option<String>,
+    endpoint: ProviderEndpoint,
     instructions: Option<String>,
     default_instructions: &'static str,
     pub tools: Option<Tools>,
@@ -220,6 +222,14 @@ impl App {
                 .or(latest.map(|info| info.provider))
                 .unwrap_or(ProviderKind::OpenAi),
             model: options.model.or(latest.map(|info| info.model.clone())),
+            endpoint: options
+                .endpoint
+                .or_else(|| {
+                    latest
+                        .filter(|_| options.provider.is_none())
+                        .map(|info| info.endpoint.clone())
+                })
+                .unwrap_or(ProviderEndpoint::Official),
             instructions: None,
             default_instructions: options.default_instructions,
             tools: None,
@@ -848,7 +858,7 @@ impl App {
                 .instructions
                 .clone()
                 .unwrap_or_else(|| self.default_instructions.to_owned()),
-            endpoint: ProviderEndpoint::Official,
+            endpoint: self.endpoint.clone(),
             max_output_tokens: 4_096,
             temperature: None,
         };
@@ -960,6 +970,7 @@ impl App {
         };
         self.provider = info.provider;
         self.model = Some(info.model.clone());
+        self.endpoint = info.endpoint.clone();
         self.conversation = Some(info.clone());
         self.stopped = false;
         self.load_transcript().await;
@@ -1099,6 +1110,7 @@ impl App {
             "/provider" => match arguments.first().copied() {
                 Some("openai") => {
                     self.provider = ProviderKind::OpenAi;
+                    self.endpoint = ProviderEndpoint::Official;
                     self.note(
                         NoteKind::Ok,
                         "provider openai for new conversations · /model to pick a model",
@@ -1106,6 +1118,7 @@ impl App {
                 }
                 Some("anthropic") => {
                     self.provider = ProviderKind::Anthropic;
+                    self.endpoint = ProviderEndpoint::Official;
                     self.note(
                         NoteKind::Ok,
                         "provider anthropic for new conversations · /model MODEL_ID",
