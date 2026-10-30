@@ -6,7 +6,7 @@ mod onboarding;
 mod render;
 mod theme;
 
-use std::io::stdout;
+use std::io::{IsTerminal, stdout};
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -35,6 +35,9 @@ pub async fn run(
     mut options: Options,
     cancellation: CancellationToken,
 ) -> Result<(), TuiError> {
+    if !std::io::stdin().is_terminal() || !stdout().is_terminal() {
+        return Err(TuiError::NoTerminal);
+    }
     let cancellation = cancellation.child_token();
     #[cfg(unix)]
     {

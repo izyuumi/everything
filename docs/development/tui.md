@@ -10,7 +10,7 @@ everything tui --conversation UUID
 everything tui --provider openai --model MODEL_ID
 ```
 
-Flags (`--continue`, `--conversation`, `--provider`, `--model`) need the `tui` form. A conversation is created on the first message, titled from it. Provider, model and instructions stay immutable per conversation, so `/model` and `/instructions` apply to the next new conversation.
+Flags (`--continue`, `--conversation`, `--provider`, `--model`) need the `tui` form. Without an interactive terminal on stdin and stdout, it exits non-zero with "the terminal UI needs an interactive terminal; run `everything --help` for commands" before touching the terminal or the state directory. A conversation is created on the first message, titled from it. Provider, model and instructions stay immutable per conversation, so `/model` and `/instructions` apply to the next new conversation.
 
 ## Starting the Host
 

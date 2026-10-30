@@ -39,6 +39,8 @@ pub enum TuiError {
     Setup(String),
     #[error("cancelled")]
     Interrupted,
+    #[error("the terminal UI needs an interactive terminal; run `everything --help` for commands")]
+    NoTerminal,
 }
 
 #[derive(Clone, Debug)]

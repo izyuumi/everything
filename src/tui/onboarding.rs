@@ -800,25 +800,24 @@ impl Wizard<'_, '_> {
         let Some(storage) = self.storage(&title).await? else {
             return Ok(None);
         };
-        let key = match environment {
-            Some(key) => key,
-            None => {
-                let body = [
-                    text(format!(
-                        "Paste or type your {} API key. It is never shown.",
-                        provider_name(provider)
-                    )),
-                    dim("It is tested before anything is saved."),
-                ];
-                let Some(key) = self
-                    .screen
-                    .input(&title, &body, "API key:", "", true)
-                    .await?
-                else {
-                    return Ok(None);
-                };
-                key
-            }
+        let key = if let Some(key) = environment {
+            key
+        } else {
+            let body = [
+                text(format!(
+                    "Paste or type your {} API key. It is never shown.",
+                    provider_name(provider)
+                )),
+                dim("It is tested before anything is saved."),
+            ];
+            let Some(key) = self
+                .screen
+                .input(&title, &body, "API key:", "", true)
+                .await?
+            else {
+                return Ok(None);
+            };
+            key
         };
         Ok(Some(Choice {
             configuration,
@@ -829,19 +828,18 @@ impl Wizard<'_, '_> {
 
     async fn chatgpt(&mut self) -> Result<Option<Choice>, TuiError> {
         let title = "Sign in with ChatGPT";
-        let binding = match &self.found.chatgpt {
-            Some(binding) => binding.clone(),
-            None => {
-                let Some(storage) = self.storage(title).await? else {
-                    return Ok(None);
-                };
-                ModelCredentialReference {
-                    provider: ProviderKind::OpenAi,
-                    endpoint: ProviderEndpoint::Official,
-                    reference: uuid::Uuid::new_v4(),
-                    storage,
-                    source: ModelCredentialSource::ChatGpt,
-                }
+        let binding = if let Some(binding) = &self.found.chatgpt {
+            binding.clone()
+        } else {
+            let Some(storage) = self.storage(title).await? else {
+                return Ok(None);
+            };
+            ModelCredentialReference {
+                provider: ProviderKind::OpenAi,
+                endpoint: ProviderEndpoint::Official,
+                reference: uuid::Uuid::new_v4(),
+                storage,
+                source: ModelCredentialSource::ChatGpt,
             }
         };
         let failure = match self.sign_in(title, binding.clone()).await? {
@@ -1205,21 +1203,22 @@ async fn replace_settings(host: &Host, binding: &ModelCredentialReference) -> Re
         .model_credentials
         .retain(|existing| !same(&existing));
     updated.model_credentials.push(binding.clone());
-    let restart = match host
+    let (OwnerOperationResult::SettingsReceipt {
+        restart_required: restart,
+        ..
+    }
+    | OwnerOperationResult::Settings {
+        restart_required: restart,
+        ..
+    }) = host
         .operate(OwnerOperation::ReplaceSettings {
             expected_revision: settings.revision,
             settings: Box::new(updated),
         })
         .await
         .map_err(|error| error.to_string())?
-    {
-        OwnerOperationResult::SettingsReceipt {
-            restart_required, ..
-        }
-        | OwnerOperationResult::Settings {
-            restart_required, ..
-        } => restart_required,
-        _ => return Err("unexpected settings response".into()),
+    else {
+        return Err("unexpected settings response".into());
     };
     let applied = host.settings().await.map_err(|error| error.to_string())?;
     if applied.model_credentials.iter().filter(same).eq([binding]) {
