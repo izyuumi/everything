@@ -392,6 +392,7 @@ impl HostService {
             agent.store(),
             credentials.native_store(),
             settings.clone(),
+            lease.path().join("vault").join("protonpass"),
         );
         let vault_tasks = crate::vault::task::VaultTasks::new(vault.clone());
         broker.attach_vault(Arc::clone(&vault_tasks))?;
@@ -1036,11 +1037,11 @@ impl HostInner {
     async fn replace_vault_settings(
         &self,
         call: &LocalCall,
-        connection: Option<crate::vault::OnePasswordConnection>,
+        update: impl FnOnce(&mut crate::vault::VaultSettings),
     ) -> Result<(), HostError> {
         let caller = self.settings_service.local_owner_caller(call)?;
         let mut settings = self.settings.snapshot()?;
-        settings.vault.onepassword = connection;
+        update(&mut settings.vault);
         let receipt = self
             .settings_service
             .replace_as_owner(
@@ -1224,20 +1225,53 @@ impl HostInner {
             LocalRequestPayload::OwnerOperation {
                 operation:
                     crate::ipc::OwnerOperation::VaultConnect {
-                        provider,
+                        provider: crate::vault::VaultProviderId::ProtonPass,
                         binary,
-                        account,
+                        token,
+                        ..
+                    },
+            } => {
+                self.ensure_accepting()?;
+                let previous = self.settings.snapshot()?.vault.protonpass;
+                let (probe, token) = self
+                    .vault
+                    .connect_protonpass(binary.clone(), token.clone(), call.cancellation.clone())
+                    .await?;
+                let connected = probe.signed_in.is_some();
+                if connected {
+                    let connection = crate::vault::ProtonPassConnection {
+                        binary: probe.binary.clone(),
+                        token: token.clone(),
+                    };
+                    if let Err(error) = self
+                        .replace_vault_settings(call, |vault| vault.protonpass = Some(connection))
+                        .await
+                    {
+                        if let Some(token) = &token {
+                            self.vault.forget_protonpass_token(token).await;
+                        }
+                        return Err(error);
+                    }
+                    if let Some(previous) = previous.and_then(|previous| previous.token)
+                        && Some(&previous) != token.as_ref()
+                    {
+                        self.vault.forget_protonpass_token(&previous).await;
+                    }
+                }
+                Ok(LocalResponsePayload::OwnerOperationResult {
+                    result: crate::ipc::OwnerOperationResult::VaultProtonPass { probe, connected },
+                })
+            }
+            LocalRequestPayload::OwnerOperation {
+                operation:
+                    crate::ipc::OwnerOperation::VaultConnect {
+                        binary, account, ..
                     },
             } => {
                 self.ensure_accepting()?;
                 let probe = self
                     .vault
-                    .connect(
-                        *provider,
-                        binary.clone(),
-                        account.clone(),
-                        call.cancellation.clone(),
-                    )
+                    .connect_onepassword(binary.clone(), account.clone(), call.cancellation.clone())
                     .await?;
                 let connection =
                     probe
@@ -1249,7 +1283,8 @@ impl HostInner {
                         });
                 let connected = connection.is_some();
                 if connected {
-                    self.replace_vault_settings(call, connection).await?;
+                    self.replace_vault_settings(call, |vault| vault.onepassword = connection)
+                        .await?;
                 }
                 Ok(LocalResponsePayload::OwnerOperationResult {
                     result: crate::ipc::OwnerOperationResult::VaultConnection { probe, connected },
@@ -1267,16 +1302,21 @@ impl HostInner {
                     Ok(()) => {}
                     Err(
                         error @ (crate::vault::VaultError::ProviderDisconnected(_)
-                        | crate::vault::VaultError::ProviderNotAvailable(..)
                         | crate::vault::VaultError::InvalidReference
                         | crate::vault::VaultError::Worker),
                     ) => return Err(error.into()),
                     Err(error) => tracing::warn!(
                         error = %error,
-                        "1Password sign-out failed; removing the connection anyway"
+                        provider = provider.as_str(),
+                        "vault provider sign-out failed; removing the connection anyway"
                     ),
                 }
-                self.replace_vault_settings(call, None).await?;
+                self.replace_vault_settings(call, |vault| match provider {
+                    crate::vault::VaultProviderId::OnePassword => vault.onepassword = None,
+                    crate::vault::VaultProviderId::ProtonPass => vault.protonpass = None,
+                    crate::vault::VaultProviderId::Local => {}
+                })
+                .await?;
                 Ok(LocalResponsePayload::OwnerOperationResult {
                     result: crate::ipc::OwnerOperationResult::Applied,
                 })
@@ -1588,7 +1628,6 @@ pub(super) fn public_failure(error: &HostError) -> LocalFailure {
             | crate::vault::VaultError::NotReady
             | crate::vault::VaultError::MissingField(_)
             | crate::vault::VaultError::MissingSecret
-            | crate::vault::VaultError::ProviderNotAvailable(..)
             | crate::vault::VaultError::ProviderDisconnected(_)
             | crate::vault::VaultError::ProviderLocked(_)
             | crate::vault::VaultError::ProviderFailed(..)
@@ -1600,7 +1639,6 @@ pub(super) fn public_failure(error: &HostError) -> LocalFailure {
                 code: match error {
                     crate::vault::VaultError::Capacity => LocalFailureCode::Busy,
                     crate::vault::VaultError::MissingSecret
-                    | crate::vault::VaultError::ProviderNotAvailable(..)
                     | crate::vault::VaultError::ProviderDisconnected(_)
                     | crate::vault::VaultError::ProviderLocked(_)
                     | crate::vault::VaultError::ProviderFailed(..)

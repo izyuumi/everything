@@ -1185,13 +1185,10 @@ impl Wizard<'_, '_> {
                 dim("Nothing was connected here."),
             ],
             Some(2) => [
-                colored(
-                    WARN,
-                    "Proton Pass is not available yet; it is tracked in https://github.com/izyuumi/everything/issues/221.",
+                text(
+                    "Connect Proton Pass from a terminal with `everything vault connect protonpass`; it needs pass-cli and a paid Proton Pass plan, and asks for a personal access token (or use --web for the browser login).",
                 ),
-                dim(
-                    "Nothing was connected. You can add local secrets with `everything vault add`.",
-                ),
+                dim("Nothing was connected here."),
             ],
             Some(3) => return self.local_secret().await,
             _ => return Ok(Flow::Next),

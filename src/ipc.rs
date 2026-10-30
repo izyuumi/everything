@@ -486,6 +486,8 @@ pub enum OwnerOperation {
         binary: std::path::PathBuf,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         account: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        token: Option<crate::host::credentials::SecretTransfer>,
     },
     VaultDisconnect {
         provider: crate::vault::VaultProviderId,
@@ -583,15 +585,21 @@ impl OwnerOperation {
                 provider,
                 binary,
                 account,
+                token,
             } => {
-                if *provider == crate::vault::VaultProviderId::Local {
-                    return Err("the local vault needs no connection");
-                }
-                if !crate::vault::onepassword::valid_binary_path(binary)
-                    || account
-                        .as_deref()
-                        .is_some_and(|account| !crate::vault::onepassword::valid_account(account))
-                {
+                let valid = match provider {
+                    crate::vault::VaultProviderId::Local => {
+                        return Err("the local vault needs no connection");
+                    }
+                    crate::vault::VaultProviderId::OnePassword => {
+                        token.is_none()
+                            && account.as_deref().is_none_or(|account| {
+                                crate::vault::onepassword::valid_account(account)
+                            })
+                    }
+                    crate::vault::VaultProviderId::ProtonPass => account.is_none(),
+                };
+                if !valid || !crate::vault::external::valid_binary_path(binary) {
                     return Err("invalid vault connection");
                 }
                 Ok(())
@@ -1006,6 +1014,10 @@ pub enum OwnerOperationResult {
         probe: crate::vault::OnePasswordProbe,
         connected: bool,
     },
+    VaultProtonPass {
+        probe: crate::vault::ProtonPassProbe,
+        connected: bool,
+    },
     SettingsReceipt {
         operation: Box<crate::host::settings::SettingsOperationInspection>,
         settings: Option<Box<crate::host::settings::HostSettings>>,
@@ -1235,7 +1247,10 @@ impl OwnerOperationResult {
             (OwnerOperation::ResumeInterrupted { .. }, Self::Applied) => true,
             (
                 OwnerOperation::VaultConnect {
-                    binary, account, ..
+                    provider: crate::vault::VaultProviderId::OnePassword,
+                    binary,
+                    account,
+                    ..
                 },
                 Self::VaultConnection { probe, connected },
             ) => {
@@ -1247,6 +1262,20 @@ impl OwnerOperationResult {
                         .as_ref()
                         .map(|signed_in| &signed_in.account_uuid)
                         == account.as_ref()
+            }
+            (
+                OwnerOperation::VaultConnect {
+                    provider: crate::vault::VaultProviderId::ProtonPass,
+                    binary,
+                    token,
+                    ..
+                },
+                Self::VaultProtonPass { probe, connected },
+            ) => {
+                probe.validate().is_ok()
+                    && probe.binary == *binary
+                    && *connected == probe.signed_in.is_some()
+                    && (token.is_none() || *connected)
             }
             (OwnerOperation::VaultPut { .. }, Self::VaultItemAdded { reference }) => {
                 reference.local_id().is_ok() && reference.field().is_none()

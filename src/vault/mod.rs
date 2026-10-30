@@ -1,6 +1,8 @@
+pub(crate) mod external;
 pub mod item;
 pub mod local;
 pub mod onepassword;
+pub mod protonpass;
 pub mod reference;
 pub(crate) mod task;
 pub(crate) mod tools;
@@ -14,6 +16,7 @@ use thiserror::Error;
 use tokio_util::sync::CancellationToken;
 
 use crate::credentials::{CredentialError, CredentialSecret, NativeCredentialStore};
+use crate::host::credentials::SecretTransfer;
 use crate::host::settings::SettingsRepository;
 use crate::storage::{StorageError, Store};
 
@@ -22,6 +25,7 @@ pub use local::{LocalVaultProvider, VaultItemState, VaultPendingItem};
 pub use onepassword::{
     OnePasswordAccount, OnePasswordConnection, OnePasswordProbe, OnePasswordProvider,
 };
+pub use protonpass::{ProtonPassConnection, ProtonPassProbe, ProtonPassProvider};
 pub use reference::{VaultProviderId, VaultReference};
 
 pub const DEFAULT_VAULT_SERVICE: &str = "ai.everything.vault";
@@ -44,8 +48,6 @@ pub enum VaultError {
     MissingSecret,
     #[error("vault item has no {0} field")]
     MissingField(String),
-    #[error("vault provider {0} is not available yet; see {1}")]
-    ProviderNotAvailable(&'static str, &'static str),
     #[error("vault provider {0} is not connected; run everything vault connect")]
     ProviderDisconnected(&'static str),
     #[error("vault provider {0} is locked or not signed in; approve the sign-in and retry")]
@@ -117,17 +119,22 @@ impl VaultListing {
 pub struct VaultSettings {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub onepassword: Option<OnePasswordConnection>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub protonpass: Option<ProtonPassConnection>,
 }
 
 impl VaultSettings {
     pub fn is_empty(&self) -> bool {
-        self.onepassword.is_none()
+        self.onepassword.is_none() && self.protonpass.is_none()
     }
 
     pub fn validate(&self) -> Result<(), VaultError> {
         self.onepassword
             .as_ref()
-            .map_or(Ok(()), OnePasswordConnection::validate)
+            .map_or(Ok(()), OnePasswordConnection::validate)?;
+        self.protonpass
+            .as_ref()
+            .map_or(Ok(()), ProtonPassConnection::validate)
     }
 }
 
@@ -159,6 +166,7 @@ pub(crate) struct VaultSearch {
 pub struct VaultService {
     local: Arc<LocalVaultProvider>,
     onepassword: Arc<OnePasswordProvider>,
+    protonpass: Arc<ProtonPassProvider>,
 }
 
 impl VaultService {
@@ -166,14 +174,21 @@ impl VaultService {
         store: Store,
         native: NativeCredentialStore,
         settings: SettingsRepository,
+        protonpass_session: PathBuf,
     ) -> Self {
+        let local = Arc::new(LocalVaultProvider::new(
+            store,
+            native,
+            service_from_environment(),
+        ));
         Self {
-            local: Arc::new(LocalVaultProvider::new(
-                store,
-                native,
-                service_from_environment(),
+            onepassword: Arc::new(OnePasswordProvider::new(settings.clone())),
+            protonpass: Arc::new(ProtonPassProvider::new(
+                settings,
+                Arc::clone(&local),
+                protonpass_session,
             )),
-            onepassword: Arc::new(OnePasswordProvider::new(settings)),
+            local,
         }
     }
 
@@ -189,6 +204,7 @@ impl VaultService {
         }
         let local = self.local.status(cancellation.clone()).await;
         let onepassword = self.onepassword.status(cancellation.clone()).await;
+        let protonpass = self.protonpass.status(cancellation.clone()).await;
         if cancellation.is_cancelled() {
             return Err(VaultError::Cancelled);
         }
@@ -202,7 +218,10 @@ impl VaultService {
                     provider: VaultProviderId::OnePassword,
                     status: onepassword,
                 },
-                not_available(VaultProviderId::ProtonPass, "#221"),
+                VaultProviderState {
+                    provider: VaultProviderId::ProtonPass,
+                    status: protonpass,
+                },
             ],
             items: self.local.search("", &[], limit, cancellation).await?,
             incomplete: self.local.incomplete(limit).await?,
@@ -236,11 +255,17 @@ impl VaultService {
         cancellation: CancellationToken,
     ) -> Result<VaultSearch, VaultError> {
         let mut items = self.search_local(query, kinds, limit).await?;
-        let mut unavailable = vec![not_available(VaultProviderId::ProtonPass, "#221")];
-        if items.len() < limit {
-            let status = match self
-                .onepassword
-                .search(query, kinds, limit - items.len(), cancellation)
+        let mut unavailable = Vec::new();
+        let providers: [(VaultProviderId, &dyn VaultProvider); 2] = [
+            (VaultProviderId::OnePassword, self.onepassword.as_ref()),
+            (VaultProviderId::ProtonPass, self.protonpass.as_ref()),
+        ];
+        for (provider, external) in providers {
+            if items.len() >= limit {
+                break;
+            }
+            let status = match external
+                .search(query, kinds, limit - items.len(), cancellation.clone())
                 .await
             {
                 Ok(found) => {
@@ -254,10 +279,7 @@ impl VaultService {
                     reason: error.to_string(),
                 }),
             };
-            unavailable.extend(status.map(|status| VaultProviderState {
-                provider: VaultProviderId::OnePassword,
-                status,
-            }));
+            unavailable.extend(status.map(|status| VaultProviderState { provider, status }));
         }
         Ok(VaultSearch { items, unavailable })
     }
@@ -270,25 +292,32 @@ impl VaultService {
         match reference.provider() {
             VaultProviderId::Local => self.local.resolve(reference, cancellation).await,
             VaultProviderId::OnePassword => self.onepassword.resolve(reference, cancellation).await,
-            provider => Err(unavailable_provider(provider)),
+            VaultProviderId::ProtonPass => self.protonpass.resolve(reference, cancellation).await,
         }
     }
 
-    pub(crate) async fn connect(
+    pub(crate) async fn connect_onepassword(
         &self,
-        provider: VaultProviderId,
         binary: PathBuf,
         account: Option<String>,
         cancellation: CancellationToken,
     ) -> Result<OnePasswordProbe, VaultError> {
-        match provider {
-            VaultProviderId::OnePassword => {
-                self.onepassword
-                    .connect(binary, account, cancellation)
-                    .await
-            }
-            provider => Err(unavailable_provider(provider)),
-        }
+        self.onepassword
+            .connect(binary, account, cancellation)
+            .await
+    }
+
+    pub(crate) async fn connect_protonpass(
+        &self,
+        binary: PathBuf,
+        token: Option<SecretTransfer>,
+        cancellation: CancellationToken,
+    ) -> Result<(ProtonPassProbe, Option<VaultReference>), VaultError> {
+        self.protonpass.connect(binary, token, cancellation).await
+    }
+
+    pub(crate) async fn forget_protonpass_token(&self, token: &VaultReference) {
+        self.protonpass.forget_token(token).await;
     }
 
     pub(crate) async fn disconnect(
@@ -298,7 +327,8 @@ impl VaultService {
     ) -> Result<(), VaultError> {
         match provider {
             VaultProviderId::OnePassword => self.onepassword.disconnect(cancellation).await,
-            provider => Err(unavailable_provider(provider)),
+            VaultProviderId::ProtonPass => self.protonpass.disconnect(cancellation).await,
+            VaultProviderId::Local => Err(VaultError::InvalidReference),
         }
     }
 }
@@ -309,24 +339,9 @@ pub(crate) fn item_summary(
 ) -> Result<VaultItemSummary, VaultError> {
     match reference.provider() {
         VaultProviderId::Local => local::ready_summary(store, reference),
-        VaultProviderId::OnePassword => onepassword::cached_summary(reference),
-        provider => Err(unavailable_provider(provider)),
-    }
-}
-
-fn unavailable_provider(provider: VaultProviderId) -> VaultError {
-    match provider {
-        VaultProviderId::ProtonPass => VaultError::ProviderNotAvailable("protonpass", "#221"),
-        VaultProviderId::Local | VaultProviderId::OnePassword => VaultError::InvalidReference,
-    }
-}
-
-fn not_available(provider: VaultProviderId, issue: &'static str) -> VaultProviderState {
-    VaultProviderState {
-        provider,
-        status: ProviderStatus::Unavailable {
-            reason: VaultError::ProviderNotAvailable(provider.as_str(), issue).to_string(),
-        },
+        VaultProviderId::OnePassword | VaultProviderId::ProtonPass => {
+            external::cached_summary(reference)
+        }
     }
 }
 
