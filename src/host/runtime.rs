@@ -87,6 +87,8 @@ pub enum HostError {
     #[error(transparent)]
     ChatGpt(#[from] super::chatgpt::ChatGptError),
     #[error(transparent)]
+    Vault(#[from] crate::vault::VaultError),
+    #[error(transparent)]
     WorkerProtocol(#[from] crate::worker::WorkerError),
     #[error(transparent)]
     Json(#[from] serde_json::Error),
@@ -145,6 +147,7 @@ pub(super) struct HostInner {
     pub(super) settings_service: SettingsService,
     pub(super) settings_agents: Arc<super::settings::agent::SettingsAgentRuntime>,
     pub(super) credentials: CredentialVault,
+    pub(super) vault: crate::vault::VaultService,
     pub(super) chatgpt: super::chatgpt::ChatGptAccounts,
     pub(super) devices: DeviceEndpoint,
     pub(super) registry: Arc<ToolRegistry>,
@@ -453,6 +456,7 @@ impl HostService {
         let (publication_updates, publication) = watch::channel(Default::default());
         let inner = Arc::new(HostInner {
             inbox: HostInbox::new(agent.store()),
+            vault: crate::vault::VaultService::new(agent.store(), credentials.native_store()),
             agent,
             settings,
             settings_service,
@@ -1471,6 +1475,31 @@ pub(super) fn public_failure(error: &HostError) -> LocalFailure {
                     LocalFailureCode::Unavailable
                 },
                 message,
+            };
+        }
+        HostError::Vault(
+            error @ (crate::vault::VaultError::InvalidReference
+            | crate::vault::VaultError::InvalidItem(_)
+            | crate::vault::VaultError::InvalidMetadata(_)
+            | crate::vault::VaultError::NotFound
+            | crate::vault::VaultError::NotReady
+            | crate::vault::VaultError::MissingField(_)
+            | crate::vault::VaultError::MissingSecret
+            | crate::vault::VaultError::ProviderNotAvailable(..)
+            | crate::vault::VaultError::Capacity
+            | crate::vault::VaultError::Cancelled
+            | crate::vault::VaultError::Credential(_)),
+        ) => {
+            return LocalFailure {
+                code: match error {
+                    crate::vault::VaultError::Capacity => LocalFailureCode::Busy,
+                    crate::vault::VaultError::MissingSecret
+                    | crate::vault::VaultError::ProviderNotAvailable(..)
+                    | crate::vault::VaultError::Cancelled
+                    | crate::vault::VaultError::Credential(_) => LocalFailureCode::Unavailable,
+                    _ => LocalFailureCode::InvalidRequest,
+                },
+                message: error.to_string(),
             };
         }
         _ => (

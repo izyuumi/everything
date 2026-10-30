@@ -153,6 +153,9 @@ pub enum OwnerQuery {
     Command {
         command_id: CommandId,
     },
+    VaultList {
+        limit: usize,
+    },
 }
 
 impl OwnerQuery {
@@ -172,7 +175,7 @@ impl OwnerQuery {
         }
         if matches!(
             self,
-            Self::Conversations { limit } | Self::Tasks { limit, .. } | Self::Devices { limit } | Self::Approvals { limit, .. }
+            Self::Conversations { limit } | Self::Tasks { limit, .. } | Self::Devices { limit } | Self::Approvals { limit, .. } | Self::VaultList { limit }
                 if !(1..=100).contains(limit)
         ) {
             return Err("query limit must be between one and one hundred");
@@ -472,6 +475,12 @@ pub enum OwnerOperation {
         note: String,
     },
     ReconcileDrained,
+    VaultPut {
+        item: crate::vault::VaultPutRequest,
+    },
+    VaultRemove {
+        id: uuid::Uuid,
+    },
 }
 
 impl OwnerOperation {
@@ -556,6 +565,8 @@ impl OwnerOperation {
             .map_err(|_| "invalid pairing approval"),
             Self::ChatGpt { operation } => operation.validate(),
             Self::ChatGptModels { binding } => crate::host::chatgpt::validate_binding(binding),
+            Self::VaultPut { item } => item.validate().map_err(|_| "invalid vault item"),
+            Self::VaultRemove { id } if id.is_nil() => Err("invalid vault item ID"),
             _ => Ok(()),
         }
     }
@@ -670,6 +681,9 @@ pub enum OwnerQueryResult {
     },
     Command {
         receipt: Option<CommandReceipt>,
+    },
+    VaultList {
+        listing: crate::vault::VaultListing,
     },
 }
 
@@ -837,6 +851,9 @@ impl OwnerQueryResult {
                 keys.validate().is_ok() && keys.fingerprint() == *fingerprint
             }
             (OwnerQuery::Devices { limit }, Self::Devices { devices }) => devices.len() <= *limit,
+            (OwnerQuery::VaultList { limit }, Self::VaultList { listing }) => {
+                listing.validate_for(*limit).is_ok()
+            }
             (OwnerQuery::Command { command_id }, Self::Command { receipt }) => receipt
                 .as_ref()
                 .is_none_or(|receipt| receipt.command_id == *command_id),
@@ -940,6 +957,10 @@ pub enum OwnerOperationResult {
         receipt: CommandReceipt,
     },
     Applied,
+    VaultItemAdded {
+        #[serde(rename = "ref")]
+        reference: crate::vault::VaultReference,
+    },
     SettingsReceipt {
         operation: Box<crate::host::settings::SettingsOperationInspection>,
         settings: Option<Box<crate::host::settings::HostSettings>>,
@@ -1157,6 +1178,7 @@ impl OwnerOperationResult {
             }
             (
                 OwnerOperation::Credential { .. }
+                | OwnerOperation::VaultRemove { .. }
                 | OwnerOperation::RevokeWorkerPeer { .. }
                 | OwnerOperation::RevokeDevice { .. }
                 | OwnerOperation::WakeTask { .. }
@@ -1164,6 +1186,9 @@ impl OwnerOperationResult {
                 Self::Applied,
             ) => true,
             (OwnerOperation::ResumeInterrupted { .. }, Self::Applied) => true,
+            (OwnerOperation::VaultPut { .. }, Self::VaultItemAdded { reference }) => {
+                reference.local_id().is_ok() && reference.field().is_none()
+            }
             (
                 OwnerOperation::ChatGpt {
                     operation:

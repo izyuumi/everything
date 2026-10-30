@@ -274,6 +274,9 @@ impl HostInner {
                 })
                 .await
             }
+            OwnerQuery::VaultList { limit } => Ok(OwnerQueryResult::VaultList {
+                listing: self.vault.list(limit, cancellation).await?,
+            }),
             OwnerQuery::Command { command_id } => {
                 self.blocking(move |host| {
                     Ok(OwnerQueryResult::Command {
@@ -514,6 +517,19 @@ impl HostInner {
                 let _mutation = self.mutation.lock().await;
                 self.ensure_accepting()?;
                 self.credentials.apply(operation).await?;
+                Ok(OwnerOperationResult::Applied)
+            }
+            OwnerOperation::VaultPut { item } => {
+                let _mutation = self.mutation.lock().await;
+                self.ensure_accepting()?;
+                Ok(OwnerOperationResult::VaultItemAdded {
+                    reference: self.vault.put(item).await?,
+                })
+            }
+            OwnerOperation::VaultRemove { id } => {
+                let _mutation = self.mutation.lock().await;
+                self.ensure_accepting()?;
+                self.vault.remove(id).await?;
                 Ok(OwnerOperationResult::Applied)
             }
             OwnerOperation::ChatGpt { operation } => Ok(OwnerOperationResult::ChatGpt {

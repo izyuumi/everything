@@ -69,6 +69,10 @@ impl SecretTransfer {
     pub fn new(value: String) -> Result<Self, CredentialError> {
         printable_secret(value.into_bytes()).map(|secret| Self(Arc::new(secret)))
     }
+
+    pub(crate) fn expose(&self) -> &[u8] {
+        self.0.expose()
+    }
 }
 
 impl fmt::Debug for SecretTransfer {

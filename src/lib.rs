@@ -25,6 +25,8 @@ pub mod tui;
 #[cfg(unix)]
 pub mod update;
 #[cfg(unix)]
+pub mod vault;
+#[cfg(unix)]
 pub mod worker;
 
 pub mod credentials;
