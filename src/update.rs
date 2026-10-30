@@ -89,10 +89,22 @@ pub enum UpdateError {
     },
     #[error("codesign could not inspect {}: {detail}", path.display())]
     Codesign { path: PathBuf, detail: String },
+    #[error("could not run codesign on {}: {source}", path.display())]
+    CodesignSpawn {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
     #[error("{0}")]
     SignaturePolicy(String),
-    #[error("launchd service restart failed: {0}")]
-    Service(#[from] ServiceError),
+    #[error(
+        "everything {version} was installed, but restarting the launchd service failed: {source}; restart it with `everything service stop` and `everything service start`"
+    )]
+    ServiceRestart {
+        version: String,
+        #[source]
+        source: ServiceError,
+    },
     #[error("update was cancelled")]
     Cancelled,
 }
@@ -336,7 +348,12 @@ pub async fn run(
         executable.display(),
         release.tag_name
     );
-    restart_service(&executable, state_directory, cancellation).await
+    restart_service(&executable, state_directory, cancellation)
+        .await
+        .map_err(|source| UpdateError::ServiceRestart {
+            version: available.to_string(),
+            source,
+        })
 }
 
 fn target_triple() -> Option<&'static str> {
@@ -516,7 +533,7 @@ async fn restart_service(
     executable: &Path,
     state_directory: PathBuf,
     cancellation: CancellationToken,
-) -> Result<(), UpdateError> {
+) -> Result<(), ServiceError> {
     let launch_agents = std::env::var_os("HOME")
         .map(|home| PathBuf::from(home).join("Library/LaunchAgents"))
         .ok_or(ServiceError::UnsafePath("HOME is unavailable"))?;
@@ -532,7 +549,7 @@ async fn restart_service(
     _executable: &Path,
     _state_directory: PathBuf,
     _cancellation: CancellationToken,
-) -> Result<(), UpdateError> {
+) -> Result<(), ServiceError> {
     Ok(())
 }
 
@@ -581,9 +598,9 @@ async fn codesign(arguments: &[&str], path: &Path) -> Result<std::process::Outpu
         .kill_on_drop(true)
         .output()
         .await
-        .map_err(|source| UpdateError::Codesign {
+        .map_err(|source| UpdateError::CodesignSpawn {
             path: path.to_owned(),
-            detail: source.to_string(),
+            source,
         })
 }
 
