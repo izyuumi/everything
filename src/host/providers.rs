@@ -216,24 +216,7 @@ impl HostProviderFactory {
         }
         let secret =
             std::str::from_utf8(credential.expose()).map_err(|_| CredentialError::InvalidSecret)?;
-        let provider: Arc<dyn ModelProvider> = match configuration.provider {
-            ProviderKind::Anthropic => {
-                let mut provider = AnthropicConfig::new(secret.to_owned())?
-                    .with_default_max_output_tokens(configuration.max_output_tokens)?;
-                if let ProviderEndpoint::Loopback(endpoint) = &configuration.endpoint {
-                    provider = provider.with_loopback_endpoint(endpoint)?;
-                }
-                Arc::new(AnthropicProvider::with_config(provider)?)
-            }
-            ProviderKind::OpenAi => {
-                let mut provider = OpenAiConfig::new(secret)?;
-                if let ProviderEndpoint::Loopback(endpoint) = &configuration.endpoint {
-                    provider = provider.with_loopback_endpoint(endpoint)?;
-                }
-                Arc::new(OpenAiProvider::with_config(provider)?)
-            }
-        };
-        Ok(provider)
+        Ok(api_key_provider(configuration, secret)?)
     }
 
     async fn chatgpt_provider(
@@ -252,6 +235,29 @@ impl HostProviderFactory {
             ChatGptBearer::new(self.credentials.clone(), binding.clone(), cancellation).await?;
         Ok(Some(OpenAiConfig::chatgpt_plan(Arc::new(bearer))?))
     }
+}
+
+pub fn api_key_provider(
+    configuration: &ConversationConfig,
+    secret: &str,
+) -> Result<Arc<dyn ModelProvider>, ModelError> {
+    Ok(match configuration.provider {
+        ProviderKind::Anthropic => {
+            let mut provider = AnthropicConfig::new(secret.to_owned())?
+                .with_default_max_output_tokens(configuration.max_output_tokens)?;
+            if let ProviderEndpoint::Loopback(endpoint) = &configuration.endpoint {
+                provider = provider.with_loopback_endpoint(endpoint)?;
+            }
+            Arc::new(AnthropicProvider::with_config(provider)?)
+        }
+        ProviderKind::OpenAi => {
+            let mut provider = OpenAiConfig::new(secret)?;
+            if let ProviderEndpoint::Loopback(endpoint) = &configuration.endpoint {
+                provider = provider.with_loopback_endpoint(endpoint)?;
+            }
+            Arc::new(OpenAiProvider::with_config(provider)?)
+        }
+    })
 }
 
 fn settings_configuration(

@@ -6,8 +6,9 @@ use tokio::sync::mpsc::UnboundedSender;
 use tokio_util::sync::CancellationToken;
 
 use crate::agent::{ConversationConfig, RecordedMessage, TextCommand};
+use crate::host::chatgpt::{ChatGptOperation, ChatGptStatus};
 use crate::host::client::{HostClient, HostClientError};
-use crate::host::settings::ModelCredentialSource;
+use crate::host::settings::{HostSettings, ModelCredentialReference, ModelCredentialSource};
 use crate::ipc::{
     ApprovalLookup, ConversationSummary, OwnerCommand, OwnerOperation, OwnerOperationResult,
     OwnerQuery, OwnerQueryResult, RequestedRunOptions,
@@ -34,6 +35,12 @@ pub enum TuiError {
         .0.display()
     )]
     Unavailable(PathBuf),
+    #[error("{0}")]
+    Setup(String),
+    #[error("cancelled")]
+    Interrupted,
+    #[error("the terminal UI needs an interactive terminal; run `everything --help` for commands")]
+    NoTerminal,
 }
 
 #[derive(Clone, Debug)]
@@ -294,25 +301,49 @@ impl Host {
         Ok(())
     }
 
+    pub async fn settings(&self) -> Result<HostSettings, TuiError> {
+        match self.query(OwnerQuery::Settings).await? {
+            OwnerQueryResult::Settings { settings } => Ok(*settings),
+            _ => Err(TuiError::Invalid("unexpected settings response")),
+        }
+    }
+
+    pub async fn operate(
+        &self,
+        operation: OwnerOperation,
+    ) -> Result<OwnerOperationResult, TuiError> {
+        Ok(self
+            .client
+            .operate(operation, CommandId::new(), self.cancellation.clone())
+            .await?)
+    }
+
+    pub async fn chatgpt(&self, operation: ChatGptOperation) -> Result<ChatGptStatus, TuiError> {
+        match self.operate(OwnerOperation::ChatGpt { operation }).await? {
+            OwnerOperationResult::ChatGpt { status } => Ok(*status),
+            _ => Err(TuiError::Invalid("unexpected ChatGPT response")),
+        }
+    }
+
     pub async fn chatgpt_models(&self) -> Result<Vec<(String, String)>, TuiError> {
-        let OwnerQueryResult::Settings { settings } = self.query(OwnerQuery::Settings).await?
-        else {
-            return Err(TuiError::Invalid("unexpected settings response"));
-        };
-        let binding = settings
+        let binding = self
+            .settings()
+            .await?
             .model_credentials
             .into_iter()
             .find(|binding| binding.source == ModelCredentialSource::ChatGpt)
             .ok_or(TuiError::Invalid(
                 "no ChatGPT sign-in is selected; type /model MODEL_ID instead",
             ))?;
+        self.plan_models(binding).await
+    }
+
+    pub async fn plan_models(
+        &self,
+        binding: ModelCredentialReference,
+    ) -> Result<Vec<(String, String)>, TuiError> {
         let OwnerOperationResult::ChatGptModels { models, .. } = self
-            .client
-            .operate(
-                OwnerOperation::ChatGptModels { binding },
-                CommandId::new(),
-                self.cancellation.clone(),
-            )
+            .operate(OwnerOperation::ChatGptModels { binding })
             .await?
         else {
             return Err(TuiError::Invalid("unexpected models response"));

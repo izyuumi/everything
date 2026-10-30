@@ -567,7 +567,7 @@ fn draw_completions(frame: &mut Frame, app: &App, input: Rect) {
     );
 }
 
-fn centered(area: Rect, width: u16, height: u16) -> Rect {
+pub(super) fn centered(area: Rect, width: u16, height: u16) -> Rect {
     let width = width
         .min(area.width.saturating_sub(2))
         .max(10.min(area.width));
@@ -582,7 +582,7 @@ fn centered(area: Rect, width: u16, height: u16) -> Rect {
     }
 }
 
-fn overlay_block(
+pub(super) fn overlay_block(
     title: String,
     color: ratatui::style::Color,
     footer: &'static str,
