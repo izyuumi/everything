@@ -207,6 +207,39 @@ impl LaunchdService {
         }
     }
 
+    pub async fn restart_if_running(
+        &self,
+        cancellation: CancellationToken,
+    ) -> Result<bool, ServiceError> {
+        #[cfg(target_os = "macos")]
+        {
+            let status = self.status(cancellation.clone()).await?;
+            if !status.installed || !status.loaded {
+                return Ok(false);
+            }
+            let same_executable = self
+                .filesystem(cancellation.clone(), |service| {
+                    service.installed_executable_matches()
+                })
+                .await?;
+            if !same_executable {
+                return Ok(false);
+            }
+            self.require_success(
+                "kickstart",
+                vec!["kickstart".to_owned(), "-k".to_owned(), service_target()],
+                cancellation,
+            )
+            .await?;
+            Ok(true)
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = cancellation;
+            Ok(false)
+        }
+    }
+
     pub async fn status(
         &self,
         cancellation: CancellationToken,
@@ -387,6 +420,22 @@ impl LaunchdService {
             ));
         }
         Ok(())
+    }
+
+    #[cfg(target_os = "macos")]
+    fn installed_executable_matches(&self) -> Result<bool, ServiceError> {
+        let plist = Value::from_file(self.plist_path())?;
+        let program = plist
+            .as_dictionary()
+            .and_then(|dictionary| dictionary.get("ProgramArguments"))
+            .and_then(Value::as_array)
+            .and_then(|arguments| arguments.first())
+            .and_then(Value::as_string);
+        Ok(program.is_some_and(|program| {
+            Path::new(program)
+                .canonicalize()
+                .is_ok_and(|program| program == self.executable)
+        }))
     }
 
     #[cfg(target_os = "macos")]

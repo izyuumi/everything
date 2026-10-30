@@ -23,6 +23,8 @@ pub mod transport;
 #[cfg(unix)]
 pub mod tui;
 #[cfg(unix)]
+pub mod update;
+#[cfg(unix)]
 pub mod worker;
 
 pub mod credentials;

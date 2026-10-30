@@ -52,6 +52,10 @@ Initialization supports explicit `--conversation` and `--command-id` values for 
 
 `everything relay on --origin wss://relay.example.com` and `everything relay off` set or clear this Host's relay origin, offline through the state lease or through a running Host's owner settings (which then needs a restart). `everything relay serve|enroll|revoke|devices` run or administer the blind relay server on `--database PATH`, defaulting to `relay.sqlite3` in the state directory. `everything relay status` prints JSON for both the Host connection and that server database. See [relay](../architecture/relay.md).
 
+## Update
+
+`everything update` installs the newest stable release over the running binary; `--beta` follows the single `v<version>-beta` prerelease instead, and `--check` only prints `channel=… current=… available=… tag=… status=newer|up-to-date` plus a sentence and exits 0. On macOS a team-signed binary is never replaced by an unsigned, ad-hoc or differently signed one unless `--allow-unsigned` is given, because the Sign in with ChatGPT keychain item would become unreadable. A loaded launchd service running this same executable is restarted. Details, integrity limits and `EVERYTHING_UPDATE_BASE_URL` are in [CLI releases](releases.md#update).
+
 ## Local proxy and verification boundaries
 
 A new conversation can explicitly select a local proxy using `--loopback-endpoint http://127.0.0.1:PORT/v1/messages` for Anthropic, or `/v1/responses` for OpenAI. Literal IPv6 loopback is also supported. The full endpoint is persisted as immutable configuration; later commands retain it without repeating the flag. External custom endpoints, endpoint credentials, queries, and fragments are rejected. The foreground path still reads credentials from the selected environment variable. A running host does not: a loopback endpoint needs an explicit `credential_environment` binding, described in the [host guide](host.md#owner-inspection-and-configuration). When a proxied task stops as provider-unavailable without such a binding, the CLI prints the input to use.
