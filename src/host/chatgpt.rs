@@ -93,7 +93,7 @@ pub enum ChatGptError {
     #[error(
         "the ChatGPT tokens could not be saved to the credential store ({0}); they are kept in memory until the host stops and saving is retried on next use"
     )]
-    Unsaved(CredentialError),
+    Unsaved(#[source] CredentialError),
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -942,7 +942,7 @@ impl ChatGptBearer {
         if let Some(record) = &record
             && unsaved(&records, &self.binding)
         {
-            save(&self.vault, &mut records, &self.binding, record, false).await?;
+            keep_unsaved(save(&self.vault, &mut records, &self.binding, record, false).await)?;
         }
         let mut record = record
             .filter(Record::signed_in)
@@ -989,7 +989,7 @@ impl ChatGptBearer {
                 }
                 record.expires_at = Some(now().saturating_add(expires_in(&tokens)));
                 record.saved_at = now();
-                save(&self.vault, &mut records, &self.binding, &record, false).await?;
+                keep_unsaved(save(&self.vault, &mut records, &self.binding, &record, false).await)?;
                 if !record.plan_usage() {
                     return Err(ChatGptError::PlanUsageDisabled);
                 }
@@ -1088,6 +1088,16 @@ async fn save(
         cached.saved = true;
     }
     Ok(())
+}
+
+fn keep_unsaved(result: Result<(), ChatGptError>) -> Result<(), ChatGptError> {
+    match result {
+        Err(error @ ChatGptError::Unsaved(_)) => {
+            tracing::warn!(error = %error, "serving ChatGPT tokens from memory");
+            Ok(())
+        }
+        result => result,
+    }
 }
 
 fn unsaved(records: &ChatGptRecords, binding: &ModelCredentialReference) -> bool {

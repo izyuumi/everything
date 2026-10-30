@@ -24,7 +24,7 @@ Users without an API key can use their ChatGPT plan locally. Everything else kee
 
 Amended 2026-10-31. A sign-in must survive host restarts, rebuilds and updates.
 
-- **Refresh is never dropped.** The in-memory record is replaced before the native write and marked unsaved until the write succeeds. A failed write (for example a busy store or a keychain access denial) returns a clear unsaved error, keeps the rotated tokens for this host run and retries the save before the next bearer use. Previously the cache entry was removed before the write, so a failed write lost the rotated refresh token and the next start hit `refresh_token_reused`.
+- **Refresh is never dropped.** The in-memory record is replaced before the native write and marked unsaved until the write succeeds. A failed refresh write (for example a busy store or a keychain access denial) is logged as a warning, the rotated tokens keep serving requests for this host run, and every later bearer use retries the save. Sign-in and sign-out writes still return the unsaved error. Previously the cache entry was removed before the write, so a failed write lost the rotated refresh token and the next start hit `refresh_token_reused`.
 - **Native by default.** `everything chatgpt sign-in` without `--storage` creates a `native` binding. The Mac app already did.
 - **Stable code signing on macOS.** The keychain item's access list trusts the creating binary's designated requirement. Binaries are signed with the fixed identifier `ai.everything.cli` and one Apple certificate through `scripts/sign-dev.sh`, which local builds and future release CI share.
 
