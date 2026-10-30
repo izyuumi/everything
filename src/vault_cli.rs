@@ -1,5 +1,5 @@
 use std::io::{self, IsTerminal, Read, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use clap::{Args, Subcommand, ValueEnum};
 use everything::host::chatgpt::ChatGptOperation;
@@ -8,9 +8,10 @@ use everything::host::credentials::SecretTransfer;
 use everything::host::settings::{CredentialStorage, ModelCredentialSource};
 use everything::ipc::{OwnerOperation, OwnerOperationResult, OwnerQuery, OwnerQueryResult};
 use everything::protocol::CommandId;
+use everything::vault::protonpass::child_environment;
 use everything::vault::{
-    MAX_VAULT_LIST, OnePasswordProbe, ProviderStatus, VaultError, VaultItemKind, VaultItemMetadata,
-    VaultProviderId, VaultProviderState, VaultPutRequest, VaultReference,
+    MAX_VAULT_LIST, OnePasswordProbe, ProtonPassProbe, ProviderStatus, VaultItemKind,
+    VaultItemMetadata, VaultProviderId, VaultProviderState, VaultPutRequest, VaultReference,
 };
 use serde::Serialize;
 use tokio_util::sync::CancellationToken;
@@ -207,6 +208,8 @@ struct VaultConnectArguments {
     #[arg(long, value_name = "UUID")]
     account: Option<String>,
     #[arg(long)]
+    web: bool,
+    #[arg(long)]
     json: bool,
 }
 
@@ -244,40 +247,155 @@ pub async fn run(
         VaultCommand::Remove(arguments) => remove(client, arguments, cancellation).await,
         VaultCommand::Connect(arguments) => match arguments.provider {
             ExternalProvider::Onepassword => connect(client, arguments, cancellation).await,
-            ExternalProvider::Protonpass => Err(protonpass()),
-        },
-        VaultCommand::Disconnect(arguments) => match arguments.provider {
-            ExternalProvider::Onepassword => {
-                client
-                    .operate(
-                        OwnerOperation::VaultDisconnect {
-                            provider: VaultProviderId::OnePassword,
-                        },
-                        CommandId::new(),
-                        cancellation,
-                    )
-                    .await?;
-                print_lines(vec!["disconnected 1password".into()]).await
+            ExternalProvider::Protonpass => {
+                connect_protonpass(client, arguments, cancellation).await
             }
-            ExternalProvider::Protonpass => Err(protonpass()),
         },
+        VaultCommand::Disconnect(arguments) => {
+            let provider = match arguments.provider {
+                ExternalProvider::Onepassword => VaultProviderId::OnePassword,
+                ExternalProvider::Protonpass => VaultProviderId::ProtonPass,
+            };
+            client
+                .operate(
+                    OwnerOperation::VaultDisconnect { provider },
+                    CommandId::new(),
+                    cancellation,
+                )
+                .await?;
+            print_lines(vec![format!("disconnected {}", provider.as_str())]).await
+        }
     }
 }
 
-fn protonpass() -> CliError {
-    VaultError::ProviderNotAvailable(VaultProviderId::ProtonPass.as_str(), "#221").into()
+fn pinned_binary(
+    binary: Option<PathBuf>,
+    name: &str,
+    missing: &'static str,
+) -> Result<PathBuf, CliError> {
+    use std::os::unix::fs::PermissionsExt;
+    match binary {
+        Some(binary) if binary.is_absolute() => Ok(binary),
+        Some(_) => Err(CliError::VaultInput("--binary must be an absolute path")),
+        None => std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
+            .filter(|directory| directory.is_absolute())
+            .map(|directory| directory.join(name))
+            .find(|candidate| {
+                std::fs::metadata(candidate).is_ok_and(|metadata| {
+                    metadata.is_file() && metadata.permissions().mode() & 0o111 != 0
+                })
+            })
+            .ok_or(CliError::VaultInput(missing)),
+    }
 }
 
-fn find_op() -> Option<PathBuf> {
-    use std::os::unix::fs::PermissionsExt;
-    std::env::split_paths(&std::env::var_os("PATH")?)
-        .filter(|directory| directory.is_absolute())
-        .map(|directory| directory.join("op"))
-        .find(|candidate| {
-            std::fs::metadata(candidate).is_ok_and(|metadata| {
-                metadata.is_file() && metadata.permissions().mode() & 0o111 != 0
+async fn connect_protonpass(
+    client: &HostClient,
+    arguments: VaultConnectArguments,
+    cancellation: CancellationToken,
+) -> Result<(), CliError> {
+    if arguments.account.is_some() {
+        return Err(CliError::VaultInput("--account applies only to 1password"));
+    }
+    let binary = pinned_binary(
+        arguments.binary,
+        "pass-cli",
+        "pass-cli was not found on PATH; install the Proton Pass CLI or pass --binary",
+    )?;
+    eprintln!("using pass-cli at {}", binary.display());
+    let probe = |token: Option<SecretTransfer>| {
+        client.operate(
+            OwnerOperation::VaultConnect {
+                provider: VaultProviderId::ProtonPass,
+                binary: binary.clone(),
+                account: None,
+                token,
+            },
+            CommandId::new(),
+            cancellation.clone(),
+        )
+    };
+    let result = if arguments.web {
+        let first = probe(None).await?;
+        let OwnerOperationResult::VaultProtonPass {
+            probe: found,
+            connected,
+        } = &first
+        else {
+            return Err(CliError::OwnerInput);
+        };
+        if *connected {
+            first
+        } else {
+            web_login(&binary, &found.session_dir, &cancellation).await?;
+            probe(None).await?
+        }
+    } else {
+        let token =
+            tokio::task::spawn_blocking(|| {
+                if io::stdin().is_terminal() {
+                    transfer(read_hidden("Proton Pass personal access token")?)
+                } else {
+                    read_piped(vec!["token".to_owned()])?.remove("token").ok_or(
+                        CliError::VaultInput("pipe the personal access token on stdin"),
+                    )
+                }
             })
-        })
+            .await
+            .map_err(|_| CliError::Worker)??;
+        probe(Some(token)).await?
+    };
+    if arguments.json {
+        return write_json(result).await;
+    }
+    let OwnerOperationResult::VaultProtonPass {
+        probe:
+            ProtonPassProbe {
+                binary,
+                version,
+                signed_in: Some(account),
+                ..
+            },
+        connected: true,
+    } = result
+    else {
+        return Err(CliError::VaultInput(
+            "pass-cli is not signed in; nothing was connected",
+        ));
+    };
+    print_lines(vec![format!(
+        "connected protonpass\t{account}\tpass-cli {version} at {}",
+        binary.display()
+    )])
+    .await
+}
+
+async fn web_login(
+    binary: &Path,
+    session_dir: &Path,
+    cancellation: &CancellationToken,
+) -> Result<(), CliError> {
+    let mut command = tokio::process::Command::new(binary);
+    command
+        .arg("login")
+        .env_clear()
+        .envs(child_environment(session_dir))
+        .kill_on_drop(true);
+    if let Some(home) = std::env::var_os("HOME") {
+        command.env("HOME", home);
+    }
+    eprintln!(
+        "running pass-cli login; open the URL it prints and type any extra password at its own hidden prompt"
+    );
+    let mut child = command.spawn()?;
+    let status = tokio::select! {
+        () = cancellation.cancelled() => return Err(CliError::VaultInput("pass-cli login was cancelled")),
+        status = child.wait() => status?,
+    };
+    if !status.success() {
+        return Err(CliError::VaultInput("pass-cli login did not complete"));
+    }
+    Ok(())
 }
 
 async fn connect(
@@ -285,13 +403,14 @@ async fn connect(
     arguments: VaultConnectArguments,
     cancellation: CancellationToken,
 ) -> Result<(), CliError> {
-    let binary = match arguments.binary {
-        Some(binary) if binary.is_absolute() => binary,
-        Some(_) => return Err(CliError::VaultInput("--binary must be an absolute path")),
-        None => find_op().ok_or(CliError::VaultInput(
-            "op was not found on PATH; install the 1Password CLI 2.x or pass --binary",
-        ))?,
-    };
+    if arguments.web {
+        return Err(CliError::VaultInput("--web applies only to protonpass"));
+    }
+    let binary = pinned_binary(
+        arguments.binary,
+        "op",
+        "op was not found on PATH; install the 1Password CLI 2.x or pass --binary",
+    )?;
     eprintln!("using op at {}", binary.display());
     let probe = |account: Option<String>| {
         client.operate(
@@ -299,6 +418,7 @@ async fn connect(
                 provider: VaultProviderId::OnePassword,
                 binary: binary.clone(),
                 account,
+                token: None,
             },
             CommandId::new(),
             cancellation.clone(),

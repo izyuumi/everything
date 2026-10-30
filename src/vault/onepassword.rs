@@ -1,13 +1,8 @@
-use std::collections::BTreeMap;
-use std::path::{Component, Path, PathBuf};
-use std::process::Stdio;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Mutex, MutexGuard};
-use std::time::Duration;
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
-use tokio::io::AsyncReadExt;
 use tokio_util::sync::CancellationToken;
 use zeroize::Zeroizing;
 
@@ -15,6 +10,9 @@ use crate::credentials::CredentialSecret;
 use crate::host::settings::SettingsRepository;
 use crate::protocol::UnixMillis;
 
+use super::external::{
+    MAX_CACHED_ITEMS, ProviderCli, cached_summary, forget, remember, valid_binary_path,
+};
 use super::item::valid_host;
 use super::{
     ProviderStatus, VaultError, VaultItemKind, VaultItemMetadata, VaultItemSummary, VaultProvider,
@@ -22,19 +20,19 @@ use super::{
 };
 
 const PROVIDER: &str = "1password";
-const TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_LIST_BYTES: usize = 4 * 1_024 * 1_024;
 const MAX_SMALL_BYTES: usize = 64 * 1_024;
 const MAX_VALUE_BYTES: usize = 32_768;
-const MAX_STDERR_BYTES: usize = 4_096;
-const MAX_CACHED_ITEMS: usize = 1_024;
 const MAX_ACCOUNTS: usize = 32;
 const MAX_TEXT_CHARS: usize = 256;
 const MAX_LABEL_CHARS: usize = 128;
 const MAX_SITES: usize = 16;
-const MAX_PATH_BYTES: usize = 4_096;
 
-static ITEMS: Mutex<BTreeMap<VaultReference, VaultItemSummary>> = Mutex::new(BTreeMap::new());
+const OP: ProviderCli = ProviderCli {
+    provider: PROVIDER,
+    program: "op",
+    classify,
+};
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -185,7 +183,7 @@ impl OnePasswordProvider {
         limit: usize,
         cancellation: &CancellationToken,
     ) -> Result<Zeroizing<Vec<u8>>, VaultError> {
-        let result = run(binary, arguments, limit, cancellation).await;
+        let result = OP.run(binary, arguments, &[], limit, cancellation).await;
         match &result {
             Ok(_) => self.locked.store(false, Ordering::Relaxed),
             Err(VaultError::ProviderLocked(_)) => self.locked.store(true, Ordering::Relaxed),
@@ -200,7 +198,7 @@ impl OnePasswordProvider {
         account: Option<String>,
         cancellation: CancellationToken,
     ) -> Result<OnePasswordProbe, VaultError> {
-        executable(&binary)?;
+        OP.executable(&binary)?;
         let version = self
             .op(&binary, &["--version"], MAX_SMALL_BYTES, &cancellation)
             .await?;
@@ -262,9 +260,12 @@ impl OnePasswordProvider {
         cancellation: CancellationToken,
     ) -> Result<(), VaultError> {
         let connection = self.connection()?;
-        forget(&connection.account);
+        forget(
+            super::VaultProviderId::OnePassword,
+            &format!("{}/", connection.account),
+        );
         self.locked.store(false, Ordering::Relaxed);
-        executable(&connection.binary)?;
+        OP.executable(&connection.binary)?;
         match self
             .op(
                 &connection.binary,
@@ -288,7 +289,7 @@ impl VaultProvider for OnePasswordProvider {
             Err(error) => ProviderStatus::Unavailable {
                 reason: error.to_string(),
             },
-            Ok(connection) => match executable(&connection.binary) {
+            Ok(connection) => match OP.executable(&connection.binary) {
                 Err(error) => ProviderStatus::Unavailable {
                     reason: error.to_string(),
                 },
@@ -308,7 +309,7 @@ impl VaultProvider for OnePasswordProvider {
         cancellation: CancellationToken,
     ) -> Result<Vec<VaultItemSummary>, VaultError> {
         let connection = self.connection()?;
-        executable(&connection.binary)?;
+        OP.executable(&connection.binary)?;
         let output = self
             .op(
                 &connection.binary,
@@ -331,7 +332,11 @@ impl VaultProvider for OnePasswordProvider {
             .filter_map(|item| summary(&connection.account, item))
             .take(MAX_CACHED_ITEMS)
             .collect();
-        remember(&connection.account, &summaries);
+        remember(
+            super::VaultProviderId::OnePassword,
+            &format!("{}/", connection.account),
+            &summaries,
+        );
         Ok(summaries
             .into_iter()
             .filter(|summary| summary.matches(query, kinds))
@@ -366,7 +371,7 @@ impl VaultProvider for OnePasswordProvider {
         {
             return Err(VaultError::MissingField(field.to_owned()));
         }
-        executable(&connection.binary)?;
+        OP.executable(&connection.binary)?;
         let target = format!("op://{vault}/{item}/{field}");
         let value = self
             .op(
@@ -391,42 +396,6 @@ impl VaultProvider for OnePasswordProvider {
         }
         Ok(CredentialSecret::new(value.to_vec())?)
     }
-}
-
-pub(crate) fn cached_summary(reference: &VaultReference) -> Result<VaultItemSummary, VaultError> {
-    let key = VaultReference::from_parts(reference.provider(), reference.id(), None)?;
-    ITEMS
-        .lock()
-        .map_err(|_| VaultError::Worker)?
-        .get(&key)
-        .cloned()
-        .ok_or(VaultError::NotFound)
-}
-
-fn cache() -> MutexGuard<'static, BTreeMap<VaultReference, VaultItemSummary>> {
-    ITEMS.lock().unwrap_or_else(|poisoned| {
-        let mut items = poisoned.into_inner();
-        items.clear();
-        ITEMS.clear_poison();
-        items
-    })
-}
-
-fn remember(account: &str, summaries: &[VaultItemSummary]) {
-    let mut items = cache();
-    let prefix = format!("{account}/");
-    items.retain(|reference, _| !reference.id().starts_with(&prefix));
-    for summary in summaries {
-        if items.len() >= MAX_CACHED_ITEMS {
-            break;
-        }
-        items.insert(summary.reference.clone(), summary.clone());
-    }
-}
-
-fn forget(account: &str) {
-    let prefix = format!("{account}/");
-    cache().retain(|reference, _| !reference.id().starts_with(&prefix));
 }
 
 fn summary(account: &str, item: RawItem) -> Option<VaultItemSummary> {
@@ -518,64 +487,11 @@ fn sites(urls: &[RawUrl]) -> Vec<String> {
     sites
 }
 
-async fn run(
-    binary: &Path,
-    arguments: &[&str],
-    limit: usize,
-    cancellation: &CancellationToken,
-) -> Result<Zeroizing<Vec<u8>>, VaultError> {
-    let mut command = tokio::process::Command::new(binary);
-    command
-        .args(arguments)
-        .env_clear()
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .kill_on_drop(true);
-    if let Some(home) = std::env::var_os("HOME") {
-        command.env("HOME", home);
-    }
-    let mut child = command
-        .spawn()
-        .map_err(|_| failed("the pinned op binary could not be started"))?;
-    let (Some(stdout), Some(stderr)) = (child.stdout.take(), child.stderr.take()) else {
-        return Err(failed("the op pipes could not be opened"));
-    };
-    let work = async {
-        let mut output = Zeroizing::new(Vec::with_capacity(limit + 1));
-        let mut errors = Zeroizing::new(Vec::with_capacity(MAX_STDERR_BYTES + 1));
-        let mut stdout = stdout.take(u64::try_from(limit + 1).unwrap_or(u64::MAX));
-        let mut stderr = stderr.take(u64::try_from(MAX_STDERR_BYTES).unwrap_or(u64::MAX));
-        let (read, _) = tokio::join!(
-            stdout.read_to_end(&mut output),
-            stderr.read_to_end(&mut errors),
-        );
-        read.map_err(|_| failed("reading op output failed"))?;
-        if output.len() > limit {
-            return Err(failed("op output exceeded its size limit"));
-        }
-        let status = child
-            .wait()
-            .await
-            .map_err(|_| failed("waiting for op failed"))?;
-        if !status.success() {
-            return Err(classify(status.code(), &errors));
-        }
-        Ok(output)
-    };
-    tokio::select! {
-        () = cancellation.cancelled() => Err(VaultError::Cancelled),
-        () = tokio::time::sleep(TIMEOUT) => Err(failed("op timed out after 10 seconds")),
-        result = work => result,
-    }
-}
-
-fn classify(code: Option<i32>, stderr: &[u8]) -> VaultError {
-    let text = Zeroizing::new(String::from_utf8_lossy(stderr).to_lowercase());
+fn classify(text: &str) -> Option<VaultError> {
     if text.contains("signed in") || text.contains("sign in") {
-        return VaultError::ProviderLocked(PROVIDER);
+        return Some(VaultError::ProviderLocked(PROVIDER));
     }
-    if [
+    [
         "not found",
         "cannot be found",
         "isn't an item",
@@ -584,47 +500,15 @@ fn classify(code: Option<i32>, stderr: &[u8]) -> VaultError {
     ]
     .iter()
     .any(|needle| text.contains(needle))
-    {
-        return VaultError::NotFound;
-    }
-    failed(&match code {
-        Some(code) => format!("op exited with status {code}"),
-        None => "op was terminated by a signal".to_owned(),
-    })
-}
-
-fn executable(binary: &Path) -> Result<(), VaultError> {
-    use std::os::unix::fs::PermissionsExt;
-    if !valid_binary_path(binary) {
-        return Err(VaultError::InvalidItem(
-            "the op binary must be an absolute path without relative components",
-        ));
-    }
-    match std::fs::metadata(binary) {
-        Ok(metadata) if metadata.is_file() && metadata.permissions().mode() & 0o111 != 0 => Ok(()),
-        _ => Err(failed(&format!(
-            "the pinned op binary {} is missing or not executable",
-            binary.display()
-        ))),
-    }
+    .then_some(VaultError::NotFound)
 }
 
 fn failed(reason: &str) -> VaultError {
-    VaultError::ProviderFailed(PROVIDER, reason.to_owned())
+    OP.failed(reason)
 }
 
 fn malformed() -> VaultError {
-    failed("op returned output in an unexpected shape")
-}
-
-pub(crate) fn valid_binary_path(path: &Path) -> bool {
-    path.is_absolute()
-        && path
-            .to_str()
-            .is_some_and(|text| text.len() <= MAX_PATH_BYTES && !text.chars().any(char::is_control))
-        && path
-            .components()
-            .all(|component| matches!(component, Component::RootDir | Component::Normal(_)))
+    OP.malformed()
 }
 
 pub(crate) fn valid_account(value: &str) -> bool {

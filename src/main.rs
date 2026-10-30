@@ -814,6 +814,7 @@ async fn owner_cli(
                 &*operation,
                 everything::ipc::OwnerOperation::Credential { .. }
                     | everything::ipc::OwnerOperation::VaultPut { .. }
+                    | everything::ipc::OwnerOperation::VaultConnect { token: Some(_), .. }
             ) {
                 return Err(CliError::SensitiveOwnerInput);
             }
