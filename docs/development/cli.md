@@ -73,12 +73,14 @@ everything --state-dir /absolute/private/path chat --conversation CONVERSATION_U
 
 Read-only mode is the default. `--execution-mode trusted-workspace` permits authorized native writes inside the saved workspace. The mode is saved per native turn, so a later message in the same conversation can pass a different `--execution-mode`. In read-only mode `search_tools` omits write tools and reports in `diagnostics` that writes are unavailable; a direct `write_file` call returns a `read_only_mode` tool error naming the write-capable modes, and the CLI prints `writes are disabled in read-only mode; send the next message with --tools --execution-mode trusted-workspace (or full-host) to allow writes`. `--execution-mode full-host` exposes host-scoped capabilities, including shell, subject to exact operation approval. Arbitrary shell has full host access; path checks are not a sandbox. The registered tools are read_file, write_file, search_files, shell, and offline search_tools. The kernel can expand advertised schemas through successful local discovery without discarding native provider continuation.
 
-A required approval prints its exact request, arguments, scope, expiry, and UUID. Review it before a separate decision:
+With a running host and an interactive terminal, `chat` prompts for a required approval in place and continues the same turn, also accepting a decision made in another client; see the [host guide](host.md). `--no-wait` keeps the exit-and-resume behaviour below. The foreground path and non-interactive host use print the exact request, arguments, scope, expiry, and UUID, followed by the exact commands for a separate decision:
 
 ```sh
 everything --state-dir /absolute/private/path chat --conversation CONVERSATION_UUID --tools --resume --approve APPROVAL_UUID
 everything --state-dir /absolute/private/path chat --conversation CONVERSATION_UUID --tools --resume --deny APPROVAL_UUID
 ```
+
+`--resume` on a conversation without a pending turn, for example one whose turn already finished, explains how to read the saved reply with `status --conversation CONVERSATION_UUID --history` or start a new turn with `--message`.
 
 An uncertain provider attempt stops on normal resume. Inspect status, then explicitly authorize another potentially paid request with `--tools --resume --retry-uncertain`. This flag never re-executes an unknown broker operation. In-flight broker operations retain their original UUID for lookup; unknown effects and required cleanup reconciliation remain stopped.
 
