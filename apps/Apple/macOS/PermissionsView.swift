@@ -6,38 +6,35 @@ struct PermissionsView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Picker("Conversation", selection: $model.selectedConversation) {
-                Text("Choose a conversation").tag(Optional<OwnerID>.none)
-                ForEach(model.conversations) { conversation in
-                    Text(conversation.title).tag(Optional(conversation.id))
-                }
-            }
-            .disabled(!model.connected)
             HStack {
-                Text("Pending requests for this conversation").font(.caption).foregroundStyle(.secondary)
+                Text("Pending approvals across all conversations").font(.caption).foregroundStyle(.secondary)
                 Spacer()
-                Button("Refresh") { Task { await model.loadApprovals() } }.disabled(model.approvalLoading)
+                Button("Refresh") { Task { await model.loadApprovals() } }.disabled(model.approvalLoading || !model.connected)
             }
             List(model.approvals) { approval in
                 Button { Task { await model.inspect(approval) } } label: {
                     VStack(alignment: .leading) {
                         Text(approval.tool).font(.headline)
-                        Text("\(approval.argumentsBytes) bytes of arguments • Inspect before deciding")
+                        Text(title(approval.conversationID)).font(.caption).lineLimit(1)
+                        Text("Requested \(JSONSummary.date(approval.requestedAt)) • \(approval.argumentsBytes) bytes of arguments")
                             .font(.caption).foregroundStyle(.secondary)
                     }
                 }.buttonStyle(.plain)
             }
-            if model.approvalCursor != .null {
-                Button("Load next 20 requests") { Task { await model.loadApprovals(more: true) } }
-                    .disabled(model.approvalLoading || model.approvals.count >= 1000)
+            if model.approvalsLimited {
+                Text("Showing the first 500 pending approvals.").font(.caption).foregroundStyle(.secondary)
             }
             if model.approvals.isEmpty && !model.approvalLoading {
-                Text("No pending requests loaded for the selected conversation.")
-                    .font(.caption).foregroundStyle(.secondary)
+                Text("No pending approvals.").font(.caption).foregroundStyle(.secondary)
             }
         }
         .padding(.top, 8)
-        .task(id: model.selectedConversation) { await model.loadApprovals() }
+        .task(id: model.conversations.map(\.id)) { await model.loadApprovals() }
+    }
+
+    private func title(_ id: OwnerID) -> String {
+        guard let title = model.conversations.first(where: { $0.id == id })?.title, !title.isEmpty else { return "Conversation " + id.string }
+        return title
     }
 }
 
@@ -48,15 +45,32 @@ struct ApprovalDetailsView: View {
     @Environment(\.dismiss) private var dismiss
     @State private var confirmingAllow = false
 
+    private var scope: JSONValue { approval.request["scope"] }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             Text("Permission for \(approval.summary.tool)").font(.title2)
             Text(approval.id).font(.caption.monospaced()).textSelection(.enabled)
-            Text("Scope, targets and exact arguments").font(.headline)
             ScrollView {
-                Text(approval.value.formatted)
-                    .font(.system(.caption, design: .monospaced))
-                    .textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading)
+                VStack(alignment: .leading, spacing: 6) {
+                    LabeledContent("Tool", value: approval.summary.tool)
+                    LabeledContent("Workspace") { Text(scope["workspace_root"].string ?? "Unknown").textSelection(.enabled) }
+                    LabeledContent("Mode", value: JSONSummary.label(scope["mode"].string ?? "unknown"))
+                    LabeledContent("Status", value: JSONSummary.label(approval.value["status"]["status"].string ?? "unknown"))
+                    LabeledContent("Requested", value: JSONSummary.date(approval.request["requested_at"].unsigned))
+                    LabeledContent("Expires", value: JSONSummary.date(approval.request["expires_at"].unsigned))
+                    if let targets = scope["targets"].array?.compactMap(\.string), !targets.isEmpty {
+                        LabeledContent("Targets") { Text(targets.joined(separator: "\n")).textSelection(.enabled) }
+                    }
+                    Text("Arguments").font(.headline).padding(.top, 6)
+                    Text(JSONSummary.lines(approval.request["arguments"]))
+                        .font(.system(.caption, design: .monospaced)).textSelection(.enabled)
+                    DisclosureGroup("Raw JSON") {
+                        Text(approval.value.formatted)
+                            .font(.system(.caption, design: .monospaced))
+                            .textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                }.font(.callout).frame(maxWidth: .infinity, alignment: .leading)
             }
             HStack {
                 if approval.pending {

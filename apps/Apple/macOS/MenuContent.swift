@@ -55,9 +55,10 @@ struct MenuContent: View {
                 }
             }
             TabView {
+                ConversationsView(model: model).tabItem { Label("Conversations", systemImage: "bubble.left.and.bubble.right") }
                 TasksView(model: model).tabItem { Label("Tasks", systemImage: "list.bullet") }
                 SchedulesView(model: model).tabItem { Label("Schedules", systemImage: "calendar") }
-                PermissionsView(model: model).tabItem { Label("Permissions", systemImage: "hand.raised") }
+                PermissionsView(model: model).tabItem { Label(model.approvals.isEmpty ? "Approvals" : "Approvals (\(model.approvals.count))", systemImage: "hand.raised") }
             }
             Divider()
             HStack {
@@ -81,5 +82,6 @@ struct MenuContent: View {
         }
         .sheet(item: $model.selectedTask) { task in TaskDetailsView(model: model, task: task) }
         .sheet(item: $model.selectedApproval) { approval in ApprovalDetailsView(model: model, approval: approval) }
+        .sheet(item: $model.openConversation) { conversation in ConversationTranscriptView(model: model, conversation: conversation) }
     }
 }

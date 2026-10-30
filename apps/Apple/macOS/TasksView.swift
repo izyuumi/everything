@@ -45,7 +45,11 @@ struct TaskDetailsView: View {
                         Text("Response in progress").font(.headline)
                         Text(live).textSelection(.enabled)
                     }
-                    Text(model.taskDetails.formatted).font(.system(.caption, design: .monospaced)).textSelection(.enabled)
+                    TaskFieldsView(details: model.taskDetails, conversation: model.taskConversation)
+                    DisclosureGroup("Raw JSON") {
+                        Text(model.taskDetails.formatted).font(.system(.caption, design: .monospaced)).textSelection(.enabled)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
                 }.frame(maxWidth: .infinity, alignment: .leading)
             }
             if model.taskDetails["kind"].string == "legacy_foreground" {
@@ -75,4 +79,54 @@ struct TaskDetailsView: View {
             Text("The host preserves uncertain native state and tool cleanup requirements.")
         }
     }
+}
+
+struct TaskFieldsView: View {
+    let details: JSONValue
+    let conversation: HostConversation?
+
+    var body: some View {
+        let task = details["task"]
+        let execution = details["execution"]
+        VStack(alignment: .leading, spacing: 6) {
+            LabeledContent("State", value: JSONSummary.label(task["status"].string ?? "unknown"))
+            if let reason = execution["waiting"]["reason"].string {
+                LabeledContent("Waiting", value: Self.waiting[reason] ?? JSONSummary.label(reason))
+            }
+            LabeledContent("Created", value: JSONSummary.date(task["created_at"].unsigned))
+            LabeledContent("Updated", value: JSONSummary.date(task["updated_at"].unsigned))
+            LabeledContent("Provider", value: conversation.map { $0.provider + " · " + $0.model } ?? "Unknown")
+            if let queued = execution["queued_messages"].unsigned, queued > 0 {
+                LabeledContent("Queued messages", value: String(queued))
+            }
+            if execution["cancel_requested"].bool == true {
+                LabeledContent("Cancellation", value: "Requested")
+            }
+            if let message = task["failure"]["message"].string {
+                LabeledContent("Error") {
+                    Text((task["failure"]["code"].string.map { $0 + ": " } ?? "") + message)
+                        .foregroundStyle(.red).textSelection(.enabled)
+                }
+            }
+            if let diagnostic = execution["diagnostic"].string {
+                LabeledContent("Diagnostic") { Text(diagnostic).textSelection(.enabled) }
+            }
+        }
+        .font(.callout)
+    }
+
+    private static let waiting = [
+        "remote": "Running on a remote worker",
+        "approval": "Waiting for a permission decision",
+        "provider_uncertain": "Provider outcome is uncertain",
+        "in_flight": "A model or tool call is in flight",
+        "children": "Waiting for subtasks",
+        "child_outcome_unknown": "A subtask outcome is unknown",
+        "reconciliation": "Waiting for reconciliation",
+        "interrupted": "Interrupted",
+        "limit": "Stopped at a resource limit",
+        "provider_unavailable": "Provider is unavailable",
+        "stopped": "Stopped",
+        "native_paused": "Paused"
+    ]
 }
