@@ -318,6 +318,13 @@ impl Host {
             .await?)
     }
 
+    pub async fn vault_list(&self, limit: usize) -> Result<crate::vault::VaultListing, TuiError> {
+        match self.query(OwnerQuery::VaultList { limit }).await? {
+            OwnerQueryResult::VaultList { listing } => Ok(listing),
+            _ => Err(TuiError::Invalid("unexpected vault response")),
+        }
+    }
+
     pub async fn chatgpt(&self, operation: ChatGptOperation) -> Result<ChatGptStatus, TuiError> {
         match self.operate(OwnerOperation::ChatGpt { operation }).await? {
             OwnerOperationResult::ChatGpt { status } => Ok(*status),

@@ -81,6 +81,11 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         Some(Overlay::Approval { .. }) => draw_approval(frame, app, area),
         Some(Overlay::Picker { .. }) => draw_picker(frame, app, area),
         Some(Overlay::Help) => draw_help(frame, area),
+        Some(Overlay::Secret {
+            label,
+            value,
+            overflow,
+        }) => draw_secret(frame, area, label, value.chars().count(), *overflow),
         None => {}
     }
 }
@@ -748,6 +753,47 @@ fn draw_picker(frame: &mut Frame, app: &App, area: Rect) {
             BORDER,
             " ↑↓ move · Enter choose · Esc close ",
         )),
+        rect,
+    );
+}
+
+fn draw_secret(frame: &mut Frame, area: Rect, label: &str, length: usize, overflow: bool) {
+    let mut lines = vec![
+        Line::from(vec![
+            Span::styled(format!("{:<8}", "label"), fg(LABEL)),
+            Span::styled(label.to_owned(), bold(TEXT)),
+        ]),
+        Line::from(vec![
+            Span::styled(format!("{:<8}", "kind"), fg(LABEL)),
+            Span::styled("api_secret · field value", fg(TEXT)),
+        ]),
+        Line::from(vec![
+            Span::styled(format!("{:<8}", "secret"), fg(LABEL)),
+            Span::styled("•".repeat(length.min(64)), fg(TEXT)),
+            Span::styled("▏", fg(TITLE)),
+        ]),
+        Line::default(),
+        Line::from(Span::styled(
+            "Stored in the system keychain; never shown, kept in history or sent to the model.",
+            fg(DIM),
+        )),
+    ];
+    if overflow {
+        lines.push(Line::from(Span::styled(
+            "longer than 8192 bytes · Backspace or Esc",
+            fg(ERROR),
+        )));
+    }
+    let rect = centered(area, 88, lines.len() as u16 + 2);
+    frame.render_widget(Clear, rect);
+    frame.render_widget(
+        Paragraph::new(lines)
+            .wrap(ratatui::widgets::Wrap { trim: false })
+            .block(overlay_block(
+                " ◈ add to the local vault ".into(),
+                BORDER,
+                " Enter save · Esc cancel ",
+            )),
         rect,
     );
 }

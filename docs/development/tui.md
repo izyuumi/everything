@@ -22,7 +22,7 @@ When no Host answers for the state directory, the TUI offers, inside the termina
 
 ## First-run onboarding
 
-After connecting, the TUI decides whether a usable model credential is configured: any API-key binding in settings counts as usable (the TUI cannot inspect stored secrets); a ChatGPT binding counts only if its status is signed in with plan usage enabled; with no binding at all, onboarding runs only when the Host has no conversations, so existing environment-variable users are not prompted. Source is `src/tui/onboarding.rs`; its steps are an ordered list (`Welcome`, `Provider`, `Verify`, `Save`, `Service`), so a later optional step such as connecting a password manager ([#218](https://github.com/izyuumi/everything/issues/218)) can be inserted without restructuring.
+After connecting, the TUI decides whether a usable model credential is configured: any API-key binding in settings counts as usable (the TUI cannot inspect stored secrets); a ChatGPT binding counts only if its status is signed in with plan usage enabled; with no binding at all, onboarding runs only when the Host has no conversations, so existing environment-variable users are not prompted. Source is `src/tui/onboarding.rs`; its steps are an ordered list (`Welcome`, `Provider`, `Verify`, `Save`, `Service`, `Vault`). Skipping the model steps jumps to `Vault`, the optional "Connect a password manager" step: Skip continues; 1Password and Proton Pass say they are not available yet, link #220 or #221, connect nothing and continue; "Add an API secret to the local vault" asks for a label and then the secret in the masked input, saves it with `vault_put` and shows only the new reference.
 
 1. **Welcome.** A one-line security note (credentials stay on this machine in the system keychain; the model provider sees conversation content) and Quick start / Custom / Skip. Quick start means OpenAI, native keychain storage and the default model (`gpt-5` for an API key, the plan's first listed model for ChatGPT). Custom asks for provider (OpenAI or Anthropic), endpoint (official or a loopback URL), model and storage (keychain or Host memory).
 2. **Provider.** A read-only scan shows whether `OPENAI_API_KEY` and `ANTHROPIC_API_KEY` are set in the TUI's environment and whether settings hold a ChatGPT binding that needs signing in again; values are never shown. Choices are Sign in with ChatGPT (the same owner `chatgpt` sign-in/wait/cancel operations as `everything chatgpt sign-in`, opening the browser and showing the URL; an existing ChatGPT binding is reused), using a found environment key, or typing an API key into a masked input. The input buffer is a preallocated `Zeroizing<String>` capped at 8 KiB so it never reallocates; pasted text is also zeroized.
@@ -38,9 +38,13 @@ The transcript starts with a banner (model, conversation, tools, Host state dire
 
 ## Commands and keys
 
-`/help`, `/new [title]`, `/sessions` (also Ctrl+X), `/resume <n|id-prefix>`, `/model [id]` (lists the ChatGPT plan's models when a ChatGPT binding is selected), `/provider`, `/instructions`, `/tools on [dir] [read-only|trusted-workspace|full-host]` / `/tools off`, `/approvals`, `/history`, `/retry`, `/copy`, `/stop`, `/status`, `/clear`, `/mouse`, `/queue`, `/quit`.
+`/help`, `/new [title]`, `/sessions` (also Ctrl+X), `/resume <n|id-prefix>`, `/model [id]` (lists the ChatGPT plan's models when a ChatGPT binding is selected), `/provider`, `/instructions`, `/tools on [dir] [read-only|trusted-workspace|full-host]` / `/tools off`, `/approvals`, `/vault [list]` / `/vault add LABEL` / `/vault remove ID|REF`, `/history`, `/retry`, `/copy`, `/stop`, `/status`, `/clear`, `/mouse`, `/queue`, `/quit`.
 
 Enter sends; Alt+Enter, Ctrl+J or a trailing `\` inserts a newline; Tab completes commands; Up/Down walk input history or lines; PageUp/PageDown or the wheel scroll; End jumps to the latest output. Ctrl+L starts a new conversation and Ctrl+D exits on empty input. `/mouse` releases mouse capture for terminal text selection.
+
+## Vault
+
+`/vault add LABEL` validates the label and opens a masked modal for a local `api_secret` item. Typed and pasted characters render as `•` (at most 8192 bytes); Enter sends the value straight into `SecretTransfer` and the `vault_put` owner operation, Esc or Ctrl+C discards it. The value lives only in a pre-sized zeroizing buffer: it never enters the input line, input history, transcript, chat events or logs. The transcript note shows the label and the new reference. `/vault` lists provider statuses and items as label, fields and reference; `/vault remove` takes an item UUID or `vault://local/` reference. Other kinds and metadata use `everything vault add`.
 
 ## Tool approvals
 

@@ -6,15 +6,20 @@ use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, Mou
 use ratatui::text::Line;
 use tokio::sync::mpsc::UnboundedSender;
 use tokio::task::JoinHandle;
+use zeroize::Zeroizing;
 
 use super::host::{Host, HostEvent, Readiness, Tools, TurnEvent, TurnStart, message_text};
 use super::input::Input;
 use crate::agent::{ConversationConfig, ProviderEndpoint, ProviderKind};
-use crate::ipc::ConversationSummary;
+use crate::host::credentials::SecretTransfer;
+use crate::ipc::{ConversationSummary, OwnerOperation, OwnerOperationResult};
 use crate::permissions::{ApprovalRequest, ExecutionMode};
 use crate::protocol::{CommandId, ConversationId, MessageContent, MessageRole, TaskId};
+use crate::vault::{ProviderStatus, VaultItemMetadata, VaultPutRequest, VaultReference};
 
-pub const COMMANDS: [(&str, &str); 19] = [
+const MAX_SECRET: usize = 8_192;
+
+pub const COMMANDS: [(&str, &str); 20] = [
     ("/help", "Show commands and keys"),
     ("/new", "New conversation  [title]"),
     ("/sessions", "List conversations and switch"),
@@ -33,6 +38,10 @@ pub const COMMANDS: [(&str, &str); 19] = [
         "Native tools  <on [dir] [read-only|trusted-workspace|full-host]|off>",
     ),
     ("/approvals", "Review pending tool approvals"),
+    (
+        "/vault",
+        "Local vault  <list|add LABEL|remove ID>  (add opens a masked field)",
+    ),
     ("/history", "Reload this conversation from the host"),
     ("/retry", "Send the last message again"),
     ("/copy", "Copy the last response to the clipboard"),
@@ -132,6 +141,11 @@ pub enum Overlay {
         selected: usize,
     },
     Help,
+    Secret {
+        label: String,
+        value: Zeroizing<String>,
+        overflow: bool,
+    },
 }
 
 pub struct Options {
@@ -192,6 +206,14 @@ pub fn provider_label(provider: ProviderKind) -> &'static str {
     match provider {
         ProviderKind::Anthropic => "anthropic",
         ProviderKind::OpenAi => "openai",
+    }
+}
+
+fn push_secret(value: &mut String, overflow: &mut bool, character: char) {
+    if value.len() + character.len_utf8() <= MAX_SECRET {
+        value.push(character);
+    } else {
+        *overflow = true;
     }
 }
 
@@ -307,6 +329,18 @@ impl App {
     pub async fn on_terminal(&mut self, event: Event) {
         match event {
             Event::Key(key) if key.kind != KeyEventKind::Release => self.on_key(key).await,
+            Event::Paste(text) if matches!(self.overlay, Some(Overlay::Secret { .. })) => {
+                let text = Zeroizing::new(text);
+                if let Some(Overlay::Secret {
+                    value, overflow, ..
+                }) = self.overlay.as_mut()
+                {
+                    text.chars()
+                        .filter(|character| !character.is_control())
+                        .for_each(|character| push_secret(value, overflow, character));
+                }
+                self.dirty = true;
+            }
             Event::Paste(text) if self.overlay.is_none() => {
                 self.input
                     .insert(&text.replace("\r\n", "\n").replace('\r', "\n"));
@@ -580,9 +614,158 @@ impl App {
                     })
                 }
             },
+            Some(Overlay::Secret {
+                label,
+                mut value,
+                mut overflow,
+            }) => match key.code {
+                KeyCode::Esc => self.note(NoteKind::Info, "vault entry cancelled · nothing saved"),
+                _ if control_c => {
+                    self.note(NoteKind::Info, "vault entry cancelled · nothing saved")
+                }
+                KeyCode::Enter if !value.trim().is_empty() => {
+                    if overflow {
+                        self.note(
+                            NoteKind::Error,
+                            "secret is longer than 8192 bytes · nothing saved",
+                        );
+                    } else {
+                        self.vault_put(label, std::mem::take(&mut *value)).await;
+                    }
+                }
+                code => {
+                    match code {
+                        KeyCode::Backspace => {
+                            value.pop();
+                            overflow = false;
+                        }
+                        KeyCode::Char(character)
+                            if !key.modifiers.contains(KeyModifiers::CONTROL)
+                                && !character.is_control() =>
+                        {
+                            push_secret(&mut value, &mut overflow, character);
+                        }
+                        _ => {}
+                    }
+                    self.overlay = Some(Overlay::Secret {
+                        label,
+                        value,
+                        overflow,
+                    });
+                }
+            },
             Some(Overlay::Help) | None => {}
         }
         self.dirty = true;
+    }
+
+    async fn vault_put(&mut self, label: String, value: String) {
+        let secret = match SecretTransfer::new(value) {
+            Ok(secret) => secret,
+            Err(_) => {
+                self.note(
+                    NoteKind::Error,
+                    "the secret must be printable text · nothing saved",
+                );
+                return;
+            }
+        };
+        let item = VaultPutRequest {
+            metadata: VaultItemMetadata::ApiSecret {
+                label: label.clone(),
+                env_name: None,
+                service: None,
+            },
+            secrets: [("value".to_owned(), secret)].into(),
+        };
+        match self.host.operate(OwnerOperation::VaultPut { item }).await {
+            Ok(OwnerOperationResult::VaultItemAdded { reference }) => self.note(
+                NoteKind::Ok,
+                format!("saved {label} to the local vault · {reference}"),
+            ),
+            Ok(_) => self.note(NoteKind::Error, "unexpected vault response"),
+            Err(error) => self.note(NoteKind::Error, format!("vault: {error}")),
+        }
+    }
+
+    async fn vault_command(&mut self, arguments: &[&str], rest: &str) {
+        match arguments.first().copied() {
+            None | Some("list") => match self.host.vault_list(20).await {
+                Ok(listing) => {
+                    let mut lines: Vec<String> = listing
+                        .providers
+                        .iter()
+                        .map(|state| {
+                            let status = match &state.status {
+                                ProviderStatus::Ready { .. } => "ready".to_owned(),
+                                ProviderStatus::Disconnected => "disconnected".to_owned(),
+                                ProviderStatus::Locked => "locked".to_owned(),
+                                ProviderStatus::Unavailable { reason } => reason.clone(),
+                            };
+                            format!("{} · {status}", state.provider.as_str())
+                        })
+                        .collect();
+                    if listing.items.is_empty() {
+                        lines.push("no vault items · /vault add LABEL".into());
+                    }
+                    lines.extend(listing.items.iter().map(|item| {
+                        format!(
+                            "{} · {} · {}",
+                            item.label,
+                            item.fields.join(","),
+                            item.reference
+                        )
+                    }));
+                    lines.extend(listing.incomplete.iter().map(|item| {
+                        format!(
+                            "incomplete {} · /vault remove {}",
+                            item.label,
+                            item.reference.id()
+                        )
+                    }));
+                    self.note(NoteKind::Info, lines.join("\n"));
+                }
+                Err(error) => self.note(NoteKind::Error, format!("vault: {error}")),
+            },
+            Some("add") => {
+                let label = rest.strip_prefix("add").unwrap_or_default().trim();
+                let metadata = VaultItemMetadata::ApiSecret {
+                    label: label.to_owned(),
+                    env_name: None,
+                    service: None,
+                };
+                if let Err(error) = metadata.validate() {
+                    self.note(NoteKind::Warn, format!("usage: /vault add LABEL · {error}"));
+                    return;
+                }
+                self.overlay = Some(Overlay::Secret {
+                    label: label.to_owned(),
+                    value: Zeroizing::new(String::with_capacity(MAX_SECRET + 4)),
+                    overflow: false,
+                });
+            }
+            Some("remove") => {
+                let id = arguments.get(1).and_then(|item| {
+                    item.parse::<uuid::Uuid>().ok().or_else(|| {
+                        item.parse::<VaultReference>()
+                            .ok()
+                            .and_then(|reference| reference.local_id().ok())
+                    })
+                });
+                let Some(id) = id else {
+                    self.note(NoteKind::Warn, "usage: /vault remove <id|vault://local/id>");
+                    return;
+                };
+                match self.host.operate(OwnerOperation::VaultRemove { id }).await {
+                    Ok(_) => self.note(NoteKind::Ok, format!("removed vault://local/{id}")),
+                    Err(error) => self.note(NoteKind::Error, format!("vault: {error}")),
+                }
+            }
+            Some(_) => self.note(
+                NoteKind::Warn,
+                "usage: /vault [list] | /vault add LABEL | /vault remove ID",
+            ),
+        }
     }
 
     fn decide(
@@ -1153,6 +1336,7 @@ impl App {
                 }
             }
             "/tools" => self.tools_command(&arguments),
+            "/vault" => self.vault_command(&arguments, rest).await,
             "/approvals" => {
                 if let Some(info) = self.conversation.clone() {
                     match self.host.pending_approvals(info.id, None).await {

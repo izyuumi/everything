@@ -1,6 +1,6 @@
 # Credential vault
 
-Status: **partly implemented.** [#217](https://github.com/izyuumi/everything/issues/217) implemented the item kinds, references, `VaultItemSummary`, the `VaultProvider` trait, the local provider, Keychain service isolation and the three owner IPC operations in [`src/vault/`](../../src/vault/). Agent tools, leases, the per-task redactor, external providers and clients are still planned. Each section names the issue that implements it under tracker [#215](https://github.com/izyuumi/everything/issues/215). Decision record: [ADR-0016](../decisions/ADR-0016-credential-vault.md). Module map and threat model: [vault architecture](../architecture/vault.md). When an implementation PR has to deviate, it updates this contract in the same PR.
+Status: **partly implemented.** [#217](https://github.com/izyuumi/everything/issues/217) implemented the item kinds, references, `VaultItemSummary`, the `VaultProvider` trait, the local provider, Keychain service isolation and the three owner IPC operations in [`src/vault/`](../../src/vault/). [#218](https://github.com/izyuumi/everything/issues/218) added the `everything vault` CLI, the TUI masked modal and the onboarding step ([CLI](../development/cli.md#credential-vault), [TUI](../development/tui.md#vault)). Agent tools, leases, the per-task redactor, external providers and Apple clients are still planned. Each section names the issue that implements it under tracker [#215](https://github.com/izyuumi/everything/issues/215). Decision record: [ADR-0016](../decisions/ADR-0016-credential-vault.md). Module map and threat model: [vault architecture](../architecture/vault.md). When an implementation PR has to deviate, it updates this contract in the same PR.
 
 ## Invariant
 
@@ -98,7 +98,7 @@ Lands in [#217](https://github.com/izyuumi/everything/issues/217); CLI and TUI i
 - `vault_put`: owner operation `{"kind":"vault_put","item":{"metadata":VaultItemMetadata,"secrets":{"<field>":"<value>"}}}`, each value a `SecretTransfer`. **Pipe-only**: the CLI accepts it only as `{"kind":"vault_put","request_id":…,"item":…}` on `everything owner --sensitive-stdin` (private pipe stdin/stdout, zeroizing buffers), and rejects it in `--request-file` input before contacting the Host. Relay commands, paired devices and model tools have no route to owner operations, and owner operations are not journaled. Returns `{"kind":"vault_item_added","ref":"vault://local/<uuid>"}`.
 - `vault_remove`: owner operation `{"kind":"vault_remove","id":"<uuid>"}`, accepted from request files; returns `applied` or a not-found error.
 
-Secrets reach `vault_put` from the TUI masked field, `everything vault add` (tty with echo off, or piped stdin, never an argv flag) or the macOS SecureField sheet ([#222](https://github.com/izyuumi/everything/issues/222)). iOS is approve-only in v1.
+Secrets reach `vault_put` from the TUI masked field, `everything vault add` (tty with echo off, or piped stdin, never an argv flag) or the macOS SecureField sheet ([#222](https://github.com/izyuumi/everything/issues/222)). The CLI and TUI send `vault_put` directly over the owner socket from their own zeroizing buffers; the `owner --sensitive-stdin` route remains for other clients. iOS is approve-only in v1.
 
 ## Agent tools
 

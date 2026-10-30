@@ -415,7 +415,7 @@ pub async fn memory(
     .await
 }
 
-fn label(value: impl Serialize) -> String {
+pub(crate) fn label(value: impl Serialize) -> String {
     serde_json::to_value(value)
         .ok()
         .and_then(|value| value.as_str().map(str::to_owned))
@@ -444,7 +444,7 @@ fn snippet(text: &str) -> String {
     }
 }
 
-async fn print_lines(lines: Vec<String>) -> Result<(), CliError> {
+pub(crate) async fn print_lines(lines: Vec<String>) -> Result<(), CliError> {
     let mut output = tokio::io::stdout();
     for line in lines {
         output.write_all(line.as_bytes()).await?;
