@@ -13,11 +13,11 @@ use crate::context::{
     BuiltContext, CompactionRecord, ContextBudget, ContextBuilder, ContextInput,
     ContinuationBinding, HistoryEntry, MemoryExcerpt, TaskContext,
 };
-use crate::permissions::{ApprovalRequest, ExecutionMode};
+use crate::permissions::{ApprovalRequest, ExecutionMode, READ_ONLY_WRITES_UNAVAILABLE};
 use crate::protocol::{OperationId, PermissionInspection, TaskId, ToolCall, ToolResult};
 use crate::storage::{TaskState, ToolCallState};
 use crate::tools::{
-    RetainedToolOwner, ToolRegistry,
+    RetainedToolOwner, ToolCapability, ToolRegistry,
     broker::{BrokerOutcome, OperationResult, TaskToolBroker, ToolInvocation},
 };
 
@@ -1540,10 +1540,15 @@ impl Agent {
                         let converted = ToolCall { id: ToolCallId::new(), provider_call_id: Some(call.id), name: call.name, arguments: call.arguments };
                         let validation = if selected.contains(converted.name.as_str()) {
                             if restricted.is_some() { registry.validate_settings(&converted.name, &converted.arguments) } else { registry.validate(&converted.name, &converted.arguments) }.map_err(|_| "invalid_arguments")
+                        } else if turn.definition.mode == ExecutionMode::ReadOnly && registry.descriptor(&converted.name).is_ok_and(|tool| tool.capabilities.contains(&ToolCapability::FilesystemWrite)) {
+                            Err("read_only_mode")
                         } else { Err("tool_not_advertised") };
                         let phase = match validation {
                             Ok(()) => CallPhase::Pending,
-                            Err(code) => CallPhase::Result { result: bounded_result(converted.id, json!({"error":{"code":code,"message":"The completed call did not match the advertised native tool contract."}}), true)?, stop: false },
+                            Err(code) => {
+                                let message = if code == "read_only_mode" { READ_ONLY_WRITES_UNAVAILABLE } else { "The completed call did not match the advertised native tool contract." };
+                                CallPhase::Result { result: bounded_result(converted.id, json!({"error":{"code":code,"message":message}}), true)?, stop: false }
+                            }
                         };
                         content.push(MessageContent::ToolCall(converted.clone())); calls.push(CallCheckpoint { call: converted, phase });
                     }

@@ -10,10 +10,13 @@ use thiserror::Error;
 use uuid::Uuid;
 
 use crate::model::ToolDefinition;
-use crate::permissions::{Authorizer, ExecutionAuthority, PermissionError, ToolVisibility};
+use crate::permissions::{
+    Authorizer, ExecutionAuthority, ExecutionMode, PermissionError, READ_ONLY_WRITES_UNAVAILABLE,
+    ToolVisibility,
+};
 use crate::tools::{
-    Tool, ToolConcurrency, ToolDescriptor, ToolError, ToolExecutionContext, ToolOutput,
-    ToolRegistry,
+    Tool, ToolCapability, ToolConcurrency, ToolDescriptor, ToolError, ToolExecutionContext,
+    ToolOutput, ToolRegistry,
 };
 
 pub const SEARCH_TOOLS_NAME: &str = "search_tools";
@@ -121,7 +124,17 @@ impl ToolSelector {
         validate_query(query, limit)?;
         require_discovery(authority)?;
         let candidates = self.candidates(authority, query, false)?;
-        selection(candidates, limit, SelectionMethod::Local, Vec::new())
+        let diagnostics = if authority.mode() == ExecutionMode::ReadOnly
+            && self
+                .catalog
+                .iter()
+                .any(|tool| tool.capabilities.contains(&ToolCapability::FilesystemWrite))
+        {
+            vec![READ_ONLY_WRITES_UNAVAILABLE.to_owned()]
+        } else {
+            Vec::new()
+        };
+        selection(candidates, limit, SelectionMethod::Local, diagnostics)
     }
 
     fn candidates(
