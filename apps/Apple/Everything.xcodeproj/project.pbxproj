@@ -479,6 +479,16 @@
             "path" = "NativeCredentialEntryView.swift";
             "sourceTree" = "<group>";
         };
+        "876EACB0594C49718C264F72" = {
+            "isa" = "PBXFileReference";
+            "lastKnownFileType" = "sourcecode.swift";
+            "path" = "VaultSettingsView.swift";
+            "sourceTree" = "<group>";
+        };
+        "05C883BACDC7A6B41A99CA09" = {
+            "isa" = "PBXBuildFile";
+            "fileRef" = "876EACB0594C49718C264F72";
+        };
         "CCCB026149B99186971190C7" = {
             "isa" = "PBXBuildFile";
             "fileRef" = "0A337230134DAA8722D393C4";
@@ -507,6 +517,7 @@
                 "D2CE169C5FD56BC9C3B1E381",
                 "7CAE8192CC0D5C163E79798B",
                 "65D18DFF3D6AF9F3DBFCF85E",
+                "876EACB0594C49718C264F72",
             );
             "path" = "Settings";
             "sourceTree" = "<group>";
@@ -644,6 +655,7 @@
                 "23879FBD469F2CB181AA5704",
                 "7050C019B8826A6B562E6C8B",
                 "CCCB026149B99186971190C7",
+                "05C883BACDC7A6B41A99CA09",
                 "F9AADB8D6356703E3CC8152E",
                 "7E2A7CA90A2C4616966F3D9F",
                 "675B6E03408CDAA4029469CB",

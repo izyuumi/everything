@@ -65,7 +65,8 @@ struct OwnerRequest: Sendable {
                  "prepare_selection", "approve_selection", "discard_selection", "memory_enqueue", "memory_cancel",
                  "memory_retry", "apply_memory_plan", "rebuild_embeddings", "discard_unapplied", "replace_settings", "reconcile_settings",
                  "revoke_device", "wake_task", "retry_provider", "resume_interrupted", "chatgpt",
-                 "acknowledge_cleanup", "reconcile_drained": return
+                 "acknowledge_cleanup", "reconcile_drained", "vault_remove", "vault_disconnect": return
+            case "vault_connect" where body["operation"]["token"] == .null: return
             default: throw OwnerPrivateTransportError.requiresPrivatePipe
             }
         default: throw OwnerPrivateTransportError.requiresPrivatePipe

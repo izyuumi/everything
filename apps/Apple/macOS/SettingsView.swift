@@ -40,6 +40,11 @@ struct SettingsView: View {
                 .tag(SettingsAssistantNavigation.Destination.host)
                 .onAppear { model.settingsNavigation.destinationAppeared(.host) }
                 .onDisappear { model.settingsNavigation.destinationDisappeared(.host) }
+            VaultSettingsView(vault: model.vault, enabled: model.canMutate)
+                .tabItem { Label("Vault", systemImage: "key") }
+                .tag(SettingsAssistantNavigation.Destination.vault)
+                .onAppear { model.settingsNavigation.destinationAppeared(.vault) }
+                .onDisappear { model.settingsNavigation.destinationDisappeared(.vault) }
             Group {
                 if let store = model.thisMacSettings {
                     ThisMacSettingsView(store: store)
@@ -87,7 +92,7 @@ struct SettingsView: View {
                 Button("Choose executable…") { choose(directory: false) }
                 TextField("Private state directory", text: $model.stateDirectory)
                 Button("Choose state directory…") { choose(directory: true) }
-                Button("Connect") { model.rememberConnection(); Task { await model.refresh(); await model.loadSettings() } }
+                Button("Connect") { model.rememberConnection(); Task { await model.refresh(); await model.loadSettings(); await model.vault.load() } }
                     .disabled(model.acting || model.closing || model.pendingAction != nil)
                 Text("Choose the physical trusted Rust CLI executable. The app connects to its existing headless host through owner IPC.")
                     .font(.caption).foregroundStyle(.secondary)
