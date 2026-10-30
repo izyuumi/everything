@@ -44,6 +44,25 @@ everything --state-dir /absolute/private/path chat --conversation CONVERSATION_U
 
 Initialization supports explicit `--conversation` and `--command-id` values for retries. Reuse the same title and configuration. The full external device command envelope is handled by a later host processor; the foreground command boundary comprises conversation ID, command ID, and exact text.
 
+## Host queries and cancellation
+
+With a running host, common owner queries have subcommands that print one tab-separated line per item; `--json` prints the raw owner response instead:
+
+```sh
+everything tasks [--conversation UUID] [--limit N]       # id, status, updated, conversation, instruction
+everything approvals [--conversation UUID] [--limit N]   # pending approvals: id, tool, requested, conversation, task
+everything conversations [--limit N]                     # id, idle|pending, messages, provider/model, title
+everything schedules [--limit N]                         # id, enabled|disabled, next run, name
+everything memory "QUESTION"                             # retrieved memory excerpts
+everything cancel TASK_UUID                              # request cancellation and report the outcome
+```
+
+Limits default to 20 and the host accepts 1–100. `tasks` uses the owner query's creation order, newest first. `approvals` without `--conversation` checks the 100 most recently updated conversations that have a pending turn and prints their pending approvals; its `--json` output is the combined list of approval summaries rather than one owner response. `schedules` is the first page of `schedule list`; page further with `schedule list --after-id`. Times are local. These commands need the host and do not fall back to the foreground store.
+
+`cancel` submits the existing `cancel_task` domain command for the task's conversation, then polls the task for up to five seconds and prints whether it ended (`cancelled`, or `failed` with the reason) or is still stopping. An already finished task is reported without submitting anything. Cancelling during a provider request leaves the task `failed` with an uncertain outcome that cannot be retried, as the [scheduler contract](../contracts/scheduler.md#cancellation-shutdown-and-recovery) describes.
+
+In host-proxied `chat`, the first Ctrl-C after the turn is admitted (while text streams, while waiting, or at the in-place approval prompt) cancels the task the same way and prints the outcome, exiting 130. A second Ctrl-C while that cancellation is pending detaches instead, printing the usual `closing this CLI leaves admitted work in the host` line. Ctrl-C before admission still just stops the CLI.
+
 ## Optional ChatGPT plan
 
 `everything chatgpt sign-in|status|models|sign-out|select|deselect` lets a running host use your ChatGPT plan for the official OpenAI endpoint instead of an API key. It is optional. See the [host guide](host.md#optional-sign-in-with-chatgpt). `models` lists the model slugs your plan accepts. `status` masks the account email to its domain unless `--json` or `--show-email` is given. The foreground path without a host always uses `OPENAI_API_KEY`.
