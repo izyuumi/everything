@@ -480,6 +480,9 @@ impl HostInner {
                                 &ApprovalResolution {
                                     choice: match decision {
                                         PermissionDecision::Allow => ApprovalChoice::Allow,
+                                        PermissionDecision::AllowForTask => {
+                                            ApprovalChoice::AllowForTask
+                                        }
                                         PermissionDecision::Deny => ApprovalChoice::Deny,
                                     },
                                     expires_at: None,

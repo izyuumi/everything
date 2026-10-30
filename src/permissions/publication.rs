@@ -84,7 +84,7 @@ impl PermissionDecisionPublication {
                 .map_err(|_| malformed())?,
             resolution_id: row.id,
             decision: match resolution.choice {
-                ApprovalChoice::Allow => PermissionDecision::Allow,
+                ApprovalChoice::Allow | ApprovalChoice::AllowForTask => PermissionDecision::Allow,
                 ApprovalChoice::Deny => PermissionDecision::Deny,
             },
             resolved_at: UnixMillis::try_from(u64::try_from(resolved_at).map_err(|_| malformed())?)

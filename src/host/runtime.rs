@@ -212,6 +212,7 @@ impl HostService {
             mut scopes,
             task_tools,
             schedule_tools,
+            vault_tools,
             _preparation_lease,
         ) = tokio::task::spawn_blocking(move || {
             let preparation_lease = Arc::clone(&prepared_lease);
@@ -231,6 +232,8 @@ impl HostService {
             scopes.extend(task_tools.register_into(&mut registry)?);
             let schedule_tools = ScheduleTools::new();
             scopes.extend(schedule_tools.register_into(&mut registry)?);
+            let vault_tools = crate::vault::tools::VaultTools::new();
+            scopes.extend(vault_tools.register_into(&mut registry)?);
             Ok::<_, HostError>((
                 agent,
                 settings,
@@ -239,6 +242,7 @@ impl HostService {
                 scopes,
                 task_tools,
                 schedule_tools,
+                vault_tools,
                 preparation_lease,
             ))
         })
@@ -359,6 +363,7 @@ impl HostService {
         }
         let relay_origin = effective.relay_origin.clone();
         let worker_settings = effective.worker.clone();
+        let vault_mcp = effective.mcp.clone();
         let composition = Arc::new(super::composition::Composition::new(
             memory,
             mcp,
@@ -383,6 +388,15 @@ impl HostService {
             agent.clone(),
         )
         .await?;
+        let vault = crate::vault::VaultService::new(agent.store(), credentials.native_store());
+        let vault_tasks = crate::vault::task::VaultTasks::new(vault.clone());
+        broker.attach_vault(Arc::clone(&vault_tasks))?;
+        vault_tools.bind(crate::vault::tools::VaultRuntime {
+            tasks: vault_tasks,
+            credentials: credentials.clone(),
+            mcp: vault_mcp,
+            store: agent.store(),
+        })?;
         let (settings_agents, settings_supervisor) =
             super::settings::agent::SettingsAgentRuntime::new(
                 super::settings::agent::SettingsAgentComponents {
@@ -456,7 +470,7 @@ impl HostService {
         let (publication_updates, publication) = watch::channel(Default::default());
         let inner = Arc::new(HostInner {
             inbox: HostInbox::new(agent.store()),
-            vault: crate::vault::VaultService::new(agent.store(), credentials.native_store()),
+            vault,
             agent,
             settings,
             settings_service,

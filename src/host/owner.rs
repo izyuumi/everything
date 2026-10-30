@@ -532,6 +532,14 @@ impl HostInner {
                 self.vault.remove(id).await?;
                 Ok(OwnerOperationResult::Applied)
             }
+            OwnerOperation::RevokeGrant { grant_id } => {
+                self.blocking(move |host| {
+                    let now = super::runtime::timestamp(UnixMillis::now()?)?;
+                    Ok(host.authorizer.revoke(&grant_id, now)?)
+                })
+                .await?;
+                Ok(OwnerOperationResult::Applied)
+            }
             OwnerOperation::ChatGpt { operation } => Ok(OwnerOperationResult::ChatGpt {
                 status: Box::new(self.chatgpt.operate(operation, cancellation).await?),
             }),

@@ -135,11 +135,11 @@ impl Tool for FilesystemTool {
         let worker_name = name.clone();
         let root = context.workspace_root().to_owned();
         let cancellation = context.cancellation().clone();
-        let redactor = self.redactor.clone();
+        let redactor = self.redactor.for_task(context);
         let operation = self.operation;
-        let error_redactor = self.redactor.clone();
+        let error_redactor = redactor.clone();
         let retained_context = context.clone();
-        tokio::task::spawn_blocking(move || {
+        let result = tokio::task::spawn_blocking(move || {
             let _retained_context = retained_context;
             check_cancelled(&worker_name, &cancellation)?;
             let directory =
@@ -155,7 +155,8 @@ impl Tool for FilesystemTool {
             name,
             message: error_redactor.error(format!("filesystem worker failed: {error}")),
             cleanup_completed: false,
-        })?
+        })?;
+        error_redactor.finish(result)
     }
 }
 

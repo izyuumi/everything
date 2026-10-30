@@ -1,4 +1,5 @@
 use std::io;
+use std::os::unix::ffi::OsStrExt;
 use std::os::unix::process::ExitStatusExt;
 use std::process::Stdio;
 use std::time::Duration;
@@ -39,13 +40,13 @@ impl ShellTool {
             redactor,
         }
     }
+}
 
-    fn unknown(&self, message: impl std::fmt::Display) -> ToolError {
-        ToolError::EffectsUnknown {
-            name: "shell".into(),
-            message: self.redactor.error(message),
-            cleanup_completed: false,
-        }
+fn unknown(redactor: &Redactor, message: impl std::fmt::Display) -> ToolError {
+    ToolError::EffectsUnknown {
+        name: "shell".into(),
+        message: redactor.error(message),
+        cleanup_completed: false,
     }
 }
 
@@ -115,8 +116,19 @@ impl Tool for ShellTool {
         context: &ToolExecutionContext,
         arguments: Value,
     ) -> Result<ToolOutput, ToolError> {
+        let redactor = self.redactor.for_task(context);
+        redactor.finish(run(context, arguments, &redactor).await)
+    }
+}
+
+async fn run(
+    context: &ToolExecutionContext,
+    arguments: Value,
+    redactor: &Redactor,
+) -> Result<ToolOutput, ToolError> {
+    {
         let arguments: Arguments = serde_json::from_value(arguments)
-            .map_err(|error| no_effect("shell", self.redactor.error(error)))?;
+            .map_err(|error| no_effect("shell", redactor.error(error)))?;
         if arguments.command.is_empty()
             || arguments.command.len() > 65_536
             || arguments.command.contains('\0')
@@ -127,13 +139,21 @@ impl Tool for ShellTool {
         if context.cancellation().is_cancelled() {
             return Err(no_effect("shell", "shell cancelled before spawning"));
         }
-        let mut child = tokio::process::Command::new("/bin/sh")
+        let mut command = tokio::process::Command::new("/bin/sh");
+        command
             .arg("-c")
             .arg(&arguments.command)
             .env_clear()
             .env("PATH", "/usr/bin:/bin")
             .env("LANG", "C")
-            .env("LC_ALL", "C")
+            .env("LC_ALL", "C");
+        for (name, value) in context
+            .vault()
+            .map_or(&[][..], |vault| &vault.environment[..])
+        {
+            command.env(name, std::ffi::OsStr::from_bytes(value.expose()));
+        }
+        let mut child = command
             .current_dir(context.workspace_root())
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
@@ -141,7 +161,7 @@ impl Tool for ShellTool {
             .process_group(0)
             .kill_on_drop(false)
             .spawn()
-            .map_err(|error| no_effect("shell", self.redactor.error(error)))?;
+            .map_err(|error| no_effect("shell", redactor.error(error)))?;
         let pid = match child
             .id()
             .and_then(|id| i32::try_from(id).ok())
@@ -151,18 +171,23 @@ impl Tool for ShellTool {
             None => {
                 let killed = child.start_kill();
                 let waited = timeout(CLEANUP_WAIT, child.wait()).await;
-                return Err(self.unknown(format!("spawned shell did not expose a valid process identifier; leader kill: {killed:?}; wait: {waited:?}")));
+                return Err(unknown(
+                    redactor,
+                    format!(
+                        "spawned shell did not expose a valid process identifier; leader kill: {killed:?}; wait: {waited:?}"
+                    ),
+                ));
             }
         };
         let mut group = ProcessGroup { pid, armed: true };
         let stdout = child
             .stdout
             .take()
-            .ok_or_else(|| self.unknown("spawned shell has no stdout pipe"))?;
+            .ok_or_else(|| unknown(redactor, "spawned shell has no stdout pipe"))?;
         let stderr = child
             .stderr
             .take()
-            .ok_or_else(|| self.unknown("spawned shell has no stderr pipe"))?;
+            .ok_or_else(|| unknown(redactor, "spawned shell has no stderr pipe"))?;
         let readers = async { tokio::join!(capture(stdout), capture(stderr)) };
         tokio::pin!(readers);
         let mut captured = None;
@@ -184,14 +209,14 @@ impl Tool for ShellTool {
                     if let Err(error) = status {
                         if error.raw_os_error() == Some(rustix::io::Errno::CHILD.raw_os_error()) {
                             group.armed = false;
-                            return Err(self.unknown("shell child was reaped outside its owner; process identity is no longer anchored and no signal was sent"));
+                            return Err(unknown(redactor, "shell child was reaped outside its owner; process identity is no longer anchored and no signal was sent"));
                         }
                         let kill = group.kill();
                         let waited = timeout(CLEANUP_WAIT, child.wait()).await;
                         if captured.is_none() {
                             let _ = timeout(CLEANUP_WAIT, &mut readers).await;
                         }
-                        return Err(self.unknown(format!("{error}; process-group cleanup: {kill:?}; leader wait: {waited:?}")));
+                        return Err(unknown(redactor, format!("{error}; process-group cleanup: {kill:?}; leader wait: {waited:?}")));
                     }
                     break;
                 }
@@ -206,28 +231,46 @@ impl Tool for ShellTool {
         };
         let group_absent = group_absent(pid).await;
         if let Some(reason) = interrupted {
-            return Err(self.unknown(format!("{reason}; group signal delivered: {}; leader reaped: {}; group absent: {}; pipes closed: {}. Process-group escape and remote activity cannot be excluded", killed.is_ok(), matches!(status, Ok(Ok(_))), group_absent, streams.is_ok())));
+            return Err(unknown(
+                redactor,
+                format!(
+                    "{reason}; group signal delivered: {}; leader reaped: {}; group absent: {}; pipes closed: {}. Process-group escape and remote activity cannot be excluded",
+                    killed.is_ok(),
+                    matches!(status, Ok(Ok(_))),
+                    group_absent,
+                    streams.is_ok()
+                ),
+            ));
         }
         if killed.is_err() || !group_absent {
-            return Err(
-                self.unknown("shell cleanup could not establish that its process group stopped")
-            );
+            return Err(unknown(
+                redactor,
+                "shell cleanup could not establish that its process group stopped",
+            ));
         }
         let status = status
-            .map_err(|_| self.unknown("shell leader did not finish cleanup before its deadline"))?
-            .map_err(|error| self.unknown(error))?;
+            .map_err(|_| {
+                unknown(
+                    redactor,
+                    "shell leader did not finish cleanup before its deadline",
+                )
+            })?
+            .map_err(|error| unknown(redactor, error))?;
         let (stdout, stderr) = streams.map_err(|_| {
-            self.unknown("shell output pipes remained open after process-group cleanup")
+            unknown(
+                redactor,
+                "shell output pipes remained open after process-group cleanup",
+            )
         })?;
-        let stdout = stdout.map_err(|error| self.unknown(error))?;
-        let stderr = stderr.map_err(|error| self.unknown(error))?;
-        let stdout_text = self.redactor.range(
+        let stdout = stdout.map_err(|error| unknown(redactor, error))?;
+        let stderr = stderr.map_err(|error| unknown(redactor, error))?;
+        let stdout_text = redactor.range(
             &stdout.bytes,
             0..stdout.bytes.len(),
             CAPTURE_BYTES,
             stdout.total_bytes > stdout.bytes.len() as u64,
         );
-        let stderr_text = self.redactor.range(
+        let stderr_text = redactor.range(
             &stderr.bytes,
             0..stderr.bytes.len(),
             CAPTURE_BYTES,

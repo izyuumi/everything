@@ -1,6 +1,8 @@
 pub mod item;
 pub mod local;
 pub mod reference;
+pub(crate) mod task;
+pub(crate) mod tools;
 
 use std::sync::Arc;
 
@@ -147,14 +149,13 @@ impl VaultService {
             return Err(VaultError::Cancelled);
         }
         Ok(VaultListing {
-            providers: vec![
-                VaultProviderState {
-                    provider: VaultProviderId::Local,
-                    status: local,
-                },
-                not_available(VaultProviderId::OnePassword, "#220"),
-                not_available(VaultProviderId::ProtonPass, "#221"),
-            ],
+            providers: vec![VaultProviderState {
+                provider: VaultProviderId::Local,
+                status: local,
+            }]
+            .into_iter()
+            .chain(Self::unavailable_providers())
+            .collect(),
             items: self.local.search("", &[], limit).await?,
             incomplete: self.local.incomplete(limit).await?,
         })
@@ -166,6 +167,51 @@ impl VaultService {
 
     pub(crate) async fn remove(&self, id: uuid::Uuid) -> Result<(), VaultError> {
         self.local.remove(id).await
+    }
+
+    pub(crate) async fn search(
+        &self,
+        query: &str,
+        kinds: &[VaultItemKind],
+        limit: usize,
+    ) -> Result<Vec<VaultItemSummary>, VaultError> {
+        self.local.search(query, kinds, limit).await
+    }
+
+    pub(crate) async fn resolve(
+        &self,
+        reference: &VaultReference,
+        cancellation: CancellationToken,
+    ) -> Result<CredentialSecret, VaultError> {
+        match reference.provider() {
+            VaultProviderId::Local => self.local.resolve(reference, cancellation).await,
+            provider => Err(unavailable_provider(provider)),
+        }
+    }
+
+    pub(crate) fn unavailable_providers() -> Vec<VaultProviderState> {
+        vec![
+            not_available(VaultProviderId::OnePassword, "#220"),
+            not_available(VaultProviderId::ProtonPass, "#221"),
+        ]
+    }
+}
+
+pub(crate) fn item_summary(
+    store: &Store,
+    reference: &VaultReference,
+) -> Result<VaultItemSummary, VaultError> {
+    match reference.provider() {
+        VaultProviderId::Local => local::ready_summary(store, reference),
+        provider => Err(unavailable_provider(provider)),
+    }
+}
+
+fn unavailable_provider(provider: VaultProviderId) -> VaultError {
+    match provider {
+        VaultProviderId::OnePassword => VaultError::ProviderNotAvailable("1password", "#220"),
+        VaultProviderId::ProtonPass => VaultError::ProviderNotAvailable("protonpass", "#221"),
+        VaultProviderId::Local => VaultError::InvalidReference,
     }
 }
 

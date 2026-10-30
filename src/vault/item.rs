@@ -304,7 +304,7 @@ fn valid_host(value: &str) -> bool {
         })
 }
 
-fn valid_env_name(value: &str) -> bool {
+pub(crate) fn valid_env_name(value: &str) -> bool {
     let mut bytes = value.bytes();
     value.len() <= MAX_ENV_NAME_BYTES
         && bytes

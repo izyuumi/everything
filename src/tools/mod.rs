@@ -52,6 +52,7 @@ pub struct ToolExecutionContext {
     cancellation: CancellationToken,
     _retained_owner: Option<RetainedToolOwner>,
     settings_capability: Option<crate::agent::settings::SettingsToolCapability>,
+    vault: Option<Arc<crate::vault::task::ToolVault>>,
 }
 
 #[derive(Clone)]
@@ -101,6 +102,7 @@ impl ToolExecutionContext {
             cancellation,
             _retained_owner: None,
             settings_capability: None,
+            vault: None,
         })
     }
 
@@ -115,6 +117,15 @@ impl ToolExecutionContext {
     ) -> Self {
         self.settings_capability = Some(capability);
         self
+    }
+
+    pub(crate) fn with_vault(mut self, vault: crate::vault::task::ToolVault) -> Self {
+        self.vault = Some(Arc::new(vault));
+        self
+    }
+
+    pub(crate) fn vault(&self) -> Option<&crate::vault::task::ToolVault> {
+        self.vault.as_deref()
     }
 
     pub(crate) fn settings_capability(
