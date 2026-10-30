@@ -25,7 +25,7 @@ use crate::model::ModelError;
 use crate::model::openai::OpenAiBearer;
 use crate::service::StateLease;
 
-use super::credentials::{ChatGptRecords, CredentialVault};
+use super::credentials::{ChatGptCached, ChatGptRecords, CredentialVault};
 use super::settings::{ModelCredentialReference, ModelCredentialSource};
 
 const ISSUER: &str = "https://auth.openai.com";
@@ -90,6 +90,10 @@ pub enum ChatGptError {
     Model(#[from] ModelError),
     #[error(transparent)]
     Credential(#[from] CredentialError),
+    #[error(
+        "the ChatGPT tokens could not be saved to the credential store ({0}); they are kept in memory until the host stops and saving is retried on next use"
+    )]
+    Unsaved(#[source] CredentialError),
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -928,15 +932,21 @@ impl ChatGptBearer {
 
     async fn access_token(&self, cancellation: CancellationToken) -> Result<String, ChatGptError> {
         let mut records = self.vault.chatgpt_records().await;
-        let mut record = load(
+        let record = load(
             &self.vault,
             &mut records,
             &self.binding,
             cancellation.clone(),
         )
-        .await?
-        .filter(Record::signed_in)
-        .ok_or(ChatGptError::SignedOut)?;
+        .await?;
+        if let Some(record) = &record
+            && unsaved(&records, &self.binding)
+        {
+            keep_unsaved(save(&self.vault, &mut records, &self.binding, record, false).await)?;
+        }
+        let mut record = record
+            .filter(Record::signed_in)
+            .ok_or(ChatGptError::SignedOut)?;
         if !record.plan_usage() {
             return Err(ChatGptError::PlanUsageDisabled);
         }
@@ -979,7 +989,7 @@ impl ChatGptBearer {
                 }
                 record.expires_at = Some(now().saturating_add(expires_in(&tokens)));
                 record.saved_at = now();
-                save(&self.vault, &mut records, &self.binding, &record, false).await?;
+                keep_unsaved(save(&self.vault, &mut records, &self.binding, &record, false).await)?;
                 if !record.plan_usage() {
                     return Err(ChatGptError::PlanUsageDisabled);
                 }
@@ -1030,10 +1040,16 @@ async fn load(
 ) -> Result<Option<Record>, ChatGptError> {
     let key = binding.scope_key();
     let secret = match records.get(&key) {
-        Some(secret) => Arc::clone(secret),
+        Some(cached) => Arc::clone(&cached.secret),
         None => match vault.read_binding(binding, cancellation).await? {
             Some(secret) => {
-                records.insert(key, Arc::clone(&secret));
+                records.insert(
+                    key,
+                    ChatGptCached {
+                        secret: Arc::clone(&secret),
+                        saved: true,
+                    },
+                );
                 secret
             }
             None => return Ok(None),
@@ -1056,13 +1072,38 @@ async fn save(
 ) -> Result<(), ChatGptError> {
     let bytes =
         zeroize::Zeroizing::new(serde_json::to_vec(record).map_err(|_| ChatGptError::Record)?);
-    let secret = Arc::new(CredentialSecret::new(bytes.to_vec())?);
-    records.remove(&binding.scope_key());
+    let key = binding.scope_key();
+    records.insert(
+        key.clone(),
+        ChatGptCached {
+            secret: Arc::new(CredentialSecret::new(bytes.to_vec())?),
+            saved: false,
+        },
+    );
     vault
         .write_binding(binding, CredentialSecret::new(bytes.to_vec())?, tracked)
-        .await?;
-    records.insert(binding.scope_key(), secret);
+        .await
+        .map_err(ChatGptError::Unsaved)?;
+    if let Some(cached) = records.get_mut(&key) {
+        cached.saved = true;
+    }
     Ok(())
+}
+
+fn keep_unsaved(result: Result<(), ChatGptError>) -> Result<(), ChatGptError> {
+    match result {
+        Err(error @ ChatGptError::Unsaved(_)) => {
+            tracing::warn!(error = %error, "serving ChatGPT tokens from memory");
+            Ok(())
+        }
+        result => result,
+    }
+}
+
+fn unsaved(records: &ChatGptRecords, binding: &ModelCredentialReference) -> bool {
+    records
+        .get(&binding.scope_key())
+        .is_some_and(|cached| !cached.saved)
 }
 
 enum TokenFailure {

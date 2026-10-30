@@ -756,9 +756,12 @@ async fn chatgpt_cli(
                 "--reference/--storage differ from the ChatGPT binding selected in settings".into(),
             )),
             (None, Some(reference), Some(storage)) => Ok(binding(reference, storage)),
-            (None, None, Some(storage)) if create => Ok(binding(uuid::Uuid::new_v4(), storage)),
+            (None, None, storage) if create => Ok(binding(
+                uuid::Uuid::new_v4(),
+                storage.unwrap_or(everything::host::settings::CredentialStorage::Native),
+            )),
             (None, _, _) => Err(CliError::ChatGpt(
-                "no ChatGPT binding is selected in settings; pass --storage session|native (and --reference for an existing sign-in)".into(),
+                "no ChatGPT binding is selected in settings; pass --reference and --storage session|native for an existing sign-in".into(),
             )),
         }
     };

@@ -124,11 +124,15 @@ pub struct CredentialVault {
     session: Arc<Mutex<BTreeMap<String, Arc<CredentialSecret>>>>,
     environment: Arc<Vec<EnvironmentCredential>>,
     model_generation: Arc<Mutex<ModelCredentialGeneration>>,
-    chatgpt: Arc<tokio::sync::Mutex<BTreeMap<String, Arc<CredentialSecret>>>>,
+    chatgpt: Arc<tokio::sync::Mutex<BTreeMap<String, ChatGptCached>>>,
 }
 
-pub(super) type ChatGptRecords =
-    tokio::sync::OwnedMutexGuard<BTreeMap<String, Arc<CredentialSecret>>>;
+pub(super) struct ChatGptCached {
+    pub(super) secret: Arc<CredentialSecret>,
+    pub(super) saved: bool,
+}
+
+pub(super) type ChatGptRecords = tokio::sync::OwnedMutexGuard<BTreeMap<String, ChatGptCached>>;
 
 #[derive(Default)]
 struct ModelCredentialGeneration {
