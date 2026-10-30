@@ -43,7 +43,7 @@ struct ApprovalDetailsView: View {
     @Bindable var model: HostModel
     let approval: ApprovalDetails
     @Environment(\.dismiss) private var dismiss
-    @State private var confirmingAllow = false
+    @State private var confirming: String?
 
     private var scope: JSONValue { approval.request["scope"] }
 
@@ -59,6 +59,7 @@ struct ApprovalDetailsView: View {
                     LabeledContent("Status", value: JSONSummary.label(approval.value["status"]["status"].string ?? "unknown"))
                     LabeledContent("Requested", value: JSONSummary.date(approval.request["requested_at"].unsigned))
                     LabeledContent("Expires", value: JSONSummary.date(approval.request["expires_at"].unsigned))
+                    if approval.vaultUse { vaultUse }
                     if let targets = scope["targets"].array?.compactMap(\.string), !targets.isEmpty {
                         LabeledContent("Targets") { Text(targets.joined(separator: "\n")).textSelection(.enabled) }
                     }
@@ -74,8 +75,11 @@ struct ApprovalDetailsView: View {
             }
             HStack {
                 if approval.pending {
-                    Button("Deny", role: .destructive) { Task { await model.decide(approval, allow: false); dismiss() } }.disabled(!model.canMutate)
-                    Button("Allow this operation…") { confirmingAllow = true }.disabled(!model.canMutate)
+                    Button("Deny", role: .destructive) { Task { await model.decide(approval, decision: "deny"); dismiss() } }.disabled(!model.canMutate)
+                    Button(approval.vaultUse ? "Allow once…" : "Allow this operation…") { confirming = "allow" }.disabled(!model.canMutate)
+                    if approval.leasable {
+                        Button("Allow for this task…") { confirming = "allow_for_task" }.disabled(!model.canMutate)
+                    }
                 } else {
                     Text("This request is no longer pending.").foregroundStyle(.secondary)
                 }
@@ -84,10 +88,30 @@ struct ApprovalDetailsView: View {
             }
         }
         .padding(20).frame(width: 700, height: 600)
-        .confirmationDialog("Allow this exact tool operation?", isPresented: $confirmingAllow, titleVisibility: .visible) {
-            Button("Allow this operation") { Task { await model.decide(approval, allow: true); dismiss() } }
+        .confirmationDialog(confirming == "allow_for_task" ? "Allow this vault use for the rest of this task?" : "Allow this exact tool operation?",
+                            isPresented: Binding(get: { confirming != nil }, set: { if !$0 { confirming = nil } }), titleVisibility: .visible) {
+            Button(confirming == "allow_for_task" ? "Allow for this task" : approval.vaultUse ? "Allow once" : "Allow this operation") {
+                guard let decision = confirming else { return }
+                Task { await model.decide(approval, decision: decision); dismiss() }
+            }
         } message: {
-            Text("The host binds this decision to the displayed conversation, task, operation and argument digest. It grants no general future permission.")
+            Text(confirming == "allow_for_task"
+                 ? "For one hour, this task may use the same item for the same destination without asking again. Other tasks, items and destinations still ask. You can revoke it."
+                 : "The host binds this decision to the displayed conversation, task, operation and argument digest. It grants no general future permission.")
         }
+    }
+
+    @ViewBuilder
+    private var vaultUse: some View {
+        Text("Vault use").font(.headline).padding(.top, 6)
+        LabeledContent("Item", value: approval.vaultTargets("label").first ?? "Unknown")
+        LabeledContent("Provider", value: approval.vaultTargets("provider").first ?? "Unknown")
+        LabeledContent("Kind", value: JSONSummary.label(approval.vaultTargets("kind").first ?? "unknown"))
+        LabeledContent("Field", value: approval.vaultTargets("field").first ?? "Unknown")
+        LabeledContent("Destination", value: approval.vaultTargets("destination").first ?? "Unknown")
+        let sites = approval.vaultTargets("site")
+        if !sites.isEmpty { LabeledContent("Sites", value: sites.joined(separator: ", ")) }
+        LabeledContent("Reason") { Text(approval.request["arguments"]["reason"].string ?? "None").textSelection(.enabled) }
+        Text("Only metadata is shown. The value is never part of this request.").font(.caption).foregroundStyle(.secondary)
     }
 }

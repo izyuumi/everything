@@ -212,6 +212,11 @@ enum SensitiveOwnerInput {
         request_id: CommandId,
         item: everything::vault::VaultPutRequest,
     },
+    VaultConnect {
+        request_id: CommandId,
+        binary: std::path::PathBuf,
+        token: everything::host::credentials::SecretTransfer,
+    },
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -716,6 +721,29 @@ async fn owner_cli(
                     client
                         .operate(
                             everything::ipc::OwnerOperation::VaultPut { item },
+                            request_id,
+                            cancellation.clone(),
+                        )
+                        .await?,
+                    cancellation,
+                )
+                .await
+            }
+            SensitiveOwnerInput::VaultConnect {
+                request_id,
+                binary,
+                token,
+            } => {
+                write_sensitive_json(
+                    output,
+                    client
+                        .operate(
+                            everything::ipc::OwnerOperation::VaultConnect {
+                                provider: everything::vault::VaultProviderId::ProtonPass,
+                                binary,
+                                account: None,
+                                token: Some(token),
+                            },
                             request_id,
                             cancellation.clone(),
                         )

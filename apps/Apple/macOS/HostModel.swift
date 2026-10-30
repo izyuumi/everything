@@ -67,6 +67,7 @@ final class HostModel {
     let nativeSettings: NativeSettingsStore
     let settingsNavigation: SettingsAssistantNavigation
     let settingsAssistant: SettingsAssistantController
+    let vault: VaultSettingsModel
     @ObservationIgnored private var settingsWindowCovered = false
     @ObservationIgnored private var settingsPresentationCovered = false
     @ObservationIgnored private var surfaceDrain: Task<Void, Never>?
@@ -88,6 +89,7 @@ final class HostModel {
         }
         let nativeSettings = NativeSettingsStore(client: client, connection: connection, connectionKey: connectionKey)
         self.nativeSettings = nativeSettings
+        vault = VaultSettingsModel(client: client, connection: connection)
         let navigation = SettingsAssistantNavigation()
         settingsNavigation = navigation
         let assistant = SettingsAssistantController(store: nativeSettings, connectionKey: connectionKey,
@@ -112,6 +114,7 @@ final class HostModel {
         catch { message = error.localizedDescription; return }
         let connectionKey = UUID()
         nativeSettings.replaceConnection(selected, connectionKey: connectionKey)
+        vault.replaceConnection(selected)
         activeConnection = selected
         connectionVersion = connectionKey
         settingsAssistant.applyConnectionKey(connectionKey)
@@ -378,7 +381,8 @@ final class HostModel {
         } catch { message = error.localizedDescription }
     }
 
-    func decide(_ approval: ApprovalDetails, allow: Bool) async {
+    func decide(_ approval: ApprovalDetails, decision: String) async {
+        guard ["allow", "deny", "allow_for_task"].contains(decision), decision != "allow_for_task" || approval.leasable else { return }
         guard canMutate, approval.summary.source == connection else { return }
         let original = connection
         do {
@@ -391,9 +395,14 @@ final class HostModel {
                   current.request == approval.request, original == connection else { throw OwnerClientError.invalidResponse }
             let request = try OwnerRequest.command(conversation: approval.summary.conversationID, payload: [
                 "kind": .string("resolve_permission"), "operation_id": .string(approval.summary.operationID.string),
-                "decision": .string(allow ? "allow" : "deny")
+                "decision": .string(decision)
             ])
-            await apply(request, label: allow ? "Operation approval" : "Operation denial", expectedKind: "command")
+            let label = switch decision {
+            case "deny": "Operation denial"
+            case "allow_for_task": "Approval for this task"
+            default: "Operation approval"
+            }
+            await apply(request, label: label, expectedKind: "command")
             await loadApprovals()
         } catch { message = error.localizedDescription }
     }

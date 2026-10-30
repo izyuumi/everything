@@ -150,6 +150,13 @@ struct ApprovalDetails: Identifiable, Sendable {
     var id: String { summary.id }
     var request: JSONValue { value["request"] }
     var pending: Bool { value["status"]["status"].string == "pending" }
+    var targets: [String] { request["scope"]["targets"].array?.compactMap(\.string) ?? [] }
+    var vaultUse: Bool { summary.tool == "vault_use" && targets.contains("vault_use") }
+    var leasable: Bool { vaultUse && !targets.contains("vault_kind=card") }
+
+    func vaultTargets(_ name: String) -> [String] {
+        targets.compactMap { $0.hasPrefix("vault_" + name + "=") ? String($0.dropFirst(name.count + 7)) : nil }
+    }
 
     init(summary: PendingApproval, value: JSONValue) throws {
         let scope = value["request"]["scope"]
