@@ -1,4 +1,4 @@
-use std::io::{self, Read};
+use std::io::{self, IsTerminal, Read};
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::Arc;
@@ -313,6 +313,8 @@ struct ChatArguments {
     resume: bool,
     #[arg(long, conflicts_with = "conversation")]
     title: Option<String>,
+    #[arg(long)]
+    no_wait: bool,
     #[command(flatten)]
     model: ModelArguments,
     #[command(flatten)]
@@ -408,6 +410,10 @@ enum CliError {
     StateDirectory,
     #[error("command {0} is already pending; use --resume --conversation with its conversation ID")]
     ResumeRequired(CommandId),
+    #[error(
+        "conversation {0} has no pending text turn to resume; its last turn already finished or was never accepted. Read the reply with `everything status --conversation {0} --history`, or start a new turn with `everything chat --conversation {0} --message TEXT`"
+    )]
+    NothingToResume(ConversationId),
     #[error("message files require at most 131072 bytes of UTF-8 text")]
     MessageFile,
     #[error("CLI output worker failed")]
@@ -1197,7 +1203,7 @@ async fn proxy_chat(
     use everything::ipc::{
         OwnerCommand, OwnerOperation, OwnerQuery, OwnerQueryResult, RequestedRunOptions,
     };
-    use everything::protocol::{TaskId, UnixMillis};
+    use everything::protocol::TaskId;
     let text = match (arguments.message, arguments.message_file) {
         (Some(message), None) => Some(message),
         (None, Some(path)) => Some(read_message(path).await?),
@@ -1256,7 +1262,7 @@ async fn proxy_chat(
     let command_id = if arguments.resume {
         let command_id = information
             .pending_command_id
-            .ok_or(AgentError::NoPendingTurn)?;
+            .ok_or(CliError::NothingToResume(conversation_id))?;
         if arguments.command_id.is_some_and(|id| id != command_id) {
             return Err(AgentError::CommandConflict(command_id).into());
         }
@@ -1284,42 +1290,15 @@ async fn proxy_chat(
                     .map(|id| (id, everything::protocol::PermissionDecision::Deny))
             })
         {
-            let OwnerQueryResult::Approval { approval } = client
-                .query(
-                    OwnerQuery::Approval {
-                        conversation_id,
-                        lookup: everything::ipc::ApprovalLookup::Approval(id),
-                    },
-                    cancellation.clone(),
-                )
-                .await?
-            else {
-                return Err(CliError::OwnerInput);
-            };
-            let approval = approval
-                .filter(|approval| {
-                    approval.status == everything::permissions::ApprovalStatus::Pending
-                        && approval.request.scope.task_id == task_id.to_string()
-                })
-                .ok_or(CliError::ToolOptions(
-                    "approval does not belong to this pending task",
-                ))?
-                .request;
-            let operation_id = approval
-                .scope
-                .operation_id
-                .parse()
-                .map_err(AgentError::from)?;
-            let command = everything::protocol::CommandEnvelope::new(
+            resolve_host_approval(
+                client,
                 conversation_id,
-                None,
-                UnixMillis::now().map_err(AgentError::from)?,
-                everything::protocol::Command::ResolvePermission {
-                    operation_id,
-                    decision,
-                },
-            );
-            client.submit_domain(command, cancellation.clone()).await?;
+                task_id,
+                id,
+                decision,
+                &cancellation,
+            )
+            .await?;
         } else {
             let operation = if arguments.tools.retry_uncertain {
                 match information.native_status.clone() {
@@ -1424,6 +1403,8 @@ async fn proxy_chat(
         command_id
     };
     let task_id = TaskId::try_from(*command_id.as_uuid()).map_err(AgentError::from)?;
+    let wait = !arguments.no_wait && io::stdin().is_terminal() && io::stdout().is_terminal();
+    let mut lines = None;
     let mut reported = None;
     let mut streamed = None::<everything::scheduler::LiveText>;
     let mut output = tokio::io::stdout();
@@ -1495,8 +1476,12 @@ async fn proxy_chat(
             OwnerQueryResult::Task { task, .. }
                 if task.status == everything::protocol::TaskStatus::AwaitingPermission =>
             {
-                print_host_approvals(client, conversation_id, task_id, &cancellation).await?;
-                return Err(CliError::ToolPaused);
+                if !wait {
+                    print_host_approvals(client, conversation_id, task_id, &cancellation).await?;
+                    return Err(CliError::ToolPaused);
+                }
+                await_host_approval(client, conversation_id, task_id, &mut lines, &cancellation)
+                    .await?;
             }
             OwnerQueryResult::Task { task, execution } => {
                 match &execution.waiting {
@@ -1576,13 +1561,62 @@ async fn proxy_chat(
     }
 }
 
-async fn print_host_approvals(
+async fn resolve_host_approval(
+    client: &everything::host::client::HostClient,
+    conversation_id: ConversationId,
+    task_id: everything::protocol::TaskId,
+    id: String,
+    decision: everything::protocol::PermissionDecision,
+    cancellation: &CancellationToken,
+) -> Result<(), CliError> {
+    use everything::ipc::{ApprovalLookup, OwnerQuery, OwnerQueryResult};
+    let OwnerQueryResult::Approval { approval } = client
+        .query(
+            OwnerQuery::Approval {
+                conversation_id,
+                lookup: ApprovalLookup::Approval(id),
+            },
+            cancellation.clone(),
+        )
+        .await?
+    else {
+        return Err(CliError::OwnerInput);
+    };
+    let approval = approval
+        .filter(|approval| {
+            approval.status == everything::permissions::ApprovalStatus::Pending
+                && approval.request.scope.task_id == task_id.to_string()
+        })
+        .ok_or(CliError::ToolOptions(
+            "approval does not belong to this pending task",
+        ))?
+        .request;
+    let operation_id = approval
+        .scope
+        .operation_id
+        .parse()
+        .map_err(AgentError::from)?;
+    let command = everything::protocol::CommandEnvelope::new(
+        conversation_id,
+        None,
+        everything::protocol::UnixMillis::now().map_err(AgentError::from)?,
+        everything::protocol::Command::ResolvePermission {
+            operation_id,
+            decision,
+        },
+    );
+    client.submit_domain(command, cancellation.clone()).await?;
+    Ok(())
+}
+
+async fn pending_host_approvals(
     client: &everything::host::client::HostClient,
     conversation_id: ConversationId,
     task_id: everything::protocol::TaskId,
     cancellation: &CancellationToken,
-) -> Result<(), CliError> {
+) -> Result<Vec<everything::permissions::ApprovalRequest>, CliError> {
     use everything::ipc::{ApprovalLookup, OwnerQuery, OwnerQueryResult};
+    let mut pending = Vec::new();
     let mut cursor = None;
     loop {
         let OwnerQueryResult::Approvals {
@@ -1620,18 +1654,158 @@ async fn print_host_approvals(
             if let Some(approval) = approval.filter(|approval| {
                 approval.status == everything::permissions::ApprovalStatus::Pending
             }) {
-                let request = serde_json::to_string_pretty(&approval.request)
-                    .map_err(|_| CliError::Serialization)?;
-                eprintln!(
-                    "exact operation approval required:\n{request}\nresume with --tools --resume --approve {} or --deny {}",
-                    approval.request.id, approval.request.id
-                );
+                pending.push(approval.request);
             }
         }
         match next_cursor {
             Some(next) => cursor = Some(next),
-            None => return Ok(()),
+            None => return Ok(pending),
         }
+    }
+}
+
+async fn print_host_approvals(
+    client: &everything::host::client::HostClient,
+    conversation_id: ConversationId,
+    task_id: everything::protocol::TaskId,
+    cancellation: &CancellationToken,
+) -> Result<(), CliError> {
+    for request in pending_host_approvals(client, conversation_id, task_id, cancellation).await? {
+        let json = serde_json::to_string_pretty(&request).map_err(|_| CliError::Serialization)?;
+        eprintln!(
+            "exact operation approval required:\n{json}\n{}",
+            resume_hint(conversation_id, &request.id)
+        );
+    }
+    Ok(())
+}
+
+fn resume_hint(conversation_id: ConversationId, approval_id: &str) -> String {
+    format!(
+        "approve with: everything chat --conversation {conversation_id} --tools --resume --approve {approval_id}\ndeny with:    everything chat --conversation {conversation_id} --tools --resume --deny {approval_id}"
+    )
+}
+
+fn terminal_lines() -> Result<tokio::sync::mpsc::Receiver<String>, CliError> {
+    let (sender, receiver) = tokio::sync::mpsc::channel(16);
+    std::thread::Builder::new()
+        .name("everything-approval-input".into())
+        .spawn(move || {
+            for line in io::stdin().lines() {
+                let Ok(line) = line else { break };
+                if sender.blocking_send(line).is_err() {
+                    break;
+                }
+            }
+        })?;
+    Ok(receiver)
+}
+
+async fn await_host_approval(
+    client: &everything::host::client::HostClient,
+    conversation_id: ConversationId,
+    task_id: everything::protocol::TaskId,
+    lines: &mut Option<tokio::sync::mpsc::Receiver<String>>,
+    cancellation: &CancellationToken,
+) -> Result<(), CliError> {
+    use everything::ipc::{ApprovalLookup, OwnerQuery, OwnerQueryResult};
+    use everything::permissions::ApprovalStatus;
+    use everything::protocol::PermissionDecision;
+    let Some(request) = pending_host_approvals(client, conversation_id, task_id, cancellation)
+        .await?
+        .into_iter()
+        .next()
+    else {
+        return Ok(());
+    };
+    let arguments =
+        serde_json::to_string(&request.arguments).map_err(|_| CliError::Serialization)?;
+    let arguments = match arguments.char_indices().nth(400) {
+        Some((end, _)) => format!("{}…", &arguments[..end]),
+        None => arguments,
+    };
+    let mode = serde_json::to_value(request.scope.mode)
+        .ok()
+        .and_then(|mode| mode.as_str().map(str::to_owned))
+        .unwrap_or_default();
+    eprintln!(
+        "\napproval required: {} in {mode} mode\n  workspace: {}\n  arguments: {arguments}\n  approval:  {}",
+        request.scope.tool_name, request.scope.workspace_root, request.id
+    );
+    if !request.scope.targets.is_empty() {
+        eprintln!("  targets:   {}", request.scope.targets.join(", "));
+    }
+    let lines = match lines {
+        Some(lines) => lines,
+        None => lines.insert(terminal_lines()?),
+    };
+    loop {
+        eprint!("approve? [y]es / [n]o (or decide in another client): ");
+        let answer = loop {
+            tokio::select! {
+                () = cancellation.cancelled() => {
+                    eprintln!("\nthe approval stays pending\n{}", resume_hint(conversation_id, &request.id));
+                    return Err(AgentError::Cancelled.into());
+                }
+                line = lines.recv() => break line,
+                () = tokio::time::sleep(std::time::Duration::from_millis(500)) => {
+                    let OwnerQueryResult::Approval { approval } = client
+                        .query(
+                            OwnerQuery::Approval {
+                                conversation_id,
+                                lookup: ApprovalLookup::Approval(request.id.clone()),
+                            },
+                            cancellation.clone(),
+                        )
+                        .await?
+                    else {
+                        return Err(CliError::OwnerInput);
+                    };
+                    match approval.map(|approval| approval.status) {
+                        Some(ApprovalStatus::Pending) => {}
+                        Some(ApprovalStatus::Approved { .. }) => {
+                            eprintln!("\napproved in another client; continuing");
+                            return Ok(());
+                        }
+                        Some(status) => {
+                            eprintln!("\napproval {} is no longer pending ({status:?})", request.id);
+                            return Ok(());
+                        }
+                        None => return Ok(()),
+                    }
+                }
+            }
+        };
+        let decision = match answer.map(|line| line.trim().to_ascii_lowercase()) {
+            None => {
+                eprintln!(
+                    "\ninput closed; the approval stays pending\n{}",
+                    resume_hint(conversation_id, &request.id)
+                );
+                return Err(CliError::ToolPaused);
+            }
+            Some(answer) if matches!(answer.as_str(), "y" | "yes" | "approve") => {
+                PermissionDecision::Allow
+            }
+            Some(answer) if matches!(answer.as_str(), "n" | "no" | "deny") => {
+                PermissionDecision::Deny
+            }
+            Some(_) => continue,
+        };
+        resolve_host_approval(
+            client,
+            conversation_id,
+            task_id,
+            request.id.clone(),
+            decision,
+            cancellation,
+        )
+        .await?;
+        match decision {
+            PermissionDecision::Allow => eprintln!("approved; continuing"),
+            PermissionDecision::Deny => eprintln!("denied; continuing without running it"),
+        }
+        return Ok(());
     }
 }
 
@@ -1739,7 +1913,7 @@ async fn chat(
         let pending = conversation
             .info
             .pending_command_id
-            .ok_or(AgentError::NoPendingTurn)?;
+            .ok_or(CliError::NothingToResume(conversation.info.id))?;
         if arguments.command_id.is_some_and(|id| id != pending) {
             return Err(
                 AgentError::CommandConflict(arguments.command_id.unwrap_or(pending)).into(),
@@ -2103,16 +2277,26 @@ async fn run_tool_chat(
                 TurnEvent::Committed { message, summary } => {
                     let authoritative = message_text(&message);
                     if authoritative != provisional {
-                        if !provisional.is_empty() { output.write_all(b"\n").await?; }
+                        if !provisional.is_empty() {
+                            output.write_all(b"\n").await?;
+                        }
                         output.write_all(authoritative.as_bytes()).await?;
                     }
-                    if !authoritative.is_empty() || !provisional.is_empty() { output.write_all(b"\n").await?; }
+                    if !authoritative.is_empty() || !provisional.is_empty() {
+                        output.write_all(b"\n").await?;
+                    }
                     output.flush().await?;
                     provisional.clear();
-                    eprintln!("saved assistant message {} ({:?})", summary.message_id, summary.stop_reason);
+                    eprintln!(
+                        "saved assistant message {} ({:?})",
+                        summary.message_id, summary.stop_reason
+                    );
                 }
                 TurnEvent::ContextBuilt { usage, .. } => {
-                    eprintln!("context input estimate {} tokens", usage.estimated_input_tokens);
+                    eprintln!(
+                        "context input estimate {} tokens",
+                        usage.estimated_input_tokens
+                    );
                 }
                 TurnEvent::ModelAttemptStarted { attempt_id } => eprintln!("model attempt {attempt_id}"),
                 TurnEvent::ToolCallRecorded { call } => eprintln!("saved tool call {} {}", call.id, call.name),
@@ -2123,18 +2307,30 @@ async fn run_tool_chat(
                     }
                 }
                 TurnEvent::AwaitingPermission { approval, .. } => {
-                    let request = serde_json::to_string_pretty(&approval).map_err(|_| CliError::Serialization)?;
-                    eprintln!("exact operation approval required:\n{request}\nresume with --tools --approve {} or --deny {}", approval.id, approval.id);
+                    let request = serde_json::to_string_pretty(&approval)
+                        .map_err(|_| CliError::Serialization)?;
+                    eprintln!(
+                        "exact operation approval required:\n{request}\n{}",
+                        resume_hint(conversation_id, &approval.id)
+                    );
                 }
                 TurnEvent::Paused { reason } => eprintln!("native run paused: {reason:?}"),
-                TurnEvent::ToolBlocked { call_id, reason, diagnostic } => eprintln!("tool call {call_id} blocked ({reason:?}): {diagnostic}"),
+                TurnEvent::ToolBlocked {
+                    call_id,
+                    reason,
+                    diagnostic,
+                } => eprintln!("tool call {call_id} blocked ({reason:?}): {diagnostic}"),
                 TurnEvent::RunCompleted { run } => {
                     completed = matches!(run.status, LoopStatus::Completed);
-                    eprintln!("completed task {}; charged token budget {}", run.task_id, run.charged_tokens);
+                    eprintln!(
+                        "completed task {}; charged token budget {}",
+                        run.task_id, run.charged_tokens
+                    );
                 }
             }
             Ok::<_, CliError>(())
-        }.await;
+        }
+        .await;
         if let Err(error) = rendered {
             failure = Some(error);
             cancellation.cancel();
