@@ -15,7 +15,7 @@ use everything::model::anthropic::{AnthropicConfig, AnthropicProvider};
 use everything::model::openai::{OpenAiConfig, OpenAiProvider};
 use everything::permissions::{
     ApprovalChoice, ApprovalResolution, Authorizer, ExecutionAuthority, ExecutionMode,
-    ToolScopeRule,
+    READ_ONLY_WRITES_UNAVAILABLE, ToolScopeRule,
 };
 use everything::protocol::{CommandId, ConversationId, ConversationMessage, MessageContent};
 use everything::selector::{SEARCH_TOOLS_NAME, SearchTools, ToolSelector};
@@ -2095,7 +2095,12 @@ async fn run_tool_chat(
                 }
                 TurnEvent::ModelAttemptStarted { attempt_id } => eprintln!("model attempt {attempt_id}"),
                 TurnEvent::ToolCallRecorded { call } => eprintln!("saved tool call {} {}", call.id, call.name),
-                TurnEvent::ToolResultRecorded { result } => eprintln!("saved tool result {} error={}", result.tool_call_id, result.is_error),
+                TurnEvent::ToolResultRecorded { result } => {
+                    eprintln!("saved tool result {} error={}", result.tool_call_id, result.is_error);
+                    if result.is_error && result.content.contains(READ_ONLY_WRITES_UNAVAILABLE) {
+                        eprintln!("writes are disabled in read-only mode; send the next message with --tools --execution-mode trusted-workspace (or full-host) to allow writes");
+                    }
+                }
                 TurnEvent::AwaitingPermission { approval, .. } => {
                     let request = serde_json::to_string_pretty(&approval).map_err(|_| CliError::Serialization)?;
                     eprintln!("exact operation approval required:\n{request}\nresume with --tools --approve {} or --deny {}", approval.id, approval.id);

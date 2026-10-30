@@ -16,6 +16,7 @@ use thiserror::Error;
 const RECORD_VERSION: u32 = 1;
 const SNAPSHOT_LIMIT: usize = 1_000;
 const APPROVAL_LIFETIME_MS: i64 = 30 * 60 * 1_000;
+pub const READ_ONLY_WRITES_UNAVAILABLE: &str = "writes are unavailable because the current execution mode is read-only; the trusted-workspace and full-host execution modes allow writes";
 
 #[derive(Debug, Error)]
 pub enum PermissionError {
@@ -425,7 +426,7 @@ impl Authorizer {
             && authority.mode == ExecutionMode::ReadOnly
         {
             return Ok(ToolVisibility::Denied {
-                reason: "ReadOnly authority forbids filesystem mutation".into(),
+                reason: READ_ONLY_WRITES_UNAVAILABLE.into(),
             });
         }
         if !descriptor.read_only
@@ -828,7 +829,7 @@ fn evaluate_mode(
         .capabilities
         .contains(&ToolCapability::FilesystemWrite);
     if writes && authority.mode == ExecutionMode::ReadOnly {
-        return ModeDecision::Deny("ReadOnly authority forbids filesystem mutation");
+        return ModeDecision::Deny(READ_ONLY_WRITES_UNAVAILABLE);
     }
     if matches!(rule, ToolScopeRule::Filesystem { .. }) {
         let inside_workspace = scope
