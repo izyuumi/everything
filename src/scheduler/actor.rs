@@ -853,7 +853,49 @@ impl Actor {
                 }
             }
         }
+        self.release_stranded_children().await?;
         self.repair_child_deliveries().await?;
+        Ok(())
+    }
+
+    async fn release_stranded_children(&mut self) -> Result<(), SchedulerError> {
+        for parent in repository::unfinished(&self.store(), self.limits.max_pending_tasks)? {
+            let Some(wait) = parent.checkpoint.child_wait.as_ref() else {
+                continue;
+            };
+            if parent.checkpoint.cancel_requested
+                || !matches!(
+                    parent.checkpoint.waiting,
+                    Some(WaitingReason::Children { .. })
+                )
+            {
+                continue;
+            }
+            for child in wait
+                .children
+                .iter()
+                .filter(|child| child.delivery.is_none())
+            {
+                let mut task = repository::load(&self.store(), child.task_id)?;
+                let Some(reason) = task.checkpoint.waiting.clone().filter(owner_decision) else {
+                    continue;
+                };
+                if task.checkpoint.task.status.is_terminal()
+                    || task.checkpoint.cancel_requested
+                    || task.definition.remote.is_some()
+                {
+                    continue;
+                }
+                task.checkpoint.diagnostic = Some(diagnostic(&format!(
+                    "Host restart found this child stopped at {reason:?} while parent task {} waited for it; it was cancelled so the parent receives its result",
+                    parent.definition.initial.id
+                )));
+                let status = task.checkpoint.task.status;
+                repository::save(&self.store(), &mut task, status)?;
+                tracing::warn!(task_id=%child.task_id, parent_task_id=%parent.definition.initial.id, ?reason, "cancelling child stranded at an owner decision while its parent waits");
+                self.cancel(child.task_id).await?;
+            }
+        }
         Ok(())
     }
 
@@ -2172,17 +2214,7 @@ impl Actor {
             return Ok(task.snapshot());
         }
         let conversation = self.repair_initial_acceptance(&task, None).await?;
-        if native_waiting(&conversation, &task).is_some_and(|reason| {
-            matches!(
-                reason,
-                WaitingReason::ProviderUncertain { .. }
-                    | WaitingReason::Limit
-                    | WaitingReason::Reconciliation
-                    | WaitingReason::ChildOutcomeUnknown { .. }
-                    | WaitingReason::Interrupted
-                    | WaitingReason::NativePaused { .. }
-            )
-        }) {
+        if native_waiting(&conversation, &task).is_some_and(|reason| owner_decision(&reason)) {
             return Err(SchedulerError::OwnerDecision(id));
         }
         if matches!(
@@ -2829,6 +2861,18 @@ fn diagnostic(message: &str) -> String {
         end -= 1;
     }
     message[..end].to_owned()
+}
+
+fn owner_decision(reason: &WaitingReason) -> bool {
+    matches!(
+        reason,
+        WaitingReason::ProviderUncertain { .. }
+            | WaitingReason::Limit
+            | WaitingReason::Reconciliation
+            | WaitingReason::ChildOutcomeUnknown { .. }
+            | WaitingReason::Interrupted
+            | WaitingReason::NativePaused { .. }
+    )
 }
 
 fn native_waiting(conversation: &Conversation, task: &StoredTask) -> Option<WaitingReason> {

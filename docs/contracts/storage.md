@@ -83,7 +83,7 @@ Automated checkpoint migration, command-collision, concurrency and recovery cove
 
 ## Tasks and tool operations
 
-`create_task` creates a queued task with opaque input and checkpoint JSON. A parent task may span conversations, while tool calls remain bound to their task's conversation. `task` and `tasks` read tasks, optionally filtering by conversation and state. `transition_task` atomically compares the previous state and writes a new checkpoint and timestamp. `checkpoint_task` updates a nonterminal task without transitioning. Timestamps may not move backward. Terminal tasks cannot be reopened.
+`create_task` creates a queued task with opaque input and checkpoint JSON. A parent task may span conversations, while tool calls remain bound to their task's conversation. `task` and `tasks` read tasks, optionally filtering by conversation and state; `tasks` returns the newest first by `(created_at, id)` descending. `transition_task` atomically compares the previous state and writes a new checkpoint and timestamp. `checkpoint_task` updates a nonterminal task without transitioning. Timestamps may not move backward. Terminal tasks cannot be reopened.
 
 Allowed task transitions are queued → running/failed/cancelled, running → queued/waiting/completed/failed/cancelled, and waiting → queued/running/failed/cancelled. Running → queued exists for deliberate recovery after the caller reconciles external effects. Storage never automatically replays task or tool side effects.
 

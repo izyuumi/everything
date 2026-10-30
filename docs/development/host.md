@@ -46,7 +46,7 @@ These operations target the current user's launchd login domain, without root. I
 {"kind":"query","query":{"kind":"runtime"}}
 ```
 
-Other query kinds include `conversations`, `conversation`, `tasks`, `task`, `approvals`, `approval`, `identity`, `devices`, `transport`, `command`, and `tool_recovery`. Lists require a limit from 1 to 100. Individual task metadata reports the actual waiting reason, diagnostic, cancellation state and active command. Private native checkpoints and credentials are not returned. Pending approval lists return small summaries with default `limit: 20` and an optional cursor. Fetch the exact arguments and scope separately before deciding:
+Other query kinds include `conversations`, `conversation`, `tasks`, `task`, `approvals`, `approval`, `identity`, `devices`, `transport`, `command`, and `tool_recovery`. Lists require a limit from 1 to 100. `tasks` returns the newest tasks first. Individual task metadata reports the actual waiting reason, diagnostic, cancellation state and active command. Private native checkpoints and credentials are not returned. Pending approval lists return small summaries with default `limit: 20` and an optional cursor. Fetch the exact arguments and scope separately before deciding:
 
 ```json
 {"kind":"query","query":{"kind":"approval","conversation_id":"CONVERSATION_UUID","lookup":{"by":"approval","id":"approval:EXACT_ID"}}}
