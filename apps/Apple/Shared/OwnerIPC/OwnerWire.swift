@@ -58,7 +58,7 @@ struct OwnerRequest: Sendable {
 
     func validateForFileTransfer() throws {
         switch body["kind"].string {
-        case "query", "command": return
+        case "query", "command", "synchronize": return
         case "operation":
             switch body["operation"]["kind"].string {
             case "worker_coordinator", "revoke_worker_peer", "schedule", "acknowledge_scheduled_unknown",
@@ -76,6 +76,13 @@ struct OwnerRequest: Sendable {
         var query = fields
         query["kind"] = .string(kind)
         return OwnerRequest(id: OwnerID(), body: .object(["kind": .string("query"), "query": .object(query)]), mutating: false)
+    }
+
+    static func synchronize(conversation: OwnerID, after: UInt64) -> OwnerRequest {
+        let cursor: JSONValue = .object(["conversation_id": .string(conversation.string), "after_sequence": .unsigned(after)])
+        return OwnerRequest(id: OwnerID(), body: .object(["kind": .string("synchronize"), "request": .object([
+            "schema_version": .integer(1), "cursors": .array([cursor]), "max_events": .integer(64)
+        ])]), mutating: false)
     }
 
     static func command(conversation: OwnerID, payload: [String: JSONValue]) throws -> OwnerRequest {

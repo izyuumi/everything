@@ -27,10 +27,94 @@ struct HostTask: Identifiable, Sendable {
 struct HostConversation: Identifiable, Sendable {
     let id: OwnerID
     let title: String
+    let provider: String
+    let model: String
+    let lastSequence: UInt64
+    let messageCount: UInt64
 
     init(_ value: JSONValue) throws {
         id = try OwnerID(value.requiringString("id", maximum: 36))
         title = try value.requiringString("title", maximum: 4096)
+        provider = try value.requiringString("provider", maximum: 32)
+        model = try value.requiringString("model", maximum: 256)
+        guard let sequence = value["last_sequence"].unsigned, let count = value["message_count"].unsigned else { throw OwnerClientError.invalidResponse }
+        lastSequence = sequence
+        messageCount = count
+    }
+}
+
+struct TranscriptEntry: Identifiable, Sendable {
+    enum Kind: Sendable { case text, toolCall, toolResult, toolError }
+    let id: String
+    let role: String
+    let kind: Kind
+    let tool: String?
+    let text: String
+    let date: Date
+}
+
+struct TranscriptPage: Sendable {
+    let entries: [TranscriptEntry]
+    let through: UInt64
+
+    init(_ response: JSONValue, conversation: OwnerID, after: UInt64) throws {
+        let batch = response["batch"]
+        guard response["kind"].string == "synchronized",
+              batch["cursor"]["conversation_id"].string == conversation.string,
+              batch["cursor"]["after_sequence"].unsigned == after,
+              let events = batch["events"].array, events.count <= 64 else { throw OwnerClientError.invalidResponse }
+        var previous = after
+        var entries: [TranscriptEntry] = []
+        for event in events {
+            guard event["conversation_id"].string == conversation.string,
+                  let sequence = event["sequence"].unsigned, sequence > previous else { throw OwnerClientError.invalidResponse }
+            previous = sequence
+            guard event["payload"]["kind"].string == "message_appended" else { continue }
+            let message = event["payload"]["message"]
+            let identifier = try message.requiringString("id", maximum: 36)
+            let role = try message.requiringString("role", maximum: 16)
+            guard ["system", "user", "assistant", "tool"].contains(role), let parts = message["content"].array,
+                  let created = message["created_at"].unsigned else { throw OwnerClientError.invalidResponse }
+            guard role != "system" else { continue }
+            let date = try ScheduleFields.date(.unsigned(created))
+            for (index, part) in parts.enumerated() {
+                let id = identifier + "-\(index)"
+                switch part["kind"].string {
+                case "text":
+                    entries.append(TranscriptEntry(id: id, role: role, kind: .text, tool: nil, text: try part.requiringString("text", maximum: 4 * 1024 * 1024), date: date))
+                case "tool_call":
+                    entries.append(TranscriptEntry(id: id, role: role, kind: .toolCall, tool: try part.requiringString("name", maximum: 256), text: JSONSummary.lines(part["arguments"]), date: date))
+                case "tool_result":
+                    guard let error = part["is_error"].bool else { throw OwnerClientError.invalidResponse }
+                    entries.append(TranscriptEntry(id: id, role: role, kind: error ? .toolError : .toolResult, tool: nil, text: try part.requiringString("content", maximum: 4 * 1024 * 1024), date: date))
+                default: throw OwnerClientError.invalidResponse
+                }
+            }
+        }
+        self.entries = entries
+        through = previous
+    }
+}
+
+enum JSONSummary {
+    static func lines(_ value: JSONValue, limit: Int = 12) -> String {
+        guard case .object(let object) = value else { return clipped(value) }
+        let keys = object.keys.sorted()
+        var lines = keys.prefix(limit).map { $0 + ": " + clipped(object[$0] ?? .null) }
+        if keys.count > limit { lines.append("…and \(keys.count - limit) more") }
+        return lines.isEmpty ? "No arguments" : lines.joined(separator: "\n")
+    }
+
+    static func clipped(_ value: JSONValue) -> String {
+        let text = value.string ?? value.formatted.replacingOccurrences(of: "\n", with: " ")
+        return text.count > 160 ? String(text.prefix(160)) + "…" : text
+    }
+
+    static func label(_ value: String) -> String { value.replacingOccurrences(of: "_", with: " ").capitalized }
+
+    static func date(_ milliseconds: UInt64?) -> String {
+        guard let milliseconds else { return "Unknown" }
+        return Date(timeIntervalSince1970: Double(milliseconds) / 1000).formatted(date: .abbreviated, time: .standard)
     }
 }
 

@@ -191,6 +191,9 @@ enum OwnerInput {
         operation: Box<everything::ipc::OwnerOperation>,
         request_id: Option<CommandId>,
     },
+    Synchronize {
+        request: everything::protocol::SyncRequest,
+    },
 }
 
 #[derive(serde::Deserialize)]
@@ -792,6 +795,21 @@ async fn owner_cli(
             };
             eprintln!("owner request {request_id}; reuse this ID for an explicit retry");
             write_json(client.operate(*operation, request_id, cancellation).await?).await
+        }
+        OwnerInput::Synchronize { request } => {
+            request.validate().map_err(|_| CliError::OwnerInput)?;
+            match client
+                .request(
+                    everything::transport::local::LocalRequestPayload::Synchronize { request },
+                    cancellation,
+                )
+                .await?
+            {
+                response @ everything::transport::local::LocalResponsePayload::Synchronized {
+                    ..
+                } => write_json(response).await,
+                _ => Err(CliError::OwnerInput),
+            }
         }
     }
 }

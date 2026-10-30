@@ -37,10 +37,16 @@ final class HostModel {
     @ObservationIgnored private var historyGeneration = UUID()
     var tasks: [HostTask] = []
     var conversations: [HostConversation] = []
-    var selectedConversation: OwnerID?
     var approvals: [PendingApproval] = []
-    var approvalCursor: JSONValue = .null
+    var approvalsLimited = false
     var approvalLoading = false
+    var openConversation: HostConversation?
+    var transcript: [TranscriptEntry] = []
+    var transcriptCursor: UInt64 = 0
+    var transcriptTrimmed = false
+    var transcriptLoading = false
+    var transcriptError: String?
+    var taskConversation: HostConversation?
     var selectedApproval: ApprovalDetails?
     var selectedTask: HostTask?
     var taskDetails: JSONValue = .null
@@ -133,7 +139,10 @@ final class HostModel {
         tasks = []
         conversations = []
         approvals = []
-        selectedConversation = nil
+        approvalsLimited = false
+        openConversation = nil
+        transcript = []
+        taskConversation = nil
         settings = .null
         selectedTask = nil
         selectedApproval = nil
@@ -173,9 +182,6 @@ final class HostModel {
             self.conversations = conversations
             connected = true
             lastRefresh = Date()
-            if !conversations.contains(where: { $0.id == selectedConversation }) {
-                selectedConversation = conversations.first?.id
-            }
         } catch {
             guard original == connection, !Task.isCancelled, !closing else { return }
             connected = false
@@ -272,26 +278,69 @@ final class HostModel {
         }
     }
 
-    func loadApprovals(more: Bool = false) async {
-        guard let conversation = selectedConversation, !approvalLoading, !closing else { return }
+    func loadApprovals() async {
+        guard !approvalLoading, !closing else { return }
         approvalLoading = true
         defer { approvalLoading = false }
         let original = connection
-        let cursor = more ? approvalCursor : .null
-        if !more { approvals = []; approvalCursor = .null }
+        var collected: [PendingApproval] = []
+        var limited = false
         do {
-            let result = try await client.request(.query("approvals", fields: ["conversation_id": .string(conversation.string), "limit": .integer(20), "cursor": cursor]), connection: original)
-            guard result["kind"].string == "approvals", let rows = result["approvals"].array,
-                  rows.count <= 20, try result.encoded().count <= 256 * 1024 else { throw OwnerClientError.invalidResponse }
-            let items = try rows.map { try PendingApproval($0, conversation: conversation, connection: original) }
-            guard original == connection, conversation == selectedConversation, !closing, !Task.isCancelled else { return }
-            guard Set(items.map(\.id)).count == items.count else { throw OwnerClientError.invalidResponse }
-            let previous = more ? approvals : []
-            guard items.allSatisfy({ item in !previous.contains(where: { $0.id == item.id }) }) else { throw OwnerClientError.invalidResponse }
-            approvals = previous + items
-            approvalCursor = result["next_cursor"]
+            search: for conversation in conversations {
+                var cursor: JSONValue = .null
+                repeat {
+                    let result = try await client.request(.query("approvals", fields: ["conversation_id": .string(conversation.id.string), "limit": .integer(100), "cursor": cursor]), connection: original)
+                    guard result["kind"].string == "approvals", let rows = result["approvals"].array,
+                          rows.count <= 100, try result.encoded().count <= 256 * 1024 else { throw OwnerClientError.invalidResponse }
+                    collected += try rows.map { try PendingApproval($0, conversation: conversation.id, connection: original) }
+                    guard original == connection, !closing, !Task.isCancelled else { return }
+                    if collected.count >= 500 { limited = true; break search }
+                    cursor = result["next_cursor"]
+                } while cursor != .null
+            }
+            guard Set(collected.map(\.id)).count == collected.count else { throw OwnerClientError.invalidResponse }
+            approvals = collected.sorted { $0.requestedAt < $1.requestedAt }
+            approvalsLimited = limited
         } catch {
-            if !Task.isCancelled { message = error.localizedDescription }
+            if original == connection, !closing, !Task.isCancelled { message = error.localizedDescription }
+        }
+    }
+
+    func open(_ conversation: HostConversation) {
+        guard !closing else { return }
+        transcript = []
+        transcriptCursor = 0
+        transcriptTrimmed = false
+        transcriptError = nil
+        openConversation = conversation
+    }
+
+    func loadTranscript(_ conversation: HostConversation) async {
+        guard !closing, !transcriptLoading, openConversation?.id == conversation.id else { return }
+        transcriptLoading = true
+        defer { transcriptLoading = false }
+        let original = connection
+        do {
+            let head = try await client.request(.query("conversation", fields: ["conversation_id": .string(conversation.id.string)]), connection: original)
+            guard head["kind"].string == "conversation", head["information"]["id"].string == conversation.id.string,
+                  let through = head["information"]["last_sequence"].unsigned else { throw OwnerClientError.invalidResponse }
+            while transcriptCursor < through {
+                let after = transcriptCursor
+                let response = try await client.request(.synchronize(conversation: conversation.id, after: after), connection: original)
+                let page = try TranscriptPage(response, conversation: conversation.id, after: after)
+                guard original == connection, openConversation?.id == conversation.id, transcriptCursor == after,
+                      !closing, !Task.isCancelled else { return }
+                guard page.through > after else { throw OwnerClientError.invalidResponse }
+                transcript += page.entries
+                if transcript.count > 2000 {
+                    transcript.removeFirst(transcript.count - 2000)
+                    transcriptTrimmed = true
+                }
+                transcriptCursor = page.through
+            }
+            transcriptError = nil
+        } catch {
+            if original == connection, openConversation?.id == conversation.id, !closing, !Task.isCancelled { transcriptError = error.localizedDescription }
         }
     }
 
@@ -313,7 +362,11 @@ final class HostModel {
             guard ["task", "legacy_foreground"].contains(result["kind"].string ?? ""),
                   result["task"]["id"].string == task.id.string,
                   result["task"]["conversation_id"].string == task.conversationID.string else { throw OwnerClientError.invalidResponse }
-            if original == connection, !closing { taskDetails = result; selectedTask = task }
+            let head = try await client.request(.query("conversation", fields: ["conversation_id": .string(task.conversationID.string)]), connection: original)
+            guard head["kind"].string == "conversation" else { throw OwnerClientError.invalidResponse }
+            let conversation = try HostConversation(head["information"])
+            guard conversation.id == task.conversationID else { throw OwnerClientError.invalidResponse }
+            if original == connection, !closing { taskDetails = result; taskConversation = conversation; selectedTask = task }
         } catch { if !Task.isCancelled { message = error.localizedDescription } }
     }
 

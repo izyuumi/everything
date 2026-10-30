@@ -329,6 +329,16 @@
             "path" = "TasksView.swift";
             "sourceTree" = "<group>";
         };
+        "3F1C7A52D90B4E6A8C21B7E4" = {
+            "isa" = "PBXFileReference";
+            "lastKnownFileType" = "sourcecode.swift";
+            "path" = "ConversationsView.swift";
+            "sourceTree" = "<group>";
+        };
+        "9A4E2D61C8B37F05E1D6A932" = {
+            "isa" = "PBXBuildFile";
+            "fileRef" = "3F1C7A52D90B4E6A8C21B7E4";
+        };
         "7CA5E98DE69F2186DEA9BCC0" = {
             "isa" = "PBXBuildFile";
             "fileRef" = "D7C84BABB04E783E04F7D6EB";
@@ -509,6 +519,7 @@
                 "8D895A41A4241F5A0E80D77C",
                 "7C5CDFEEFC4B839057387451",
                 "D7C84BABB04E783E04F7D6EB",
+                "3F1C7A52D90B4E6A8C21B7E4",
                 "E4DEA7C2A88FA1DC5F002B17",
                 "0C033674B3E2048D89A933D7",
                 "BC02965820324DAB9751A7EE",
@@ -601,6 +612,7 @@
                 "5DD0C751C392C8F6847DCDF4",
                 "14E3FDC1451F2DCE6763CA98",
                 "7CA5E98DE69F2186DEA9BCC0",
+                "9A4E2D61C8B37F05E1D6A932",
                 "68B248F9B1B6FC26D9DD796C",
                 "F3589FE64633CD71BA5F075A",
                 "42D1465C9A4544B4BB5A3E90",
