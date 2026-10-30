@@ -481,6 +481,9 @@ pub enum OwnerOperation {
     VaultRemove {
         id: uuid::Uuid,
     },
+    RevokeGrant {
+        grant_id: String,
+    },
 }
 
 impl OwnerOperation {
@@ -567,6 +570,13 @@ impl OwnerOperation {
             Self::ChatGptModels { binding } => crate::host::chatgpt::validate_binding(binding),
             Self::VaultPut { item } => item.validate().map_err(|_| "invalid vault item"),
             Self::VaultRemove { id } if id.is_nil() => Err("invalid vault item ID"),
+            Self::RevokeGrant { grant_id }
+                if !grant_id.starts_with("decision:approval:")
+                    || grant_id.len() > 256
+                    || grant_id.chars().any(char::is_control) =>
+            {
+                Err("invalid grant ID")
+            }
             _ => Ok(()),
         }
     }
@@ -1179,6 +1189,7 @@ impl OwnerOperationResult {
             (
                 OwnerOperation::Credential { .. }
                 | OwnerOperation::VaultRemove { .. }
+                | OwnerOperation::RevokeGrant { .. }
                 | OwnerOperation::RevokeWorkerPeer { .. }
                 | OwnerOperation::RevokeDevice { .. }
                 | OwnerOperation::WakeTask { .. }

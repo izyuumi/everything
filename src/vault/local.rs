@@ -232,41 +232,8 @@ impl VaultProvider for LocalVaultProvider {
                 let mut statement = connection.prepare(
                     "SELECT id, kind, metadata, fields, updated_at FROM vault_items WHERE state = 'ready' ORDER BY updated_at DESC, id LIMIT ?1",
                 )?;
-                let rows = statement.query_map(params![MAX_VAULT_ITEMS], |row| {
-                    Ok((
-                        row.get::<_, String>(0)?,
-                        row.get::<_, String>(1)?,
-                        row.get::<_, String>(2)?,
-                        row.get::<_, String>(3)?,
-                        row.get::<_, i64>(4)?,
-                    ))
-                })?;
-                let mut summaries = Vec::new();
-                for row in rows {
-                    let (id, kind, metadata, fields, updated_at) = row?;
-                    let metadata: VaultItemMetadata =
-                        serde_json::from_str(&metadata).map_err(|_| VaultError::Malformed)?;
-                    let fields: Vec<String> =
-                        serde_json::from_str(&fields).map_err(|_| VaultError::Malformed)?;
-                    if VaultItemKind::parse(&kind) != Some(metadata.kind())
-                        || !fields
-                            .iter()
-                            .all(|field| metadata.kind().secret_fields().contains(&field.as_str()))
-                    {
-                        return Err(VaultError::Malformed);
-                    }
-                    let updated_at = u64::try_from(updated_at)
-                        .ok()
-                        .and_then(|value| UnixMillis::try_from(value).ok())
-                        .ok_or(VaultError::Malformed)?;
-                    summaries.push(VaultItemSummary::new(
-                        VaultReference::local(parse_id(&id)?, None)?,
-                        metadata,
-                        fields,
-                        updated_at,
-                    ));
-                }
-                Ok(summaries)
+                let rows = statement.query_map(params![MAX_VAULT_ITEMS], index_row)?;
+                rows.map(|row| summary(row?)).collect::<Result<Vec<_>, _>>()
             })
             .await?;
         Ok(rows
@@ -319,6 +286,60 @@ impl VaultProvider for LocalVaultProvider {
             .ok_or(VaultError::MissingField(field))?;
         Ok(CredentialSecret::new(value.expose().to_vec())?)
     }
+}
+
+type IndexRow = (String, String, String, String, i64);
+
+fn index_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<IndexRow> {
+    Ok((
+        row.get(0)?,
+        row.get(1)?,
+        row.get(2)?,
+        row.get(3)?,
+        row.get(4)?,
+    ))
+}
+
+fn summary(
+    (id, kind, metadata, fields, updated_at): IndexRow,
+) -> Result<VaultItemSummary, VaultError> {
+    let metadata: VaultItemMetadata =
+        serde_json::from_str(&metadata).map_err(|_| VaultError::Malformed)?;
+    let fields: Vec<String> = serde_json::from_str(&fields).map_err(|_| VaultError::Malformed)?;
+    if VaultItemKind::parse(&kind) != Some(metadata.kind())
+        || !fields
+            .iter()
+            .all(|field| metadata.kind().secret_fields().contains(&field.as_str()))
+    {
+        return Err(VaultError::Malformed);
+    }
+    let updated_at = u64::try_from(updated_at)
+        .ok()
+        .and_then(|value| UnixMillis::try_from(value).ok())
+        .ok_or(VaultError::Malformed)?;
+    Ok(VaultItemSummary::new(
+        VaultReference::local(parse_id(&id)?, None)?,
+        metadata,
+        fields,
+        updated_at,
+    ))
+}
+
+pub(crate) fn ready_summary(
+    store: &Store,
+    reference: &VaultReference,
+) -> Result<VaultItemSummary, VaultError> {
+    let id = reference.local_id()?.hyphenated().to_string();
+    let row = store
+        .connection()?
+        .query_row(
+            "SELECT id, kind, metadata, fields, updated_at FROM vault_items WHERE id = ?1 AND state = 'ready'",
+            params![id],
+            index_row,
+        )
+        .optional()?
+        .ok_or(VaultError::NotFound)?;
+    summary(row)
 }
 
 fn parse_id(value: &str) -> Result<uuid::Uuid, VaultError> {

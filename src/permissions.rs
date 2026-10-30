@@ -5,6 +5,7 @@ pub use publication::PermissionDecisionPublication;
 
 use crate::storage::{PermissionRow, StorageError, Store};
 use crate::tools::{ToolCapability, ToolDescriptor, ToolError, ToolRegistry};
+use crate::vault::task::VaultUse;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -16,6 +17,7 @@ use thiserror::Error;
 const RECORD_VERSION: u32 = 1;
 const SNAPSHOT_LIMIT: usize = 1_000;
 const APPROVAL_LIFETIME_MS: i64 = 30 * 60 * 1_000;
+const VAULT_LEASE_MS: i64 = 60 * 60 * 1_000;
 pub const READ_ONLY_WRITES_UNAVAILABLE: &str = "writes are unavailable because the current execution mode is read-only; the trusted-workspace and full-host execution modes allow writes";
 
 #[derive(Debug, Error)]
@@ -44,6 +46,8 @@ pub enum PermissionError {
     ApprovalExpired(String),
     #[error("grant {0} was not found")]
     GrantNotFound(String),
+    #[error("{0}")]
+    Refused(String),
 }
 
 pub use crate::protocol::ExecutionMode;
@@ -270,6 +274,14 @@ pub enum ToolScopeRule {
     RuntimeTask,
     Filesystem { path_pointers: Vec<String> },
     Host { service: String },
+    Vault(VaultAccess),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VaultAccess {
+    Search,
+    Use,
+    Request,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -300,6 +312,7 @@ pub struct ApprovalRequest {
 #[serde(rename_all = "snake_case")]
 pub enum ApprovalChoice {
     Allow,
+    AllowForTask,
     Deny,
 }
 
@@ -405,6 +418,15 @@ impl Authorizer {
         if matches!(rule, ToolScopeRule::RuntimeTask) {
             return Ok(ToolVisibility::Available);
         }
+        if let ToolScopeRule::Vault(access) = rule {
+            return Ok(match vault_mode(*access, authority.mode) {
+                ModeDecision::Allow => ToolVisibility::Available,
+                ModeDecision::Ask => ToolVisibility::RequiresApproval,
+                ModeDecision::Deny(reason) => ToolVisibility::Denied {
+                    reason: reason.into(),
+                },
+            });
+        }
         let privileged = descriptor.capabilities.iter().any(|capability| {
             matches!(
                 capability,
@@ -467,13 +489,16 @@ impl Authorizer {
         let Some(rule) = self.scope_rules.get(tool_name) else {
             return Ok(deny("tool has no trusted host scope registration"));
         };
-        let scope = match derive_scope(authority, operation_id, descriptor, rule, arguments) {
+        let scope = match derive_scope(authority, operation_id, descriptor, rule, arguments)
+            .and_then(|scope| self.vault_scope(authority, descriptor, rule, arguments, scope))
+        {
             Ok(scope) => scope,
             Err(PermissionError::InvalidTarget(_)) => {
                 return Ok(deny(
                     "filesystem target cannot be resolved inside the inherited workspace",
                 ));
             }
+            Err(PermissionError::Refused(reason)) => return Ok(deny(&reason)),
             Err(error) => return Err(error),
         };
         let approval_id = approval_id(&scope)?;
@@ -498,6 +523,14 @@ impl Authorizer {
             }
             ModeDecision::Deny(reason) => return Ok(deny(reason)),
             ModeDecision::Ask => {}
+        }
+        if existing_request.is_none()
+            && matches!(rule, ToolScopeRule::Vault(VaultAccess::Use))
+            && let Some(grant_id) = self.vault_lease(authority, arguments, now)?
+        {
+            return Ok(AuthorizationDecision::Allow {
+                grant_id: Some(grant_id),
+            });
         }
         let request = if let Some(request) = existing_request {
             request
@@ -625,9 +658,15 @@ impl Authorizer {
         let request = self.load_request(approval_id)?;
         self.validate_snapshot(&request.scope.conversation_id, now)?;
         let id = resolution_id(approval_id);
+        let lease = resolution.choice == ApprovalChoice::AllowForTask;
+        if lease && !leasable(&request.scope) {
+            return Err(PermissionError::Refused(
+                "allow for this task applies only to vault_use requests for non-card items".into(),
+            ));
+        }
         if let Some(row) = self.store.permission(&id)? {
             let stored = decode_resolution(&row, &request)?;
-            if stored != *resolution {
+            if stored.choice != resolution.choice || (!lease && stored != *resolution) {
                 return Err(PermissionError::ApprovalConflict(approval_id.into()));
             }
             return Ok(ApprovalView {
@@ -638,8 +677,18 @@ impl Authorizer {
         if now < request.requested_at || now >= request.expires_at {
             return Err(PermissionError::ApprovalExpired(approval_id.into()));
         }
+        let resolution = &if lease {
+            ApprovalResolution {
+                choice: ApprovalChoice::AllowForTask,
+                expires_at: Some(now.checked_add(VAULT_LEASE_MS).ok_or_else(|| {
+                    PermissionError::InvalidAuthority("timestamp overflow".into())
+                })?),
+            }
+        } else {
+            resolution.clone()
+        };
         let expires_at = resolution.expires_at.unwrap_or(request.expires_at);
-        if expires_at <= now || expires_at > request.expires_at {
+        if expires_at <= now || expires_at > grant_limit(&request, resolution, now) {
             return Err(PermissionError::ApprovalConflict(approval_id.into()));
         }
         let payload = PermissionRecord {
@@ -663,7 +712,7 @@ impl Authorizer {
             let Some(existing) = self.store.permission(&id)? else {
                 return Err(error.into());
             };
-            if decode_resolution(&existing, &request)? != *resolution {
+            if decode_resolution(&existing, &request)?.choice != resolution.choice {
                 return Err(PermissionError::ApprovalConflict(approval_id.into()));
             }
         }
@@ -690,7 +739,7 @@ impl Authorizer {
         };
         let request = self.load_request(&approval_id)?;
         decode_resolution(&row, &request)?;
-        if resolution.choice != ApprovalChoice::Allow {
+        if resolution.choice == ApprovalChoice::Deny {
             return Err(PermissionError::GrantNotFound(grant_id.into()));
         }
         if row.revoked_at.is_some() {
@@ -766,6 +815,169 @@ impl Authorizer {
     }
 }
 
+impl Authorizer {
+    fn vault_scope(
+        &self,
+        authority: &ExecutionAuthority,
+        descriptor: &ToolDescriptor,
+        rule: &ToolScopeRule,
+        arguments: &Value,
+        mut scope: AuthorizationScope,
+    ) -> Result<AuthorizationScope, PermissionError> {
+        if matches!(rule, ToolScopeRule::Vault(VaultAccess::Use)) {
+            let parsed = VaultUse::parse(arguments)
+                .map_err(|reason| PermissionError::Refused(reason.into()))?;
+            let item = crate::vault::item_summary(&self.store, &parsed.reference)
+                .map_err(|error| PermissionError::Refused(format!("vault_use refused: {error}")))?;
+            let field = parsed.reference.field().unwrap_or_default();
+            if item.kind == crate::vault::VaultItemKind::Card {
+                return Err(PermissionError::Refused(
+                    "card references have no destination in this version".into(),
+                ));
+            }
+            if !item.fields.iter().any(|existing| existing == field) {
+                return Err(PermissionError::Refused(format!(
+                    "vault item has no {field} field"
+                )));
+            }
+            scope.targets.extend([
+                format!("vault_ref={}", parsed.reference),
+                format!("vault_provider={}", item.provider.as_str()),
+                format!("vault_kind={}", item.kind.as_str()),
+                format!("vault_label={}", item.label),
+                format!("vault_field={field}"),
+                format!("vault_destination={}", parsed.destination.target()),
+            ]);
+            scope
+                .targets
+                .extend(item.sites.iter().map(|site| format!("vault_site={site}")));
+        }
+        if descriptor.capabilities.contains(&ToolCapability::Shell) {
+            let bindings = crate::vault::task::env_bindings(
+                &self.store,
+                authority.conversation_id(),
+                authority.task_id(),
+            )
+            .map_err(|error| PermissionError::Refused(format!("vault bindings: {error}")))?;
+            for binding in bindings {
+                let label = crate::vault::item_summary(&self.store, &binding.reference)
+                    .map_or_else(|_| "item unavailable".to_owned(), |item| item.label);
+                scope
+                    .targets
+                    .push(format!("vault_env=${} ({label})", binding.name));
+            }
+            if arguments
+                .get("command")
+                .and_then(Value::as_str)
+                .is_some_and(mentions_password_manager)
+            {
+                scope.targets.push(
+                    "warning=command mentions a password manager CLI (op or pass-cli) that bypasses the vault".into(),
+                );
+            }
+        }
+        scope.targets.sort();
+        scope.targets.dedup();
+        Ok(scope)
+    }
+
+    fn vault_lease(
+        &self,
+        authority: &ExecutionAuthority,
+        arguments: &Value,
+        now: i64,
+    ) -> Result<Option<String>, PermissionError> {
+        let Ok(wanted) = VaultUse::parse(arguments) else {
+            return Ok(None);
+        };
+        for row in self.validate_snapshot(authority.conversation_id(), now)? {
+            let StoredRecord::Resolution {
+                approval_id,
+                resolution,
+                ..
+            } = decode_record(&row)?.record
+            else {
+                continue;
+            };
+            if resolution.choice != ApprovalChoice::AllowForTask {
+                continue;
+            }
+            let request = self.load_request(&approval_id)?;
+            if request.scope.task_id == authority.task_id()
+                && request.scope.tool_name == crate::vault::task::VAULT_USE
+                && VaultUse::parse(&request.arguments)
+                    .is_ok_and(|leased| leased.same_lease(&wanted))
+                && matches!(
+                    status_for_resolution(&request, Some(&row), now)?,
+                    ApprovalStatus::Approved { .. }
+                )
+            {
+                return Ok(Some(row.id));
+            }
+        }
+        Ok(None)
+    }
+
+    pub(crate) fn vault_binding_live(
+        &self,
+        authority: &ExecutionAuthority,
+        operation_id: &str,
+        arguments: &Value,
+        now: i64,
+    ) -> Result<bool, PermissionError> {
+        if authority.mode != ExecutionMode::FullHost {
+            return Ok(false);
+        }
+        let approved = self
+            .approval_for_operation(authority.conversation_id(), operation_id, now)?
+            .is_some_and(|view| {
+                view.request.scope.task_id == authority.task_id()
+                    && matches!(view.status, ApprovalStatus::Approved { .. })
+            });
+        Ok(approved || self.vault_lease(authority, arguments, now)?.is_some())
+    }
+}
+
+fn vault_mode(access: VaultAccess, mode: ExecutionMode) -> ModeDecision {
+    match (access, mode) {
+        (VaultAccess::Search, ExecutionMode::ReadOnly) | (VaultAccess::Request, _) => {
+            ModeDecision::Ask
+        }
+        (VaultAccess::Search, _) => ModeDecision::Allow,
+        (VaultAccess::Use, ExecutionMode::FullHost) => ModeDecision::Ask,
+        (VaultAccess::Use, _) => {
+            ModeDecision::Deny("vault_use requires FullHost authority and explicit approval")
+        }
+    }
+}
+
+fn leasable(scope: &AuthorizationScope) -> bool {
+    scope.tool_name == crate::vault::task::VAULT_USE
+        && scope.targets.iter().any(|target| target == "vault_use")
+        && !scope
+            .targets
+            .iter()
+            .any(|target| target == "vault_kind=card")
+}
+
+fn grant_limit(
+    request: &ApprovalRequest,
+    resolution: &ApprovalResolution,
+    resolved_at: i64,
+) -> i64 {
+    if resolution.choice == ApprovalChoice::AllowForTask {
+        resolved_at.saturating_add(VAULT_LEASE_MS)
+    } else {
+        request.expires_at
+    }
+}
+
+fn mentions_password_manager(command: &str) -> bool {
+    command
+        .split(|character: char| !(character.is_ascii_alphanumeric() || "-_./".contains(character)))
+        .any(|word| matches!(word.rsplit('/').next(), Some("op" | "pass-cli")))
+}
+
 fn status_for_resolution(
     request: &ApprovalRequest,
     row: Option<&PermissionRow>,
@@ -809,6 +1021,9 @@ fn evaluate_mode(
 ) -> ModeDecision {
     if matches!(rule, ToolScopeRule::RuntimeTask) {
         return ModeDecision::Allow;
+    }
+    if let ToolScopeRule::Vault(access) = rule {
+        return vault_mode(*access, authority.mode);
     }
     let privileged = descriptor.capabilities.iter().any(|capability| {
         matches!(
@@ -906,6 +1121,15 @@ fn validate_rule(descriptor: &ToolDescriptor, rule: &ToolScopeRule) -> Result<()
             validate_identifier(service)
                 .map_err(|_| invalid("host service must be a valid identifier"))?;
         }
+        ToolScopeRule::Vault(access) => {
+            if !descriptor.capabilities.is_empty()
+                || descriptor.read_only != (*access == VaultAccess::Search)
+            {
+                return Err(invalid(
+                    "vault tools declare no capabilities and only vault_search is read-only",
+                ));
+            }
+        }
     }
     Ok(())
 }
@@ -922,6 +1146,14 @@ fn derive_scope(
         ToolScopeRule::LocalReadOnly => {}
         ToolScopeRule::RuntimeTask => targets.push("native_tasks".into()),
         ToolScopeRule::Host { service } => targets.push(service.clone()),
+        ToolScopeRule::Vault(access) => targets.push(
+            match access {
+                VaultAccess::Search => "vault_metadata",
+                VaultAccess::Use => "vault_use",
+                VaultAccess::Request => "vault_request",
+            }
+            .into(),
+        ),
         ToolScopeRule::Filesystem { path_pointers } => {
             for pointer in path_pointers {
                 let target = arguments.pointer(pointer).ok_or_else(|| {
@@ -1110,7 +1342,8 @@ fn decode_resolution(
         || row.created_at < request.requested_at
         || row.created_at >= request.expires_at
         || expires_at <= resolved_at
-        || expires_at > request.expires_at
+        || expires_at > grant_limit(request, &resolution, resolved_at)
+        || (resolution.choice == ApprovalChoice::AllowForTask && !leasable(&request.scope))
         || row.conversation_id.as_deref() != Some(request.scope.conversation_id.as_str())
     {
         return Err(malformed());

@@ -377,6 +377,8 @@ struct ToolArguments {
     retry_uncertain: bool,
     #[arg(long, requires_all = ["tools", "resume"], conflicts_with = "deny")]
     approve: Option<String>,
+    #[arg(long, requires = "approve")]
+    for_task: bool,
     #[arg(long, requires_all = ["tools", "resume"])]
     deny: Option<String>,
 }
@@ -1391,7 +1393,16 @@ async fn proxy_chat(
         if let Some((id, decision)) = arguments
             .tools
             .approve
-            .map(|id| (id, everything::protocol::PermissionDecision::Allow))
+            .map(|id| {
+                (
+                    id,
+                    if arguments.tools.for_task {
+                        everything::protocol::PermissionDecision::AllowForTask
+                    } else {
+                        everything::protocol::PermissionDecision::Allow
+                    },
+                )
+            })
             .or_else(|| {
                 arguments
                     .tools
@@ -1897,8 +1908,15 @@ async fn await_host_approval(
         Some(lines) => lines,
         None => lines.insert(terminal_lines()?),
     };
+    let leasable = request.scope.tool_name == "vault_use";
     loop {
-        eprint!("approve? [y]es / [n]o (or decide in another client): ");
+        if leasable {
+            eprint!(
+                "approve? [y]es once / [t]ask: allow for this task (up to 1 hour) / [n]o (or decide in another client): "
+            );
+        } else {
+            eprint!("approve? [y]es / [n]o (or decide in another client): ");
+        }
         let answer = loop {
             tokio::select! {
                 () = cancellation.cancelled() => return Err(AgentError::Cancelled.into()),
@@ -1942,6 +1960,9 @@ async fn await_host_approval(
             Some(answer) if matches!(answer.as_str(), "y" | "yes" | "approve") => {
                 PermissionDecision::Allow
             }
+            Some(answer) if leasable && matches!(answer.as_str(), "t" | "task") => {
+                PermissionDecision::AllowForTask
+            }
             Some(answer) if matches!(answer.as_str(), "n" | "no" | "deny") => {
                 PermissionDecision::Deny
             }
@@ -1958,6 +1979,9 @@ async fn await_host_approval(
         .await?;
         match decision {
             PermissionDecision::Allow => eprintln!("approved; continuing"),
+            PermissionDecision::AllowForTask => {
+                eprintln!("approved for this task (vault lease); continuing")
+            }
             PermissionDecision::Deny => eprintln!("denied; continuing without running it"),
         }
         return Ok(());
@@ -2242,7 +2266,16 @@ async fn run_tool_chat(
     let approval = options
         .approve
         .clone()
-        .map(|id| (id, ApprovalChoice::Allow))
+        .map(|id| {
+            (
+                id,
+                if options.for_task {
+                    ApprovalChoice::AllowForTask
+                } else {
+                    ApprovalChoice::Allow
+                },
+            )
+        })
         .or_else(|| options.deny.clone().map(|id| (id, ApprovalChoice::Deny)));
     let provider_resume = if options.retry_uncertain {
         ProviderResume::RetryUncertain

@@ -382,6 +382,7 @@ impl TaskRecord {
 #[serde(rename_all = "snake_case")]
 pub enum PermissionDecision {
     Allow,
+    AllowForTask,
     Deny,
 }
 

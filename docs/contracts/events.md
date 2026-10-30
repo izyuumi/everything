@@ -29,7 +29,7 @@ Enums use snake-case names. `ConversationEvent`, `Command`, and `MessageContent`
 | `create_task` | Instruction and optional parent task ID |
 | `steer_task` | Task ID and new instruction |
 | `cancel_task` | Task ID |
-| `resolve_permission` | Operation ID and `allow` or `deny` decision |
+| `resolve_permission` | Operation ID and `allow`, `allow_for_task` or `deny` decision. `allow_for_task` is accepted only for `vault_use` and creates a [vault lease](vault.md#vault-lease-grant); the resulting `PermissionDecided` event reports `allow` |
 
 These data structures do not execute commands or grant permissions. The receiving host must enforce command authorization, allowed message roles, conversation/task ownership, parent relationships, instruction and payload limits, and valid pending permission operations before committing changes. A permission decision authorizes only its referenced operation; persistent grants have a separate policy contract.
 
@@ -69,7 +69,7 @@ These structs have public fields for integration, so call `validate()` again aft
 - `ToolCall` contains `id`, optional `provider_call_id`, `name`, and JSON `arguments`.
 - `ToolResult` contains `tool_call_id`, textual `content`, and `is_error`.
 
-Tool argument schema validation, names, execution limits, result redaction, and duplicate-call policy belong to the Tool Broker. JSON arguments are confined to the external tool boundary. Durable messages are separate from provider-neutral model requests and streamed adapter responses, which can carry richer model capabilities. Runtime integration must explicitly map these records, preserve provider tool-call identifiers, and recover the mapping from durable call records after a restart. Persisted image or other binary content is not implemented by this contract.
+Tool argument schema validation, names, execution limits, result redaction, and duplicate-call policy belong to the Tool Broker. Tool results are journaled after the broker masks the task's resolved vault values, so `ToolResult` events and model messages carry only masked text. JSON arguments are confined to the external tool boundary. Durable messages are separate from provider-neutral model requests and streamed adapter responses, which can carry richer model capabilities. Runtime integration must explicitly map these records, preserve provider tool-call identifiers, and recover the mapping from durable call records after a restart. Persisted image or other binary content is not implemented by this contract.
 
 ## Durable task state
 

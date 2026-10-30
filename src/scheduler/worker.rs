@@ -68,6 +68,9 @@ pub(super) async fn execute(
     live.send_modify(|texts| {
         texts.remove(&task_id);
     });
+    if !matches!(stop, ExecutionStop::Waiting { .. }) {
+        services.broker.release_vault_task(&task_id.to_string());
+    }
     changed.send_modify(|revision| *revision = revision.wrapping_add(1));
     ExecutionOutcome { task_id, stop }
 }

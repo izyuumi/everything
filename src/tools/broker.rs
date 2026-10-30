@@ -25,8 +25,11 @@ use crate::permissions::{
 use crate::storage::{StorageError, Store, ToolCallRow, ToolCallState, ToolCleanupAttestation};
 
 use super::{
-    RetainedToolOwner, ToolConcurrency, ToolError, ToolExecutionContext, ToolOutput, ToolRegistry,
+    RetainedToolOwner, ToolCapability, ToolConcurrency, ToolError, ToolExecutionContext,
+    ToolOutput, ToolRegistry,
 };
+use crate::credentials::CredentialSecret;
+use crate::vault::task::{VaultTasks, redact_text, redact_value};
 
 const RECORD_VERSION: u16 = 1;
 const MAX_RECORD_BYTES: usize = 1_048_576;
@@ -254,6 +257,7 @@ struct BrokerInner {
     restart_required: AtomicBool,
     recovered_operations: usize,
     settings_journals: Mutex<BTreeMap<Uuid, Arc<SettingsProfile>>>,
+    vault: std::sync::OnceLock<Arc<VaultTasks>>,
     _retained_owner: Option<RetainedToolOwner>,
 }
 
@@ -358,9 +362,23 @@ impl ToolBroker {
                 restart_required: AtomicBool::new(false),
                 recovered_operations,
                 settings_journals: Mutex::new(BTreeMap::new()),
+                vault: std::sync::OnceLock::new(),
                 _retained_owner: owner,
             }),
         })
+    }
+
+    pub(crate) fn attach_vault(&self, vault: Arc<VaultTasks>) -> Result<(), BrokerError> {
+        self.inner
+            .vault
+            .set(vault)
+            .map_err(|_| BrokerError::InvalidConfiguration("the vault is already attached".into()))
+    }
+
+    pub(crate) fn release_vault_task(&self, task_id: &str) {
+        if let Some(vault) = self.inner.vault.get() {
+            vault.release(task_id);
+        }
     }
 
     pub fn scoped(&self, authority: ExecutionAuthority) -> TaskToolBroker {
@@ -949,6 +967,16 @@ impl BrokerInner {
             context = context.with_settings_capability(capability);
         }
         let arguments = invocation_arguments(&call)?;
+        let vault = profile
+            .is_none()
+            .then(|| self.vault.get().cloned())
+            .flatten();
+        let vault_authority = authority.clone();
+        let shell = self
+            .registry
+            .descriptor(&call.tool_name)?
+            .capabilities
+            .contains(&ToolCapability::Shell);
         let inner = Arc::clone(&self);
         let claim_call = call.clone();
         let claim_cancellation = cancellation.clone();
@@ -1026,10 +1054,27 @@ impl BrokerInner {
             inner: Arc::clone(&self),
             armed: true,
         };
-        let mut execution = Box::pin(
-            AssertUnwindSafe(self.registry.execute(&call.tool_name, &context, arguments))
-                .catch_unwind(),
-        );
+        let prepared = async {
+            let context = match &vault {
+                Some(vault) => context.with_vault(
+                    vault
+                        .prepare(
+                            journal.clone(),
+                            Arc::clone(&self.authorizer),
+                            &vault_authority,
+                            &call.tool_name,
+                            shell,
+                            &cancellation,
+                        )
+                        .await?,
+                ),
+                None => context,
+            };
+            self.registry
+                .execute(&call.tool_name, &context, arguments)
+                .await
+        };
+        let mut execution = Box::pin(AssertUnwindSafe(prepared).catch_unwind());
         let execution_deadline = Instant::now() + self.limits.execution_timeout;
         let (returned, interruption) = tokio::select! {
             result = &mut execution => (Some(result), None),
@@ -1053,7 +1098,7 @@ impl BrokerInner {
                 None
             }
         });
-        let result = match returned {
+        let mut result = match returned {
             Some(Ok(Ok(output))) if output.is_error => OperationResult::Failed {
                 code: "completed_tool_error".into(),
                 message: "Tool completed with an error result".into(),
@@ -1101,6 +1146,9 @@ impl BrokerInner {
             },
         };
         drop(execution);
+        if let Some(vault) = &vault {
+            redact_result(&mut result, &vault.literals(vault_authority.task_id()));
+        }
         let mut record = record(result, interruption);
         if profile.is_some()
             && serde_json::to_vec(&record).map_or(true, |bytes| bytes.len() > MAX_BROKER_RECORD)
@@ -1388,6 +1436,35 @@ fn inspect_cleanup(
         restart_required: false,
         quarantined: unresolved_count != 0,
     })
+}
+
+fn redact_result(result: &mut OperationResult, literals: &[Arc<CredentialSecret>]) {
+    match result {
+        OperationResult::Succeeded { output } => redact_output(output, literals),
+        OperationResult::Failed {
+            message, output, ..
+        } => {
+            redact_text(message, literals);
+            if let Some(output) = output {
+                redact_output(output, literals);
+            }
+        }
+        OperationResult::Unknown {
+            diagnostic: Some(diagnostic),
+            ..
+        } => {
+            redact_text(diagnostic, literals);
+        }
+        _ => {}
+    }
+}
+
+fn redact_output(output: &mut ToolOutput, literals: &[Arc<CredentialSecret>]) {
+    if redact_value(&mut output.content, literals)
+        && let Value::Object(content) = &mut output.content
+    {
+        content.insert("vault_redacted".into(), Value::Bool(true));
+    }
 }
 
 fn invocation_arguments(call: &ToolCallRow) -> Result<Value, BrokerError> {

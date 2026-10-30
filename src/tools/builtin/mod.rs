@@ -3,12 +3,14 @@ mod shell;
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use serde_json::Value;
+use zeroize::Zeroizing;
 
 use crate::permissions::ToolScopeRule;
 
-use super::{Tool, ToolError, ToolOutput, ToolRegistry};
+use super::{Tool, ToolError, ToolExecutionContext, ToolOutput, ToolRegistry};
 
 pub const MAX_BUILTIN_OUTPUT_BYTES: usize = 65_536;
 
@@ -73,12 +75,19 @@ impl BuiltinTools {
 }
 
 #[derive(Clone)]
+struct Literal {
+    bytes: Zeroizing<Vec<u8>>,
+    vault: bool,
+}
+
+#[derive(Clone)]
 struct Redactor {
-    literals: Arc<Vec<String>>,
+    literals: Arc<Vec<Literal>>,
+    vault_fired: Arc<AtomicBool>,
 }
 
 impl Redactor {
-    fn new(mut literals: Vec<String>) -> Result<Self, ToolError> {
+    fn new(literals: Vec<String>) -> Result<Self, ToolError> {
         if literals.len() > 64
             || literals
                 .iter()
@@ -89,15 +98,64 @@ impl Redactor {
                 message: "redaction requires at most 64 nonempty literals, 1024 bytes each and 16384 bytes total".into(),
             });
         }
-        literals.sort_by(|left, right| right.len().cmp(&left.len()).then(left.cmp(right)));
-        literals.dedup();
-        Ok(Self {
+        Ok(Self::sorted(
+            literals
+                .into_iter()
+                .map(|value| Literal {
+                    bytes: Zeroizing::new(value.into_bytes()),
+                    vault: false,
+                })
+                .collect(),
+        ))
+    }
+
+    fn sorted(mut literals: Vec<Literal>) -> Self {
+        literals.sort_by(|left, right| {
+            right
+                .bytes
+                .len()
+                .cmp(&left.bytes.len())
+                .then(left.bytes.cmp(&right.bytes))
+                .then(right.vault.cmp(&left.vault))
+        });
+        literals.dedup_by(|right, left| left.bytes == right.bytes);
+        Self {
             literals: Arc::new(literals),
-        })
+            vault_fired: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    fn for_task(&self, context: &ToolExecutionContext) -> Self {
+        let vault = context.vault().map_or(&[][..], |vault| &vault.literals[..]);
+        Self::sorted(
+            self.literals
+                .iter()
+                .cloned()
+                .chain(vault.iter().map(|secret| Literal {
+                    bytes: Zeroizing::new(secret.expose().to_vec()),
+                    vault: true,
+                }))
+                .collect(),
+        )
+    }
+
+    fn finish(&self, result: Result<ToolOutput, ToolError>) -> Result<ToolOutput, ToolError> {
+        let mut output = result?;
+        if self.vault_fired.load(Ordering::Acquire)
+            && let Value::Object(content) = &mut output.content
+        {
+            content.insert("vault_redacted".into(), Value::Bool(true));
+        }
+        Ok(output)
     }
 
     fn lookaround(&self) -> usize {
-        self.literals.iter().map(String::len).max().unwrap_or(1) - 1
+        self.literals
+            .iter()
+            .map(|literal| literal.bytes.len())
+            .max()
+            .unwrap_or(1)
+            - 1
     }
 
     fn apply(&self, value: &str, limit: usize, incomplete: bool) -> RenderedText {
@@ -122,22 +180,30 @@ impl Redactor {
             let matched = self
                 .literals
                 .iter()
-                .find(|literal| remaining.starts_with(literal.as_bytes()));
-            let length = matched.map(String::len).or_else(|| {
-                (incomplete
-                    && self
-                        .literals
-                        .iter()
-                        .any(|literal| literal.as_bytes().starts_with(remaining)))
-                .then_some(remaining.len())
+                .find(|literal| remaining.starts_with(&literal.bytes))
+                .map(|literal| (literal.bytes.len(), literal.vault));
+            let found = matched.or_else(|| {
+                incomplete
+                    .then(|| {
+                        self.literals
+                            .iter()
+                            .filter(|literal| literal.bytes.starts_with(remaining))
+                            .map(|literal| literal.vault)
+                            .reduce(|left, right| left || right)
+                    })
+                    .flatten()
+                    .map(|vault| (remaining.len(), vault))
             });
-            if let Some(length) = length {
+            if let Some((length, vault)) = found {
                 let mask_end = position + length;
                 if mask_end > start {
                     if masked_until <= start || position >= masked_until {
                         bytes.extend_from_slice(b"[REDACTED]");
                     }
                     redacted = true;
+                    if vault {
+                        self.vault_fired.store(true, Ordering::Release);
+                    }
                     masked_until = masked_until.max(mask_end);
                 }
             }

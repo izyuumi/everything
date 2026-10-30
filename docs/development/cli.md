@@ -117,6 +117,8 @@ everything --state-dir /absolute/private/path chat --conversation CONVERSATION_U
 everything --state-dir /absolute/private/path chat --conversation CONVERSATION_UUID --tools --resume --deny APPROVAL_UUID
 ```
 
+For a `vault_use` approval the in-place prompt also offers `[t]ask`, which allows that exact reference and destination for the rest of the task (a vault lease, at most one hour); the non-interactive form is `--resume --approve APPROVAL_UUID --for-task`. See the [vault contract](../contracts/vault.md#vault-lease-grant).
+
 `--resume` on a conversation without a pending turn, for example one whose turn already finished, explains how to read the saved reply with `status --conversation CONVERSATION_UUID --history` or start a new turn with `--message`.
 
 An uncertain provider attempt stops on normal resume. Inspect status, then explicitly authorize another potentially paid request with `--tools --resume --retry-uncertain`. This flag never re-executes an unknown broker operation. In-flight broker operations retain their original UUID for lookup; unknown effects and required cleanup reconciliation remain stopped.
