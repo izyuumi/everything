@@ -853,13 +853,13 @@ impl Actor {
                 }
             }
         }
-        self.release_stranded_children().await?;
+        self.diagnose_stranded_waits()?;
         self.repair_child_deliveries().await?;
         Ok(())
     }
 
-    async fn release_stranded_children(&mut self) -> Result<(), SchedulerError> {
-        for parent in repository::unfinished(&self.store(), self.limits.max_pending_tasks)? {
+    fn diagnose_stranded_waits(&self) -> Result<(), SchedulerError> {
+        for mut parent in repository::unfinished(&self.store(), self.limits.max_pending_tasks)? {
             let Some(wait) = parent.checkpoint.child_wait.as_ref() else {
                 continue;
             };
@@ -871,30 +871,37 @@ impl Actor {
             {
                 continue;
             }
+            let mut stranded = Vec::new();
             for child in wait
                 .children
                 .iter()
                 .filter(|child| child.delivery.is_none())
             {
-                let mut task = repository::load(&self.store(), child.task_id)?;
-                let Some(reason) = task.checkpoint.waiting.clone().filter(owner_decision) else {
-                    continue;
-                };
-                if task.checkpoint.task.status.is_terminal()
-                    || task.checkpoint.cancel_requested
-                    || task.definition.remote.is_some()
-                {
+                let task = repository::load(&self.store(), child.task_id)?;
+                if task.checkpoint.task.status.is_terminal() || task.checkpoint.cancel_requested {
                     continue;
                 }
-                task.checkpoint.diagnostic = Some(diagnostic(&format!(
-                    "Host restart found this child stopped at {reason:?} while parent task {} waited for it; it was cancelled so the parent receives its result",
-                    parent.definition.initial.id
-                )));
-                let status = task.checkpoint.task.status;
-                repository::save(&self.store(), &mut task, status)?;
-                tracing::warn!(task_id=%child.task_id, parent_task_id=%parent.definition.initial.id, ?reason, "cancelling child stranded at an owner decision while its parent waits");
-                self.cancel(child.task_id).await?;
+                if let Some(reason) = task.checkpoint.waiting.filter(owner_decision) {
+                    stranded.push(format!(
+                        "child {}, which needs an owner decision ({reason:?})",
+                        child.task_id
+                    ));
+                }
             }
+            if stranded.is_empty() {
+                continue;
+            }
+            let message = diagnostic(&format!(
+                "At host startup this task was waiting for {}: resume or cancel that child, or cancel this task",
+                stranded.join("; ")
+            ));
+            if parent.checkpoint.diagnostic.as_deref() == Some(message.as_str()) {
+                continue;
+            }
+            tracing::warn!(task_id=%parent.definition.initial.id, diagnostic=%message, "parent waits on children that need an owner decision");
+            parent.checkpoint.diagnostic = Some(message);
+            let status = parent.checkpoint.task.status;
+            repository::save(&self.store(), &mut parent, status)?;
         }
         Ok(())
     }
