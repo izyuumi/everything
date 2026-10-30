@@ -152,7 +152,7 @@ pub async fn run(
             with_database(database_path(database), |database| async move {
                 server::run(database, bind, origin, max_connections, cancellation).await
             })
-            .await?
+            .await?;
         }
         RelayCommand::Enroll { database, keys } => {
             let keys = tokio::task::spawn_blocking(move || read_public_keys(keys))
@@ -171,7 +171,7 @@ pub async fn run(
                 );
                 Ok(())
             })
-            .await?
+            .await?;
         }
         RelayCommand::Revoke {
             database,
@@ -189,7 +189,7 @@ pub async fn run(
                 );
                 Ok(())
             })
-            .await?
+            .await?;
         }
         RelayCommand::Devices { database } => {
             with_database(database_path(database), |database| async move {
@@ -199,7 +199,7 @@ pub async fn run(
                 );
                 Ok(())
             })
-            .await?
+            .await?;
         }
         RelayCommand::Status { database } => {
             let database = database_path(database);
@@ -224,9 +224,11 @@ pub async fn run(
             })?;
         }
         RelayCommand::On { origin } => {
-            print_json(&toggle(&state_directory, Some(origin), cancellation).await?)?
+            print_json(&toggle(&state_directory, RelayTarget::On(origin), cancellation).await?)?;
         }
-        RelayCommand::Off => print_json(&toggle(&state_directory, None, cancellation).await?)?,
+        RelayCommand::Off => {
+            print_json(&toggle(&state_directory, RelayTarget::Off, cancellation).await?)?;
+        }
     }
     Ok(())
 }
@@ -283,15 +285,20 @@ async fn host_status(
     }
 }
 
+enum RelayTarget {
+    Off,
+    On(Option<RelayOrigin>),
+}
+
 async fn toggle(
     state_directory: &Path,
-    origin: Option<Option<RelayOrigin>>,
+    relay: RelayTarget,
     cancellation: CancellationToken,
 ) -> Result<RelayToggle, RelayCommandError> {
-    let target = |current: Option<RelayOrigin>| match origin {
-        None => Ok(None),
-        Some(Some(origin)) => Ok(Some(origin)),
-        Some(None) => current.ok_or(RelayCommandError::OriginRequired).map(Some),
+    let target = |current: Option<RelayOrigin>| match relay {
+        RelayTarget::Off => Ok(None),
+        RelayTarget::On(Some(origin)) => Ok(Some(origin)),
+        RelayTarget::On(None) => current.ok_or(RelayCommandError::OriginRequired).map(Some),
     };
     match StateLease::acquire(state_directory).await {
         Ok(lease) => {
