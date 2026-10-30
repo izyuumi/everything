@@ -1950,8 +1950,8 @@ actor ReplicaService {
         try await submit(conversation: conversation, payload: .object(["kind": .string("cancel_task"), "task_id": .id(task)]), now: WireID.now())
     }
 
-    func resolve(_ approval: ReplicaApproval, allow: Bool) async throws {
-        try await submit(conversation: approval.conversationID, payload: .object(["kind": .string("resolve_permission"), "operation_id": .id(approval.id), "decision": .string(allow ? "allow" : "deny")]), now: WireID.now(), permission: approval)
+    func resolve(_ approval: ReplicaApproval, decision: String) async throws {
+        try await submit(conversation: approval.conversationID, payload: .object(["kind": .string("resolve_permission"), "operation_id": .id(approval.id), "decision": .string(decision)]), now: WireID.now(), permission: approval)
     }
 
     private func submit(conversation: UUID, payload: WireValue, now: UInt64, permission: ReplicaApproval? = nil) async throws {
