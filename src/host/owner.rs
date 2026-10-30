@@ -547,11 +547,12 @@ impl HostInner {
                 models: self.chatgpt.models(binding.clone(), cancellation).await?,
                 binding,
             }),
-            OwnerOperation::ReplaceSettings { .. } | OwnerOperation::ReconcileSettings { .. } => {
-                Err(HostError::Invalid(
-                    "settings replacement requires authenticated owner ingress",
-                ))
-            }
+            OwnerOperation::ReplaceSettings { .. }
+            | OwnerOperation::ReconcileSettings { .. }
+            | OwnerOperation::VaultConnect { .. }
+            | OwnerOperation::VaultDisconnect { .. } => Err(HostError::Invalid(
+                "settings replacement requires authenticated owner ingress",
+            )),
             OwnerOperation::BeginPairing { lifetime_ms } => {
                 let _mutation = self.mutation.lock().await;
                 self.ensure_accepting()?;

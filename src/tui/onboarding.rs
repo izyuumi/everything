@@ -1177,21 +1177,25 @@ impl Wizard<'_, '_> {
             "Proton Pass".to_owned(),
             "Add an API secret to the local vault (system keychain)".to_owned(),
         ];
-        let (name, issue) = match self.screen.choose(title, &body, &options, 0).await? {
-            Some(1) => ("1Password", 220),
-            Some(2) => ("Proton Pass", 221),
+        let body = match self.screen.choose(title, &body, &options, 0).await? {
+            Some(1) => [
+                text(
+                    "Connect 1Password from a terminal with `everything vault connect onepassword`; it needs the 1Password CLI (op 2.x) with desktop-app integration and asks you to pick an account.",
+                ),
+                dim("Nothing was connected here."),
+            ],
+            Some(2) => [
+                colored(
+                    WARN,
+                    "Proton Pass is not available yet; it is tracked in https://github.com/izyuumi/everything/issues/221.",
+                ),
+                dim(
+                    "Nothing was connected. You can add local secrets with `everything vault add`.",
+                ),
+            ],
             Some(3) => return self.local_secret().await,
             _ => return Ok(Flow::Next),
         };
-        let body = [
-            colored(
-                WARN,
-                format!(
-                    "{name} is not available yet; it is tracked in https://github.com/izyuumi/everything/issues/{issue}.",
-                ),
-            ),
-            dim("Nothing was connected. You can add local secrets with `everything vault add`."),
-        ];
         self.screen
             .choose(title, &body, &["Continue".to_owned()], 0)
             .await?;

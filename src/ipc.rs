@@ -481,6 +481,15 @@ pub enum OwnerOperation {
     VaultRemove {
         id: uuid::Uuid,
     },
+    VaultConnect {
+        provider: crate::vault::VaultProviderId,
+        binary: std::path::PathBuf,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        account: Option<String>,
+    },
+    VaultDisconnect {
+        provider: crate::vault::VaultProviderId,
+    },
     RevokeGrant {
         grant_id: String,
     },
@@ -570,6 +579,28 @@ impl OwnerOperation {
             Self::ChatGptModels { binding } => crate::host::chatgpt::validate_binding(binding),
             Self::VaultPut { item } => item.validate().map_err(|_| "invalid vault item"),
             Self::VaultRemove { id } if id.is_nil() => Err("invalid vault item ID"),
+            Self::VaultConnect {
+                provider,
+                binary,
+                account,
+            } => {
+                if *provider == crate::vault::VaultProviderId::Local {
+                    return Err("the local vault needs no connection");
+                }
+                if !crate::vault::onepassword::valid_binary_path(binary)
+                    || account
+                        .as_deref()
+                        .is_some_and(|account| !crate::vault::onepassword::valid_account(account))
+                {
+                    return Err("invalid vault connection");
+                }
+                Ok(())
+            }
+            Self::VaultDisconnect { provider }
+                if *provider == crate::vault::VaultProviderId::Local =>
+            {
+                Err("the local vault needs no connection")
+            }
             Self::RevokeGrant { grant_id }
                 if !grant_id.starts_with("decision:approval:")
                     || grant_id.len() > 256
@@ -971,6 +1002,10 @@ pub enum OwnerOperationResult {
         #[serde(rename = "ref")]
         reference: crate::vault::VaultReference,
     },
+    VaultConnection {
+        probe: crate::vault::OnePasswordProbe,
+        connected: bool,
+    },
     SettingsReceipt {
         operation: Box<crate::host::settings::SettingsOperationInspection>,
         settings: Option<Box<crate::host::settings::HostSettings>>,
@@ -1189,6 +1224,7 @@ impl OwnerOperationResult {
             (
                 OwnerOperation::Credential { .. }
                 | OwnerOperation::VaultRemove { .. }
+                | OwnerOperation::VaultDisconnect { .. }
                 | OwnerOperation::RevokeGrant { .. }
                 | OwnerOperation::RevokeWorkerPeer { .. }
                 | OwnerOperation::RevokeDevice { .. }
@@ -1197,6 +1233,21 @@ impl OwnerOperationResult {
                 Self::Applied,
             ) => true,
             (OwnerOperation::ResumeInterrupted { .. }, Self::Applied) => true,
+            (
+                OwnerOperation::VaultConnect {
+                    binary, account, ..
+                },
+                Self::VaultConnection { probe, connected },
+            ) => {
+                probe.validate().is_ok()
+                    && probe.binary == *binary
+                    && *connected == account.is_some()
+                    && probe
+                        .signed_in
+                        .as_ref()
+                        .map(|signed_in| &signed_in.account_uuid)
+                        == account.as_ref()
+            }
             (OwnerOperation::VaultPut { .. }, Self::VaultItemAdded { reference }) => {
                 reference.local_id().is_ok() && reference.field().is_none()
             }

@@ -1,4 +1,5 @@
 use std::io::{self, IsTerminal, Read, Write};
+use std::path::PathBuf;
 
 use clap::{Args, Subcommand, ValueEnum};
 use everything::host::chatgpt::ChatGptOperation;
@@ -8,8 +9,8 @@ use everything::host::settings::{CredentialStorage, ModelCredentialSource};
 use everything::ipc::{OwnerOperation, OwnerOperationResult, OwnerQuery, OwnerQueryResult};
 use everything::protocol::CommandId;
 use everything::vault::{
-    MAX_VAULT_LIST, ProviderStatus, VaultError, VaultItemKind, VaultItemMetadata, VaultProviderId,
-    VaultProviderState, VaultPutRequest, VaultReference,
+    MAX_VAULT_LIST, OnePasswordProbe, ProviderStatus, VaultError, VaultItemKind, VaultItemMetadata,
+    VaultProviderId, VaultProviderState, VaultPutRequest, VaultReference,
 };
 use serde::Serialize;
 use tokio_util::sync::CancellationToken;
@@ -33,7 +34,7 @@ enum VaultCommand {
     Add(VaultAddArguments),
     Remove(VaultRemoveArguments),
     Connect(VaultConnectArguments),
-    Disconnect(VaultConnectArguments),
+    Disconnect(VaultDisconnectArguments),
 }
 
 #[derive(Args)]
@@ -201,6 +202,18 @@ enum ExternalProvider {
 struct VaultConnectArguments {
     #[arg(value_enum)]
     provider: ExternalProvider,
+    #[arg(long, value_name = "PATH")]
+    binary: Option<PathBuf>,
+    #[arg(long, value_name = "UUID")]
+    account: Option<String>,
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Args)]
+struct VaultDisconnectArguments {
+    #[arg(value_enum)]
+    provider: ExternalProvider,
 }
 
 #[derive(Serialize)]
@@ -229,18 +242,144 @@ pub async fn run(
         VaultCommand::List(arguments) => list(client, arguments, cancellation).await,
         VaultCommand::Add(arguments) => add(client, arguments, cancellation).await,
         VaultCommand::Remove(arguments) => remove(client, arguments, cancellation).await,
-        VaultCommand::Connect(arguments) | VaultCommand::Disconnect(arguments) => {
-            Err(match arguments.provider {
-                ExternalProvider::Onepassword => {
-                    VaultError::ProviderNotAvailable(VaultProviderId::OnePassword.as_str(), "#220")
+        VaultCommand::Connect(arguments) => match arguments.provider {
+            ExternalProvider::Onepassword => connect(client, arguments, cancellation).await,
+            ExternalProvider::Protonpass => Err(protonpass()),
+        },
+        VaultCommand::Disconnect(arguments) => match arguments.provider {
+            ExternalProvider::Onepassword => {
+                client
+                    .operate(
+                        OwnerOperation::VaultDisconnect {
+                            provider: VaultProviderId::OnePassword,
+                        },
+                        CommandId::new(),
+                        cancellation,
+                    )
+                    .await?;
+                print_lines(vec!["disconnected 1password".into()]).await
+            }
+            ExternalProvider::Protonpass => Err(protonpass()),
+        },
+    }
+}
+
+fn protonpass() -> CliError {
+    VaultError::ProviderNotAvailable(VaultProviderId::ProtonPass.as_str(), "#221").into()
+}
+
+fn find_op() -> Option<PathBuf> {
+    use std::os::unix::fs::PermissionsExt;
+    std::env::split_paths(&std::env::var_os("PATH")?)
+        .filter(|directory| directory.is_absolute())
+        .map(|directory| directory.join("op"))
+        .find(|candidate| {
+            std::fs::metadata(candidate).is_ok_and(|metadata| {
+                metadata.is_file() && metadata.permissions().mode() & 0o111 != 0
+            })
+        })
+}
+
+async fn connect(
+    client: &HostClient,
+    arguments: VaultConnectArguments,
+    cancellation: CancellationToken,
+) -> Result<(), CliError> {
+    let binary = match arguments.binary {
+        Some(binary) if binary.is_absolute() => binary,
+        Some(_) => return Err(CliError::VaultInput("--binary must be an absolute path")),
+        None => find_op().ok_or(CliError::VaultInput(
+            "op was not found on PATH; install the 1Password CLI 2.x or pass --binary",
+        ))?,
+    };
+    eprintln!("using op at {}", binary.display());
+    let probe = |account: Option<String>| {
+        client.operate(
+            OwnerOperation::VaultConnect {
+                provider: VaultProviderId::OnePassword,
+                binary: binary.clone(),
+                account,
+            },
+            CommandId::new(),
+            cancellation.clone(),
+        )
+    };
+    let account = match arguments.account {
+        Some(account) => account,
+        None => {
+            let OwnerOperationResult::VaultConnection { probe: found, .. } = probe(None).await?
+            else {
+                return Err(CliError::OwnerInput);
+            };
+            let accounts = found.accounts;
+            for (index, account) in accounts.iter().enumerate() {
+                eprintln!(
+                    "{}\t{}\t{}\t{}",
+                    index + 1,
+                    account.account_uuid,
+                    account.email,
+                    account.url
+                );
+            }
+            match accounts.len() {
+                0 => {
+                    return Err(CliError::VaultInput(
+                        "op lists no accounts; add one in the 1Password app first",
+                    ));
                 }
-                ExternalProvider::Protonpass => {
-                    VaultError::ProviderNotAvailable(VaultProviderId::ProtonPass.as_str(), "#221")
+                1 => accounts[0].account_uuid.clone(),
+                _ if io::stdin().is_terminal() => {
+                    eprint!("account number: ");
+                    let line = tokio::task::spawn_blocking(|| {
+                        let mut line = String::new();
+                        io::stdin().read_line(&mut line).map(|_| line)
+                    })
+                    .await
+                    .map_err(|_| CliError::Worker)??;
+                    line.trim()
+                        .parse::<usize>()
+                        .ok()
+                        .and_then(|number| accounts.get(number.checked_sub(1)?))
+                        .ok_or(CliError::VaultInput(
+                            "choose one of the listed account numbers",
+                        ))?
+                        .account_uuid
+                        .clone()
+                }
+                _ => {
+                    return Err(CliError::VaultInput(
+                        "op lists several accounts; pass --account with one of the UUIDs above",
+                    ));
                 }
             }
-            .into())
         }
+    };
+    eprintln!("approve the 1Password prompt for account {account} if one appears");
+    let result = probe(Some(account)).await?;
+    if arguments.json {
+        return write_json(result).await;
     }
+    let OwnerOperationResult::VaultConnection {
+        probe:
+            OnePasswordProbe {
+                binary,
+                version,
+                signed_in: Some(account),
+                ..
+            },
+        connected: true,
+    } = result
+    else {
+        return Err(CliError::OwnerInput);
+    };
+    print_lines(vec![format!(
+        "connected 1password\t{}\t{}\t{}\top {version} at {}",
+        account.account_uuid,
+        account.email,
+        account.url,
+        binary.display()
+    )])
+    .await
 }
 
 async fn listing(

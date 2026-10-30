@@ -388,7 +388,11 @@ impl HostService {
             agent.clone(),
         )
         .await?;
-        let vault = crate::vault::VaultService::new(agent.store(), credentials.native_store());
+        let vault = crate::vault::VaultService::new(
+            agent.store(),
+            credentials.native_store(),
+            settings.clone(),
+        );
         let vault_tasks = crate::vault::task::VaultTasks::new(vault.clone());
         broker.attach_vault(Arc::clone(&vault_tasks))?;
         vault_tools.bind(crate::vault::tools::VaultRuntime {
@@ -1029,6 +1033,31 @@ impl HostInner {
             .map_err(|_| HostError::Worker)?
     }
 
+    async fn replace_vault_settings(
+        &self,
+        call: &LocalCall,
+        connection: Option<crate::vault::OnePasswordConnection>,
+    ) -> Result<(), HostError> {
+        let caller = self.settings_service.local_owner_caller(call)?;
+        let mut settings = self.settings.snapshot()?;
+        settings.vault.onepassword = connection;
+        let receipt = self
+            .settings_service
+            .replace_as_owner(
+                caller,
+                settings.revision,
+                settings,
+                call.cancellation.clone(),
+            )
+            .await?;
+        if receipt.settings.is_none() {
+            return Err(HostError::Invalid(
+                "the vault connection could not be saved in settings",
+            ));
+        }
+        Ok(())
+    }
+
     async fn handle(self: Arc<Self>, call: LocalCall) {
         let result = self.handle_payload(&call).await;
         let response = result.unwrap_or_else(|error| LocalResponsePayload::Rejected {
@@ -1190,6 +1219,66 @@ impl HostInner {
                         settings: receipt.settings,
                         restart_required: receipt.restart_required,
                     },
+                })
+            }
+            LocalRequestPayload::OwnerOperation {
+                operation:
+                    crate::ipc::OwnerOperation::VaultConnect {
+                        provider,
+                        binary,
+                        account,
+                    },
+            } => {
+                self.ensure_accepting()?;
+                let probe = self
+                    .vault
+                    .connect(
+                        *provider,
+                        binary.clone(),
+                        account.clone(),
+                        call.cancellation.clone(),
+                    )
+                    .await?;
+                let connection =
+                    probe
+                        .signed_in
+                        .as_ref()
+                        .map(|signed_in| crate::vault::OnePasswordConnection {
+                            binary: probe.binary.clone(),
+                            account: signed_in.account_uuid.clone(),
+                        });
+                let connected = connection.is_some();
+                if connected {
+                    self.replace_vault_settings(call, connection).await?;
+                }
+                Ok(LocalResponsePayload::OwnerOperationResult {
+                    result: crate::ipc::OwnerOperationResult::VaultConnection { probe, connected },
+                })
+            }
+            LocalRequestPayload::OwnerOperation {
+                operation: crate::ipc::OwnerOperation::VaultDisconnect { provider },
+            } => {
+                self.ensure_accepting()?;
+                match self
+                    .vault
+                    .disconnect(*provider, call.cancellation.clone())
+                    .await
+                {
+                    Ok(()) => {}
+                    Err(
+                        error @ (crate::vault::VaultError::ProviderDisconnected(_)
+                        | crate::vault::VaultError::ProviderNotAvailable(..)
+                        | crate::vault::VaultError::InvalidReference
+                        | crate::vault::VaultError::Worker),
+                    ) => return Err(error.into()),
+                    Err(error) => tracing::warn!(
+                        error = %error,
+                        "1Password sign-out failed; removing the connection anyway"
+                    ),
+                }
+                self.replace_vault_settings(call, None).await?;
+                Ok(LocalResponsePayload::OwnerOperationResult {
+                    result: crate::ipc::OwnerOperationResult::Applied,
                 })
             }
             LocalRequestPayload::OwnerOperation { operation } => {
@@ -1500,6 +1589,9 @@ pub(super) fn public_failure(error: &HostError) -> LocalFailure {
             | crate::vault::VaultError::MissingField(_)
             | crate::vault::VaultError::MissingSecret
             | crate::vault::VaultError::ProviderNotAvailable(..)
+            | crate::vault::VaultError::ProviderDisconnected(_)
+            | crate::vault::VaultError::ProviderLocked(_)
+            | crate::vault::VaultError::ProviderFailed(..)
             | crate::vault::VaultError::Capacity
             | crate::vault::VaultError::Cancelled
             | crate::vault::VaultError::Credential(_)),
@@ -1509,6 +1601,9 @@ pub(super) fn public_failure(error: &HostError) -> LocalFailure {
                     crate::vault::VaultError::Capacity => LocalFailureCode::Busy,
                     crate::vault::VaultError::MissingSecret
                     | crate::vault::VaultError::ProviderNotAvailable(..)
+                    | crate::vault::VaultError::ProviderDisconnected(_)
+                    | crate::vault::VaultError::ProviderLocked(_)
+                    | crate::vault::VaultError::ProviderFailed(..)
                     | crate::vault::VaultError::Cancelled
                     | crate::vault::VaultError::Credential(_) => LocalFailureCode::Unavailable,
                     _ => LocalFailureCode::InvalidRequest,

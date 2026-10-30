@@ -55,6 +55,19 @@ impl VaultReference {
         reference.to_string().parse()
     }
 
+    pub(crate) fn from_parts(
+        provider: VaultProviderId,
+        id: &str,
+        field: Option<&str>,
+    ) -> Result<Self, VaultError> {
+        let reference = Self {
+            provider,
+            id: id.to_owned(),
+            field: field.map(str::to_owned),
+        };
+        reference.to_string().parse()
+    }
+
     pub fn provider(&self) -> VaultProviderId {
         self.provider
     }

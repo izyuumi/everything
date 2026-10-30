@@ -290,7 +290,7 @@ fn optional_text(value: Option<&str>, limit: usize, field: &'static str) -> Resu
     value.map_or(Ok(()), |value| text(value, limit, field))
 }
 
-fn valid_host(value: &str) -> bool {
+pub(crate) fn valid_host(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= MAX_HOST_BYTES
         && value.split('.').all(|label| {
