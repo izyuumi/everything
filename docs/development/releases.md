@@ -17,7 +17,7 @@ On this repository's history before any tag, `scripts/version.sh` prints `0.1.0`
 | `release.yml` | push to `main` except a change to only `CHANGELOG.md`; manual | `next`: `scripts/release.sh --next`. `build`: `scripts/release_build.sh <target>` on each target, signing macOS binaries when the secrets exist. `publish`: `scripts/release.sh --publish`, which replaces the beta and opens or updates the release PR. |
 | `promote.yml` | the release PR (branch `release`, same repository) merged | `scripts/release.sh --promote <build> <sha> <digest>` with the PR body's `Release-Build:`, `Release-Commit:` and `Release-Digest:` lines. |
 
-Both share the `release` concurrency group without cancellation, so a promote and the next beta never interleave. Both run only in `izyuumi/everything`. They run no tests; the normal [POC CI](poc-ci.md) gates merges.
+Both share the `release` concurrency group without cancellation, so a promote and the next beta never interleave. Both run only in `izyuumi/everything` and only while the repository variable `EVERYTHING_RELEASES` is `enabled`; otherwise every job is skipped. They run no tests; the normal [POC CI](poc-ci.md) gates merges.
 
 Targets and runners: `aarch64-apple-darwin` and `x86_64-apple-darwin` on `macos-latest` (x86_64 cross-compiled), `x86_64-unknown-linux-gnu` on `ubuntu-22.04` and `aarch64-unknown-linux-gnu` on `ubuntu-22.04-arm`. The Linux binaries need glibc 2.35 or newer.
 
@@ -49,7 +49,15 @@ A future `everything update` built on the `self_update` crate maps onto this as:
 
 ## macOS signing and notarization
 
-`scripts/sign_macos.sh <binary>` is the one place that signs: hardened runtime, secure timestamp, identifier `ai.everything.cli` (`IDENTIFIER` overrides), with the identity in `SIGN_IDENTITY`; then, when `NOTARY_PROFILE` names a `notarytool` keychain profile, it zips the binary and submits it (up to three tries, requiring `Accepted`). A bare Mach-O binary cannot be stapled, so Gatekeeper checks the ticket online. With `SIGN_IDENTITY` unset it prints a warning and leaves the binary unsigned; with `NOTARY_PROFILE` unset it signs without notarizing. Other scripts that need signing call it rather than repeating `codesign` flags.
+`scripts/sign_macos.sh [binary ...]` is the one signing script, for local development ([host guide](host.md#keep-the-chatgpt-sign-in-across-rebuilds-and-updates)) and release CI alike. Without arguments it signs `target/debug/everything` and `target/release/everything` where present.
+
+- Identifier: always `ai.everything.cli`.
+- Identity: `SIGN_IDENTITY`, else `EVERYTHING_CODESIGN_IDENTITY`, else the first `Developer ID Application`, else the first `Apple Development` identity from `security find-identity -v -p codesigning`. With none, it exits 1, except under GitHub Actions (`GITHUB_ACTIONS=true`), where it prints a `::warning::` and leaves the binary unsigned so the release still publishes.
+- Flags: hardened runtime and a secure timestamp when `NOTARY_PROFILE` is set, `EVERYTHING_CODESIGN_RELEASE=1` or under GitHub Actions; otherwise `--timestamp=none`, so local signing works offline.
+- It always verifies with `codesign --verify --strict`, checks the identifier and prints the designated requirement.
+- Notarization runs only when `NOTARY_PROFILE` names a `notarytool` keychain profile: it zips the binary in a temporary directory (removed on every exit) and submits it, up to three tries, requiring `Accepted`. A bare Mach-O binary cannot be stapled, so Gatekeeper checks the ticket online.
+
+Keychain items written by a binary signed with one certificate (for example Apple Development) are not readable by a binary signed with another (Developer ID), even with the same identifier, because the item trusts the writer's designated requirement. Use one kind consistently: a host installed from a release (Developer ID) cannot read the ChatGPT sign-in a locally Apple Development–signed build saved, and the reverse; sign in again after switching.
 
 In `release.yml` the macOS build jobs import the identity into a temporary keychain from these repository secrets, by name: `DEVELOPER_ID_P12` (base64 Developer ID Application `.p12`), `DEVELOPER_ID_PASSWORD`, and for notarization `ASC_KEY_ID`, `ASC_ISSUER_ID`, `ASC_KEY_P8` (base64 App Store Connect API key). Absent secrets produce a visible workflow warning and unsigned or unnotarized binaries; the release still publishes.
 
@@ -70,9 +78,15 @@ Options: `--beta` (the current `v<version>-beta`), `--version <tag>`, `--dir <di
 VERSION=0.1.0 BUILD=1 scripts/release_build.sh aarch64-apple-darwin /tmp/everything-dist
 ```
 
-It writes `/tmp/everything-dist/everything-aarch64-apple-darwin.tar.gz`, signing first only when `SIGN_IDENTITY` is set.
+It writes `/tmp/everything-dist/everything-aarch64-apple-darwin.tar.gz`. A macOS target is signed first through `scripts/sign_macos.sh`, which locally auto-detects an identity and fails without one.
 
 ## Owner setup not done by this change
+
+- Releases are off. `release.yml` (every job, including manual runs) and `promote.yml` run only when the repository variable `EVERYTHING_RELEASES` is `enabled`, so merging this publishes nothing. Set it after adding the signing secrets:
+
+  ```sh
+  gh variable set EVERYTHING_RELEASES --body enabled -R izyuumi/everything
+  ```
 
 - Repository setting "Allow GitHub Actions to create and approve pull requests" is off, so `release_pr.sh` cannot open the release PR until it is enabled; the beta still publishes first.
 - No tag ruleset exists. To make stable tags immutable, add a ruleset on `v*` tags that blocks update and deletion, excluding `v*-beta`, which the beta flow deletes.
