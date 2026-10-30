@@ -1,8 +1,8 @@
 use std::collections::BTreeMap;
 use std::path::{Component, Path, PathBuf};
 use std::process::Stdio;
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Mutex, MutexGuard};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -356,7 +356,7 @@ impl VaultProvider for OnePasswordProvider {
             return Err(VaultError::InvalidReference);
         };
         if account != connection.account {
-            return Err(VaultError::ProviderDisconnected(PROVIDER));
+            return Err(VaultError::InvalidReference);
         }
         if !valid_id(vault) || !valid_id(item) {
             return Err(VaultError::InvalidReference);
@@ -397,16 +397,23 @@ pub(crate) fn cached_summary(reference: &VaultReference) -> Result<VaultItemSumm
     let key = VaultReference::from_parts(reference.provider(), reference.id(), None)?;
     ITEMS
         .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .map_err(|_| VaultError::Worker)?
         .get(&key)
         .cloned()
         .ok_or(VaultError::NotFound)
 }
 
+fn cache() -> MutexGuard<'static, BTreeMap<VaultReference, VaultItemSummary>> {
+    ITEMS.lock().unwrap_or_else(|poisoned| {
+        let mut items = poisoned.into_inner();
+        items.clear();
+        ITEMS.clear_poison();
+        items
+    })
+}
+
 fn remember(account: &str, summaries: &[VaultItemSummary]) {
-    let mut items = ITEMS
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut items = cache();
     let prefix = format!("{account}/");
     items.retain(|reference, _| !reference.id().starts_with(&prefix));
     for summary in summaries {
@@ -419,10 +426,7 @@ fn remember(account: &str, summaries: &[VaultItemSummary]) {
 
 fn forget(account: &str) {
     let prefix = format!("{account}/");
-    ITEMS
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .retain(|reference, _| !reference.id().starts_with(&prefix));
+    cache().retain(|reference, _| !reference.id().starts_with(&prefix));
 }
 
 fn summary(account: &str, item: RawItem) -> Option<VaultItemSummary> {
