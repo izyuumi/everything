@@ -8,4 +8,4 @@ Provider configuration owns sensitive credentials in memory; credentials are not
 
 Continuation is opaque provider state, potentially containing signed thinking or encrypted reasoning. History rewrites must respect provider replay requirements; the context builder preserves required state during tool-result resumption or returns an explicit error. Private conversation checkpoints are being added for atomic persistence with public messages; consult [status](../status/implementation.md) for the current integration gate.
 
-No live inference has been verified in this environment. Automated HTTP mapping and cancellation coverage is deferred to #32.
+Live inference was verified on 2026-10-21 through a real provider (chat, multi-turn, tools, approvals, memory, schedules and cancel). Automated HTTP mapping and cancellation coverage is deferred to #32.

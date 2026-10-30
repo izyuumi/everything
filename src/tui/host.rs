@@ -72,7 +72,7 @@ pub enum TurnEvent {
     Live(String),
     Note(String),
     Approvals(Vec<ApprovalRequest>),
-    Done(String),
+    Done(String, usize),
     Stopped(String),
     Failed(String),
 }
@@ -411,9 +411,8 @@ impl Host {
                     .as_ref()
                     .is_none_or(|applied| applied.task_id.is_none())
                 {
-                    send(TurnEvent::Done(
-                        self.final_text(conversation_id, command_id).await?,
-                    ));
+                    let (text, memories) = self.final_text(conversation_id, command_id).await?;
+                    send(TurnEvent::Done(text, memories));
                     return Ok(());
                 }
                 (conversation_id, command_id)
@@ -471,9 +470,8 @@ impl Host {
                 && matches!(execution.waiting, Some(WaitingReason::Children { .. }));
             match task.status {
                 TaskStatus::Completed => {
-                    send(TurnEvent::Done(
-                        self.final_text(conversation_id, command_id).await?,
-                    ));
+                    let (text, memories) = self.final_text(conversation_id, command_id).await?;
+                    send(TurnEvent::Done(text, memories));
                     return Ok(());
                 }
                 TaskStatus::AwaitingPermission => {
@@ -527,12 +525,16 @@ impl Host {
         &self,
         conversation_id: ConversationId,
         command_id: CommandId,
-    ) -> Result<String, TuiError> {
+    ) -> Result<(String, usize), TuiError> {
         let (information, _) = self.conversation(conversation_id).await?;
+        let memories = information
+            .memory_use
+            .filter(|memory| memory.command_id == command_id)
+            .map_or(0, |memory| memory.excerpts);
         let messages = self
             .messages(conversation_id, information.last_sequence)
             .await?;
-        Ok(messages
+        let text = messages
             .into_iter()
             .rev()
             .find(|message| {
@@ -545,7 +547,8 @@ impl Host {
                         .any(|content| matches!(content, MessageContent::ToolCall(_)))
             })
             .map(|message| message_text(&message.message))
-            .unwrap_or_default())
+            .unwrap_or_default();
+        Ok((text, memories))
     }
 }
 

@@ -541,6 +541,8 @@ pub struct ConversationSummary {
     pub message_count: usize,
     pub pending_command_id: Option<CommandId>,
     pub native_status: Option<crate::agent::LoopStatus>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory_use: Option<crate::agent::MemoryUse>,
 }
 
 impl From<crate::agent::ConversationInfo> for ConversationSummary {
@@ -556,6 +558,7 @@ impl From<crate::agent::ConversationInfo> for ConversationSummary {
             message_count: information.message_count,
             pending_command_id: information.pending_command_id,
             native_status: information.native_status,
+            memory_use: information.memory_use,
         }
     }
 }
