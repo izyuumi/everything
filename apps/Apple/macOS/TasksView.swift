@@ -14,7 +14,7 @@ struct TasksView: View {
                     Button { Task { await model.inspect(task) } } label: {
                         VStack(alignment: .leading, spacing: 4) {
                             Text(task.instruction).lineLimit(2).frame(maxWidth: .infinity, alignment: .leading)
-                            Text(task.status.replacingOccurrences(of: "_", with: " ").capitalized)
+                            Text(task.status == "waiting_for_children" ? "Waiting · inspect for reason" : task.status.replacingOccurrences(of: "_", with: " ").capitalized)
                                 .font(.caption).foregroundStyle(.secondary)
                         }
                     }

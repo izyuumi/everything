@@ -989,7 +989,7 @@ impl Store {
         validate_limit(limit)?;
         let connection = self.connection()?;
         let mut statement = connection.prepare(
-            "SELECT id, conversation_id, parent_task_id, state, input, checkpoint, created_at, updated_at FROM tasks WHERE (?1 IS NULL OR conversation_id = ?1) AND (?2 IS NULL OR state = ?2) ORDER BY created_at, id LIMIT ?3",
+            "SELECT id, conversation_id, parent_task_id, state, input, checkpoint, created_at, updated_at FROM tasks WHERE (?1 IS NULL OR conversation_id = ?1) AND (?2 IS NULL OR state = ?2) ORDER BY created_at DESC, id DESC LIMIT ?3",
         )?;
         collect_rows(statement.query_map(
             params![conversation_id, state.map(TaskState::as_str), limit as i64],

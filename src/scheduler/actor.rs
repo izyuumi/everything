@@ -853,7 +853,56 @@ impl Actor {
                 }
             }
         }
+        self.diagnose_stranded_waits()?;
         self.repair_child_deliveries().await?;
+        Ok(())
+    }
+
+    fn diagnose_stranded_waits(&self) -> Result<(), SchedulerError> {
+        for mut parent in repository::unfinished(&self.store(), self.limits.max_pending_tasks)? {
+            let Some(wait) = parent.checkpoint.child_wait.as_ref() else {
+                continue;
+            };
+            if parent.checkpoint.cancel_requested
+                || !matches!(
+                    parent.checkpoint.waiting,
+                    Some(WaitingReason::Children { .. })
+                )
+            {
+                continue;
+            }
+            let mut stranded = Vec::new();
+            for child in wait
+                .children
+                .iter()
+                .filter(|child| child.delivery.is_none())
+            {
+                let task = repository::load(&self.store(), child.task_id)?;
+                if task.checkpoint.task.status.is_terminal() || task.checkpoint.cancel_requested {
+                    continue;
+                }
+                if let Some(reason) = task.checkpoint.waiting.filter(owner_decision) {
+                    stranded.push(format!(
+                        "child {}, which needs an owner decision ({reason:?})",
+                        child.task_id
+                    ));
+                }
+            }
+            if stranded.is_empty() {
+                continue;
+            }
+            let message = diagnostic(&format!(
+                "At host startup this task was waiting for {}: resume or cancel that child, or cancel this task",
+                stranded.join("; ")
+            ));
+            if parent.checkpoint.diagnostic.as_deref() == Some(message.as_str()) {
+                continue;
+            }
+            tracing::warn!(task_id=%parent.definition.initial.id, diagnostic=%message, "parent waits on children that need an owner decision");
+            parent.checkpoint.diagnostic = Some(message);
+            let status = parent.checkpoint.task.status;
+            repository::save(&self.store(), &mut parent, status)?;
+        }
         Ok(())
     }
 
@@ -2172,17 +2221,7 @@ impl Actor {
             return Ok(task.snapshot());
         }
         let conversation = self.repair_initial_acceptance(&task, None).await?;
-        if native_waiting(&conversation, &task).is_some_and(|reason| {
-            matches!(
-                reason,
-                WaitingReason::ProviderUncertain { .. }
-                    | WaitingReason::Limit
-                    | WaitingReason::Reconciliation
-                    | WaitingReason::ChildOutcomeUnknown { .. }
-                    | WaitingReason::Interrupted
-                    | WaitingReason::NativePaused { .. }
-            )
-        }) {
+        if native_waiting(&conversation, &task).is_some_and(|reason| owner_decision(&reason)) {
             return Err(SchedulerError::OwnerDecision(id));
         }
         if matches!(
@@ -2829,6 +2868,18 @@ fn diagnostic(message: &str) -> String {
         end -= 1;
     }
     message[..end].to_owned()
+}
+
+fn owner_decision(reason: &WaitingReason) -> bool {
+    matches!(
+        reason,
+        WaitingReason::ProviderUncertain { .. }
+            | WaitingReason::Limit
+            | WaitingReason::Reconciliation
+            | WaitingReason::ChildOutcomeUnknown { .. }
+            | WaitingReason::Interrupted
+            | WaitingReason::NativePaused { .. }
+    )
 }
 
 fn native_waiting(conversation: &Conversation, task: &StoredTask) -> Option<WaitingReason> {
