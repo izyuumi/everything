@@ -120,8 +120,9 @@ async fn wait(
                 result => result?,
             };
         if let Some(request) = requests.first() {
+            while stdin.try_recv().is_ok() {}
             let prompt = format!(
-                "\n{} wants to pair  code {}  device {}\nApproving lets it read all conversations, send messages and answer permission prompts.\nApprove? [y/N] ",
+                "\n{} wants to pair  code {}  device {}\nApprove only if your phone shows this same code; the name is chosen by the phone.\nApproving lets it read all conversations, send messages and answer permission prompts.\nApprove? [y/N] ",
                 request.device_name,
                 request.code,
                 pair::short_fingerprint(&request.fingerprint)

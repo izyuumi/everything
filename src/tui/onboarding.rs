@@ -1245,6 +1245,10 @@ impl Wizard<'_, '_> {
                     request.code,
                     pair::short_fingerprint(&request.fingerprint)
                 )),
+                colored(
+                    WARN,
+                    "Approve only if your phone shows this same code; the name is chosen by the phone.",
+                ),
                 dim(
                     "Approving lets it read all conversations, send messages and answer permission prompts.",
                 ),

@@ -219,13 +219,24 @@ impl DeviceEndpoint {
         responder: DeviceId,
         reason: RelayErrorCode,
     ) -> Result<(), DeviceError> {
-        self.queue_reply(RelayClientMessage::PairingDecision {
+        let mut replies = self
+            .inner
+            .pairing_replies
+            .lock()
+            .map_err(|_| DeviceError::Poisoned)?;
+        if replies.len() >= MAX_REPLIES {
+            return Ok(());
+        }
+        replies.push_back(RelayClientMessage::PairingDecision {
             schema_version: RELAY_SCHEMA_VERSION,
             pairing_id,
             responder,
             acceptance: None,
             reason: Some(reason),
-        })
+        });
+        drop(replies);
+        self.inner.outbox_ready.notify_one();
+        Ok(())
     }
 
     fn queue_reply(&self, message: RelayClientMessage) -> Result<(), DeviceError> {
@@ -234,9 +245,6 @@ impl DeviceEndpoint {
             .pairing_replies
             .lock()
             .map_err(|_| DeviceError::Poisoned)?;
-        if replies.len() >= MAX_REPLIES {
-            replies.pop_front();
-        }
         replies.push_back(message);
         drop(replies);
         self.inner.outbox_ready.notify_one();

@@ -175,7 +175,7 @@ impl Rendezvous {
             Some(acceptance) => match sponsor(database, host, &waiter.request, &acceptance).await {
                 Ok(()) => Ok(acceptance),
                 Err(error) => {
-                    eprintln!("relay pairing sponsorship refused");
+                    eprintln!("relay pairing sponsorship refused: {error}");
                     Err(match error {
                         RelayError::Pairing(code) => code,
                         _ => RelayErrorCode::PairingUnavailable,
@@ -232,7 +232,10 @@ pub(super) async fn run(
         .database
         .enrollable(request.responder.clone())
         .await
-        .map_err(|_| RelayError::Pairing(RelayErrorCode::PairingUnavailable))?;
+        .map_err(|error| match error {
+            RelayError::DeviceConflict => RelayError::Pairing(RelayErrorCode::PairingUnavailable),
+            error => error,
+        })?;
     let online = context
         .active_sessions
         .lock()

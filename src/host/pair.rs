@@ -31,6 +31,8 @@ pub enum PairError {
     Protocol,
     #[error("pairing link encoding failed")]
     Encoding,
+    #[error("the host name must be 1–64 bytes without control characters")]
+    HostName,
 }
 
 pub struct Invitation {
@@ -140,9 +142,12 @@ fn link(
 ) -> Result<Zeroizing<String>, PairError> {
     let origin = origin.as_str().as_bytes();
     let origin_length = u16::try_from(origin.len()).map_err(|_| PairError::Encoding)?;
-    let name_length = u8::try_from(name.len()).map_err(|_| PairError::Encoding)?;
-    if name.is_empty() || name.len() > MAX_HOST_NAME_BYTES {
-        return Err(PairError::Encoding);
+    let name_length = u8::try_from(name.len()).map_err(|_| PairError::HostName)?;
+    if name.trim().is_empty()
+        || name.len() > MAX_HOST_NAME_BYTES
+        || name.chars().any(char::is_control)
+    {
+        return Err(PairError::HostName);
     }
     let mut payload = Zeroizing::new(vec![LINK_VERSION]);
     payload.extend_from_slice(&invitation.compact_bytes());
