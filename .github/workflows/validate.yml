@@ -19,6 +19,7 @@ jobs:
           persist-credentials: false
       - run: scripts/check_version.sh
       - run: scripts/external_testflight.sh --audit
+      - run: scripts/release_gate.sh
   rust:
     timeout-minutes: 25
     strategy:

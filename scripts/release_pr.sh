@@ -31,7 +31,19 @@ else
     gh pr create --repo "$REPO" --head release --base main --title "chore: release $VERSION" --body "$BODY" >/dev/null
 fi
 for workflow in validate.yml apple-validation.yml; do
-    gh workflow run "$workflow" --repo "$REPO" --ref release \
-        || echo "::warning::Could not start $workflow on the release branch; run it by hand so the release PR's required checks report."
+    runs=
+    for _ in 1 2 3 4 5 6; do
+        sleep 10
+        runs=$(gh run list --repo "$REPO" --workflow "$workflow" --branch release --event pull_request --status action_required \
+            --json databaseId -q '.[].databaseId' || true)
+        [ -n "$runs" ] && break
+    done
+    if [ -z "$runs" ]; then
+        echo "::warning::No $workflow run is waiting for approval on the release PR; if its checks do not report, approve or rerun them on the PR by hand."
+    fi
+    for run in $runs; do
+        gh api -X POST "repos/$REPO/actions/runs/$run/approve" >/dev/null \
+            || echo "::warning::Could not approve $workflow run $run; approve the release PR's checks by hand."
+    done
 done
 echo "Release PR for $VERSION names build $BUILD."

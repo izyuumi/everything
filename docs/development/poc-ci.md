@@ -12,7 +12,7 @@ cargo clippy --workspace --all-targets --locked -- -D warnings
 cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 ```
 
-Its `release-guards` job runs `scripts/check_version.sh` (version placeholder drift) and `scripts/external_testflight.sh --audit` ([releases](releases.md#drift-guard)). It is a new context, not yet a required check.
+Its `release-guards` job runs `scripts/check_version.sh` (version placeholder drift), `scripts/external_testflight.sh --audit` and `scripts/release_gate.sh` (every publishing job and script requires `VORRA_RELEASES`) ([releases](releases.md#drift-guard)). It is a new context, not yet a required check.
 
 These Clippy forms compile and statically inspect the complete default and all-feature workspace/all-target graph. Normal PRs perform no redundant cargo check, optimized build, macOS Rust job, MSRV job or embedding benchmark. Existing tests remain in the tree and no new tests, fixtures, framework or test requirement is introduced.
 

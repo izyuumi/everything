@@ -97,7 +97,7 @@ case "${1:-}" in
     { echo "vorra $OLD+$N."; echo; scripts/release_notes.sh "$WANT_SHA"; } > "$FILES.md"
     gh release create "v$OLD" --repo "$REPO" --target "$WANT_SHA" --latest --title "v$OLD" --notes-file "$FILES.md" "$FILES"/*
     gh release delete "$BETA" --repo "$REPO" --cleanup-tag --yes
-    echo "Published v$OLD."
+    echo "Published v$OLD. Submit the iOS build for $OLD to the App Store by hand with scripts/app_store_submit.sh."
     ;;
 
 *)
