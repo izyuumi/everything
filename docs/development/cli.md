@@ -98,6 +98,18 @@ vorra vault disconnect protonpass
 
 `vorra update` installs the newest stable release over the running binary; `--beta` follows the single `v<version>-beta` prerelease instead, and `--check` only prints `channel=… current=… available=… tag=… status=newer|up-to-date` plus a sentence and exits 0. On macOS a team-signed binary is never replaced by an unsigned, ad-hoc or differently signed one unless `--allow-unsigned` is given, because the Sign in with ChatGPT keychain item would become unreadable. A loaded launchd service running this same executable is restarted. Details, integrity limits and `VORRA_UPDATE_BASE_URL` are in [CLI releases](releases.md#update).
 
+## Shell completions
+
+`vorra completions <bash|zsh|fish|powershell|elvish>` prints a tab-completion script to stdout. `clap_complete` generates it from the same clap definition the CLI parses, so every subcommand, nested subcommand and flag completes and stays in sync. It reads no state directory and starts no runtime, Host, TUI, network or keychain access. Nothing installs it for you; the installer and `vorra service install` never edit shell startup files.
+
+- zsh: `mkdir -p ~/.zfunc && vorra completions zsh > ~/.zfunc/_vorra`, then add `fpath=(~/.zfunc $fpath); autoload -Uz compinit && compinit` to `~/.zshrc`. Or add `source <(vorra completions zsh)` to `~/.zshrc`.
+- bash: `vorra completions bash > ~/.local/share/bash-completion/completions/vorra` (needs bash-completion), or add `source <(vorra completions bash)` to `~/.bashrc`.
+- fish: `vorra completions fish > ~/.config/fish/completions/vorra.fish`
+- PowerShell: add `vorra completions powershell | Out-String | Invoke-Expression` to your profile.
+- elvish: add `eval (vorra completions elvish | slurp)` to `rc.elv`.
+
+Regenerate the file after `vorra update` when commands change.
+
 ## Local proxy and verification boundaries
 
 A new conversation can explicitly select a local proxy using `--loopback-endpoint http://127.0.0.1:PORT/v1/messages` for Anthropic, or `/v1/responses` for OpenAI. Literal IPv6 loopback is also supported. The full endpoint is persisted as immutable configuration; later commands retain it without repeating the flag. External custom endpoints, endpoint credentials, queries, and fragments are rejected. The foreground path still reads credentials from the selected environment variable. A running host does not: a loopback endpoint needs an explicit `credential_environment` binding, described in the [host guide](host.md#owner-inspection-and-configuration). When a proxied task stops as provider-unavailable without such a binding, the CLI prints the input to use.
