@@ -257,9 +257,10 @@ pub fn read_skills_settings(state_dir: &std::path::Path) -> Result<SkillsSetting
     if FileType::from_raw_mode(metadata.st_mode) != FileType::RegularFile
         || metadata.st_uid != rustix::process::geteuid().as_raw()
         || metadata.st_mode & 0o077 != 0
+        || metadata.st_nlink != 1
     {
         return Err(SettingsError::Invalid(
-            "settings must be an owner-only regular file",
+            "settings must be an owner-only single-link regular file",
         ));
     }
     let mut bytes = Vec::new();

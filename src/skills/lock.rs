@@ -3,6 +3,7 @@ use std::fs::File;
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 
+use rustix::fs::{Mode, OFlags};
 use serde::{Deserialize, Serialize};
 
 use super::SkillDirName;
@@ -129,10 +130,15 @@ fn read(path: &Path, version: u64, minimum: bool, warnings: &mut Vec<String>) ->
 }
 
 fn read_bounded(path: &Path) -> io::Result<Option<Vec<u8>>> {
-    let file = match File::open(path) {
-        Ok(file) => file,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => return Err(error),
+    let file = match rustix::fs::open(
+        path,
+        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC | OFlags::NONBLOCK,
+        Mode::empty(),
+    ) {
+        Ok(file) => File::from(file),
+        Err(rustix::io::Errno::NOENT) => return Ok(None),
+        Err(rustix::io::Errno::LOOP) => return Err(io::Error::other("is a symlink")),
+        Err(error) => return Err(error.into()),
     };
     let metadata = file.metadata()?;
     if !metadata.is_file() {

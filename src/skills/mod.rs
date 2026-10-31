@@ -9,7 +9,9 @@ use std::path::PathBuf;
 
 use serde::Serialize;
 
-pub use discover::{Catalog, MissingSkill, RejectedSkill, SkillRoots, discover, read_body};
+pub use discover::{
+    Cancelled, Catalog, MissingSkill, RejectedSkill, SkillRoots, discover, read_body,
+};
 pub use lock::LockEntry;
 
 pub const MAX_SKILL_DIRS_PER_ROOT: usize = 512;
@@ -32,6 +34,8 @@ impl SkillName {
             Some("longer than 64 bytes")
         } else if raw.contains(['/', '\\', '\0']) {
             Some("contains a path separator or NUL")
+        } else if raw.chars().any(char::is_control) {
+            Some("contains a control character")
         } else if raw.starts_with('.') {
             Some("is a dot name or starts with a dot")
         } else {
@@ -177,6 +181,7 @@ pub enum SkillIssue {
     MetadataNotStringMap,
     MissingFrontmatter,
     FrontmatterTooLarge { bytes: usize },
+    YamlAnchorOrAlias,
     Frontmatter { message: String },
     SkillFileTooLarge { bytes: u64 },
     SkillFileNotRegular,
@@ -219,6 +224,9 @@ impl fmt::Display for SkillIssue {
                 formatter,
                 "frontmatter is {bytes} bytes, above 16 KiB; not offered"
             ),
+            Self::YamlAnchorOrAlias => {
+                formatter.write_str("frontmatter uses a YAML anchor or alias; not offered")
+            }
             Self::Frontmatter { message } => {
                 write!(formatter, "frontmatter is invalid: {message}; not offered")
             }

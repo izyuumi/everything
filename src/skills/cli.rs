@@ -1,9 +1,12 @@
+use std::borrow::Cow;
+use std::fmt;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
 use clap::{Args, Subcommand};
 use serde::Serialize;
 use thiserror::Error;
+use tokio_util::sync::CancellationToken;
 
 use super::{
     Catalog, LockEntry, RejectedSkill, SkillDirName, SkillIssue, SkillRecord, SkillRoots, discover,
@@ -56,21 +59,27 @@ pub enum SkillsCliError {
     NotFound(String),
     #[error("SKILL.md body could not be read: {0}")]
     Body(SkillIssue),
+    #[error("skills discovery was cancelled")]
+    Cancelled,
     #[error("could not serialize skills output")]
     Serialization,
     #[error(transparent)]
     Io(#[from] io::Error),
 }
 
-pub fn run(arguments: SkillsArguments, state_dir: &Path) -> Result<(), SkillsCliError> {
+pub fn run(
+    arguments: SkillsArguments,
+    state_dir: &Path,
+    cancellation: &CancellationToken,
+) -> Result<(), SkillsCliError> {
     let (json, workspace) = match &arguments.command {
         SkillsCommand::List(list) => (list.json, list.workspace.clone()),
         SkillsCommand::Show(show) => (show.json, show.workspace.clone()),
     };
-    let catalog = load(state_dir, workspace)?;
+    let catalog = load(state_dir, workspace, cancellation)?;
     let mut stderr = io::stderr().lock();
     for warning in &catalog.warnings {
-        writeln!(stderr, "vorra: warning: {warning}")?;
+        writeln!(stderr, "vorra: warning: {}", shown(warning))?;
     }
     let mut stdout = io::stdout().lock();
     match arguments.command {
@@ -79,7 +88,33 @@ pub fn run(arguments: SkillsArguments, state_dir: &Path) -> Result<(), SkillsCli
     }
 }
 
-fn load(state_dir: &Path, workspace: Option<PathBuf>) -> Result<Catalog, SkillsCliError> {
+fn printable(text: &str, keep_lines: bool) -> Cow<'_, str> {
+    let escaped = |character: char| {
+        character.is_control() && !(keep_lines && matches!(character, '\n' | '\t'))
+    };
+    if !text.chars().any(escaped) {
+        return Cow::Borrowed(text);
+    }
+    let mut output = String::with_capacity(text.len() + 8);
+    for character in text.chars() {
+        if escaped(character) {
+            output.extend(character.escape_default());
+        } else {
+            output.push(character);
+        }
+    }
+    Cow::Owned(output)
+}
+
+fn shown(value: impl fmt::Display) -> String {
+    printable(&value.to_string(), false).into_owned()
+}
+
+fn load(
+    state_dir: &Path,
+    workspace: Option<PathBuf>,
+    cancellation: &CancellationToken,
+) -> Result<Catalog, SkillsCliError> {
     let home = std::env::var_os("HOME")
         .filter(|home| !home.is_empty())
         .map(PathBuf::from)
@@ -96,11 +131,11 @@ fn load(state_dir: &Path, workspace: Option<PathBuf>) -> Result<Catalog, SkillsC
         None => std::env::current_dir()?,
     };
     let settings = read_skills_settings(state_dir)?;
-    Ok(discover(&SkillRoots::new(
-        home,
-        Some(workspace),
-        settings.extra_roots,
-    )))
+    discover(
+        &SkillRoots::new(home, Some(workspace), settings.extra_roots),
+        cancellation,
+    )
+    .map_err(|_| SkillsCliError::Cancelled)
 }
 
 #[derive(Serialize)]
@@ -224,14 +259,14 @@ fn list(catalog: &Catalog, json: bool, output: &mut impl Write) -> Result<(), Sk
             let status = match row.status {
                 "missing" => "missing from disk".to_owned(),
                 "rejected" => "rejected".to_owned(),
-                _ => row.source.unwrap_or("local").to_owned(),
+                _ => shown(row.source.unwrap_or("local")),
             };
             [
-                row.name.to_owned(),
+                shown(row.name),
                 root,
                 status,
                 row.path
-                    .map_or_else(|| "-".to_owned(), |path| path.display().to_string()),
+                    .map_or_else(|| "-".to_owned(), |path| shown(path.display())),
             ]
         })
         .collect();
@@ -264,7 +299,7 @@ fn list(catalog: &Catalog, json: bool, output: &mut impl Write) -> Result<(), Sk
             w2 = widths[2]
         )?;
         for issue in row.issues {
-            writeln!(output, "  ! {issue}")?;
+            writeln!(output, "  ! {}", shown(issue))?;
         }
     }
     Ok(())
@@ -337,18 +372,18 @@ fn show(
                 .map_err(|_| SkillsCliError::Serialization)?;
                 writeln!(output)?;
             } else {
-                writeln!(output, "name: {}", rejected.label)?;
-                writeln!(output, "path: {}", rejected.dir.display())?;
+                writeln!(output, "name: {}", shown(&rejected.label))?;
+                writeln!(output, "path: {}", shown(rejected.dir.display()))?;
                 writeln!(
                     output,
                     "root: {} ({})",
                     rejected.root.label(),
-                    rejected.root.path().display()
+                    shown(rejected.root.path().display())
                 )?;
                 writeln!(output, "offered: no")?;
                 writeln!(output, "issues:")?;
                 for issue in &rejected.issues {
-                    writeln!(output, "  - {issue}")?;
+                    writeln!(output, "  - {}", shown(issue))?;
                 }
             }
             return Ok(());
@@ -373,46 +408,55 @@ fn show(
         writeln!(output)?;
         return Ok(());
     }
-    writeln!(output, "name: {}", record.name)?;
+    writeln!(output, "name: {}", shown(&record.name))?;
     writeln!(output, "directory name: {}", record.dir_name)?;
-    writeln!(output, "path: {}", record.dir.display())?;
+    writeln!(output, "path: {}", shown(record.dir.display()))?;
     writeln!(
         output,
         "root: {} ({})",
         record.root.label(),
-        record.root.path().display()
+        shown(record.root.path().display())
     )?;
-    writeln!(output, "description: {}", record.description)?;
+    writeln!(output, "description: {}", shown(&record.description))?;
     if let Some(license) = &record.license {
-        writeln!(output, "license: {license}")?;
+        writeln!(output, "license: {}", shown(license))?;
     }
     if let Some(compatibility) = &record.compatibility {
-        writeln!(output, "compatibility: {compatibility}")?;
+        writeln!(output, "compatibility: {}", shown(compatibility))?;
     }
     if let Some(allowed_tools) = &record.allowed_tools {
-        writeln!(output, "allowed-tools (never applied): {allowed_tools}")?;
+        writeln!(
+            output,
+            "allowed-tools (never applied): {}",
+            shown(allowed_tools)
+        )?;
     }
     for (key, value) in &record.metadata {
-        writeln!(output, "metadata.{key}: {value}")?;
+        writeln!(output, "metadata.{}: {}", shown(key), shown(value))?;
     }
     match &record.source {
         Some(entry) => {
-            writeln!(output, "source: {} ({})", entry.source, entry.source_type)?;
+            writeln!(
+                output,
+                "source: {} ({})",
+                shown(&entry.source),
+                shown(&entry.source_type)
+            )?;
             if let Some(url) = &entry.source_url {
-                writeln!(output, "source url: {url}")?;
+                writeln!(output, "source url: {}", shown(url))?;
             }
             if let Some(reference) = &entry.reference {
-                writeln!(output, "ref: {reference}")?;
+                writeln!(output, "ref: {}", shown(reference))?;
             }
             if let Some(hash) = entry
                 .skill_folder_hash
                 .as_ref()
                 .or(entry.computed_hash.as_ref())
             {
-                writeln!(output, "folder hash: {hash}")?;
+                writeln!(output, "folder hash: {}", shown(hash))?;
             }
             if let Some(updated) = &entry.updated_at {
-                writeln!(output, "updated: {updated}")?;
+                writeln!(output, "updated: {}", shown(updated))?;
             }
         }
         None => writeln!(output, "source: local (no lock entry)")?,
@@ -425,11 +469,12 @@ fn show(
     if !record.issues.is_empty() {
         writeln!(output, "issues:")?;
         for issue in &record.issues {
-            writeln!(output, "  - {issue}")?;
+            writeln!(output, "  - {}", shown(issue))?;
         }
     }
     if let Some(body) = body {
         writeln!(output)?;
+        let body = printable(&body, true);
         output.write_all(body.as_bytes())?;
         if !body.ends_with('\n') {
             writeln!(output)?;

@@ -50,6 +50,9 @@ pub(super) fn parse(yaml: &str) -> Result<Fields, SkillIssue> {
     if yaml.len() > MAX_FRONTMATTER_BYTES {
         return Err(SkillIssue::FrontmatterTooLarge { bytes: yaml.len() });
     }
+    if has_anchor_or_alias(yaml) {
+        return Err(SkillIssue::YamlAnchorOrAlias);
+    }
     let raw: RawFrontmatter = if yaml.trim().is_empty() {
         RawFrontmatter::default()
     } else {
@@ -97,4 +100,96 @@ fn string_field(
             None
         }
     }
+}
+
+fn has_anchor_or_alias(yaml: &str) -> bool {
+    let mut quote: Option<char> = None;
+    let mut flow = 0_usize;
+    let mut block: Option<usize> = None;
+    let mut node = true;
+    for line in yaml.lines() {
+        let indent = line.len() - line.trim_start_matches(' ').len();
+        if quote.is_none() {
+            if let Some(parent) = block {
+                if line.trim().is_empty() || indent > parent {
+                    continue;
+                }
+                block = None;
+            }
+            if flow == 0 {
+                node = true;
+            }
+        }
+        let mut chars = line.chars().peekable();
+        let mut previous = ' ';
+        while let Some(character) = chars.next() {
+            let next_blank = chars.peek().is_none_or(|next| next.is_whitespace());
+            match quote {
+                Some('"') => {
+                    if character == '\\' {
+                        chars.next();
+                    } else if character == '"' {
+                        quote = None;
+                    }
+                    previous = character;
+                    continue;
+                }
+                Some(_) => {
+                    if character == '\'' {
+                        if chars.peek() == Some(&'\'') {
+                            chars.next();
+                        } else {
+                            quote = None;
+                        }
+                    }
+                    previous = character;
+                    continue;
+                }
+                None => {}
+            }
+            if character.is_whitespace() {
+                previous = character;
+                continue;
+            }
+            if character == '#' && previous.is_whitespace() {
+                break;
+            }
+            if node {
+                match character {
+                    '&' | '*' => return true,
+                    '"' | '\'' => {
+                        quote = Some(character);
+                        node = false;
+                    }
+                    '[' | '{' => flow += 1,
+                    ']' | '}' => {
+                        flow = flow.saturating_sub(1);
+                        node = false;
+                    }
+                    ',' if flow > 0 => {}
+                    '-' | '?' | ':' if next_blank => {}
+                    '|' | '>' if flow == 0 => {
+                        block = Some(indent);
+                        break;
+                    }
+                    '!' => while chars.next_if(|next| !next.is_whitespace()).is_some() {},
+                    _ => node = false,
+                }
+            } else if character == ':' && (next_blank || flow > 0) {
+                node = true;
+            } else if flow > 0 {
+                match character {
+                    ',' => node = true,
+                    '[' | '{' => {
+                        flow += 1;
+                        node = true;
+                    }
+                    ']' | '}' => flow = flow.saturating_sub(1),
+                    _ => {}
+                }
+            }
+            previous = character;
+        }
+    }
+    false
 }

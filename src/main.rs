@@ -632,6 +632,10 @@ async fn run_cli(arguments: Arguments) -> ExitCode {
             eprintln!("vorra: {error}");
             if matches!(error, CliError::Detached)
                 || matches!(error, CliError::Agent(ref error) if error.is_cancelled())
+                || matches!(
+                    error,
+                    CliError::Skills(vorra::skills::cli::SkillsCliError::Cancelled)
+                )
             {
                 ExitCode::from(130)
             } else {
@@ -724,8 +728,9 @@ async fn execute(arguments: Arguments, cancellation: CancellationToken) -> Resul
             return vault_cli::run(&client, arguments, cancellation).await;
         }
         Command::Skills(arguments) => {
+            let token = cancellation.clone();
             return tokio::task::spawn_blocking(move || {
-                vorra::skills::cli::run(arguments, &state_dir)
+                vorra::skills::cli::run(arguments, &state_dir, &token)
             })
             .await
             .map_err(|_| CliError::Worker)?

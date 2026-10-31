@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 
 use rustix::fs::{FileType, Mode, OFlags};
 use serde::Serialize;
+use tokio_util::sync::CancellationToken;
 
 use super::frontmatter::{self, Document};
 use super::lock::{self, Lock, LockEntry};
@@ -88,12 +89,18 @@ pub struct Catalog {
     pub warnings: Vec<String>,
 }
 
+#[derive(Debug)]
+pub struct Cancelled;
+
 enum Scanned {
     Skill(Box<SkillRecord>),
     Rejected(RejectedSkill),
 }
 
-pub fn discover(roots: &SkillRoots) -> Catalog {
+pub fn discover(
+    roots: &SkillRoots,
+    cancellation: &CancellationToken,
+) -> Result<Catalog, Cancelled> {
     let mut catalog = Catalog::default();
     let global_lock = lock::read_global(&roots.home, &mut catalog.warnings);
     let project_lock = roots
@@ -103,7 +110,7 @@ pub fn discover(roots: &SkillRoots) -> Catalog {
         .unwrap_or_default();
     let mut offered = BTreeSet::new();
     for root in roots.roots() {
-        for scanned in scan_root(&root, &mut catalog.warnings) {
+        for scanned in scan_root(&root, &mut catalog.warnings, cancellation)? {
             match scanned {
                 Scanned::Skill(mut record) => {
                     let lock = match record.root {
@@ -120,12 +127,22 @@ pub fn discover(roots: &SkillRoots) -> Catalog {
             }
         }
     }
+    let folder =
+        |dir: &Path| SkillDirName::sanitize(&dir.file_name().unwrap_or_default().to_string_lossy());
     let installed = |project: bool| -> BTreeSet<SkillDirName> {
+        let in_scope = |root: &SkillRoot| matches!(root, SkillRoot::Project(_)) == project;
         catalog
             .skills
             .iter()
-            .filter(|record| matches!(record.root, SkillRoot::Project(_)) == project)
-            .map(|record| record.name.dir_name())
+            .filter(|record| in_scope(&record.root))
+            .flat_map(|record| [record.name.dir_name(), folder(&record.dir)])
+            .chain(
+                catalog
+                    .rejected
+                    .iter()
+                    .filter(|rejected| in_scope(&rejected.root))
+                    .map(|rejected| folder(&rejected.dir)),
+            )
             .collect()
     };
     let installed_project = installed(true);
@@ -136,7 +153,7 @@ pub fn discover(roots: &SkillRoots) -> Catalog {
     ] {
         missing(lock, installed, scope, &mut catalog.missing);
     }
-    catalog
+    Ok(catalog)
 }
 
 fn missing(
@@ -157,21 +174,39 @@ fn missing(
     );
 }
 
-fn scan_root(root: &SkillRoot, warnings: &mut Vec<String>) -> Vec<Scanned> {
+fn scan_root(
+    root: &SkillRoot,
+    warnings: &mut Vec<String>,
+    cancellation: &CancellationToken,
+) -> Result<Vec<Scanned>, Cancelled> {
+    if let SkillRoot::Project(path) = root
+        && let Err(reason) = trusted_directory(path)
+    {
+        if let Some(reason) = reason {
+            warnings.push(format!(
+                "project root {} was not scanned: {reason}",
+                path.display()
+            ));
+        }
+        return Ok(Vec::new());
+    }
     let entries = match std::fs::read_dir(root.path()) {
         Ok(entries) => entries,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Vec::new(),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
         Err(error) => {
             warnings.push(format!(
                 "{} root {} could not be read: {error}",
                 root.label(),
                 root.path().display()
             ));
-            return Vec::new();
+            return Ok(Vec::new());
         }
     };
     let mut candidates = Vec::new();
     for entry in entries {
+        if cancellation.is_cancelled() {
+            return Err(Cancelled);
+        }
         let entry = match entry {
             Ok(entry) => entry,
             Err(error) => {
@@ -200,10 +235,34 @@ fn scan_root(root: &SkillRoot, warnings: &mut Vec<String>) -> Vec<Scanned> {
         candidates.push(entry.path());
     }
     candidates.sort();
-    candidates
-        .into_iter()
-        .filter_map(|dir| scan_dir(root, dir))
-        .collect()
+    let mut scanned = Vec::with_capacity(candidates.len());
+    for dir in candidates {
+        if cancellation.is_cancelled() {
+            return Err(Cancelled);
+        }
+        scanned.extend(scan_dir(root, dir));
+    }
+    Ok(scanned)
+}
+
+fn trusted_directory(path: &Path) -> Result<(), Option<String>> {
+    let directory = match rustix::fs::open(
+        path,
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
+        Mode::empty(),
+    ) {
+        Ok(directory) => directory,
+        Err(rustix::io::Errno::NOENT) => return Err(None),
+        Err(error) => return Err(Some(io::Error::from(error).to_string())),
+    };
+    let status = rustix::fs::fstat(&directory).map_err(|error| Some(error.to_string()))?;
+    if status.st_uid != rustix::process::geteuid().as_raw() {
+        return Err(Some("not owned by the current user".to_owned()));
+    }
+    if status.st_mode & 0o022 != 0 {
+        return Err(Some("group- or world-writable".to_owned()));
+    }
+    Ok(())
 }
 
 fn scan_dir(root: &SkillRoot, dir: PathBuf) -> Option<Scanned> {
