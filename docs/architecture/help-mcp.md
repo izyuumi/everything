@@ -9,7 +9,8 @@ The server is the separate workspace member `crates/vorra-help-mcp` (`publish = 
 - `build.rs` embeds `README.md`, `CHANGELOG.md` and every `docs/**/*.md` file, splits them into heading sections (ignoring `#` lines inside code fences) and resolves the install-guide sections. A renamed or removed install-guide heading fails the build.
 - `manifest.json` holds the `vorra` command tree and the typed settings registry. The hidden `vorra help-manifest` subcommand writes it from the real clap definitions (`clap::CommandFactory`) and `SettingRegistry::from_profile(None)`. It runs before state-directory resolution, so it never touches `~/.vorra`. The Validate workflow regenerates it and fails on any difference, so commands and settings cannot drift silently. After changing a command or setting, run `cargo run --bin vorra -- help-manifest > crates/vorra-help-mcp/manifest.json`.
 - `content.rs` serves embedded documents and a small section search: ASCII-lowercased term counts, heading matches weighted above body matches, and documents matching more query terms ranked first.
-- `server.rs` is the MCP handler; `http.rs` is the HTTP transport and rate limit.
+- `server.rs` is the MCP handler; `http.rs` is the HTTP transport, rate limit and the static pairing site.
+- `site/` holds the pairing site files, embedded with `include_str!`: `apple-app-site-association`, `pair.html` and `pair.js`. They are the only copy in the repository.
 
 ## Contract
 
@@ -42,12 +43,24 @@ vorra-help-mcp --http --bind 127.0.0.1 --port 18790
 curl -fsS http://127.0.0.1:18790/healthz
 ```
 
-- MCP is served at `/mcp` only; `GET /healthz` returns `200 ok` and is not rate limited.
+- MCP is served at `/mcp`; `GET /healthz` returns `200 ok` and is not rate limited. The three pairing-site routes below are also served.
 - Request bodies over 64 KiB receive `413 Payload Too Large` from rmcp's streaming body limit.
 - Each client address gets a token bucket of 60 requests refilled at one per second; an empty bucket receives `429 Too Many Requests` with `Retry-After: 1`. At most 4096 addresses are tracked; when the table is full of active clients, new addresses receive 429 rather than growing memory.
 - rmcp validates the `Host` header against `localhost`, `127.0.0.1` and `::1`. Add a public name with `--allowed-host vorra.yumi.to` (repeatable).
 - The rate limit keys on the TCP peer address. `--trust-forwarded-for` keys on the last `X-Forwarded-For` entry instead, which is the address the nearest proxy saw. Use it only when the server is reachable solely through one trusted proxy that appends that header, such as a Cloudflare tunnel to a loopback bind; otherwise any client can choose its own key.
 - No authentication. Origin validation is off, matching rmcp's default; the server returns only public documentation.
+
+## Pairing site
+
+The same HTTP server serves the static files for iPhone pairing links on `vorra.yumi.to` (see the [pairing contract](../contracts/device-pairing.md#link)). They are read-only `GET` routes (`HEAD` works, other methods get `405`), share the rate limit above, and answer any `Host` header, including `vorra.yumi.to`:
+
+| Path | Content-Type | Other headers | Body |
+| --- | --- | --- | --- |
+| `/.well-known/apple-app-site-association` | `application/json` | `Cache-Control: max-age=3600`, `X-Content-Type-Options: nosniff` | `applinks` for app ID `AN5KM8QGEF.to.yumi.vorra.ios`, components `/pair` and `/pair/*` |
+| `/pair` | `text/html; charset=utf-8` | `Content-Security-Policy: default-src 'none'; script-src 'self'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'`, `Referrer-Policy: no-referrer`, `nosniff`, `Cache-Control: no-store` | Fallback page: how to get the app (App Store `https://apps.apple.com/app/id6829295744`, TestFlight while in beta) and run `vorra pair` again |
+| `/pair/open.js` | `text/javascript; charset=utf-8` | Same policy headers, `max-age=3600` | `location.replace("vorra://pair" + location.hash)` when a fragment is present |
+
+The fragment that holds the pairing invitation is never sent to the server, which only ever sees `/pair`. The page makes no requests besides its own script; the CSP blocks every other fetch, and the App Store link sends no referrer. Requests to `/pair/` or other paths under it return `404`. The universal link itself never loads the page when Vorra is installed and iOS has fetched the association file.
 
 ## Use from an agent
 

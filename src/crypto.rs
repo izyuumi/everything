@@ -27,6 +27,9 @@ const INVITATION_DOMAIN: &[u8] = b"everything.pairing.invitation.v1\0";
 const REQUEST_DOMAIN: &[u8] = b"everything.pairing.request.v1\0";
 const ACCEPTANCE_DOMAIN: &[u8] = b"everything.pairing.acceptance.v1\0";
 const CHALLENGE_DOMAIN: &[u8] = b"everything.authentication.v1\0";
+const CODE_DOMAIN: &[u8] = b"vorra.pairing.code.v1\0";
+const NAME_DOMAIN: &[u8] = b"vorra.pairing.name.v1\0";
+pub const MAX_PAIRING_NAME_BYTES: usize = 64;
 
 #[derive(Debug, Error)]
 pub enum CryptoError {
@@ -454,6 +457,18 @@ impl PairingInvitation {
         Ok((request, completion))
     }
 
+    pub fn compact_bytes(&self) -> Zeroizing<Vec<u8>> {
+        let mut output = Zeroizing::new(Vec::with_capacity(210));
+        output.extend_from_slice(&self.version.to_be_bytes());
+        output.extend_from_slice(self.pairing_id.as_uuid().as_bytes());
+        output.extend_from_slice(&self.inviter.canonical_bytes());
+        output.extend_from_slice(&self.created_at_ms.to_be_bytes());
+        output.extend_from_slice(&self.expires_at_ms.to_be_bytes());
+        output.extend_from_slice(self.secret.as_ref());
+        output.extend_from_slice(&self.signature);
+        output
+    }
+
     fn signed_bytes(&self) -> Zeroizing<Vec<u8>> {
         let mut output = Zeroizing::new(INVITATION_DOMAIN.to_vec());
         output.extend_from_slice(&self.version.to_be_bytes());
@@ -475,14 +490,14 @@ impl PendingPairing {
         &self.invitation
     }
 
-    pub fn accept(
-        self,
-        inviter: &DeviceIdentity,
+    pub fn check(
+        &self,
+        inviter: &DevicePublicKeys,
         request: &PairingRequest,
         now_ms: u64,
-    ) -> Result<(DevicePublicKeys, PairingAcceptance), CryptoError> {
+    ) -> Result<(), CryptoError> {
         self.invitation.verify(now_ms)?;
-        if inviter.public_keys() != self.invitation.inviter
+        if *inviter != self.invitation.inviter
             || request.pairing_id != self.invitation.pairing_id
             || request.inviter != inviter.device_id
             || request.expires_at_ms != self.invitation.expires_at_ms
@@ -490,15 +505,35 @@ impl PendingPairing {
         {
             return Err(CryptoError::PairingMismatch);
         }
-        validate_version(request.version)?;
-        request.responder.validate()?;
-        request
-            .responder
-            .verify(&request.signed_bytes(), &request.signature)?;
+        request.verify_possession()?;
         let mut mac = pairing_mac(&self.invitation.secret)?;
         mac.update(&request.proof_bytes());
         mac.verify_slice(&request.proof)
+            .map_err(|_| CryptoError::InvalidPairingProof)
+    }
+
+    pub fn code(&self, request: &PairingRequest) -> Result<u32, CryptoError> {
+        let hkdf = Hkdf::<Sha256>::new(
+            Some(self.invitation.pairing_id.as_uuid().as_bytes()),
+            self.invitation.secret.as_ref(),
+        );
+        let mut info = CODE_DOMAIN.to_vec();
+        info.extend_from_slice(&self.invitation.inviter.canonical_bytes());
+        info.extend_from_slice(&request.responder.canonical_bytes());
+        info.extend_from_slice(&request.proof);
+        let mut output = [0; 4];
+        hkdf.expand(&info, &mut output)
             .map_err(|_| CryptoError::InvalidPairingProof)?;
+        Ok((u32::from_be_bytes(output) & 0x07ff_ffff) % 100_000_000)
+    }
+
+    pub fn accept(
+        self,
+        inviter: &DeviceIdentity,
+        request: &PairingRequest,
+        now_ms: u64,
+    ) -> Result<(DevicePublicKeys, PairingAcceptance), CryptoError> {
+        self.check(&inviter.public_keys(), request, now_ms)?;
         let mut acceptance = PairingAcceptance {
             version: ENVELOPE_VERSION,
             pairing_id: request.pairing_id,
@@ -527,6 +562,32 @@ pub struct PairingRequest {
 }
 
 impl PairingRequest {
+    pub fn verify_possession(&self) -> Result<(), CryptoError> {
+        validate_version(self.version)?;
+        self.responder.validate()?;
+        self.responder.verify(&self.signed_bytes(), &self.signature)
+    }
+
+    pub fn name_bytes(&self, name: &str) -> Result<Vec<u8>, CryptoError> {
+        let length = u8::try_from(name.len()).map_err(|_| CryptoError::PairingMismatch)?;
+        if name.is_empty()
+            || name.len() > MAX_PAIRING_NAME_BYTES
+            || name.chars().any(char::is_control)
+        {
+            return Err(CryptoError::PairingMismatch);
+        }
+        let mut output = NAME_DOMAIN.to_vec();
+        output.extend_from_slice(self.pairing_id.as_uuid().as_bytes());
+        output.extend_from_slice(&self.responder.canonical_bytes());
+        output.push(length);
+        output.extend_from_slice(name.as_bytes());
+        Ok(output)
+    }
+
+    pub fn verify_name(&self, name: &str, signature: &[u8; 64]) -> Result<(), CryptoError> {
+        self.responder.verify(&self.name_bytes(name)?, signature)
+    }
+
     fn proof_bytes(&self) -> Vec<u8> {
         let mut output = REQUEST_DOMAIN.to_vec();
         output.extend_from_slice(&self.version.to_be_bytes());
@@ -557,6 +618,23 @@ pub struct PairingAcceptance {
 }
 
 impl PairingAcceptance {
+    pub fn verify_for(
+        &self,
+        inviter: &DevicePublicKeys,
+        request: &PairingRequest,
+    ) -> Result<(), CryptoError> {
+        validate_version(self.version)?;
+        if self.pairing_id != request.pairing_id
+            || self.inviter != *inviter
+            || inviter.device_id != request.inviter
+            || self.responder != request.responder
+            || self.expires_at_ms != request.expires_at_ms
+        {
+            return Err(CryptoError::PairingMismatch);
+        }
+        inviter.verify(&self.signed_bytes(), &self.signature)
+    }
+
     fn signed_bytes(&self) -> Vec<u8> {
         let mut output = ACCEPTANCE_DOMAIN.to_vec();
         output.extend_from_slice(&self.version.to_be_bytes());

@@ -7,6 +7,7 @@ pub mod inbox;
 pub mod mcp;
 pub mod memory;
 mod owner;
+pub mod pair;
 pub mod providers;
 pub mod publication;
 pub mod relocation;

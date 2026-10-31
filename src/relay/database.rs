@@ -12,7 +12,7 @@ use tokio_rusqlite::{
 };
 
 const APPLICATION_ID: i64 = 0x4556_524c;
-const SCHEMA_VERSION: i64 = 1;
+const SCHEMA_VERSION: i64 = 2;
 const MAX_DEVICES: i64 = 4_096;
 const MAX_DEVICE_QUEUE_MESSAGES: i64 = 64;
 const MAX_DEVICE_QUEUE_BYTES: i64 = 16 * 1_024 * 1_024;
@@ -35,6 +35,8 @@ pub struct EnrolledDevice {
     pub revoked_at_ms: Option<i64>,
     pub queued_messages: i64,
     pub queued_bytes: i64,
+    pub pairing_host: bool,
+    pub sponsor: Option<DeviceId>,
 }
 
 #[derive(Debug, Serialize)]
@@ -65,6 +67,81 @@ impl Database {
     }
 
     pub async fn enroll(&self, keys: DevicePublicKeys, now_ms: u64) -> Result<bool, RelayError> {
+        self.enroll_with(keys, None, now_ms).await
+    }
+
+    pub async fn enroll_sponsored(
+        &self,
+        keys: DevicePublicKeys,
+        sponsor: DeviceId,
+        now_ms: u64,
+    ) -> Result<bool, RelayError> {
+        self.enroll_with(keys, Some(sponsor), now_ms).await
+    }
+
+    pub async fn set_pairing_host(&self, device_id: DeviceId) -> Result<(), RelayError> {
+        self.call(move |connection| {
+            let changed = connection.execute(
+                "UPDATE relay_devices SET pairing_host = 1 WHERE device_id = ?1 AND revoked_at_ms IS NULL AND sponsor IS NULL",
+                [device_id.to_string()],
+            )?;
+            if changed == 0 {
+                return Err(RelayError::DeviceConflict);
+            }
+            Ok(())
+        })
+        .await
+    }
+
+    pub async fn pairing_host_keys(
+        &self,
+        device_id: DeviceId,
+    ) -> Result<DevicePublicKeys, RelayError> {
+        self.call(move |connection| {
+            let flagged: Option<i64> = connection
+                .query_row(
+                    "SELECT pairing_host FROM relay_devices WHERE device_id = ?1 AND revoked_at_ms IS NULL",
+                    [device_id.to_string()],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            if flagged != Some(1) {
+                return Err(RelayError::Pairing(
+                    crate::relay_protocol::RelayErrorCode::PairingUnavailable,
+                ));
+            }
+            active_keys(connection, device_id)
+        })
+        .await
+    }
+
+    pub async fn enrollable(&self, keys: DevicePublicKeys) -> Result<(), RelayError> {
+        keys.validate()?;
+        self.call(move |connection| {
+            let existing: Option<(String, Option<i64>)> = connection
+                .query_row(
+                    "SELECT public_keys, revoked_at_ms FROM relay_devices WHERE device_id = ?1",
+                    [keys.device_id.to_string()],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .optional()?;
+            if let Some((existing, revoked)) = existing {
+                let pinned: DevicePublicKeys = serde_json::from_str(&existing)?;
+                if pinned != keys || revoked.is_some() {
+                    return Err(RelayError::DeviceConflict);
+                }
+            }
+            Ok(())
+        })
+        .await
+    }
+
+    async fn enroll_with(
+        &self,
+        keys: DevicePublicKeys,
+        sponsor: Option<DeviceId>,
+        now_ms: u64,
+    ) -> Result<bool, RelayError> {
         keys.validate()?;
         let now = timestamp(now_ms)?;
         self.call(move |connection| {
@@ -89,8 +166,8 @@ impl Database {
                 return Err(RelayError::QueueFull);
             }
             transaction.execute(
-                "INSERT INTO relay_devices (device_id, public_keys, enrolled_at_ms) VALUES (?1, ?2, ?3)",
-                params![id, serde_json::to_string(&keys)?, now],
+                "INSERT INTO relay_devices (device_id, public_keys, enrolled_at_ms, sponsor) VALUES (?1, ?2, ?3, ?4)",
+                params![id, serde_json::to_string(&keys)?, now, sponsor.map(|id| id.to_string())],
             )?;
             transaction.commit()?;
             Ok(true)
@@ -118,7 +195,7 @@ impl Database {
     pub async fn devices(&self) -> Result<Vec<EnrolledDevice>, RelayError> {
         self.call(|connection| {
             let mut statement = connection.prepare(
-                "SELECT public_keys, enrolled_at_ms, revoked_at_ms, queued_messages, queued_bytes
+                "SELECT public_keys, enrolled_at_ms, revoked_at_ms, queued_messages, queued_bytes, pairing_host, sponsor
                  FROM relay_devices ORDER BY enrolled_at_ms, device_id LIMIT 4096",
             )?;
             let rows = statement.query_map([], |row| {
@@ -128,16 +205,22 @@ impl Database {
                     row.get(2)?,
                     row.get(3)?,
                     row.get(4)?,
+                    row.get::<_, i64>(5)?,
+                    row.get::<_, Option<String>>(6)?,
                 ))
             })?;
             rows.map(|row| {
-                let (keys, enrolled_at_ms, revoked_at_ms, queued_messages, queued_bytes) = row?;
+                let (keys, enrolled_at_ms, revoked_at_ms, queued_messages, queued_bytes, pairing_host, sponsor) = row?;
                 Ok(EnrolledDevice {
                     keys: serde_json::from_str(&keys)?,
                     enrolled_at_ms,
                     revoked_at_ms,
                     queued_messages,
                     queued_bytes,
+                    pairing_host: pairing_host == 1,
+                    sponsor: sponsor
+                        .map(|id| id.parse().map_err(|_| RelayError::DeviceConflict))
+                        .transpose()?,
                 })
             })
             .collect()
@@ -394,7 +477,9 @@ fn initialize(connection: &mut rusqlite::Connection) -> Result<(), RelayError> {
              queued_bytes INTEGER NOT NULL DEFAULT 0 CHECK (queued_bytes >= 0),
              rate_window INTEGER NOT NULL DEFAULT -1,
              rate_frames INTEGER NOT NULL DEFAULT 0,
-             rate_bytes INTEGER NOT NULL DEFAULT 0
+             rate_bytes INTEGER NOT NULL DEFAULT 0,
+             pairing_host INTEGER NOT NULL DEFAULT 0 CHECK (pairing_host IN (0, 1)),
+             sponsor TEXT
          );
          CREATE TABLE IF NOT EXISTS relay_stats (
              singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
@@ -436,6 +521,12 @@ fn initialize(connection: &mut rusqlite::Connection) -> Result<(), RelayError> {
              UPDATE relay_stats SET retained_message_ids = retained_message_ids - 1 WHERE singleton = 1;
          END;",
     )?;
+    if schema_version == 1 {
+        transaction.execute_batch(
+            "ALTER TABLE relay_devices ADD COLUMN pairing_host INTEGER NOT NULL DEFAULT 0 CHECK (pairing_host IN (0, 1));
+             ALTER TABLE relay_devices ADD COLUMN sponsor TEXT;",
+        )?;
+    }
     transaction.pragma_update(None, "application_id", APPLICATION_ID)?;
     transaction.pragma_update(None, "user_version", SCHEMA_VERSION)?;
     transaction.commit()?;
