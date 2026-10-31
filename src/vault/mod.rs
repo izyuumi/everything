@@ -62,6 +62,10 @@ pub enum VaultError {
     Cancelled,
     #[error("vault worker failed")]
     Worker,
+    #[error(
+        "vault values for this task were discarded after an internal failure; call vault_use again in a new task"
+    )]
+    TaskDiscarded,
     #[error(transparent)]
     Credential(#[from] CredentialError),
     #[error(transparent)]

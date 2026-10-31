@@ -1,6 +1,6 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 
 use rusqlite::params;
 use serde::{Deserialize, Serialize};
@@ -212,16 +212,31 @@ impl fmt::Debug for ToolVault {
 
 type TaskSecrets = BTreeMap<VaultReference, Option<Arc<CredentialSecret>>>;
 
+#[derive(Default)]
+struct TaskState {
+    secrets: BTreeMap<String, TaskSecrets>,
+    discarded: BTreeSet<String>,
+}
+
+impl TaskState {
+    fn usable(&self, task_id: &str) -> Result<(), VaultError> {
+        if self.discarded.contains(task_id) {
+            return Err(VaultError::TaskDiscarded);
+        }
+        Ok(())
+    }
+}
+
 pub struct VaultTasks {
     service: VaultService,
-    secrets: Mutex<BTreeMap<String, TaskSecrets>>,
+    state: Mutex<TaskState>,
 }
 
 impl VaultTasks {
     pub(crate) fn new(service: VaultService) -> Arc<Self> {
         Arc::new(Self {
             service,
-            secrets: Mutex::new(BTreeMap::new()),
+            state: Mutex::new(TaskState::default()),
         })
     }
 
@@ -229,10 +244,14 @@ impl VaultTasks {
         &self.service
     }
 
-    fn tasks(&self) -> std::sync::MutexGuard<'_, BTreeMap<String, TaskSecrets>> {
-        self.secrets
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    fn tasks(&self) -> MutexGuard<'_, TaskState> {
+        self.state.lock().unwrap_or_else(|poisoned| {
+            let mut state = poisoned.into_inner();
+            let secrets = std::mem::take(&mut state.secrets);
+            state.discarded.extend(secrets.into_keys());
+            self.state.clear_poison();
+            state
+        })
     }
 
     pub(crate) fn remember(
@@ -242,7 +261,8 @@ impl VaultTasks {
         secret: Option<Arc<CredentialSecret>>,
     ) -> Result<(), VaultError> {
         let mut tasks = self.tasks();
-        let task = tasks.entry(task_id.to_owned()).or_default();
+        tasks.usable(task_id)?;
+        let task = tasks.secrets.entry(task_id.to_owned()).or_default();
         if !task.contains_key(reference) && task.len() >= MAX_TASK_SECRETS {
             return Err(VaultError::Capacity);
         }
@@ -252,21 +272,29 @@ impl VaultTasks {
         Ok(())
     }
 
-    pub(crate) fn literals(&self, task_id: &str) -> Vec<Arc<CredentialSecret>> {
-        self.tasks()
+    pub(crate) fn literals(&self, task_id: &str) -> Result<Vec<Arc<CredentialSecret>>, VaultError> {
+        let tasks = self.tasks();
+        tasks.usable(task_id)?;
+        Ok(tasks
+            .secrets
             .get(task_id)
             .map(|task| task.values().flatten().cloned().collect())
-            .unwrap_or_default()
+            .unwrap_or_default())
     }
 
     fn known(&self, task_id: &str, reference: &VaultReference) -> bool {
         self.tasks()
+            .secrets
             .get(task_id)
             .is_some_and(|task| task.contains_key(reference))
     }
 
     pub(crate) fn release(&self, task_id: &str) {
-        let released = self.tasks().remove(task_id);
+        let released = {
+            let mut tasks = self.tasks();
+            tasks.discarded.remove(task_id);
+            tasks.secrets.remove(task_id)
+        };
         drop(released);
     }
 
@@ -348,7 +376,9 @@ impl VaultTasks {
         }
         Ok(ToolVault {
             conversation_id: authority.conversation_id().to_owned(),
-            literals: self.literals(&task_id),
+            literals: self
+                .literals(&task_id)
+                .map_err(|error| failed(error.to_string()))?,
             task_id,
             environment,
         })
