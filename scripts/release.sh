@@ -109,7 +109,7 @@ case "${1:-}" in
         grep -qE "  vorra-$target\.tar\.gz\$" "$FILES/SHA256SUMS" 2>/dev/null \
             || mismatch "SHA256SUMS's entry for $target" "" "vorra-$target.tar.gz"
     done
-    (cd "$FILES" && shasum -a 256 -c SHA256SUMS >/dev/null 2>&1) || mismatch "the downloaded tarballs" "different from SHA256SUMS" "matching tarballs"
+    (cd "$FILES" && shasum -a 256 -c SHA256SUMS >/dev/null 2>&1) || mismatch "the downloaded assets" "different from SHA256SUMS" "assets matching it"
     MAC=$(jq -r '.mac.bundle_version // empty' "$FILES/candidate.json" 2>/dev/null || true)
     if [ -n "$MAC" ]; then
         want=$(scripts/build-number.sh "$OLD" "$N" 2>/dev/null || true)
