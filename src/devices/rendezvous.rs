@@ -254,7 +254,7 @@ impl DeviceEndpoint {
         let pinned = self.pin_peer(entry.keys, pairing_id, entry.approval, now);
         let _ = entry
             .reply
-            .send(pinned.map_err(|_| RelayErrorCode::PairingUnavailable));
+            .send(pinned.map_err(|_| RelayErrorCode::Internal));
         Ok(())
     }
 

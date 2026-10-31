@@ -643,6 +643,11 @@ impl HostInner {
                     )) => Err(HostError::Invalid(
                         "the phone left before the approval reached it; nothing was paired. Run vorra pair again",
                     )),
+                    Some(Err(crate::relay_protocol::RelayErrorCode::Internal)) => {
+                        Err(HostError::Invalid(
+                            "the phone received the approval but this host could not record the pairing; disable the device on the phone and run vorra pair again",
+                        ))
+                    }
                     Some(Err(_)) => Err(HostError::Invalid(
                         "the relay could not enroll the phone; nothing was paired. Check vorra relay devices and run vorra pair again",
                     )),
