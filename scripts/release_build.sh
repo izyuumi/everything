@@ -8,6 +8,9 @@ BUILD=${BUILD:-1}
 case "$BUILD" in ''|*[!0-9]*) echo "BUILD must be a positive integer, got '$BUILD'" >&2; exit 64 ;; esac
 VORRA_VERSION="$VERSION+$BUILD" cargo build --release --locked --package vorra --bin vorra --target "$TARGET"
 BINARY=target/$TARGET/release/vorra
+if [ "$TARGET" = "$(rustc -vV | sed -n 's/^host: //p')" ] && [ "$("$BINARY" --version)" != "vorra $VERSION+$BUILD" ]; then
+    echo "$BINARY reports '$("$BINARY" --version)', not 'vorra $VERSION+$BUILD'" >&2; exit 1
+fi
 case "$TARGET" in *-apple-darwin) scripts/sign_macos.sh "$BINARY" ;; esac
 mkdir -p "$DIST"
 STAGE=$(mktemp -d)

@@ -122,7 +122,7 @@ impl ClientHandler for Handler {
     fn get_info(&self) -> ClientConfig {
         ClientConfig::new(
             ClientCapabilities::default(),
-            Implementation::new("vorra", env!("CARGO_PKG_VERSION")),
+            Implementation::new("vorra", crate::VERSION),
         )
     }
 

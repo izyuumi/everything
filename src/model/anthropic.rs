@@ -166,7 +166,7 @@ impl AnthropicProvider {
             .connect_timeout(config.connect_timeout)
             .timeout(config.request_timeout)
             .redirect(reqwest::redirect::Policy::none())
-            .user_agent(concat!("vorra/", env!("CARGO_PKG_VERSION")));
+            .user_agent(format!("vorra/{}", crate::VERSION));
         let builder = if config.endpoint.as_str() != ENDPOINT {
             builder.no_proxy()
         } else {

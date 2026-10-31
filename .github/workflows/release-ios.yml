@@ -1,0 +1,57 @@
+name: Release iOS
+on:
+  push:
+    branches: [main]
+    paths: ['apps/Apple/**', 'scripts/upload_ios.sh', 'scripts/asc_lib.sh', 'scripts/version.sh', 'scripts/build-number.sh']
+  workflow_dispatch:
+concurrency:
+  group: release-ios
+  cancel-in-progress: false
+permissions: {}
+jobs:
+  upload:
+    if: github.repository == 'izyuumi/everything' && vars.VORRA_RELEASES == 'enabled'
+    runs-on: macos-latest
+    timeout-minutes: 120
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Signing identity and App Store Connect key
+        env:
+          MAC_CERT_P12: ${{ secrets.MAC_CERT_P12 }}
+          MAC_CERT_PASSWORD: ${{ secrets.MAC_CERT_PASSWORD }}
+          ASC_KEY_P8: ${{ secrets.ASC_KEY_P8 }}
+        run: |
+          set -eu
+          KEYCHAIN="$RUNNER_TEMP/release.keychain-db"
+          KEYCHAIN_PASSWORD=$(openssl rand -base64 24)
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          printf '%s' "$MAC_CERT_P12" | base64 -d > "$RUNNER_TEMP/distribution.p12"
+          security import "$RUNNER_TEMP/distribution.p12" -P "$MAC_CERT_PASSWORD" -A -t cert -f pkcs12 -k "$KEYCHAIN"
+          rm "$RUNNER_TEMP/distribution.p12"
+          curl -fsSL -o "$RUNNER_TEMP/AppleWWDRCAG3.cer" https://www.apple.com/certificateauthority/AppleWWDRCAG3.cer
+          security import "$RUNNER_TEMP/AppleWWDRCAG3.cer" -t cert -k "$KEYCHAIN" 2>&1 | grep -v 'already exists' || true
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN" >/dev/null
+          security list-keychains -d user -s "$KEYCHAIN" login.keychain-db
+          security default-keychain -s "$KEYCHAIN"
+          umask 077
+          printf '%s' "$ASC_KEY_P8" | base64 -d > "$RUNNER_TEMP/AuthKey.p8"
+      - name: Upload the iOS build and set its What to Test
+        env:
+          ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+          ASC_KEY_PATH: ${{ runner.temp }}/AuthKey.p8
+          VORRA_RELEASES: ${{ vars.VORRA_RELEASES }}
+          VORRA_EXTERNAL_TESTFLIGHT: ${{ vars.VORRA_EXTERNAL_TESTFLIGHT }}
+        run: scripts/upload_ios.sh --confirm
+      - name: Forget signing credentials
+        if: always()
+        run: |
+          rm -f "$RUNNER_TEMP/AuthKey.p8"
+          security delete-keychain "$RUNNER_TEMP/release.keychain-db" 2>/dev/null || true

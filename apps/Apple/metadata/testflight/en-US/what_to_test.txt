@@ -1,0 +1,6 @@
+intro=Vorra {version} ({build}), beta.
+note=
+feat=Features:
+fix=Fixes:
+perf=Performance:
+more=… and {count} more in the GitHub release.

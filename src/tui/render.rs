@@ -159,7 +159,7 @@ fn banner(app: &App, width: usize) -> Vec<Line<'static>> {
     }
     let box_width = width.clamp(20, 100);
     let inner = box_width.saturating_sub(4);
-    let title = format!(" {AGENT} v{} ", env!("CARGO_PKG_VERSION"));
+    let title = format!(" {AGENT} v{} ", crate::VERSION);
     let top_fill = box_width.saturating_sub(title.width() + 3);
     lines.push(Line::from(vec![
         Span::styled("╭─", fg(BORDER)),

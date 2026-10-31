@@ -2,6 +2,7 @@
 set -eu
 cd "$(dirname "$0")/.."
 REPO=${REPO:-izyuumi/everything}
+[ "${VORRA_RELEASES:-}" = enabled ] || { echo "Refusing to move the release branch or open the release PR: VORRA_RELEASES is '${VORRA_RELEASES:-}', not enabled." >&2; exit 1; }
 VERSION=${1:?usage: scripts/release_pr.sh <version> <build> <source sha> <sha256:SHA256SUMS digest>}
 BUILD=${2:?}
 SHA=${3:?}
