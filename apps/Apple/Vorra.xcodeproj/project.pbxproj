@@ -4,6 +4,20 @@
     };
     "objectVersion" = "56";
     "objects" = {
+        "5A1C0E7B9D2F4E6A8B3C1D05" = {
+            "isa" = "PBXFileReference";
+            "lastKnownFileType" = "folder.iconcomposer.icon";
+            "path" = "Shared/AppIcon.icon";
+            "sourceTree" = "<group>";
+        };
+        "5A1C0E7B9D2F4E6A8B3C1D06" = {
+            "isa" = "PBXBuildFile";
+            "fileRef" = "5A1C0E7B9D2F4E6A8B3C1D05";
+        };
+        "5A1C0E7B9D2F4E6A8B3C1D07" = {
+            "isa" = "PBXBuildFile";
+            "fileRef" = "5A1C0E7B9D2F4E6A8B3C1D05";
+        };
         "68C351A22E9E47DB97992884" = {
             "isa" = "PBXFileReference";
             "lastKnownFileType" = "sourcecode.swift";
@@ -610,6 +624,7 @@
         "0D6E4079E36703EBD37C0072" = {
             "isa" = "PBXGroup";
             "children" = (
+                "5A1C0E7B9D2F4E6A8B3C1D05",
                 "0112514560F5BC5CF1ECEF39",
                 "0032AA0FD9D3AE708ACA3405",
                 "0A3E27B8CA818264D75C8D81",
@@ -690,6 +705,7 @@
             "isa" = "PBXResourcesBuildPhase";
             "buildActionMask" = "2147483647";
             "files" = (
+                "5A1C0E7B9D2F4E6A8B3C1D07",
             );
             "runOnlyForDeploymentPostprocessing" = "0";
         };
@@ -706,6 +722,7 @@
                 "ENABLE_HARDENED_RUNTIME" = "YES";
                 "ENABLE_APP_SANDBOX" = "NO";
                 "PRODUCT_BUNDLE_IDENTIFIER" = "to.yumi.vorra.mac";
+                "ASSETCATALOG_COMPILER_APPICON_NAME" = "AppIcon";
                 "VORRA_SPARKLE_FEED_URL" = "https://github.com/izyuumi/everything/releases/latest/download/appcast.xml";
                 "VORRA_SPARKLE_PUBLIC_KEY" = "";
                 "DEVELOPMENT_TEAM" = "AN5KM8QGEF";
@@ -737,6 +754,7 @@
                 "ENABLE_HARDENED_RUNTIME" = "YES";
                 "ENABLE_APP_SANDBOX" = "NO";
                 "PRODUCT_BUNDLE_IDENTIFIER" = "to.yumi.vorra.mac";
+                "ASSETCATALOG_COMPILER_APPICON_NAME" = "AppIcon";
                 "VORRA_SPARKLE_FEED_URL" = "https://github.com/izyuumi/everything/releases/latest/download/appcast.xml";
                 "VORRA_SPARKLE_PUBLIC_KEY" = "";
                 "DEVELOPMENT_TEAM" = "AN5KM8QGEF";
@@ -911,7 +929,6 @@
                 "A023B409344CC33CA7E46FF1",
                 "51327B0574AFD65741A5344B",
                 "DCCAC891CFB1755B73CEAFC6",
-                "447EAFCEC2470DF0C55881BE",
             );
             "path" = "iOS";
             "sourceTree" = "<group>";
@@ -1141,21 +1158,11 @@
             );
             "runOnlyForDeploymentPostprocessing" = "0";
         };
-        "447EAFCEC2470DF0C55881BE" = {
-            "isa" = "PBXFileReference";
-            "lastKnownFileType" = "folder.assetcatalog";
-            "path" = "Assets.xcassets";
-            "sourceTree" = "<group>";
-        };
-        "7919F2AFD713A201991913BB" = {
-            "isa" = "PBXBuildFile";
-            "fileRef" = "447EAFCEC2470DF0C55881BE";
-        };
         "77CC031345BC7172C1AB381F" = {
             "isa" = "PBXResourcesBuildPhase";
             "buildActionMask" = "2147483647";
             "files" = (
-                "7919F2AFD713A201991913BB",
+                "5A1C0E7B9D2F4E6A8B3C1D06",
             );
             "runOnlyForDeploymentPostprocessing" = "0";
         };
