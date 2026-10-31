@@ -172,6 +172,27 @@ private struct PrivacySettingsView: View {
     var body: some View {
         Form {
             Section {
+                if let owner = model.localSettings, let draft = owner.draft {
+                    Toggle("Hide screens when inactive", isOn: Binding(get: { owner.draft?.privacyCover ?? draft.privacyCover }, set: { owner.setPrivacyCover($0) }))
+                        .disabled(!owner.canEdit)
+                    HStack {
+                        Button("Save") { owner.save() }.disabled(!owner.canSave)
+                        if owner.pendingPatch != nil {
+                            Button("Inspect original save") { owner.inspectPendingSave() }.disabled(!owner.canInspect)
+                        }
+                    }
+                    .buttonStyle(.borderless)
+                    if let message = owner.preferenceStatus { Text(message) }
+                    if let error = owner.preferenceError { Text(error.errorDescription ?? "Local preferences are unavailable.").foregroundStyle(.red) }
+                } else {
+                    Text(model.localSettingsIssue ?? "Saved local preferences are unavailable.").foregroundStyle(.secondary)
+                }
+            } header: {
+                Text("Privacy Cover")
+            } footer: {
+                Text("Off by default. When on and saved, Vorra covers its screens with an opaque lock while the app is inactive, including in the app switcher. Saved on this iPhone with its other local preferences, so Save also saves unsaved notification choices from General.")
+            }
+            Section {
                 Button("Permanently disable this device", role: .destructive) { setDisabling(true) }.disabled(model.state?.snapshot.revoked != false)
             } header: {
                 Text("Local privacy")
@@ -182,6 +203,8 @@ private struct PrivacySettingsView: View {
         .formStyle(.grouped)
         .navigationTitle("Privacy")
         .navigationBarTitleDisplayMode(.inline)
+        .onAppear { model.localDestinationChanged(presented: true) }
+        .onDisappear { model.localDestinationChanged(presented: false) }
         .confirmationDialog("Permanently disable this device?", isPresented: Binding(get: { disabling }, set: { setDisabling($0) })) {
             Button("Disable device", role: .destructive) { Task { await model.disable() } }
             Button("Cancel", role: .cancel) { setDisabling(false) }

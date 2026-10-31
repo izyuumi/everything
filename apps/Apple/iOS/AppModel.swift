@@ -116,6 +116,7 @@ final class AppModel {
     private(set) var selectedTab: ClientTab = .chat
     private(set) var settingsPath: [ClientSettingsDestination] = []
     private(set) var pairingPhase: PairingPhase = .idle
+    var privacyCoverEnabled: Bool { localSettings?.savedPrivacyCover ?? false }
     var pairingLink: String?
     @ObservationIgnored private var pairingTask: Task<Void, Never>?
     @ObservationIgnored private var service: ReplicaService?
@@ -465,7 +466,7 @@ final class AppModel {
 
     func localDestinationChanged(presented: Bool) {
         if !presented { localSettings?.setSurfaceVisible(false) }
-        localDestinationVisible = presented && settingsPath.last == .general
+        localDestinationVisible = presented && (settingsPath.last == .general || settingsPath.last == .privacy)
         updateLocalEligibility()
     }
 
