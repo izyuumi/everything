@@ -19,6 +19,7 @@ pub const VAULT_SEARCH: &str = "vault_search";
 pub const VAULT_USE: &str = "vault_use";
 pub const VAULT_REQUEST: &str = "vault_request";
 pub(crate) const MAX_TASK_SECRETS: usize = 16;
+pub(crate) const MIN_BOUND_VALUE_CHARS: usize = 8;
 const MAX_REASON_CHARS: usize = 512;
 const MAX_BINDING_ROWS: i64 = 256;
 const REDACTED: &str = "[REDACTED]";
@@ -361,6 +362,12 @@ impl VaultTasks {
                             binding.name
                         ))
                     })?;
+                if too_short(&secret) {
+                    return Err(failed(format!(
+                        "vault binding ${} is shorter than {MIN_BOUND_VALUE_CHARS} characters; call vault_use with a longer value",
+                        binding.name
+                    )));
+                }
                 self.remember(&task_id, &binding.reference, Some(Arc::clone(&secret)))
                     .map_err(|error| failed(error.to_string()))?;
                 environment.push((binding.name.clone(), secret));
@@ -383,6 +390,12 @@ impl VaultTasks {
             environment,
         })
     }
+}
+
+pub(crate) fn too_short(secret: &CredentialSecret) -> bool {
+    let value = secret.expose();
+    std::str::from_utf8(value).map_or(value.len(), |text| text.chars().count())
+        < MIN_BOUND_VALUE_CHARS
 }
 
 pub(crate) fn redact_value(value: &mut Value, literals: &[Arc<CredentialSecret>]) -> bool {
