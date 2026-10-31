@@ -9,6 +9,7 @@ default-run = "vorra"
 
 [workspace]
 resolver = "3"
+members = ["crates/vorra-help-mcp"]
 
 [dependencies]
 clap = { version = "4.5", features = ["derive", "env"] }
