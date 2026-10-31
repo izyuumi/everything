@@ -7,7 +7,7 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::path::PathBuf;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 pub use discover::{
     Cancelled, Catalog, MissingSkill, RejectedSkill, SkillRoots, discover, read_body,
@@ -19,20 +19,35 @@ pub const MAX_SKILL_FILE_BYTES: u64 = 256 * 1024;
 pub const MAX_FRONTMATTER_BYTES: usize = 16 * 1024;
 pub const MAX_FRONTMATTER_STRING_BYTES: usize = 64 * 1024;
 pub const MAX_EXTRA_ROOTS: usize = 8;
-pub const MAX_NAME_BYTES: usize = 64;
+pub const MAX_NAME_BYTES: usize = 256;
+pub const SPEC_MAX_NAME_BYTES: usize = 64;
 pub const MAX_DESCRIPTION_BYTES: usize = 1024;
 pub const MAX_COMPATIBILITY_BYTES: usize = 500;
 
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
-#[serde(transparent)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
 pub struct SkillName(String);
+
+impl TryFrom<String> for SkillName {
+    type Error = SkillIssue;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::parse(&value)
+    }
+}
+
+impl From<SkillName> for String {
+    fn from(value: SkillName) -> Self {
+        value.0
+    }
+}
 
 impl SkillName {
     pub fn parse(raw: &str) -> Result<Self, SkillIssue> {
         let reason = if raw.is_empty() {
             Some("empty")
         } else if raw.len() > MAX_NAME_BYTES {
-            Some("longer than 64 bytes")
+            Some("longer than 256 bytes")
         } else if raw.contains(['/', '\\', '\0']) {
             Some("contains a path separator or NUL")
         } else if raw.chars().any(char::is_control) {
@@ -60,12 +75,13 @@ impl SkillName {
     }
 
     fn follows_spec_grammar(&self) -> bool {
-        self.0.split('-').all(|part| {
-            !part.is_empty()
-                && part
-                    .bytes()
-                    .all(|byte| matches!(byte, b'a'..=b'z' | b'0'..=b'9'))
-        })
+        self.0.len() <= SPEC_MAX_NAME_BYTES
+            && self.0.split('-').all(|part| {
+                !part.is_empty()
+                    && part
+                        .bytes()
+                        .all(|byte| matches!(byte, b'a'..=b'z' | b'0'..=b'9'))
+            })
     }
 }
 
@@ -201,9 +217,9 @@ impl fmt::Display for SkillIssue {
             }
             Self::MissingName => formatter.write_str("frontmatter has no name; not offered"),
             Self::NotAString { field } => write!(formatter, "frontmatter {field} is not a string"),
-            Self::NameGrammar => {
-                formatter.write_str("name does not match the spec grammar ^[a-z0-9]+(-[a-z0-9]+)*$")
-            }
+            Self::NameGrammar => formatter.write_str(
+                "name does not match the spec: ^[a-z0-9]+(-[a-z0-9]+)*$ and at most 64 bytes",
+            ),
             Self::DirectoryMismatch { directory } => {
                 write!(formatter, "directory {directory:?} does not equal the name")
             }

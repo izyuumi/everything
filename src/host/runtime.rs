@@ -49,6 +49,8 @@ pub enum HostError {
     #[error(transparent)]
     Settings(#[from] SettingsError),
     #[error(transparent)]
+    Agents(#[from] super::agents::AgentsError),
+    #[error(transparent)]
     SettingsService(#[from] SettingsServiceError),
     #[error(transparent)]
     Inbox(#[from] InboxError),
@@ -144,6 +146,7 @@ pub(super) struct HostInner {
     pub(super) agent: Agent,
     pub(super) inbox: HostInbox,
     pub(super) settings: SettingsRepository,
+    pub(super) agents: super::agents::AgentRepository,
     pub(super) settings_service: SettingsService,
     pub(super) settings_agents: Arc<super::settings::agent::SettingsAgentRuntime>,
     pub(super) credentials: CredentialVault,
@@ -475,6 +478,7 @@ impl HostService {
         let (publication_updates, publication) = watch::channel(Default::default());
         let inner = Arc::new(HostInner {
             inbox: HostInbox::new(agent.store()),
+            agents: super::agents::AgentRepository::for_agent(&agent)?,
             vault,
             agent,
             settings,
@@ -1522,6 +1526,27 @@ pub(super) fn public_failure(error: &HostError) -> LocalFailure {
             LocalFailureCode::Busy,
             "host command or task capacity is exhausted",
         ),
+        HostError::Agents(
+            error @ (super::agents::AgentsError::Invalid(_)
+            | super::agents::AgentsError::Configuration(_)
+            | super::agents::AgentsError::NotFound
+            | super::agents::AgentsError::Conflict),
+        ) => {
+            return LocalFailure {
+                code: LocalFailureCode::InvalidRequest,
+                message: error.to_string(),
+            };
+        }
+        HostError::Agents(
+            super::agents::AgentsError::UnsupportedSchema(_)
+            | super::agents::AgentsError::Malformed
+            | super::agents::AgentsError::TooLarge
+            | super::agents::AgentsError::UnsafeFile,
+        ) => (
+            LocalFailureCode::Unavailable,
+            "agents file is unreadable; inspect it on the Host",
+        ),
+        HostError::Agents(_) => (LocalFailureCode::Internal, "agents state operation failed"),
         HostError::Invalid(message) | HostError::Inbox(InboxError::Invalid(message)) => {
             (LocalFailureCode::InvalidRequest, *message)
         }

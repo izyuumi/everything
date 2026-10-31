@@ -24,6 +24,8 @@ pub(super) enum EffectiveCommand {
     Initialize {
         configuration: ConversationConfig,
         title: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        agent: Option<super::agents::AgentId>,
     },
     Turn {
         execution: ExecutionPolicy,
@@ -337,14 +339,16 @@ impl HostInner {
                 EffectiveCommand::Initialize {
                     configuration,
                     title,
+                    agent,
                 },
             ) => {
                 self.agent
-                    .create_conversation(
+                    .create_conversation_as(
                         record.conversation_id,
                         record.command_id,
                         title,
                         configuration,
+                        agent,
                     )
                     .await?;
             }
@@ -565,6 +569,18 @@ impl HostInner {
         })
     }
 
+    async fn bind_agent(
+        self: &Arc<Self>,
+        configuration: ConversationConfig,
+    ) -> Result<(super::agents::AgentId, ConversationConfig), HostError> {
+        self.blocking(move |host| {
+            let agents = host.agents.snapshot()?;
+            let agent = agents.resolve(None)?;
+            Ok((agent.id, agent.configure(configuration)?))
+        })
+        .await
+    }
+
     pub(super) async fn capture_command(
         self: &Arc<Self>,
         input: &InboxInput,
@@ -574,10 +590,14 @@ impl HostInner {
                 configuration,
                 title,
                 ..
-            }) => Ok(EffectiveCommand::Initialize {
-                configuration: configuration.clone(),
-                title: title.clone(),
-            }),
+            }) => {
+                let (agent, configuration) = self.bind_agent(configuration.clone()).await?;
+                Ok(EffectiveCommand::Initialize {
+                    configuration,
+                    title: title.clone(),
+                    agent: Some(agent),
+                })
+            }
             InboxInput::Domain(command)
                 if matches!(command.payload, Command::CreateConversation { .. }) =>
             {
@@ -588,9 +608,11 @@ impl HostInner {
                 let Command::CreateConversation { title } = &command.payload else {
                     return Err(HostError::Invalid("invalid conversation creation"));
                 };
+                let (agent, configuration) = self.bind_agent(configuration).await?;
                 Ok(EffectiveCommand::Initialize {
                     configuration,
                     title: title.clone().unwrap_or_else(|| "New conversation".into()),
+                    agent: Some(agent),
                 })
             }
             InboxInput::Owner(OwnerCommand::Text { command, options }) => {
@@ -776,6 +798,9 @@ fn retryable_application(error: &HostError) -> bool {
     matches!(
         error,
         HostError::Agent(AgentError::Busy | AgentError::PendingTurn(_))
+            | HostError::Agents(
+                super::agents::AgentsError::Io(_) | super::agents::AgentsError::Service(_)
+            )
             | HostError::Draining
             | HostError::WorkerRecoveryUnavailable
             | HostError::Inbox(InboxError::Capacity)
