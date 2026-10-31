@@ -51,22 +51,6 @@ struct RootView: View {
                 .tag(ClientTab.approvals)
             NavigationStack(path: Binding(get: { model.settingsPath }, set: { model.localSettingsPathChanged($0) })) {
                 SettingsView(model: model, pair: { showSheet(.pairing) })
-                    .navigationDestination(for: ClientSettingsDestination.self) { destination in
-                        switch destination {
-                        case .thisDevice:
-                            if let owner = model.localSettings {
-                                ThisDeviceSettingsView(store: owner, onPresentationChange: { covered in
-                                    model.localCoverChanged(.localConfirmation, presented: covered)
-                                })
-                                .onAppear { model.localDestinationChanged(presented: true) }
-                                .onDisappear { model.localDestinationChanged(presented: false) }
-                            } else {
-                                ContentUnavailableView("Local preferences unavailable", systemImage: "lock", description: Text(model.localSettingsIssue ?? "Unlock this iPhone and reopen Vorra to access its existing protected identity."))
-                            }
-                        case .hostAssistant:
-                            HostSettingsAssistantView(model: model)
-                        }
-                    }
             }
             .tabItem { Label("Settings", systemImage: "gearshape") }
             .tag(ClientTab.settings)

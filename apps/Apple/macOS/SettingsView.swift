@@ -10,42 +10,7 @@ struct SettingsView: View {
 
     var body: some View {
         TabView(selection: Binding(get: { model.settingsNavigation.selected }, set: { model.settingsNavigation.select($0) })) {
-            hostSettings
-                .tabItem { Label("General", systemImage: "gearshape") }
-                .tag(SettingsAssistantNavigation.Destination.general)
-                .onAppear { model.settingsNavigation.destinationAppeared(.general) }
-                .onDisappear { model.settingsNavigation.destinationDisappeared(.general) }
-            NativeSettingsControls(store: model.nativeSettings, section: .models, connectionEdited: model.connectionEdited)
-                .tabItem { Label("Models", systemImage: "cpu") }
-                .tag(SettingsAssistantNavigation.Destination.models)
-                .onAppear { model.settingsNavigation.destinationAppeared(.models) }
-                .onDisappear { model.settingsNavigation.destinationDisappeared(.models) }
-            NativeSettingsControls(store: model.nativeSettings, section: .memory, connectionEdited: model.connectionEdited)
-                .tabItem { Label("Memory", systemImage: "brain") }
-                .tag(SettingsAssistantNavigation.Destination.memory)
-                .onAppear { model.settingsNavigation.destinationAppeared(.memory) }
-                .onDisappear { model.settingsNavigation.destinationDisappeared(.memory) }
-            NativeSettingsControls(store: model.nativeSettings, section: .toolSelection, connectionEdited: model.connectionEdited)
-                .tabItem { Label("Tool Selection", systemImage: "wrench.and.screwdriver") }
-                .tag(SettingsAssistantNavigation.Destination.toolSelection)
-                .onAppear { model.settingsNavigation.destinationAppeared(.toolSelection) }
-                .onDisappear { model.settingsNavigation.destinationDisappeared(.toolSelection) }
-            NativeDevicesControls(store: model.nativeSettings, connectionEdited: model.connectionEdited)
-                .tabItem { Label("Devices", systemImage: "desktopcomputer.and.iphone") }
-                .tag(SettingsAssistantNavigation.Destination.devices)
-                .onAppear { model.settingsNavigation.destinationAppeared(.devices) }
-                .onDisappear { model.settingsNavigation.destinationDisappeared(.devices) }
-            NativeHostSettingsPane(store: model.nativeSettings, connectionEdited: model.connectionEdited)
-                .tabItem { Label("Host settings", systemImage: "slider.horizontal.3") }
-                .tag(SettingsAssistantNavigation.Destination.host)
-                .onAppear { model.settingsNavigation.destinationAppeared(.host) }
-                .onDisappear { model.settingsNavigation.destinationDisappeared(.host) }
-            VaultSettingsView(vault: model.vault, enabled: model.canMutate)
-                .tabItem { Label("Vault", systemImage: "key") }
-                .tag(SettingsAssistantNavigation.Destination.vault)
-                .onAppear { model.settingsNavigation.destinationAppeared(.vault) }
-                .onDisappear { model.settingsNavigation.destinationDisappeared(.vault) }
-            Group {
+            tab("General", systemImage: "gearshape", .general) {
                 if let store = model.thisMacSettings {
                     ThisMacSettingsView(store: store)
                 } else {
@@ -53,10 +18,23 @@ struct SettingsView: View {
                         .padding()
                 }
             }
-            .tabItem { Label("Notifications", systemImage: "bell") }
-            .tag(SettingsAssistantNavigation.Destination.notifications)
-            .onAppear { model.settingsNavigation.destinationAppeared(.notifications) }
-            .onDisappear { model.settingsNavigation.destinationDisappeared(.notifications) }
+            tab("Models", systemImage: "cpu", .models) {
+                NativeSettingsControls(store: model.nativeSettings, section: .models, connectionEdited: model.connectionEdited)
+            }
+            tab("Memory", systemImage: "brain", .memory) {
+                NativeSettingsControls(store: model.nativeSettings, section: .memory, connectionEdited: model.connectionEdited)
+            }
+            tab("Tools", systemImage: "wrench.and.screwdriver", .toolSelection) {
+                NativeSettingsControls(store: model.nativeSettings, section: .toolSelection, connectionEdited: model.connectionEdited)
+            }
+            tab("Devices", systemImage: "laptopcomputer.and.iphone", .devices) {
+                NativeDevicesControls(store: model.nativeSettings, connectionEdited: model.connectionEdited)
+            }
+            tab("Vault", systemImage: "key", .vault) {
+                VaultSettingsView(vault: model.vault, enabled: model.canMutate)
+            }
+            tab("Host", systemImage: "server.rack", .host) { hostSettings }
+            tab("About", systemImage: "info.circle", .about) { AboutSettingsView() }
         }
         .frame(minWidth: 700, minHeight: 600)
         .inspector(isPresented: Binding(get: { model.settingsAssistant.expanded }, set: { model.settingsAssistant.setExpanded($0) })) {
@@ -157,14 +135,7 @@ struct SettingsView: View {
                 Text("These explicit controls manage to.yumi.vorra.host in your launchd login domain. They do not control a separately started foreground host.")
                     .font(.caption).foregroundStyle(.secondary)
             }.disabled(model.acting || model.closing || model.connection.executable.isEmpty || model.connectionEdited || model.pendingAction != nil)
-            Section("Updates") {
-                if let updater = MacUpdates.controller?.updater {
-                    UpdateSettings(updater: updater)
-                } else {
-                    Text("Updates are unavailable in this build: it has no Sparkle feed or public key.")
-                        .font(.caption).foregroundStyle(.secondary)
-                }
-            }
+            NativeHostSettingsSections(store: model.nativeSettings, connectionEdited: model.connectionEdited)
             if let message = model.message { Text(message).font(.caption).textSelection(.enabled) }
         }
         .formStyle(.grouped)
@@ -179,6 +150,15 @@ struct SettingsView: View {
         } message: {
             Text("The selected CLI writes your launchd user-agent configuration for this state directory. No administrator access is used.")
         }
+    }
+
+    private func tab(_ title: LocalizedStringKey, systemImage: String, _ destination: SettingsAssistantNavigation.Destination,
+                     @ViewBuilder content: () -> some View) -> some View {
+        content()
+            .tabItem { Label(title, systemImage: systemImage) }
+            .tag(destination)
+            .onAppear { model.settingsNavigation.destinationAppeared(destination) }
+            .onDisappear { model.settingsNavigation.destinationDisappeared(destination) }
     }
 
     private func choose(directory: Bool) {
@@ -218,13 +198,46 @@ struct SettingsView: View {
     }
 }
 
+private struct AboutSettingsView: View {
+    private let info = Bundle.main.infoDictionary
+
+    var body: some View {
+        Form {
+            Section {
+                HStack(spacing: 16) {
+                    Image(nsImage: NSApplication.shared.applicationIconImage)
+                        .resizable()
+                        .frame(width: 64, height: 64)
+                        .accessibilityHidden(true)
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("Vorra for macOS").font(.title3.weight(.semibold))
+                        Text("Version \(info?["CFBundleShortVersionString"] as? String ?? "unknown") (\(info?["CFBundleVersion"] as? String ?? "unknown"))")
+                            .foregroundStyle(.secondary)
+                            .textSelection(.enabled)
+                    }
+                }
+            }
+            Section("Updates") {
+                if let updater = MacUpdates.controller?.updater {
+                    UpdateSettings(updater: updater)
+                } else {
+                    Text("Updates are unavailable in this build: it has no Sparkle feed or public key.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+            }
+        }
+        .formStyle(.grouped)
+        .padding(12)
+    }
+}
+
 @MainActor
-private struct NativeHostSettingsPane: View {
+private struct NativeHostSettingsSections: View {
     let store: NativeSettingsStore
     let connectionEdited: Bool
 
     var body: some View {
-        Form {
+        Group {
             Section("Native Host settings: read only") {
                 LabeledContent("Session", value: store.status)
                 HStack {
@@ -237,14 +250,14 @@ private struct NativeHostSettingsPane: View {
                 }
                 if store.isOpening { ProgressView("Opening the original native session…") }
                 if store.isRefreshing { ProgressView("Reading Host settings…") }
-                if connectionEdited { Text("Apply connection edits with Connect in General before opening Host settings.").foregroundStyle(.secondary) }
+                if connectionEdited { Text("Apply connection edits with Connect above before opening Host settings.").foregroundStyle(.secondary) }
                 if let issue = store.issue { NativeSettingsNotice(issue.errorDescription ?? "Native Host settings are unavailable.") }
                 if let information = store.information {
                     LabeledContent("Host", value: information.hostID.uuidString.lowercased())
                     LabeledContent("Original session expiry", value: Date(timeIntervalSince1970: Double(information.expiresAt) / 1000).formatted())
                 }
                 if let observedAt = store.observedAt { Text("Last read \(observedAt.formatted())").font(.caption).foregroundStyle(.secondary) }
-                Text("Open creates a temporary session for the applied General connection. Refresh does not renew it. Closing Settings closes the session and leaves the independent Host running.")
+                Text("Open creates a temporary session for the applied owner connection. Refresh does not renew it. Closing Settings closes the session and leaves the independent Host running.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -307,8 +320,6 @@ private struct NativeHostSettingsPane: View {
                 }
             }
         }
-        .formStyle(.grouped)
-        .padding(12)
         .textSelection(.enabled)
     }
 

@@ -6,16 +6,16 @@ import Observation
 @Observable
 final class SettingsAssistantNavigation {
     enum Destination: String, Hashable {
-        case general, models, memory, toolSelection, devices, host, vault, notifications
+        case general, models, memory, toolSelection, devices, vault, host, about
 
         init?(_ section: SettingsSection) {
             switch section {
-            case .general: self = .general
+            case .general: self = .host
             case .models: self = .models
             case .memory: self = .memory
             case .toolSelection: self = .toolSelection
             case .devices: self = .devices
-            case .notifications: self = .notifications
+            case .notifications: self = .general
             case .ownerSecurity: return nil
             }
         }

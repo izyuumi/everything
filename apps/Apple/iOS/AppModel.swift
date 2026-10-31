@@ -7,7 +7,7 @@ enum ClientTab: Hashable {
 }
 
 enum ClientSettingsDestination: Hashable {
-    case thisDevice
+    case general, devices, host, privacy, about
     case hostAssistant
 }
 
@@ -454,7 +454,7 @@ final class AppModel {
     func localSettingsPathChanged(_ path: [ClientSettingsDestination]) {
         localSettings?.setSurfaceVisible(false)
         localDestinationVisible = false
-        guard path.count <= 1 else {
+        guard path.count <= 1 || path == [.host, .hostAssistant] else {
             localSettingsIssue = "The local settings destination could not be opened."
             requestLocalDrain()
             return
@@ -466,7 +466,7 @@ final class AppModel {
 
     func localDestinationChanged(presented: Bool) {
         if !presented { localSettings?.setSurfaceVisible(false) }
-        localDestinationVisible = presented && settingsPath.last == .thisDevice
+        localDestinationVisible = presented && settingsPath.last == .general
         updateLocalEligibility()
     }
 
@@ -621,7 +621,7 @@ final class AppModel {
     private var hostSettingsAccessEligible: Bool {
         (accessSurfaceVisible || assistantSurfaceVisible) && localSceneActive && platformActive
             && UIApplication.shared.applicationState == .active && selectedTab == .settings
-            && (settingsPath.isEmpty || settingsPath == [.hostAssistant]) && localCovers.isEmpty
+            && (settingsPath == [.host] || settingsPath == [.host, .hostAssistant]) && localCovers.isEmpty
             && connectionEnabled && state?.connection == "Connected" && state?.settingsScope != nil
             && state?.snapshot.host != nil && state?.snapshot.revoked == false
     }
@@ -965,7 +965,7 @@ final class AppModel {
     }
 
     private func autoRefreshHostSettings() {
-        guard accessSurfaceVisible, settingsPath.isEmpty, hostSettingsAccessEligible, !hostSettingsBusy,
+        guard accessSurfaceVisible, settingsPath == [.host], hostSettingsAccessEligible, !hostSettingsBusy,
               let scope = state?.settingsScope, hostAutoRefreshScope !== scope, !hostValuesCurrent else { return }
         hostAutoRefreshScope = scope
         refreshHostSettings()
