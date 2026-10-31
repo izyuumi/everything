@@ -77,7 +77,6 @@ enum Command {
 
 #[derive(Serialize)]
 struct HelpManifest {
-    version: &'static str,
     commands: CommandManifest,
     settings: vorra::host::settings::contract::SettingRegistry,
 }
@@ -109,7 +108,6 @@ fn help_manifest() -> HelpManifest {
     let mut command = <Arguments as clap::CommandFactory>::command();
     command.build();
     HelpManifest {
-        version: env!("CARGO_PKG_VERSION"),
         commands: command_manifest(&command),
         settings: vorra::host::settings::contract::SettingRegistry::from_profile(None),
     }

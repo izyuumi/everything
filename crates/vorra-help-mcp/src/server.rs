@@ -388,7 +388,6 @@ impl HelpServer {
             .find(|section| section.path() == "CHANGELOG.md" && section.heading != "Changelog")
             .map(|section| section.heading);
         pretty(&json!({
-            "documented_package_version": self.manifest["version"],
             "latest_changelog_release": latest,
             "releases": RELEASES_URL,
             "check": "Run `vorra update --check` to compare the installed binary with the newest GitHub release; `vorra --version` prints the installed version.",
