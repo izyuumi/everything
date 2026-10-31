@@ -16,7 +16,7 @@ Pairing pins a phone's public keys on the host and the host's public keys on the
 
 ## Link
 
-The QR encodes `vorra://pair#<payload>` today (`LINK_PREFIX` in `src/host/pair.rs`). The universal-link files are served by `vorra-help-mcp` (see [help MCP server](../architecture/help-mcp.md#pairing-site)): `GET https://vorra.yumi.to/.well-known/apple-app-site-association` (`application/json`, app ID `AN5KM8QGEF.to.yumi.vorra.ios`, components `/pair` and `/pair/*`) and `GET https://vorra.yumi.to/pair`, a fallback page whose script `/pair/open.js` only calls `location.replace("vorra://pair" + location.hash)` and otherwise links to the App Store. Once that route is live through the tunnel, changing `LINK_PREFIX` to `https://vorra.yumi.to/pair#` is the one-line switch to the universal link; the app already accepts both. The payload is unpadded base64url of:
+The QR encodes `https://vorra.yumi.to/pair#<payload>` (`LINK_PREFIX` in `src/host/pair.rs`); the app also accepts `vorra://pair#<payload>`, the fallback scheme. The universal-link files are served by `vorra-help-mcp` (see [help MCP server](../architecture/help-mcp.md#pairing-site)): `GET https://vorra.yumi.to/.well-known/apple-app-site-association` (`application/json`, app ID `AN5KM8QGEF.to.yumi.vorra.ios`, components `/pair` and `/pair/*`) and `GET https://vorra.yumi.to/pair`, a fallback page whose script `/pair/open.js` only calls `location.replace("vorra://pair" + location.hash)` and otherwise links to the App Store. The payload is unpadded base64url of:
 
 | Field | Bytes |
 | --- | --- |
@@ -78,4 +78,4 @@ The relay database schema is version 2. `relay_devices` gains `pairing_host` (0/
 
 ## Validation
 
-See the [dated walkthrough](../development/native-pairing-validation.md#qr-pairing-walkthrough-2026-11-01). The universal link, the stock Camera app, a real iPhone, cloudflared/TLS relays and a two-phone race were not exercised. No automated tests were added; deferred coverage stays in [#32](https://github.com/izyuumi/everything/issues/32).
+See the [dated walkthrough](../development/native-pairing-validation.md#qr-pairing-walkthrough-2026-11-01). Universal links on a real device, the stock Camera app, a real iPhone, cloudflared/TLS relays and a two-phone race were not exercised. No automated tests were added; deferred coverage stays in [#32](https://github.com/izyuumi/everything/issues/32).

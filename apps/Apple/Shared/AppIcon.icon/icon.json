@@ -1,0 +1,184 @@
+{
+  "fill": {
+    "linear-gradient": [
+      "extended-srgb:0.98431,0.98039,1.00000,1.00000",
+      "extended-srgb:0.90588,0.90196,0.96078,1.00000"
+    ],
+    "orientation": {
+      "start": {
+        "x": 0.5,
+        "y": 0.0
+      },
+      "stop": {
+        "x": 0.5,
+        "y": 1.0
+      }
+    }
+  },
+  "fill-specializations": [
+    {
+      "appearance": "dark",
+      "value": {
+        "linear-gradient": [
+          "extended-srgb:0.17255,0.16078,0.22353,1.00000",
+          "extended-srgb:0.08627,0.08235,0.11373,1.00000"
+        ],
+        "orientation": {
+          "start": {
+            "x": 0.5,
+            "y": 0.0
+          },
+          "stop": {
+            "x": 0.5,
+            "y": 1.0
+          }
+        }
+      }
+    }
+  ],
+  "groups": [
+    {
+      "layers": [
+        {
+          "fill-specializations": [
+            {
+              "value": {
+                "linear-gradient": [
+                  "extended-srgb:0.25490,0.42353,0.89412,1.00000",
+                  "extended-srgb:0.06275,0.80000,0.80784,1.00000"
+                ],
+                "orientation": {
+                  "start": {
+                    "x": 0.5,
+                    "y": 0.3
+                  },
+                  "stop": {
+                    "x": 0.5,
+                    "y": 1.0
+                  }
+                }
+              }
+            },
+            {
+              "appearance": "dark",
+              "value": {
+                "linear-gradient": [
+                  "extended-srgb:0.20000,0.56078,0.96078,1.00000",
+                  "extended-srgb:0.90196,1.00000,0.98431,1.00000"
+                ],
+                "orientation": {
+                  "start": {
+                    "x": 0.5,
+                    "y": 0.3
+                  },
+                  "stop": {
+                    "x": 0.5,
+                    "y": 1.0
+                  }
+                }
+              }
+            },
+            {
+              "appearance": "tinted",
+              "value": {
+                "solid": "extended-srgb:1.00000,1.00000,1.00000,1.00000"
+              }
+            }
+          ],
+          "glass": true,
+          "image-name": "crossing.svg",
+          "name": "Crossing"
+        }
+      ],
+      "name": "Crossing",
+      "shadow": {
+        "kind": "layer-color",
+        "opacity": 0.5
+      },
+      "specular": true,
+      "translucency": {
+        "enabled": true,
+        "value": 0.15
+      }
+    },
+    {
+      "layers": [
+        {
+          "fill-specializations": [
+            {
+              "value": {
+                "solid": "extended-srgb:0.07843,0.70196,0.64314,1.00000"
+              }
+            },
+            {
+              "appearance": "dark",
+              "value": {
+                "solid": "extended-srgb:0.12157,0.78431,0.72157,1.00000"
+              }
+            },
+            {
+              "appearance": "tinted",
+              "value": {
+                "solid": "extended-srgb:0.80000,0.80000,0.80000,1.00000"
+              }
+            }
+          ],
+          "glass": true,
+          "image-name": "ribbon-teal.svg",
+          "name": "Teal ribbon"
+        }
+      ],
+      "name": "Teal ribbon",
+      "shadow": {
+        "kind": "layer-color",
+        "opacity": 0.4
+      },
+      "specular": true,
+      "translucency": {
+        "enabled": true,
+        "value": 0.25
+      }
+    },
+    {
+      "layers": [
+        {
+          "fill-specializations": [
+            {
+              "value": {
+                "solid": "extended-srgb:0.29412,0.24706,0.85098,1.00000"
+              }
+            },
+            {
+              "appearance": "dark",
+              "value": {
+                "solid": "extended-srgb:0.40000,0.34510,0.95294,1.00000"
+              }
+            },
+            {
+              "appearance": "tinted",
+              "value": {
+                "solid": "extended-srgb:0.52000,0.52000,0.52000,1.00000"
+              }
+            }
+          ],
+          "glass": true,
+          "image-name": "ribbon-indigo.svg",
+          "name": "Indigo ribbon"
+        }
+      ],
+      "name": "Indigo ribbon",
+      "shadow": {
+        "kind": "layer-color",
+        "opacity": 0.4
+      },
+      "specular": true,
+      "translucency": {
+        "enabled": true,
+        "value": 0.25
+      }
+    }
+  ],
+  "supported-platforms": {
+    "squares": "shared"
+  }
+}
