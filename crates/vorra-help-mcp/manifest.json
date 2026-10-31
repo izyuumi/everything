@@ -1,0 +1,3663 @@
+{
+  "version": "0.1.0",
+  "commands": {
+    "name": "vorra",
+    "about": "Local-first native AI conversations",
+    "arguments": [
+      {
+        "id": "state_dir",
+        "long": "state-dir",
+        "short": null,
+        "positional": false,
+        "required": false,
+        "takes_value": true,
+        "value_names": [
+          "PATH"
+        ],
+        "possible_values": [],
+        "default_values": [],
+        "env": "VORRA_STATE_DIR",
+        "help": null
+      }
+    ],
+    "subcommands": [
+      {
+        "name": "serve",
+        "about": null,
+        "arguments": [
+          {
+            "id": "mcp_credential_environment_file",
+            "long": "mcp-credential-environment-file",
+            "short": null,
+            "positional": false,
+            "required": false,
+            "takes_value": true,
+            "value_names": [
+              "PATH"
+            ],
+            "possible_values": [],
+            "default_values": [],
+            "env": null,
+            "help": null
+          },
+          {
+            "id": "max_parallel_tasks",
+            "long": "max-parallel-tasks",
+            "short": null,
+            "positional": false,
+            "required": false,
+            "takes_value": true,
+            "value_names": [
+              "1-4"
+            ],
+            "possible_values": [],
+            "default_values": [],
+            "env": "VORRA_MAX_PARALLEL_TASKS",
+            "help": null
+          }
+        ],
+        "subcommands": []
+      },
+      {
+        "name": "worker",
+        "about": null,
+        "arguments": [],
+        "subcommands": [
+          {
+            "name": "coordinator",
+            "about": null,
+            "arguments": [],
+            "subcommands": [
+              {
+                "name": "status",
+                "about": null,
+                "arguments": [],
+                "subcommands": []
+              },
+              {
+                "name": "identity",
+                "about": null,
+                "arguments": [],
+                "subcommands": []
+              },
+              {
+                "name": "peers",
+                "about": null,
+                "arguments": [],
+                "subcommands": []
+              },
+              {
+                "name": "pin-peer",
+                "about": null,
+                "arguments": [
+                  {
+                    "id": "file",
+                    "long": "file",
+                    "short": null,
+                    "positional": false,
+                    "required": true,
+                    "takes_value": true,
+                    "value_names": [
+                      "PATH"
+                    ],
+                    "possible_values": [],
+                    "default_values": [],
+                    "env": null,
+                    "help": null
+                  },
+                  {
+                    "id": "fingerprint",
+                    "long": "fingerprint",
+                    "short": null,
+                    "positional": false,
+                    "required": true,
+                    "takes_value": true,
+                    "value_names": [
+                      "FINGERPRINT"
+                    ],
+                    "possible_values": [],
+                    "default_values": [],
+                    "env": null,
+                    "help": null
+                  },
+                  {
+                    "id": "request_id",
+                    "long": "request-id",
+                    "short": null,
+                    "positional": false,
+                    "required": false,
+                    "takes_value": true,
+                    "value_names": [
+                      "REQUEST_ID"
+                    ],
+                    "possible_values": [],
+                    "default_values": [],
+                    "env": null,
+                    "help": null
+                  }
+                ],
+                "subcommands": []
+              },
+              {
+                "name": "prepare",
+                "about": null,
+                "arguments": [
+                  {
+                    "id": "file",
+                    "long": "file",
+                    "short": null,
+                    "positional": false,
+                    "required": true,
+                    "takes_value": true,
+                    "value_names": [
+                      "PATH"
+                    ],
+                    "possible_values": [],
+                    "default_values": [],
+                    "env": null,
+                    "help": null
+                  },
+                  {
+                    "id": "request_id",
+                    "long": "request-id",
+                    "short": null,
+                    "positional": false,
+                    "required": false,
+                    "takes_value": true,
+                    "value_names": [
+                      "REQUEST_ID"
+                    ],
+                    "possible_values": [],
+                    "default_values": [],
+                    "env": null,
+                    "help": null
+                  }
+                ],
+                "subcommands": []
+              },
+              {
+                "name": "delegate",
+                "about": null,
+                "arguments": [
+                  {
+                    "id": "ticket",
+                    "long": "ticket",
+                    "short": null,
+                    "positional": false,
+                    "required": true,
+                    "takes_value": true,
+                    "value_names": [
+                      "TICKET"
+                    ],
+                    "possible_values": [],
+                    "default_values": [],
+                    "env": null,
+                    "help": null
+                  },
+                  {
+                    "id": "manifest_digest",
+                    "long": "manifest-digest",
+                    "short": null,
+                    "positional": false,
+                    "required": true,
+                    "takes_value": true,
+                    "value_names": [
+                      "MANIFEST_DIGEST"
+                    ],
+                    "possible_values": [],
+                    "default_values": [],
+                    "env": null,
+                    "help": null
+                  },
+                  {
+                    "id": "executor_fingerprint",
+                    "long": "executor-fingerprint",
+                    "short": null,
+                    "positional": false,
+                    "required": true,
+                    "takes_value": true,
+                    "value_names": [
+                      "EXECUTOR_FINGERPRINT"
+                    ],
+                    "possible_values": [],
+                    "default_values": [],
+                    "env": null,
+                    "help": null
+                  },
+                  {
+                    "id": "request_id",
+                    "long": "request-id",
+                    "short": null,
+                    "positional": false,
+                    "required": true,
+                    "takes_value": true,
+                    "value_names": [
+                      "REQUEST_ID"
+                    ],
+                    "possible_values": [],
+                    "default_values": [],
+                    "env": null,
+                    "help": null
+                  }
+                ],
+                "subcommands": []
+              },
+              {
+                "name": "discard",
+                "about": null,
+                "arguments": [
+                  {
+                    "id": "ticket",
+                    "long": "ticket",
+                    "short": null,
+                    "positional": false,
+                    "required": true,
+                    "takes_value": true,
+                    "value_names": [
+                      "TICKET"
+                    ],
+                    "possible_values": [],
+                    "default_values": [],
+                    "env": null,
+                    "help": null
+                  },
+                  {
+                    "id": "request_id",
+                    "long": "request-id",
+                    "short": null,
+                    "positional": false,
+                    "required": false,
+                    "takes_value": true,
+                    "value_names": [
+                      "REQUEST_ID"
+                    ],
+                    "possible_values": [],
+                    "default_values": [],
+                    "env": null,
+                    "help": null
+                  }
+                ],
+                "subcommands": []
+              },
+              {
+                "name": "jobs",
+                "about": null,
+                "arguments": [
+                  {
+                    "id": "after_delegation_id",
+                    "long": "after-delegation-id",
+                    "short": null,
+                    "positional": false,
+                    "required": false,
+                    "takes_value": true,
+                    "value_names": [
+                      "AFTER_DELEGATION_ID"
+                    ],
+                    "possible_values": [],
+                    "default_values": [],
+                    "env": null,
+                    "help": null
+                  },
+                  {
+                    "id": "limit",
+                    "long": "limit",
+                    "short": null,
+                    "positional": false,
+                    "required": false,
+                    "takes_value": true,
+                    "value_names": [
+                      "LIMIT"
+                    ],
+                    "possible_values": [],
+                    "default_values": [
+                      "16"
+                    ],
+                    "env": null,
+                    "help": null
+                  }
+                ],
+                "subcommands": []
+              },
+              {
+                "name": "inspect",
+                "about": null,
+                "arguments": [
+                  {
+                    "id": "task",
+                    "long": "task",
+                    "short": null,
+                    "positional": false,
+                    "required": false,
+                    "takes_value": true,
+                    "value_names": [
+                      "TASK"
+                    ],
+                    "possible_values": [],
+                    "default_values": [],
+                    "env": null,
+                    "help": null
+                  },
+                  {
+                    "id": "delegation",
+                    "long": "delegation",
+                    "short": null,
+                    "positional": false,
+                    "required": false,
+                    "takes_value": true,
+                    "value_names": [
+                      "DELEGATION"
+                    ],
+                    "possible_values": [],
+                    "default_values": [],
+                    "env": null,
+                    "help": null
+                  }
+                ],
+                "subcommands": []
+              },
+              {
+                "name": "cancel",
+                "about": null,
+                "arguments": [
+                  {
+                    "id": "task",
+                    "long": "task",
+                    "short": null,
+                    "positional": false,
+                    "required": true,
+                    "takes_value": true,
+                    "value_names": [
+                      "TASK"
+                    ],
+                    "possible_values": [],
+                    "default_values": [],
+                    "env": null,
+                    "help": null
+                  },
+                  {
+                    "id": "delegation_id",
+                    "long": "delegation-id",
+                    "short": null,
+                    "positional": false,
+                    "required": true,
+                    "takes_value": true,
+                    "value_names": [
+                      "DELEGATION_ID"
+                    ],
+                    "possible_values": [],
+                    "default_values": [],
+                    "env": null,
+                    "help": null
+                  },
+                  {
+                    "id": "attempt_id",
+                    "long": "attempt-id",
+                    "short": null,
+                    "positional": false,
+                    "required": true,
+                    "takes_value": true,
+                    "value_names": [
+                      "ATTEMPT_ID"
+                    ],
+                    "possible_values": [],
+                    "default_values": [],
+                    "env": null,
+                    "help": null
+                  },
+                  {
+                    "id": "manifest_digest",
+                    "long": "manifest-digest",
+                    "short": null,
+                    "positional": false,
+                    "required": true,
+                    "takes_value": true,
+                    "value_names": [
+                      "MANIFEST_DIGEST"
+                    ],
+                    "possible_values": [],
+                    "default_values": [],
+                    "env": null,
+                    "help": null
+                  },
+                  {
+                    "id": "request_id",
+                    "long": "request-id",
+                    "short": null,
+                    "positional": false,
+                    "required": false,
+                    "takes_value": true,
+                    "value_names": [
+                      "REQUEST_ID"
+                    ],
+                    "possible_values": [],
+                    "default_values": [],
+                    "env": null,
+                    "help": null
+                  }
+                ],
+                "subcommands": []
+              },
+              {
+                "name": "revoke",
+                "about": null,
+                "arguments": [
+                  {
+                    "id": "peer",
+                    "long": "peer",
+                    "short": null,
+                    "positional": false,
+                    "required": true,
+                    "takes_value": true,
+                    "value_names": [
+                      "PEER"
+                    ],
+                    "possible_values": [],
+                    "default_values": [],
+                    "env": null,
+                    "help": null
+                  },
+                  {
+                    "id": "request_id",
+                    "long": "request-id",
+                    "short": null,
+                    "positional": false,
+                    "required": false,
+                    "takes_value": true,
+                    "value_names": [
+                      "REQUEST_ID"
+                    ],
+                    "possible_values": [],
+                    "default_values": [],
+                    "env": null,
+                    "help": null
+                  }
+                ],
+                "subcommands": []
+              },
+              {
+                "name": "release",
+                "about": null,
+                "arguments": [
+                  {
+                    "id": "task",
+                    "long": "task",
+                    "short": null,
+                    "positional": false,
+                    "required": true,
+                    "takes_value": true,
+                    "value_names": [
+                      "TASK"
+                    ],
+                    "possible_values": [],
+                    "default_values": [],
+                    "env": null,
+                    "help": null
+                  },
+                  {
+                    "id": "delegation_id",
+                    "long": "delegation-id",
+                    "short": null,
+                    "positional": false,
+                    "required": true,
+                    "takes_value": true,
+                    "value_names": [
+                      "DELEGATION_ID"
+                    ],
+                    "possible_values": [],
+                    "default_values": [],
+                    "env": null,
+                    "help": null
+                  },
+                  {
+                    "id": "attempt_id",
+                    "long": "attempt-id",
+                    "short": null,
+                    "positional": false,
+                    "required": true,
+                    "takes_value": true,
+                    "value_names": [
+                      "ATTEMPT_ID"
+                    ],
+                    "possible_values": [],
+                    "default_values": [],
+                    "env": null,
+                    "help": null
+                  },
+                  {
+                    "id": "manifest_digest",
+                    "long": "manifest-digest",
+                    "short": null,
+                    "positional": false,
+                    "required": true,
+                    "takes_value": true,
+                    "value_names": [
+                      "MANIFEST_DIGEST"
+                    ],
+                    "possible_values": [],
+                    "default_values": [],
+                    "env": null,
+                    "help": null
+                  },
+                  {
+                    "id": "expected_phase",
+                    "long": "expected-phase",
+                    "short": null,
+                    "positional": false,
+                    "required": true,
+                    "takes_value": true,
+                    "value_names": [
+                      "EXPECTED_PHASE"
+                    ],
+                    "possible_values": [
+                      "cancellation-requested",
+                      "outcome-unknown"
+                    ],
+                    "default_values": [],
+                    "env": null,
+                    "help": null
+                  },
+                  {
+                    "id": "operator",
+                    "long": "operator",
+                    "short": null,
+                    "positional": false,
+                    "required": true,
+                    "takes_value": true,
+                    "value_names": [
+                      "OPERATOR"
+                    ],
+                    "possible_values": [],
+                    "default_values": [],
+                    "env": null,
+                    "help": null
+                  },
+                  {
+                    "id": "reason",
+                    "long": "reason",
+                    "short": null,
+                    "positional": false,
+                    "required": true,
+                    "takes_value": true,
+                    "value_names": [
+                      "REASON"
+                    ],
+                    "possible_values": [],
+                    "default_values": [],
+                    "env": null,
+                    "help": null
+                  },
+                  {
+                    "id": "request_id",
+                    "long": "request-id",
+                    "short": null,
+                    "positional": false,
+                    "required": true,
+                    "takes_value": true,
+                    "value_names": [
+                      "REQUEST_ID"
+                    ],
+                    "possible_values": [],
+                    "default_values": [],
+                    "env": null,
+                    "help": null
+                  }
+                ],
+                "subcommands": []
+              }
+            ]
+          },
+          {
+            "name": "serve",
+            "about": null,
+            "arguments": [
+              {
+                "id": "config",
+                "long": "config",
+                "short": null,
+                "positional": false,
+                "required": true,
+                "takes_value": true,
+                "value_names": [
+                  "PATH"
+                ],
+                "possible_values": [],
+                "default_values": [],
+                "env": null,
+                "help": null
+              }
+            ],
+            "subcommands": []
+          },
+          {
+            "name": "identity",
+            "about": null,
+            "arguments": [],
+            "subcommands": []
+          },
+          {
+            "name": "status",
+            "about": null,
+            "arguments": [],
+            "subcommands": []
+          },
+          {
+            "name": "inspect",
+            "about": null,
+            "arguments": [
+              {
+                "id": "task",
+                "long": "task",
+                "short": null,
+                "positional": false,
+                "required": false,
+                "takes_value": true,
+                "value_names": [
+                  "TASK"
+                ],
+                "possible_values": [],
+                "default_values": [],
+                "env": null,
+                "help": null
+              },
+              {
+                "id": "delegation",
+                "long": "delegation",
+                "short": null,
+                "positional": false,
+                "required": false,
+                "takes_value": true,
+                "value_names": [
+                  "DELEGATION"
+                ],
+                "possible_values": [],
+                "default_values": [],
+                "env": null,
+                "help": null
+              },
+              {
+                "id": "cleanup",
+                "long": "cleanup",
+                "short": null,
+                "positional": false,
+                "required": false,
+                "takes_value": false,
+                "value_names": [
+                  "CLEANUP"
+                ],
+                "possible_values": [],
+                "default_values": [
+                  "false"
+                ],
+                "env": null,
+                "help": null
+              }
+            ],
+            "subcommands": []
+          },
+          {
+            "name": "revoke",
+            "about": null,
+            "arguments": [
+              {
+                "id": "peer",
+                "long": "peer",
+                "short": null,
+                "positional": false,
+                "required": true,
+                "takes_value": true,
+                "value_names": [
+                  "PEER"
+                ],
+                "possible_values": [],
+                "default_values": [],
+                "env": null,
+                "help": null
+              },
+              {
+                "id": "request_id",
+                "long": "request-id",
+                "short": null,
+                "positional": false,
+                "required": true,
+                "takes_value": true,
+                "value_names": [
+                  "REQUEST_ID"
+                ],
+                "possible_values": [],
+                "default_values": [],
+                "env": null,
+                "help": null
+              }
+            ],
+            "subcommands": []
+          },
+          {
+            "name": "acknowledge-cleanup",
+            "about": null,
+            "arguments": [
+              {
+                "id": "operation_id",
+                "long": "operation-id",
+                "short": null,
+                "positional": false,
+                "required": true,
+                "takes_value": true,
+                "value_names": [
+                  "OPERATION_ID"
+                ],
+                "possible_values": [],
+                "default_values": [],
+                "env": null,
+                "help": null
+              },
+              {
+                "id": "original_result_digest",
+                "long": "original-result-digest",
+                "short": null,
+                "positional": false,
+                "required": true,
+                "takes_value": true,
+                "value_names": [
+                  "ORIGINAL_RESULT_DIGEST"
+                ],
+                "possible_values": [],
+                "default_values": [],
+                "env": null,
+                "help": null
+              },
+              {
+                "id": "operator",
+                "long": "operator",
+                "short": null,
+                "positional": false,
+                "required": true,
+                "takes_value": true,
+                "value_names": [
+                  "OPERATOR"
+                ],
+                "possible_values": [],
+                "default_values": [],
+                "env": null,
+                "help": null
+              },
+              {
+                "id": "note",
+                "long": "note",
+                "short": null,
+                "positional": false,
+                "required": true,
+                "takes_value": true,
+                "value_names": [
+                  "NOTE"
+                ],
+                "possible_values": [],
+                "default_values": [],
+                "env": null,
+                "help": null
+              },
+              {
+                "id": "request_id",
+                "long": "request-id",
+                "short": null,
+                "positional": false,
+                "required": true,
+                "takes_value": true,
+                "value_names": [
+                  "REQUEST_ID"
+                ],
+                "possible_values": [],
+                "default_values": [],
+                "env": null,
+                "help": null
+              }
+            ],
+            "subcommands": []
+          },
+          {
+            "name": "credential",
+            "about": null,
+            "arguments": [],
+            "subcommands": [
+              {
+                "name": "store",
+                "about": null,
+                "arguments": [
+                  {
+                    "id": "config",
+                    "long": "config",
+                    "short": null,
+                    "positional": false,
+                    "required": true,
+                    "takes_value": true,
+                    "value_names": [
+                      "PATH"
+                    ],
+                    "possible_values": [],
+                    "default_values": [],
+                    "env": null,
+                    "help": null
+                  },
+                  {
+                    "id": "source_environment_variable",
+                    "long": "source-environment-variable",
+                    "short": null,
+                    "positional": false,
+                    "required": true,
+                    "takes_value": true,
+                    "value_names": [
+                      "SOURCE_ENVIRONMENT_VARIABLE"
+                    ],
+                    "possible_values": [],
+                    "default_values": [],
+                    "env": null,
+                    "help": null
+                  }
+                ],
+                "subcommands": []
+              },
+              {
+                "name": "delete",
+                "about": null,
+                "arguments": [
+                  {
+                    "id": "config",
+                    "long": "config",
+                    "short": null,
+                    "positional": false,
+                    "required": true,
+                    "takes_value": true,
+                    "value_names": [
+                      "PATH"
+                    ],
+                    "possible_values": [],
+                    "default_values": [],
+                    "env": null,
+                    "help": null
+                  }
+                ],
+                "subcommands": []
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "name": "schedule",
+        "about": null,
+        "arguments": [],
+        "subcommands": [
+          {
+            "name": "create",
+            "about": null,
+            "arguments": [
+              {
+                "id": "file",
+                "long": "file",
+                "short": null,
+                "positional": false,
+                "required": true,
+                "takes_value": true,
+                "value_names": [
+                  "PATH"
+                ],
+                "possible_values": [],
+                "default_values": [],
+                "env": null,
+                "help": null
+              },
+              {
+                "id": "request_id",
+                "long": "request-id",
+                "short": null,
+                "positional": false,
+                "required": false,
+                "takes_value": true,
+                "value_names": [
+                  "REQUEST_ID"
+                ],
+                "possible_values": [],
+                "default_values": [],
+                "env": null,
+                "help": null
+              }
+            ],
+            "subcommands": []
+          },
+          {
+            "name": "list",
+            "about": null,
+            "arguments": [
+              {
+                "id": "after_id",
+                "long": "after-id",
+                "short": null,
+                "positional": false,
+                "required": false,
+                "takes_value": true,
+                "value_names": [
+                  "AFTER_ID"
+                ],
+                "possible_values": [],
+                "default_values": [],
+                "env": null,
+                "help": null
+              },
+              {
+                "id": "enabled",
+                "long": "enabled",
+                "short": null,
+                "positional": false,
+                "required": false,
+                "takes_value": true,
+                "value_names": [
+                  "ENABLED"
+                ],
+                "possible_values": [
+                  "true",
+                  "false"
+                ],
+                "default_values": [],
+                "env": null,
+                "help": null
+              },
+              {
+                "id": "include_deleted",
+                "long": "include-deleted",
+                "short": null,
+                "positional": false,
+                "required": false,
+                "takes_value": false,
+                "value_names": [
+                  "INCLUDE_DELETED"
+                ],
+                "possible_values": [],
+                "default_values": [
+                  "false"
+                ],
+                "env": null,
+                "help": null
+              },
+              {
+                "id": "limit",
+                "long": "limit",
+                "short": null,
+                "positional": false,
+                "required": false,
+                "takes_value": true,
+                "value_names": [
+                  "LIMIT"
+                ],
+                "possible_values": [],
+                "default_values": [
+                  "20"
+                ],
+                "env": null,
+                "help": null
+              }
+            ],
+            "subcommands": []
+          },
+          {
+            "name": "show",
+            "about": null,
+            "arguments": [
+              {
+                "id": "job_id",
+                "long": null,
+                "short": null,
+                "positional": true,
+                "required": true,
+                "takes_value": true,
+                "value_names": [
+                  "JOB_ID"
+                ],
+                "possible_values": [],
+                "default_values": [],
+                "env": null,
+                "help": null
+              }
+            ],
+            "subcommands": []
+          },
+          {
+            "name": "update",
+            "about": null,
+            "arguments": [
+              {
+                "id": "file",
+                "long": "file",
+                "short": null,
+                "positional": false,
+                "required": true,
+                "takes_value": true,
+                "value_names": [
+                  "PATH"
+                ],
+                "possible_values": [],
+                "default_values": [],
+                "env": null,
+                "help": null
+              },
+              {
+                "id": "expected_revision",
+                "long": "expected-revision",
+                "short": null,
+                "positional": false,
+                "required": true,
+                "takes_value": true,
+                "value_names": [
+                  "EXPECTED_REVISION"
+                ],
+                "possible_values": [],
+                "default_values": [],
+                "env": null,
+                "help": null
+              },
+              {
+                "id": "request_id",
+                "long": "request-id",
+                "short": null,
+                "positional": false,
+                "required": false,
+                "takes_value": true,
+                "value_names": [
+                  "REQUEST_ID"
+                ],
+                "possible_values": [],
+                "default_values": [],
+                "env": null,
+                "help": null
+              }
+            ],
+            "subcommands": []
+          },
+          {
+            "name": "disable",
+            "about": null,
+            "arguments": [
+              {
+                "id": "job_id",
+                "long": null,
+                "short": null,
+                "positional": true,
+                "required": true,
+                "takes_value": true,
+                "value_names": [
+                  "JOB_ID"
+                ],
+                "possible_values": [],
+                "default_values": [],
+                "env": null,
+                "help": null
+              },
+              {
+                "id": "expected_revision",
+                "long": "expected-revision",
+                "short": null,
+                "positional": false,
+                "required": true,
+                "takes_value": true,
+                "value_names": [
+                  "EXPECTED_REVISION"
+                ],
+                "possible_values": [],
+                "default_values": [],
+                "env": null,
+                "help": null
+              },
+              {
+                "id": "request_id",
+                "long": "request-id",
+                "short": null,
+                "positional": false,
+                "required": false,
+                "takes_value": true,
+                "value_names": [
+                  "REQUEST_ID"
+                ],
+                "possible_values": [],
+                "default_values": [],
+                "env": null,
+                "help": null
+              }
+            ],
+            "subcommands": []
+          },
+          {
+            "name": "delete",
+            "about": null,
+            "arguments": [
+              {
+                "id": "job_id",
+                "long": null,
+                "short": null,
+                "positional": true,
+                "required": true,
+                "takes_value": true,
+                "value_names": [
+                  "JOB_ID"
+                ],
+                "possible_values": [],
+                "default_values": [],
+                "env": null,
+                "help": null
+              },
+              {
+                "id": "expected_revision",
+                "long": "expected-revision",
+                "short": null,
+                "positional": false,
+                "required": true,
+                "takes_value": true,
+                "value_names": [
+                  "EXPECTED_REVISION"
+                ],
+                "possible_values": [],
+                "default_values": [],
+                "env": null,
+                "help": null
+              },
+              {
+                "id": "request_id",
+                "long": "request-id",
+                "short": null,
+                "positional": false,
+                "required": false,
+                "takes_value": true,
+                "value_names": [
+                  "REQUEST_ID"
+                ],
+                "possible_values": [],
+                "default_values": [],
+                "env": null,
+                "help": null
+              }
+            ],
+            "subcommands": []
+          },
+          {
+            "name": "run",
+            "about": null,
+            "arguments": [
+              {
+                "id": "job_id",
+                "long": null,
+                "short": null,
+                "positional": true,
+                "required": true,
+                "takes_value": true,
+                "value_names": [
+                  "JOB_ID"
+                ],
+                "possible_values": [],
+                "default_values": [],
+                "env": null,
+                "help": null
+              },
+              {
+                "id": "expected_revision",
+                "long": "expected-revision",
+                "short": null,
+                "positional": false,
+                "required": true,
+                "takes_value": true,
+                "value_names": [
+                  "EXPECTED_REVISION"
+                ],
+                "possible_values": [],
+                "default_values": [],
+                "env": null,
+                "help": null
+              },
+              {
+                "id": "occurrence_id",
+                "long": "occurrence-id",
+                "short": null,
+                "positional": false,
+                "required": false,
+                "takes_value": true,
+                "value_names": [
+                  "OCCURRENCE_ID"
+                ],
+                "possible_values": [],
+                "default_values": [],
+                "env": null,
+                "help": null
+              },
+              {
+                "id": "command_id",
+                "long": "command-id",
+                "short": null,
+                "positional": false,
+                "required": false,
+                "takes_value": true,
+                "value_names": [
+                  "COMMAND_ID"
+                ],
+                "possible_values": [],
+                "default_values": [],
+                "env": null,
+                "help": null
+              },
+              {
+                "id": "request_id",
+                "long": "request-id",
+                "short": null,
+                "positional": false,
+                "required": false,
+                "takes_value": true,
+                "value_names": [
+                  "REQUEST_ID"
+                ],
+                "possible_values": [],
+                "default_values": [],
+                "env": null,
+                "help": null
+              }
+            ],
+            "subcommands": []
+          },
+          {
+            "name": "history",
+            "about": null,
+            "arguments": [
+              {
+                "id": "job_id",
+                "long": null,
+                "short": null,
+                "positional": true,
+                "required": true,
+                "takes_value": true,
+                "value_names": [
+                  "JOB_ID"
+                ],
+                "possible_values": [],
+                "default_values": [],
+                "env": null,
+                "help": null
+              },
+              {
+                "id": "before_claimed_at",
+                "long": "before-claimed-at",
+                "short": null,
+                "positional": false,
+                "required": false,
+                "takes_value": true,
+                "value_names": [
+                  "BEFORE_CLAIMED_AT"
+                ],
+                "possible_values": [],
+                "default_values": [],
+                "env": null,
+                "help": null
+              },
+              {
+                "id": "before_occurrence_id",
+                "long": "before-occurrence-id",
+                "short": null,
+                "positional": false,
+                "required": false,
+                "takes_value": true,
+                "value_names": [
+                  "BEFORE_OCCURRENCE_ID"
+                ],
+                "possible_values": [],
+                "default_values": [],
+                "env": null,
+                "help": null
+              },
+              {
+                "id": "limit",
+                "long": "limit",
+                "short": null,
+                "positional": false,
+                "required": false,
+                "takes_value": true,
+                "value_names": [
+                  "LIMIT"
+                ],
+                "possible_values": [],
+                "default_values": [
+                  "20"
+                ],
+                "env": null,
+                "help": null
+              }
+            ],
+            "subcommands": []
+          },
+          {
+            "name": "status",
+            "about": null,
+            "arguments": [
+              {
+                "id": "occurrence_id",
+                "long": "occurrence-id",
+                "short": null,
+                "positional": false,
+                "required": false,
+                "takes_value": true,
+                "value_names": [
+                  "OCCURRENCE_ID"
+                ],
+                "possible_values": [],
+                "default_values": [],
+                "env": null,
+                "help": null
+              }
+            ],
+            "subcommands": []
+          },
+          {
+            "name": "acknowledge-unknown",
+            "about": null,
+            "arguments": [
+              {
+                "id": "occurrence_id",
+                "long": null,
+                "short": null,
+                "positional": true,
+                "required": true,
+                "takes_value": true,
+                "value_names": [
+                  "OCCURRENCE_ID"
+                ],
+                "possible_values": [],
+                "default_values": [],
+                "env": null,
+                "help": null
+              },
+              {
+                "id": "outcome_digest",
+                "long": "outcome-digest",
+                "short": null,
+                "positional": false,
+                "required": true,
+                "takes_value": true,
+                "value_names": [
+                  "OUTCOME_DIGEST"
+                ],
+                "possible_values": [],
+                "default_values": [],
+                "env": null,
+                "help": null
+              },
+              {
+                "id": "note",
+                "long": "note",
+                "short": null,
+                "positional": false,
+                "required": true,
+                "takes_value": true,
+                "value_names": [
+                  "NOTE"
+                ],
+                "possible_values": [],
+                "default_values": [],
+                "env": null,
+                "help": null
+              },
+              {
+                "id": "command_id",
+                "long": "command-id",
+                "short": null,
+                "positional": false,
+                "required": false,
+                "takes_value": true,
+                "value_names": [
+                  "COMMAND_ID"
+                ],
+                "possible_values": [],
+                "default_values": [],
+                "env": null,
+                "help": null
+              },
+              {
+                "id": "accepted_at_ms",
+                "long": "accepted-at-ms",
+                "short": null,
+                "positional": false,
+                "required": false,
+                "takes_value": true,
+                "value_names": [
+                  "ACCEPTED_AT_MS"
+                ],
+                "possible_values": [],
+                "default_values": [],
+                "env": null,
+                "help": null
+              },
+              {
+                "id": "request_id",
+                "long": "request-id",
+                "short": null,
+                "positional": false,
+                "required": false,
+                "takes_value": true,
+                "value_names": [
+                  "REQUEST_ID"
+                ],
+                "possible_values": [],
+                "default_values": [],
+                "env": null,
+                "help": null
+              }
+            ],
+            "subcommands": []
+          }
+        ]
+      },
+      {
+        "name": "owner",
+        "about": null,
+        "arguments": [
+          {
+            "id": "request_file",
+            "long": "request-file",
+            "short": null,
+            "positional": false,
+            "required": false,
+            "takes_value": true,
+            "value_names": [
+              "PATH"
+            ],
+            "possible_values": [],
+            "default_values": [],
+            "env": null,
+            "help": null
+          },
+          {
+            "id": "sensitive_stdin",
+            "long": "sensitive-stdin",
+            "short": null,
+            "positional": false,
+            "required": false,
+            "takes_value": false,
+            "value_names": [
+              "SENSITIVE_STDIN"
+            ],
+            "possible_values": [],
+            "default_values": [
+              "false"
+            ],
+            "env": null,
+            "help": null
+          }
+        ],
+        "subcommands": []
+      },
+      {
+        "name": "service",
+        "about": null,
+        "arguments": [
+          {
+            "id": "launch_agents_dir",
+            "long": "launch-agents-dir",
+            "short": null,
+            "positional": false,
+            "required": false,
+            "takes_value": true,
+            "value_names": [
+              "PATH"
+            ],
+            "possible_values": [],
+            "default_values": [],
+            "env": null,
+            "help": null
+          }
+        ],
+        "subcommands": [
+          {
+            "name": "install",
+            "about": null,
+            "arguments": [],
+            "subcommands": []
+          },
+          {
+            "name": "start",
+            "about": null,
+            "arguments": [],
+            "subcommands": []
+          },
+          {
+            "name": "stop",
+            "about": null,
+            "arguments": [],
+            "subcommands": []
+          },
+          {
+            "name": "status",
+            "about": null,
+            "arguments": [],
+            "subcommands": []
+          },
+          {
+            "name": "enable",
+            "about": null,
+            "arguments": [],
+            "subcommands": []
+          },
+          {
+            "name": "disable",
+            "about": null,
+            "arguments": [],
+            "subcommands": []
+          }
+        ]
+      },
+      {
+        "name": "init",
+        "about": null,
+        "arguments": [
+          {
+            "id": "conversation",
+            "long": "conversation",
+            "short": null,
+            "positional": false,
+            "required": false,
+            "takes_value": true,
+            "value_names": [
+              "CONVERSATION"
+            ],
+            "possible_values": [],
+            "default_values": [],
+            "env": null,
+            "help": null
+          },
+          {
+            "id": "command_id",
+            "long": "command-id",
+            "short": null,
+            "positional": false,
+            "required": false,
+            "takes_value": true,
+            "value_names": [
+              "COMMAND_ID"
+            ],
+            "possible_values": [],
+            "default_values": [],
+            "env": null,
+            "help": null
+          },
+          {
+            "id": "title",
+            "long": "title",
+            "short": null,
+            "positional": false,
+            "required": false,
+            "takes_value": true,
+            "value_names": [
+              "TITLE"
+            ],
+            "possible_values": [],
+            "default_values": [
+              "New conversation"
+            ],
+            "env": null,
+            "help": null
+          },
+          {
+            "id": "provider",
+            "long": "provider",
+            "short": null,
+            "positional": false,
+            "required": false,
+            "takes_value": true,
+            "value_names": [
+              "PROVIDER"
+            ],
+            "possible_values": [
+              "anthropic",
+              "openai"
+            ],
+            "default_values": [],
+            "env": null,
+            "help": null
+          },
+          {
+            "id": "model",
+            "long": "model",
+            "short": null,
+            "positional": false,
+            "required": false,
+            "takes_value": true,
+            "value_names": [
+              "MODEL"
+            ],
+            "possible_values": [],
+            "default_values": [],
+            "env": null,
+            "help": null
+          },
+          {
+            "id": "instructions",
+            "long": "instructions",
+            "short": null,
+            "positional": false,
+            "required": false,
+            "takes_value": true,
+            "value_names": [
+              "INSTRUCTIONS"
+            ],
+            "possible_values": [],
+            "default_values": [],
+            "env": null,
+            "help": null
+          },
+          {
+            "id": "loopback_endpoint",
+            "long": "loopback-endpoint",
+            "short": null,
+            "positional": false,
+            "required": false,
+            "takes_value": true,
+            "value_names": [
+              "URL"
+            ],
+            "possible_values": [],
+            "default_values": [],
+            "env": null,
+            "help": null
+          },
+          {
+            "id": "max_output_tokens",
+            "long": "max-output-tokens",
+            "short": null,
+            "positional": false,
+            "required": false,
+            "takes_value": true,
+            "value_names": [
+              "MAX_OUTPUT_TOKENS"
+            ],
+            "possible_values": [],
+            "default_values": [],
+            "env": null,
+            "help": null
+          },
+          {
+            "id": "temperature",
+            "long": "temperature",
+            "short": null,
+            "positional": false,
+            "required": false,
+            "takes_value": true,
+            "value_names": [
+              "TEMPERATURE"
+            ],
+            "possible_values": [],
+            "default_values": [],
+            "env": null,
+            "help": null
+          }
+        ],
+        "subcommands": []
+      },
+      {
+        "name": "chat",
+        "about": null,
+        "arguments": [
+          {
+            "id": "conversation",
+            "long": "conversation",
+            "short": null,
+            "positional": false,
+            "required": false,
+            "takes_value": true,
+            "value_names": [
+              "CONVERSATION"
+            ],
+            "possible_values": [],
+            "default_values": [],
+            "env": null,
+            "help": null
+          },
+          {
+            "id": "command_id",
+            "long": "command-id",
+            "short": null,
+            "positional": false,
+            "required": false,
+            "takes_value": true,
+            "value_names": [
+              "COMMAND_ID"
+            ],
+            "possible_values": [],
+            "default_values": [],
+            "env": null,
+            "help": null
+          },
+          {
+            "id": "message",
+            "long": "message",
+            "short": null,
+            "positional": false,
+            "required": false,
+            "takes_value": true,
+            "value_names": [
+              "MESSAGE"
+            ],
+            "possible_values": [],
+            "default_values": [],
+            "env": null,
+            "help": null
+          },
+          {
+            "id": "message_file",
+            "long": "message-file",
+            "short": null,
+            "positional": false,
+            "required": false,
+            "takes_value": true,
+            "value_names": [
+              "PATH"
+            ],
+            "possible_values": [],
+            "default_values": [],
+            "env": null,
+            "help": null
+          },
+          {
+            "id": "resume",
+            "long": "resume",
+            "short": null,
+            "positional": false,
+            "required": false,
+            "takes_value": false,
+            "value_names": [
+              "RESUME"
+            ],
+            "possible_values": [],
+            "default_values": [
+              "false"
+            ],
+            "env": null,
+            "help": null
+          },
+          {
+            "id": "title",
+            "long": "title",
+            "short": null,
+            "positional": false,
+            "required": false,
+            "takes_value": true,
+            "value_names": [
+              "TITLE"
+            ],
+            "possible_values": [],
+            "default_values": [],
+            "env": null,
+            "help": null
+          },
+          {
+            "id": "no_wait",
+            "long": "no-wait",
+            "short": null,
+            "positional": false,
+            "required": false,
+            "takes_value": false,
+            "value_names": [
+              "NO_WAIT"
+            ],
+            "possible_values": [],
+            "default_values": [
+              "false"
+            ],
+            "env": null,
+            "help": null
+          },
+          {
+            "id": "provider",
+            "long": "provider",
+            "short": null,
+            "positional": false,
+            "required": false,
+            "takes_value": true,
+            "value_names": [
+              "PROVIDER"
+            ],
+            "possible_values": [
+              "anthropic",
+              "openai"
+            ],
+            "default_values": [],
+            "env": null,
+            "help": null
+          },
+          {
+            "id": "model",
+            "long": "model",
+            "short": null,
+            "positional": false,
+            "required": false,
+            "takes_value": true,
+            "value_names": [
+              "MODEL"
+            ],
+            "possible_values": [],
+            "default_values": [],
+            "env": null,
+            "help": null
+          },
+          {
+            "id": "instructions",
+            "long": "instructions",
+            "short": null,
+            "positional": false,
+            "required": false,
+            "takes_value": true,
+            "value_names": [
+              "INSTRUCTIONS"
+            ],
+            "possible_values": [],
+            "default_values": [],
+            "env": null,
+            "help": null
+          },
+          {
+            "id": "loopback_endpoint",
+            "long": "loopback-endpoint",
+            "short": null,
+            "positional": false,
+            "required": false,
+            "takes_value": true,
+            "value_names": [
+              "URL"
+            ],
+            "possible_values": [],
+            "default_values": [],
+            "env": null,
+            "help": null
+          },
+          {
+            "id": "max_output_tokens",
+            "long": "max-output-tokens",
+            "short": null,
+            "positional": false,
+            "required": false,
+            "takes_value": true,
+            "value_names": [
+              "MAX_OUTPUT_TOKENS"
+            ],
+            "possible_values": [],
+            "default_values": [],
+            "env": null,
+            "help": null
+          },
+          {
+            "id": "temperature",
+            "long": "temperature",
+            "short": null,
+            "positional": false,
+            "required": false,
+            "takes_value": true,
+            "value_names": [
+              "TEMPERATURE"
+            ],
+            "possible_values": [],
+            "default_values": [],
+            "env": null,
+            "help": null
+          },
+          {
+            "id": "tools",
+            "long": "tools",
+            "short": null,
+            "positional": false,
+            "required": false,
+            "takes_value": false,
+            "value_names": [
+              "TOOLS"
+            ],
+            "possible_values": [],
+            "default_values": [
+              "false"
+            ],
+            "env": null,
+            "help": null
+          },
+          {
+            "id": "workspace",
+            "long": "workspace",
+            "short": null,
+            "positional": false,
+            "required": false,
+            "takes_value": true,
+            "value_names": [
+              "WORKSPACE"
+            ],
+            "possible_values": [],
+            "default_values": [],
+            "env": null,
+            "help": null
+          },
+          {
+            "id": "execution_mode",
+            "long": "execution-mode",
+            "short": null,
+            "positional": false,
+            "required": false,
+            "takes_value": true,
+            "value_names": [
+              "EXECUTION_MODE"
+            ],
+            "possible_values": [
+              "read-only",
+              "trusted-workspace",
+              "full-host"
+            ],
+            "default_values": [],
+            "env": null,
+            "help": null
+          },
+          {
+            "id": "context_tokens",
+            "long": "context-tokens",
+            "short": null,
+            "positional": false,
+            "required": false,
+            "takes_value": true,
+            "value_names": [
+              "CONTEXT_TOKENS"
+            ],
+            "possible_values": [],
+            "default_values": [],
+            "env": null,
+            "help": null
+          },
+          {
+            "id": "max_model_attempts",
+            "long": "max-model-attempts",
+            "short": null,
+            "positional": false,
+            "required": false,
+            "takes_value": true,
+            "value_names": [
+              "MAX_MODEL_ATTEMPTS"
+            ],
+            "possible_values": [],
+            "default_values": [],
+            "env": null,
+            "help": null
+          },
+          {
+            "id": "max_tool_calls",
+            "long": "max-tool-calls",
+            "short": null,
+            "positional": false,
+            "required": false,
+            "takes_value": true,
+            "value_names": [
+              "MAX_TOOL_CALLS"
+            ],
+            "possible_values": [],
+            "default_values": [],
+            "env": null,
+            "help": null
+          },
+          {
+            "id": "max_charged_tokens",
+            "long": "max-charged-tokens",
+            "short": null,
+            "positional": false,
+            "required": false,
+            "takes_value": true,
+            "value_names": [
+              "MAX_CHARGED_TOKENS"
+            ],
+            "possible_values": [],
+            "default_values": [],
+            "env": null,
+            "help": null
+          },
+          {
+            "id": "max_duration_seconds",
+            "long": "max-duration-seconds",
+            "short": null,
+            "positional": false,
+            "required": false,
+            "takes_value": true,
+            "value_names": [
+              "MAX_DURATION_SECONDS"
+            ],
+            "possible_values": [],
+            "default_values": [],
+            "env": null,
+            "help": null
+          },
+          {
+            "id": "retry_uncertain",
+            "long": "retry-uncertain",
+            "short": null,
+            "positional": false,
+            "required": false,
+            "takes_value": false,
+            "value_names": [
+              "RETRY_UNCERTAIN"
+            ],
+            "possible_values": [],
+            "default_values": [
+              "false"
+            ],
+            "env": null,
+            "help": null
+          },
+          {
+            "id": "approve",
+            "long": "approve",
+            "short": null,
+            "positional": false,
+            "required": false,
+            "takes_value": true,
+            "value_names": [
+              "APPROVE"
+            ],
+            "possible_values": [],
+            "default_values": [],
+            "env": null,
+            "help": null
+          },
+          {
+            "id": "for_task",
+            "long": "for-task",
+            "short": null,
+            "positional": false,
+            "required": false,
+            "takes_value": false,
+            "value_names": [
+              "FOR_TASK"
+            ],
+            "possible_values": [],
+            "default_values": [
+              "false"
+            ],
+            "env": null,
+            "help": null
+          },
+          {
+            "id": "deny",
+            "long": "deny",
+            "short": null,
+            "positional": false,
+            "required": false,
+            "takes_value": true,
+            "value_names": [
+              "DENY"
+            ],
+            "possible_values": [],
+            "default_values": [],
+            "env": null,
+            "help": null
+          }
+        ],
+        "subcommands": []
+      },
+      {
+        "name": "status",
+        "about": null,
+        "arguments": [
+          {
+            "id": "conversation",
+            "long": "conversation",
+            "short": null,
+            "positional": false,
+            "required": false,
+            "takes_value": true,
+            "value_names": [
+              "CONVERSATION"
+            ],
+            "possible_values": [],
+            "default_values": [],
+            "env": null,
+            "help": null
+          },
+          {
+            "id": "history",
+            "long": "history",
+            "short": null,
+            "positional": false,
+            "required": false,
+            "takes_value": false,
+            "value_names": [
+              "HISTORY"
+            ],
+            "possible_values": [],
+            "default_values": [
+              "false"
+            ],
+            "env": null,
+            "help": null
+          },
+          {
+            "id": "limit",
+            "long": "limit",
+            "short": null,
+            "positional": false,
+            "required": false,
+            "takes_value": true,
+            "value_names": [
+              "LIMIT"
+            ],
+            "possible_values": [],
+            "default_values": [
+              "20"
+            ],
+            "env": null,
+            "help": null
+          }
+        ],
+        "subcommands": []
+      },
+      {
+        "name": "chatgpt",
+        "about": null,
+        "arguments": [],
+        "subcommands": [
+          {
+            "name": "sign-in",
+            "about": null,
+            "arguments": [
+              {
+                "id": "reference",
+                "long": "reference",
+                "short": null,
+                "positional": false,
+                "required": false,
+                "takes_value": true,
+                "value_names": [
+                  "REFERENCE"
+                ],
+                "possible_values": [],
+                "default_values": [],
+                "env": null,
+                "help": null
+              },
+              {
+                "id": "storage",
+                "long": "storage",
+                "short": null,
+                "positional": false,
+                "required": false,
+                "takes_value": true,
+                "value_names": [
+                  "STORAGE"
+                ],
+                "possible_values": [
+                  "session",
+                  "native"
+                ],
+                "default_values": [],
+                "env": null,
+                "help": null
+              },
+              {
+                "id": "no_browser",
+                "long": "no-browser",
+                "short": null,
+                "positional": false,
+                "required": false,
+                "takes_value": false,
+                "value_names": [
+                  "NO_BROWSER"
+                ],
+                "possible_values": [],
+                "default_values": [
+                  "false"
+                ],
+                "env": null,
+                "help": null
+              },
+              {
+                "id": "timeout_seconds",
+                "long": "timeout-seconds",
+                "short": null,
+                "positional": false,
+                "required": false,
+                "takes_value": true,
+                "value_names": [
+                  "TIMEOUT_SECONDS"
+                ],
+                "possible_values": [],
+                "default_values": [
+                  "600"
+                ],
+                "env": null,
+                "help": null
+              }
+            ],
+            "subcommands": []
+          },
+          {
+            "name": "status",
+            "about": null,
+            "arguments": [
+              {
+                "id": "reference",
+                "long": "reference",
+                "short": null,
+                "positional": false,
+                "required": false,
+                "takes_value": true,
+                "value_names": [
+                  "REFERENCE"
+                ],
+                "possible_values": [],
+                "default_values": [],
+                "env": null,
+                "help": null
+              },
+              {
+                "id": "storage",
+                "long": "storage",
+                "short": null,
+                "positional": false,
+                "required": false,
+                "takes_value": true,
+                "value_names": [
+                  "STORAGE"
+                ],
+                "possible_values": [
+                  "session",
+                  "native"
+                ],
+                "default_values": [],
+                "env": null,
+                "help": null
+              },
+              {
+                "id": "json",
+                "long": "json",
+                "short": null,
+                "positional": false,
+                "required": false,
+                "takes_value": false,
+                "value_names": [
+                  "JSON"
+                ],
+                "possible_values": [],
+                "default_values": [
+                  "false"
+                ],
+                "env": null,
+                "help": null
+              },
+              {
+                "id": "show_email",
+                "long": "show-email",
+                "short": null,
+                "positional": false,
+                "required": false,
+                "takes_value": false,
+                "value_names": [
+                  "SHOW_EMAIL"
+                ],
+                "possible_values": [],
+                "default_values": [
+                  "false"
+                ],
+                "env": null,
+                "help": null
+              }
+            ],
+            "subcommands": []
+          },
+          {
+            "name": "models",
+            "about": null,
+            "arguments": [
+              {
+                "id": "reference",
+                "long": "reference",
+                "short": null,
+                "positional": false,
+                "required": false,
+                "takes_value": true,
+                "value_names": [
+                  "REFERENCE"
+                ],
+                "possible_values": [],
+                "default_values": [],
+                "env": null,
+                "help": null
+              },
+              {
+                "id": "storage",
+                "long": "storage",
+                "short": null,
+                "positional": false,
+                "required": false,
+                "takes_value": true,
+                "value_names": [
+                  "STORAGE"
+                ],
+                "possible_values": [
+                  "session",
+                  "native"
+                ],
+                "default_values": [],
+                "env": null,
+                "help": null
+              },
+              {
+                "id": "all",
+                "long": "all",
+                "short": null,
+                "positional": false,
+                "required": false,
+                "takes_value": false,
+                "value_names": [
+                  "ALL"
+                ],
+                "possible_values": [],
+                "default_values": [
+                  "false"
+                ],
+                "env": null,
+                "help": null
+              },
+              {
+                "id": "json",
+                "long": "json",
+                "short": null,
+                "positional": false,
+                "required": false,
+                "takes_value": false,
+                "value_names": [
+                  "JSON"
+                ],
+                "possible_values": [],
+                "default_values": [
+                  "false"
+                ],
+                "env": null,
+                "help": null
+              }
+            ],
+            "subcommands": []
+          },
+          {
+            "name": "sign-out",
+            "about": null,
+            "arguments": [
+              {
+                "id": "reference",
+                "long": "reference",
+                "short": null,
+                "positional": false,
+                "required": false,
+                "takes_value": true,
+                "value_names": [
+                  "REFERENCE"
+                ],
+                "possible_values": [],
+                "default_values": [],
+                "env": null,
+                "help": null
+              },
+              {
+                "id": "storage",
+                "long": "storage",
+                "short": null,
+                "positional": false,
+                "required": false,
+                "takes_value": true,
+                "value_names": [
+                  "STORAGE"
+                ],
+                "possible_values": [
+                  "session",
+                  "native"
+                ],
+                "default_values": [],
+                "env": null,
+                "help": null
+              }
+            ],
+            "subcommands": []
+          },
+          {
+            "name": "select",
+            "about": null,
+            "arguments": [
+              {
+                "id": "reference",
+                "long": "reference",
+                "short": null,
+                "positional": false,
+                "required": false,
+                "takes_value": true,
+                "value_names": [
+                  "REFERENCE"
+                ],
+                "possible_values": [],
+                "default_values": [],
+                "env": null,
+                "help": null
+              },
+              {
+                "id": "storage",
+                "long": "storage",
+                "short": null,
+                "positional": false,
+                "required": false,
+                "takes_value": true,
+                "value_names": [
+                  "STORAGE"
+                ],
+                "possible_values": [
+                  "session",
+                  "native"
+                ],
+                "default_values": [],
+                "env": null,
+                "help": null
+              }
+            ],
+            "subcommands": []
+          },
+          {
+            "name": "deselect",
+            "about": null,
+            "arguments": [],
+            "subcommands": []
+          }
+        ]
+      },
+      {
+        "name": "tui",
+        "about": null,
+        "arguments": [
+          {
+            "id": "conversation",
+            "long": "conversation",
+            "short": null,
+            "positional": false,
+            "required": false,
+            "takes_value": true,
+            "value_names": [
+              "CONVERSATION"
+            ],
+            "possible_values": [],
+            "default_values": [],
+            "env": null,
+            "help": null
+          },
+          {
+            "id": "resume_latest",
+            "long": "continue",
+            "short": "c",
+            "positional": false,
+            "required": false,
+            "takes_value": false,
+            "value_names": [
+              "RESUME_LATEST"
+            ],
+            "possible_values": [],
+            "default_values": [
+              "false"
+            ],
+            "env": null,
+            "help": null
+          },
+          {
+            "id": "provider",
+            "long": "provider",
+            "short": null,
+            "positional": false,
+            "required": false,
+            "takes_value": true,
+            "value_names": [
+              "PROVIDER"
+            ],
+            "possible_values": [
+              "anthropic",
+              "openai"
+            ],
+            "default_values": [],
+            "env": null,
+            "help": null
+          },
+          {
+            "id": "model",
+            "long": "model",
+            "short": null,
+            "positional": false,
+            "required": false,
+            "takes_value": true,
+            "value_names": [
+              "MODEL"
+            ],
+            "possible_values": [],
+            "default_values": [],
+            "env": null,
+            "help": null
+          }
+        ],
+        "subcommands": []
+      },
+      {
+        "name": "relay",
+        "about": null,
+        "arguments": [],
+        "subcommands": [
+          {
+            "name": "serve",
+            "about": "Run the blind relay server",
+            "arguments": [
+              {
+                "id": "database",
+                "long": "database",
+                "short": null,
+                "positional": false,
+                "required": false,
+                "takes_value": true,
+                "value_names": [
+                  "PATH"
+                ],
+                "possible_values": [],
+                "default_values": [],
+                "env": null,
+                "help": "Relay server SQLite database [default: <state-dir>/relay.sqlite3]"
+              },
+              {
+                "id": "bind",
+                "long": "bind",
+                "short": null,
+                "positional": false,
+                "required": false,
+                "takes_value": true,
+                "value_names": [
+                  "BIND"
+                ],
+                "possible_values": [],
+                "default_values": [
+                  "127.0.0.1:8787"
+                ],
+                "env": null,
+                "help": null
+              },
+              {
+                "id": "origin",
+                "long": "origin",
+                "short": null,
+                "positional": false,
+                "required": true,
+                "takes_value": true,
+                "value_names": [
+                  "ORIGIN"
+                ],
+                "possible_values": [],
+                "default_values": [],
+                "env": null,
+                "help": "Expected public WebSocket origin, wss://host or loopback ws://host"
+              },
+              {
+                "id": "max_connections",
+                "long": "max-connections",
+                "short": null,
+                "positional": false,
+                "required": false,
+                "takes_value": true,
+                "value_names": [
+                  "MAX_CONNECTIONS"
+                ],
+                "possible_values": [],
+                "default_values": [
+                  "64"
+                ],
+                "env": null,
+                "help": null
+              }
+            ],
+            "subcommands": []
+          },
+          {
+            "name": "enroll",
+            "about": "Enroll a device's public keys on the relay server",
+            "arguments": [
+              {
+                "id": "database",
+                "long": "database",
+                "short": null,
+                "positional": false,
+                "required": false,
+                "takes_value": true,
+                "value_names": [
+                  "PATH"
+                ],
+                "possible_values": [],
+                "default_values": [],
+                "env": null,
+                "help": "Relay server SQLite database [default: <state-dir>/relay.sqlite3]"
+              },
+              {
+                "id": "keys",
+                "long": "keys",
+                "short": null,
+                "positional": false,
+                "required": true,
+                "takes_value": true,
+                "value_names": [
+                  "KEYS"
+                ],
+                "possible_values": [],
+                "default_values": [],
+                "env": null,
+                "help": "Local JSON file containing public device keys only"
+              }
+            ],
+            "subcommands": []
+          },
+          {
+            "name": "revoke",
+            "about": "Revoke a device on the relay server and drop its queued traffic",
+            "arguments": [
+              {
+                "id": "database",
+                "long": "database",
+                "short": null,
+                "positional": false,
+                "required": false,
+                "takes_value": true,
+                "value_names": [
+                  "PATH"
+                ],
+                "possible_values": [],
+                "default_values": [],
+                "env": null,
+                "help": "Relay server SQLite database [default: <state-dir>/relay.sqlite3]"
+              },
+              {
+                "id": "device_id",
+                "long": null,
+                "short": null,
+                "positional": true,
+                "required": true,
+                "takes_value": true,
+                "value_names": [
+                  "DEVICE_ID"
+                ],
+                "possible_values": [],
+                "default_values": [],
+                "env": null,
+                "help": null
+              }
+            ],
+            "subcommands": []
+          },
+          {
+            "name": "devices",
+            "about": "List devices enrolled on the relay server",
+            "arguments": [
+              {
+                "id": "database",
+                "long": "database",
+                "short": null,
+                "positional": false,
+                "required": false,
+                "takes_value": true,
+                "value_names": [
+                  "PATH"
+                ],
+                "possible_values": [],
+                "default_values": [],
+                "env": null,
+                "help": "Relay server SQLite database [default: <state-dir>/relay.sqlite3]"
+              }
+            ],
+            "subcommands": []
+          },
+          {
+            "name": "status",
+            "about": "Show this host's relay connection and the relay server database",
+            "arguments": [
+              {
+                "id": "database",
+                "long": "database",
+                "short": null,
+                "positional": false,
+                "required": false,
+                "takes_value": true,
+                "value_names": [
+                  "PATH"
+                ],
+                "possible_values": [],
+                "default_values": [],
+                "env": null,
+                "help": "Relay server SQLite database [default: <state-dir>/relay.sqlite3]"
+              }
+            ],
+            "subcommands": []
+          },
+          {
+            "name": "on",
+            "about": "Connect this host to a relay",
+            "arguments": [
+              {
+                "id": "origin",
+                "long": "origin",
+                "short": null,
+                "positional": false,
+                "required": false,
+                "takes_value": true,
+                "value_names": [
+                  "ORIGIN"
+                ],
+                "possible_values": [],
+                "default_values": [],
+                "env": null,
+                "help": "Relay WebSocket origin, wss://host or loopback ws://host"
+              }
+            ],
+            "subcommands": []
+          },
+          {
+            "name": "off",
+            "about": "Stop connecting this host to a relay",
+            "arguments": [],
+            "subcommands": []
+          }
+        ]
+      },
+      {
+        "name": "update",
+        "about": null,
+        "arguments": [
+          {
+            "id": "beta",
+            "long": "beta",
+            "short": null,
+            "positional": false,
+            "required": false,
+            "takes_value": false,
+            "value_names": [
+              "BETA"
+            ],
+            "possible_values": [],
+            "default_values": [
+              "false"
+            ],
+            "env": null,
+            "help": null
+          },
+          {
+            "id": "check",
+            "long": "check",
+            "short": null,
+            "positional": false,
+            "required": false,
+            "takes_value": false,
+            "value_names": [
+              "CHECK"
+            ],
+            "possible_values": [],
+            "default_values": [
+              "false"
+            ],
+            "env": null,
+            "help": null
+          },
+          {
+            "id": "allow_unsigned",
+            "long": "allow-unsigned",
+            "short": null,
+            "positional": false,
+            "required": false,
+            "takes_value": false,
+            "value_names": [
+              "ALLOW_UNSIGNED"
+            ],
+            "possible_values": [],
+            "default_values": [
+              "false"
+            ],
+            "env": null,
+            "help": null
+          }
+        ],
+        "subcommands": []
+      },
+      {
+        "name": "cancel",
+        "about": null,
+        "arguments": [
+          {
+            "id": "task_id",
+            "long": null,
+            "short": null,
+            "positional": true,
+            "required": true,
+            "takes_value": true,
+            "value_names": [
+              "TASK_ID"
+            ],
+            "possible_values": [],
+            "default_values": [],
+            "env": null,
+            "help": null
+          },
+          {
+            "id": "json",
+            "long": "json",
+            "short": null,
+            "positional": false,
+            "required": false,
+            "takes_value": false,
+            "value_names": [
+              "JSON"
+            ],
+            "possible_values": [],
+            "default_values": [
+              "false"
+            ],
+            "env": null,
+            "help": null
+          }
+        ],
+        "subcommands": []
+      },
+      {
+        "name": "tasks",
+        "about": null,
+        "arguments": [
+          {
+            "id": "conversation",
+            "long": "conversation",
+            "short": null,
+            "positional": false,
+            "required": false,
+            "takes_value": true,
+            "value_names": [
+              "CONVERSATION"
+            ],
+            "possible_values": [],
+            "default_values": [],
+            "env": null,
+            "help": null
+          },
+          {
+            "id": "limit",
+            "long": "limit",
+            "short": null,
+            "positional": false,
+            "required": false,
+            "takes_value": true,
+            "value_names": [
+              "LIMIT"
+            ],
+            "possible_values": [],
+            "default_values": [
+              "20"
+            ],
+            "env": null,
+            "help": null
+          },
+          {
+            "id": "json",
+            "long": "json",
+            "short": null,
+            "positional": false,
+            "required": false,
+            "takes_value": false,
+            "value_names": [
+              "JSON"
+            ],
+            "possible_values": [],
+            "default_values": [
+              "false"
+            ],
+            "env": null,
+            "help": null
+          }
+        ],
+        "subcommands": []
+      },
+      {
+        "name": "approvals",
+        "about": null,
+        "arguments": [
+          {
+            "id": "conversation",
+            "long": "conversation",
+            "short": null,
+            "positional": false,
+            "required": false,
+            "takes_value": true,
+            "value_names": [
+              "CONVERSATION"
+            ],
+            "possible_values": [],
+            "default_values": [],
+            "env": null,
+            "help": null
+          },
+          {
+            "id": "limit",
+            "long": "limit",
+            "short": null,
+            "positional": false,
+            "required": false,
+            "takes_value": true,
+            "value_names": [
+              "LIMIT"
+            ],
+            "possible_values": [],
+            "default_values": [
+              "20"
+            ],
+            "env": null,
+            "help": null
+          },
+          {
+            "id": "json",
+            "long": "json",
+            "short": null,
+            "positional": false,
+            "required": false,
+            "takes_value": false,
+            "value_names": [
+              "JSON"
+            ],
+            "possible_values": [],
+            "default_values": [
+              "false"
+            ],
+            "env": null,
+            "help": null
+          }
+        ],
+        "subcommands": []
+      },
+      {
+        "name": "conversations",
+        "about": null,
+        "arguments": [
+          {
+            "id": "limit",
+            "long": "limit",
+            "short": null,
+            "positional": false,
+            "required": false,
+            "takes_value": true,
+            "value_names": [
+              "LIMIT"
+            ],
+            "possible_values": [],
+            "default_values": [
+              "20"
+            ],
+            "env": null,
+            "help": null
+          },
+          {
+            "id": "json",
+            "long": "json",
+            "short": null,
+            "positional": false,
+            "required": false,
+            "takes_value": false,
+            "value_names": [
+              "JSON"
+            ],
+            "possible_values": [],
+            "default_values": [
+              "false"
+            ],
+            "env": null,
+            "help": null
+          }
+        ],
+        "subcommands": []
+      },
+      {
+        "name": "schedules",
+        "about": null,
+        "arguments": [
+          {
+            "id": "limit",
+            "long": "limit",
+            "short": null,
+            "positional": false,
+            "required": false,
+            "takes_value": true,
+            "value_names": [
+              "LIMIT"
+            ],
+            "possible_values": [],
+            "default_values": [
+              "20"
+            ],
+            "env": null,
+            "help": null
+          },
+          {
+            "id": "json",
+            "long": "json",
+            "short": null,
+            "positional": false,
+            "required": false,
+            "takes_value": false,
+            "value_names": [
+              "JSON"
+            ],
+            "possible_values": [],
+            "default_values": [
+              "false"
+            ],
+            "env": null,
+            "help": null
+          }
+        ],
+        "subcommands": []
+      },
+      {
+        "name": "memory",
+        "about": null,
+        "arguments": [
+          {
+            "id": "question",
+            "long": null,
+            "short": null,
+            "positional": true,
+            "required": true,
+            "takes_value": true,
+            "value_names": [
+              "QUESTION"
+            ],
+            "possible_values": [],
+            "default_values": [],
+            "env": null,
+            "help": null
+          },
+          {
+            "id": "json",
+            "long": "json",
+            "short": null,
+            "positional": false,
+            "required": false,
+            "takes_value": false,
+            "value_names": [
+              "JSON"
+            ],
+            "possible_values": [],
+            "default_values": [
+              "false"
+            ],
+            "env": null,
+            "help": null
+          }
+        ],
+        "subcommands": []
+      },
+      {
+        "name": "vault",
+        "about": null,
+        "arguments": [],
+        "subcommands": [
+          {
+            "name": "status",
+            "about": null,
+            "arguments": [
+              {
+                "id": "json",
+                "long": "json",
+                "short": null,
+                "positional": false,
+                "required": false,
+                "takes_value": false,
+                "value_names": [
+                  "JSON"
+                ],
+                "possible_values": [],
+                "default_values": [
+                  "false"
+                ],
+                "env": null,
+                "help": null
+              }
+            ],
+            "subcommands": []
+          },
+          {
+            "name": "list",
+            "about": null,
+            "arguments": [
+              {
+                "id": "limit",
+                "long": "limit",
+                "short": null,
+                "positional": false,
+                "required": false,
+                "takes_value": true,
+                "value_names": [
+                  "LIMIT"
+                ],
+                "possible_values": [],
+                "default_values": [
+                  "20"
+                ],
+                "env": null,
+                "help": null
+              },
+              {
+                "id": "json",
+                "long": "json",
+                "short": null,
+                "positional": false,
+                "required": false,
+                "takes_value": false,
+                "value_names": [
+                  "JSON"
+                ],
+                "possible_values": [],
+                "default_values": [
+                  "false"
+                ],
+                "env": null,
+                "help": null
+              }
+            ],
+            "subcommands": []
+          },
+          {
+            "name": "add",
+            "about": null,
+            "arguments": [
+              {
+                "id": "kind",
+                "long": null,
+                "short": null,
+                "positional": true,
+                "required": true,
+                "takes_value": true,
+                "value_names": [
+                  "KIND"
+                ],
+                "possible_values": [
+                  "login",
+                  "api-secret",
+                  "card",
+                  "identity"
+                ],
+                "default_values": [],
+                "env": null,
+                "help": null
+              },
+              {
+                "id": "label",
+                "long": "label",
+                "short": null,
+                "positional": false,
+                "required": true,
+                "takes_value": true,
+                "value_names": [
+                  "LABEL"
+                ],
+                "possible_values": [],
+                "default_values": [],
+                "env": null,
+                "help": null
+              },
+              {
+                "id": "sites",
+                "long": "site",
+                "short": null,
+                "positional": false,
+                "required": false,
+                "takes_value": true,
+                "value_names": [
+                  "HOST"
+                ],
+                "possible_values": [],
+                "default_values": [],
+                "env": null,
+                "help": null
+              },
+              {
+                "id": "username",
+                "long": "username",
+                "short": null,
+                "positional": false,
+                "required": false,
+                "takes_value": true,
+                "value_names": [
+                  "USERNAME"
+                ],
+                "possible_values": [],
+                "default_values": [],
+                "env": null,
+                "help": null
+              },
+              {
+                "id": "env_name",
+                "long": "env-name",
+                "short": null,
+                "positional": false,
+                "required": false,
+                "takes_value": true,
+                "value_names": [
+                  "NAME"
+                ],
+                "possible_values": [],
+                "default_values": [],
+                "env": null,
+                "help": null
+              },
+              {
+                "id": "service",
+                "long": "service",
+                "short": null,
+                "positional": false,
+                "required": false,
+                "takes_value": true,
+                "value_names": [
+                  "SERVICE"
+                ],
+                "possible_values": [],
+                "default_values": [],
+                "env": null,
+                "help": null
+              },
+              {
+                "id": "brand",
+                "long": "brand",
+                "short": null,
+                "positional": false,
+                "required": false,
+                "takes_value": true,
+                "value_names": [
+                  "BRAND"
+                ],
+                "possible_values": [],
+                "default_values": [],
+                "env": null,
+                "help": null
+              },
+              {
+                "id": "last4",
+                "long": "last4",
+                "short": null,
+                "positional": false,
+                "required": false,
+                "takes_value": true,
+                "value_names": [
+                  "DIGITS"
+                ],
+                "possible_values": [],
+                "default_values": [],
+                "env": null,
+                "help": null
+              },
+              {
+                "id": "expiry_month",
+                "long": "expiry-month",
+                "short": null,
+                "positional": false,
+                "required": false,
+                "takes_value": true,
+                "value_names": [
+                  "1-12"
+                ],
+                "possible_values": [],
+                "default_values": [],
+                "env": null,
+                "help": null
+              },
+              {
+                "id": "expiry_year",
+                "long": "expiry-year",
+                "short": null,
+                "positional": false,
+                "required": false,
+                "takes_value": true,
+                "value_names": [
+                  "YEAR"
+                ],
+                "possible_values": [],
+                "default_values": [],
+                "env": null,
+                "help": null
+              },
+              {
+                "id": "fields",
+                "long": "field",
+                "short": null,
+                "positional": false,
+                "required": false,
+                "takes_value": true,
+                "value_names": [
+                  "FIELD"
+                ],
+                "possible_values": [],
+                "default_values": [],
+                "env": null,
+                "help": null
+              },
+              {
+                "id": "json",
+                "long": "json",
+                "short": null,
+                "positional": false,
+                "required": false,
+                "takes_value": false,
+                "value_names": [
+                  "JSON"
+                ],
+                "possible_values": [],
+                "default_values": [
+                  "false"
+                ],
+                "env": null,
+                "help": null
+              }
+            ],
+            "subcommands": []
+          },
+          {
+            "name": "remove",
+            "about": null,
+            "arguments": [
+              {
+                "id": "item",
+                "long": null,
+                "short": null,
+                "positional": true,
+                "required": true,
+                "takes_value": true,
+                "value_names": [
+                  "ID|REF"
+                ],
+                "possible_values": [],
+                "default_values": [],
+                "env": null,
+                "help": null
+              },
+              {
+                "id": "json",
+                "long": "json",
+                "short": null,
+                "positional": false,
+                "required": false,
+                "takes_value": false,
+                "value_names": [
+                  "JSON"
+                ],
+                "possible_values": [],
+                "default_values": [
+                  "false"
+                ],
+                "env": null,
+                "help": null
+              }
+            ],
+            "subcommands": []
+          },
+          {
+            "name": "connect",
+            "about": null,
+            "arguments": [
+              {
+                "id": "provider",
+                "long": null,
+                "short": null,
+                "positional": true,
+                "required": true,
+                "takes_value": true,
+                "value_names": [
+                  "PROVIDER"
+                ],
+                "possible_values": [
+                  "onepassword",
+                  "protonpass"
+                ],
+                "default_values": [],
+                "env": null,
+                "help": null
+              },
+              {
+                "id": "binary",
+                "long": "binary",
+                "short": null,
+                "positional": false,
+                "required": false,
+                "takes_value": true,
+                "value_names": [
+                  "PATH"
+                ],
+                "possible_values": [],
+                "default_values": [],
+                "env": null,
+                "help": null
+              },
+              {
+                "id": "account",
+                "long": "account",
+                "short": null,
+                "positional": false,
+                "required": false,
+                "takes_value": true,
+                "value_names": [
+                  "UUID"
+                ],
+                "possible_values": [],
+                "default_values": [],
+                "env": null,
+                "help": null
+              },
+              {
+                "id": "web",
+                "long": "web",
+                "short": null,
+                "positional": false,
+                "required": false,
+                "takes_value": false,
+                "value_names": [
+                  "WEB"
+                ],
+                "possible_values": [],
+                "default_values": [
+                  "false"
+                ],
+                "env": null,
+                "help": null
+              },
+              {
+                "id": "json",
+                "long": "json",
+                "short": null,
+                "positional": false,
+                "required": false,
+                "takes_value": false,
+                "value_names": [
+                  "JSON"
+                ],
+                "possible_values": [],
+                "default_values": [
+                  "false"
+                ],
+                "env": null,
+                "help": null
+              }
+            ],
+            "subcommands": []
+          },
+          {
+            "name": "disconnect",
+            "about": null,
+            "arguments": [
+              {
+                "id": "provider",
+                "long": null,
+                "short": null,
+                "positional": true,
+                "required": true,
+                "takes_value": true,
+                "value_names": [
+                  "PROVIDER"
+                ],
+                "possible_values": [
+                  "onepassword",
+                  "protonpass"
+                ],
+                "default_values": [],
+                "env": null,
+                "help": null
+              }
+            ],
+            "subcommands": []
+          }
+        ]
+      },
+      {
+        "name": "completions",
+        "about": null,
+        "arguments": [
+          {
+            "id": "shell",
+            "long": null,
+            "short": null,
+            "positional": true,
+            "required": true,
+            "takes_value": true,
+            "value_names": [
+              "SHELL"
+            ],
+            "possible_values": [
+              "bash",
+              "elvish",
+              "fish",
+              "powershell",
+              "zsh"
+            ],
+            "default_values": [],
+            "env": null,
+            "help": null
+          }
+        ],
+        "subcommands": []
+      }
+    ]
+  },
+  "settings": {
+    "contract_version": 1,
+    "descriptors": [
+      {
+        "key": "models.selection",
+        "scope": "host",
+        "constraints": {
+          "kind": "model",
+          "max_model_bytes": 256
+        },
+        "default": {
+          "kind": "model",
+          "selection": null
+        },
+        "sensitivity": "recipient_metadata",
+        "agent_mutability": "requires_native_confirmation",
+        "apply_behavior": "subsequent_run"
+      },
+      {
+        "key": "tools.selection",
+        "scope": "host",
+        "constraints": {
+          "kind": "tool_selection",
+          "max_endpoint_bytes": 4096,
+          "max_model_bytes": 256
+        },
+        "default": {
+          "kind": "tool_selection",
+          "selection": {
+            "kind": "local"
+          }
+        },
+        "sensitivity": "recipient_metadata",
+        "agent_mutability": "requires_native_confirmation",
+        "apply_behavior": "subsequent_selection"
+      },
+      {
+        "key": "memory.embeddings.enabled",
+        "scope": "host",
+        "constraints": {
+          "kind": "boolean"
+        },
+        "default": {
+          "kind": "boolean",
+          "value": false
+        },
+        "sensitivity": "non_secret_preference",
+        "agent_mutability": "allowlisted_preference",
+        "apply_behavior": "stop_new_work_then_apply"
+      },
+      {
+        "key": "memory.embeddings.dimensions",
+        "scope": "host",
+        "constraints": {
+          "kind": "optional_dimensions",
+          "choices": null
+        },
+        "default": {
+          "kind": "dimensions",
+          "value": null
+        },
+        "sensitivity": "non_secret_preference",
+        "agent_mutability": "allowlisted_preference",
+        "apply_behavior": "rebuild_required"
+      },
+      {
+        "key": "memory.embeddings.model",
+        "scope": "host",
+        "constraints": {
+          "kind": "embedding_model"
+        },
+        "default": {
+          "kind": "embedding_model",
+          "model": null
+        },
+        "sensitivity": "non_secret_preference",
+        "agent_mutability": "read_only",
+        "apply_behavior": "read_only"
+      },
+      {
+        "key": "notifications.completion",
+        "scope": "device_preferences",
+        "constraints": {
+          "kind": "boolean"
+        },
+        "default": {
+          "kind": "boolean",
+          "value": false
+        },
+        "sensitivity": "non_secret_preference",
+        "agent_mutability": "allowlisted_preference",
+        "apply_behavior": "this_device"
+      },
+      {
+        "key": "notifications.attention",
+        "scope": "device_preferences",
+        "constraints": {
+          "kind": "boolean"
+        },
+        "default": {
+          "kind": "boolean",
+          "value": false
+        },
+        "sensitivity": "non_secret_preference",
+        "agent_mutability": "allowlisted_preference",
+        "apply_behavior": "this_device"
+      },
+      {
+        "key": "notifications.authorization",
+        "scope": "observed_os_state",
+        "constraints": {
+          "kind": "notification_authorization"
+        },
+        "default": {
+          "kind": "notification_authorization",
+          "state": "unavailable"
+        },
+        "sensitivity": "observed_device_state",
+        "agent_mutability": "read_only",
+        "apply_behavior": "read_only"
+      }
+    ]
+  }
+}
