@@ -26,7 +26,7 @@ Every tool is annotated `readOnlyHint: true` and `openWorldHint: false`. Invalid
 | `list_features` | none | Each architecture document's title, path and first paragraph, plus a pointer to implementation status |
 | `list_commands` | none | Every `vorra` command path with its about text |
 | `explain_command` | `name`, for example `schedule create` | Arguments (flags, value names, defaults, possible values, environment variables), subcommands and documentation that mentions `vorra <name>` |
-| `latest_version` | none | The documented package version, the newest `CHANGELOG.md` release heading, the releases URL and how to check with `vorra update --check` |
+| `latest_version` | none | The newest `CHANGELOG.md` release heading (also the server's MCP `Implementation` version, `unreleased` before the first release; `Cargo.toml`'s 0.1.0 is a placeholder and is never reported), the releases URL and how to check with `vorra update --check` |
 | `changelog` | none | `CHANGELOG.md` as embedded, with a note when no stable release notes exist yet |
 
 Resources: every embedded document as `vorra-docs://<path>` (`text/markdown`), listed by `resources/list` and returned by `resources/read`; an unknown URI returns resource-not-found. Prompt: `setup_vorra` with an optional `os` argument (`macos`, `linux` or `ios`) returns one user message that asks the agent to start from `get_install_guide` and use the other tools, and never to request secrets in chat.

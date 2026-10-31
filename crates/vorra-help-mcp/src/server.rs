@@ -383,10 +383,7 @@ impl HelpServer {
         annotations(read_only_hint = true, open_world_hint = false)
     )]
     fn latest_version(&self) -> String {
-        let latest = SECTIONS
-            .iter()
-            .find(|section| section.path() == "CHANGELOG.md" && section.heading != "Changelog")
-            .map(|section| section.heading);
+        let latest = latest_release();
         pretty(&json!({
             "latest_changelog_release": latest,
             "releases": RELEASES_URL,
@@ -408,6 +405,13 @@ impl HelpServer {
             text.to_owned()
         }
     }
+}
+
+fn latest_release() -> Option<&'static str> {
+    SECTIONS
+        .iter()
+        .find(|section| section.path() == "CHANGELOG.md" && section.heading != "Changelog")
+        .map(|section| section.heading)
 }
 
 fn setup_prompt(os: Option<Os>) -> String {
@@ -435,7 +439,7 @@ impl ServerHandler for HelpServer {
                 .build(),
         )
         .with_server_info(
-            Implementation::new("vorra-help-mcp", env!("CARGO_PKG_VERSION"))
+            Implementation::new("vorra-help-mcp", latest_release().unwrap_or("unreleased"))
                 .with_title("Vorra help"),
         )
         .with_instructions(

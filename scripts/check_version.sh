@@ -20,7 +20,7 @@ for plist in apps/Apple/iOS/Info.plist apps/Apple/macOS/Info.plist; do
         [ "$have" = "\$(${key#*:})" ] || fail "$plist sets ${key%%:*} to '$have'; it must be \$(${key#*:})"
     done
 done
-for use in $(git grep -lE 'CARGO_PKG_VERSION|option_env!\("VORRA_VERSION"\)' -- 'src/*.rs' 'src/**/*.rs' | grep -vx src/lib.rs); do
+for use in $(git grep -lE 'CARGO_PKG_VERSION|option_env!\("VORRA_VERSION"\)' -- 'src/*.rs' 'src/**/*.rs' 'crates/*.rs' | grep -vx src/lib.rs); do
     fail "$use reads CARGO_PKG_VERSION or VORRA_VERSION directly; report vorra::VERSION so every binary shows the one stamped version"
 done
 if [ -n "${1:-}" ]; then
