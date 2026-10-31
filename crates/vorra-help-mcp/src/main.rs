@@ -21,7 +21,7 @@ struct Arguments {
         long = "allowed-host",
         requires = "http",
         value_name = "HOST",
-        help = "Accept this Host header in addition to loopback names, for example mcp.yumi.to"
+        help = "Accept this Host header in addition to loopback names, for example vorra.yumi.to"
     )]
     allowed_hosts: Vec<String>,
     #[arg(
