@@ -2,7 +2,7 @@
 
 For an interactive full-screen chat, run `everything` with no subcommand (alias [`everything tui`](tui.md)). It can start a Host for the session and runs first-run model onboarding when no usable credential is configured.
 
-Build with `cargo build --release --locked`. `everything --state-dir /absolute/private/path` places the global state option before the subcommand. `EVERYTHING_STATE_DIR` supplies the same default; otherwise the CLI uses `$HOME/.everything`. The state directory is created with owner-only permissions and validated on every foreground open. One host owns its exclusive lock.
+Build with `cargo build --release --locked`. `everything --state-dir /absolute/private/path` places the global state option before the subcommand. `EVERYTHING_STATE_DIR` supplies the same default; otherwise the CLI uses `$HOME/.everything`. The state directory is created with owner-only permissions and validated on every foreground open. Ancestors may be symlinks owned by you or root, such as `/tmp`, `$TMPDIR` under `/var/folders` or a symlinked `$HOME`; they are resolved during validation. The state directory itself must not be a symlink. One host owns its exclusive lock.
 
 ## Initialize and inspect
 

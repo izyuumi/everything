@@ -1,3 +1,5 @@
+use std::collections::VecDeque;
+use std::ffi::OsStr;
 use std::fs::File;
 use std::io::{self, Write};
 use std::os::unix::ffi::OsStrExt;
@@ -7,6 +9,8 @@ use std::sync::Arc;
 use rustix::fs::{AtFlags, FileType, Mode, OFlags};
 
 use super::ServiceError;
+
+const MAX_SYMBOLIC_LINKS: usize = 40;
 
 enum DirectoryPolicy {
     Private,
@@ -113,29 +117,88 @@ impl StateDirectory {
         if uid != rustix::process::getuid().as_raw() {
             return Err(ServiceError::UnsafePath("setuid execution is unsupported"));
         }
-        let components: Vec<_> = path.components().collect();
-        let mut directory = rustix::fs::open(
-            "/",
-            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
-            Mode::empty(),
-        )?;
-        for (index, component) in components.iter().enumerate().skip(1) {
+        let mut pending = VecDeque::new();
+        for component in path.components().skip(1) {
             let Component::Normal(name) = component else {
                 return Err(ServiceError::UnsafePath(
                     "relative or parent path components are forbidden",
                 ));
             };
-            let final_component = index + 1 == components.len();
+            pending.push_back(name.to_os_string());
+        }
+        let mut directory = rustix::fs::open(
+            "/",
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
+            Mode::empty(),
+        )?;
+        let mut ancestors = Vec::new();
+        let mut resolved = PathBuf::from("/");
+        let mut links = 0;
+        while let Some(name) = pending.pop_front() {
+            if name == ".." {
+                if let Some(parent) = ancestors.pop() {
+                    directory = parent;
+                    resolved.pop();
+                }
+                continue;
+            }
+            let final_component = pending.is_empty();
             let flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
-            let next = match rustix::fs::openat(&directory, *name, flags, Mode::empty()) {
+            let next = match rustix::fs::openat(&directory, &name, flags, Mode::empty()) {
                 Ok(next) => next,
                 Err(error) if error == rustix::io::Errno::NOENT && create => {
-                    match rustix::fs::mkdirat(&directory, *name, Mode::from_raw_mode(0o700)) {
+                    match rustix::fs::mkdirat(&directory, &name, Mode::from_raw_mode(0o700)) {
                         Ok(()) => {}
                         Err(error) if error == rustix::io::Errno::EXIST => {}
                         Err(error) => return Err(io::Error::from(error).into()),
                     }
-                    rustix::fs::openat(&directory, *name, flags, Mode::empty())?
+                    rustix::fs::openat(&directory, &name, flags, Mode::empty())?
+                }
+                Err(error)
+                    if error == rustix::io::Errno::NOTDIR || error == rustix::io::Errno::LOOP =>
+                {
+                    let metadata =
+                        rustix::fs::statat(&directory, &name, AtFlags::SYMLINK_NOFOLLOW)?;
+                    if FileType::from_raw_mode(metadata.st_mode) != FileType::Symlink {
+                        return Err(io::Error::from(error).into());
+                    }
+                    if final_component {
+                        return Err(ServiceError::UnsafePath(
+                            "the directory itself must not be a symbolic link",
+                        ));
+                    }
+                    if metadata.st_uid != uid && metadata.st_uid != 0 {
+                        return Err(ServiceError::UnsafePath(
+                            "symbolic link ancestors must belong to this user or root",
+                        ));
+                    }
+                    links += 1;
+                    if links > MAX_SYMBOLIC_LINKS {
+                        return Err(ServiceError::UnsafePath(
+                            "directory path has too many symbolic links",
+                        ));
+                    }
+                    let target = rustix::fs::readlinkat(&directory, &name, Vec::new())?;
+                    let target = Path::new(OsStr::from_bytes(target.as_bytes()));
+                    for component in target.components().rev() {
+                        match component {
+                            Component::Normal(name) => pending.push_front(name.to_os_string()),
+                            Component::ParentDir => pending.push_front("..".into()),
+                            Component::CurDir | Component::RootDir => {}
+                            Component::Prefix(_) => {
+                                return Err(ServiceError::UnsafePath(
+                                    "symbolic link target has an unsupported prefix",
+                                ));
+                            }
+                        }
+                    }
+                    if target.is_absolute() {
+                        if let Some(root) = ancestors.drain(..).next() {
+                            directory = root;
+                        }
+                        resolved = PathBuf::from("/");
+                    }
+                    continue;
                 }
                 Err(error) => return Err(io::Error::from(error).into()),
             };
@@ -150,7 +213,8 @@ impl StateDirectory {
                     "writable directory ancestors require the sticky bit",
                 ));
             }
-            directory = next;
+            ancestors.push(std::mem::replace(&mut directory, next));
+            resolved.push(&name);
         }
         let metadata = rustix::fs::fstat(&directory)?;
         let trusted = match policy {
@@ -171,7 +235,7 @@ impl StateDirectory {
             ));
         }
         Ok(Self {
-            path: path.to_path_buf(),
+            path: resolved,
             file: File::from(directory),
             uid,
         })
