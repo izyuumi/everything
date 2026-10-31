@@ -66,6 +66,8 @@ struct MenuContent: View {
                     Text("Updated \(date, style: .time)").font(.caption2).foregroundStyle(.secondary)
                 }
                 Spacer()
+                Button("Check for Updates…") { MacUpdates.checkForUpdates() }
+                    .disabled(MacUpdates.controller == nil)
                 Button("Quit menu bar app") { NSApplication.shared.terminate(nil) }
                     .keyboardShortcut("q")
             }

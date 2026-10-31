@@ -38,15 +38,35 @@ case "${1:-}" in
     for target in $TARGETS; do
         [ -f "$DIST/vorra-$target.tar.gz" ] || { echo "Missing $DIST/vorra-$target.tar.gz" >&2; exit 1; }
     done
-    (cd "$DIST" && shasum -a 256 vorra-*.tar.gz > SHA256SUMS)
+    MAC=
+    if [ -f "$DIST/Vorra.dmg" ] || [ -f "$DIST/appcast.xml" ]; then
+        [ -f "$DIST/Vorra.dmg" ] && [ -f "$DIST/appcast.xml" ] || { echo "The Mac build needs both Vorra.dmg and appcast.xml" >&2; exit 1; }
+        MAC=$(scripts/build-number.sh "$VERSION" "$BUILD")
+        grep -q "<sparkle:version>$MAC</sparkle:version>" "$DIST/appcast.xml" \
+            || { echo "appcast.xml does not carry CFBundleVersion $MAC" >&2; exit 1; }
+        grep -q "/releases/download/$TAG/Vorra.dmg\"" "$DIST/appcast.xml" \
+            || { echo "appcast.xml does not point at $TAG/Vorra.dmg" >&2; exit 1; }
+    else
+        echo "::warning::No Mac build in $DIST; $TAG ships without Vorra.dmg and appcast.xml."
+    fi
+    if [ -n "$MAC" ]; then
+        (cd "$DIST" && shasum -a 256 vorra-*.tar.gz Vorra.dmg > SHA256SUMS)
+    else
+        (cd "$DIST" && shasum -a 256 vorra-*.tar.gz > SHA256SUMS)
+    fi
     jq -n --arg tag "$TAG" --arg version "$VERSION" --arg build "$BUILD" --arg sha "$SOURCE_SHA" --arg targets "$TARGETS" \
+        --arg mac "$MAC" \
         '{schema: 1, tag: $tag, version: $version, build: ($build | tonumber), source_branch: "main", source_sha: $sha,
-          assets: ($targets | split(" ") | map({target: ., name: "vorra-\(.).tar.gz"}))}' > "$DIST/candidate.json"
+          assets: ($targets | split(" ") | map({target: ., name: "vorra-\(.).tar.gz"}))}
+         + (if $mac == "" then {} else {mac: {asset: "Vorra.dmg", appcast: "appcast.xml", bundle_version: ($mac | tonumber)}} end)' \
+        > "$DIST/candidate.json"
     { echo "vorra $VERSION+$BUILD, beta."; echo; scripts/release_notes.sh "$SOURCE_SHA"; } > "$DIST.notes.md"
+    set --
+    [ -z "$MAC" ] || set -- "$DIST/Vorra.dmg" "$DIST/appcast.xml"
     BETA=$(beta_tag)
     [ -z "$BETA" ] || gh release delete "$BETA" --repo "$REPO" --cleanup-tag --yes
     gh release create "$TAG" --repo "$REPO" --target "$SOURCE_SHA" --prerelease --latest=false --title "$TAG" \
-        --notes-file "$DIST.notes.md" "$DIST"/vorra-*.tar.gz "$DIST/SHA256SUMS" "$DIST/candidate.json"
+        --notes-file "$DIST.notes.md" "$DIST"/vorra-*.tar.gz "$DIST/SHA256SUMS" "$DIST/candidate.json" "$@"
     echo "Published $TAG."
     scripts/release_pr.sh "$VERSION" "$BUILD" "$SOURCE_SHA" "$(digest "$DIST/SHA256SUMS")"
     ;;
@@ -90,9 +110,23 @@ case "${1:-}" in
             || mismatch "SHA256SUMS's entry for $target" "" "vorra-$target.tar.gz"
     done
     (cd "$FILES" && shasum -a 256 -c SHA256SUMS >/dev/null 2>&1) || mismatch "the downloaded tarballs" "different from SHA256SUMS" "matching tarballs"
+    MAC=$(jq -r '.mac.bundle_version // empty' "$FILES/candidate.json" 2>/dev/null || true)
+    if [ -n "$MAC" ]; then
+        want=$(scripts/build-number.sh "$OLD" "$N" 2>/dev/null || true)
+        [ "$MAC" = "$want" ] || mismatch "candidate.json's Mac CFBundleVersion" "$MAC" "$want (build $N)"
+        grep -qE "  Vorra\.dmg\$" "$FILES/SHA256SUMS" 2>/dev/null || mismatch "SHA256SUMS's entry for the Mac app" "" "Vorra.dmg"
+        grep -q "<sparkle:version>$want</sparkle:version>" "$FILES/appcast.xml" 2>/dev/null \
+            || mismatch "appcast.xml's sparkle:version" "" "$want"
+        grep -q "/releases/download/$BETA/Vorra.dmg\"" "$FILES/appcast.xml" 2>/dev/null \
+            || mismatch "appcast.xml's download URL" "" "$BETA/Vorra.dmg"
+    fi
     if [ -n "$bad" ]; then
         echo "Not promoting $BETA: it is not the beta the release PR named, so nothing was published or deleted. The next beta opens a new release PR; check that beta, then merge it." >&2
         exit 1
+    fi
+    if [ -n "$MAC" ]; then
+        sed "s|/releases/download/$BETA/|/releases/download/v$OLD/|g" "$FILES/appcast.xml" > "$FILES.appcast.xml"
+        mv "$FILES.appcast.xml" "$FILES/appcast.xml"
     fi
     { echo "vorra $OLD+$N."; echo; scripts/release_notes.sh "$WANT_SHA"; } > "$FILES.md"
     gh release create "v$OLD" --repo "$REPO" --target "$WANT_SHA" --latest --title "v$OLD" --notes-file "$FILES.md" "$FILES"/*
