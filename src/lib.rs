@@ -30,3 +30,8 @@ pub mod vault;
 pub mod worker;
 
 pub mod credentials;
+
+pub const VERSION: &str = match option_env!("VORRA_VERSION") {
+    Some(version) => version,
+    None => env!("CARGO_PKG_VERSION"),
+};

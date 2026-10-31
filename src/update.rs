@@ -231,7 +231,7 @@ pub async fn run(
     let current = Version::running(running_version)?;
     let target = target_triple().ok_or(UpdateError::UnsupportedPlatform)?;
     let client = reqwest::Client::builder()
-        .user_agent(concat!("vorra-update/", env!("CARGO_PKG_VERSION")))
+        .user_agent(format!("vorra-update/{}", crate::VERSION))
         .connect_timeout(Duration::from_secs(15))
         .read_timeout(Duration::from_secs(60))
         .build()

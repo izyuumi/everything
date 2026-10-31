@@ -391,7 +391,7 @@ fn measure(
             .as_secs(),
         operating_system: std::env::consts::OS,
         architecture: std::env::consts::ARCH,
-        application_version: env!("CARGO_PKG_VERSION"),
+        application_version: vorra::VERSION,
         cache_state: "uncontrolled operating-system file cache; one fresh model session",
         interpretation: "Illustrative public-corpus retrieval probe, not a general accuracy or Apple-hardware benchmark",
         configuration: BenchmarkConfiguration {

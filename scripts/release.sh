@@ -8,6 +8,10 @@ beta_tag() {
         | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+-beta$' | head -1 || true
 }
 digest() { printf 'sha256:%s' "$(shasum -a 256 "$1" | cut -d' ' -f1)"; }
+case "${1:-}" in
+--publish|--promote)
+    [ "${VORRA_RELEASES:-}" = enabled ] || { echo "Refusing $1: VORRA_RELEASES is '${VORRA_RELEASES:-}', not enabled." >&2; exit 1; } ;;
+esac
 
 case "${1:-}" in
 --next)
@@ -30,6 +34,7 @@ case "${1:-}" in
     SOURCE_SHA=$(git rev-parse HEAD)
     TAG="v$VERSION-beta"
     [ -z "$(git status --porcelain)" ] || { echo "Refusing to publish from a dirty tree: candidate.json names the commit." >&2; exit 1; }
+    scripts/check_version.sh "$TAG"
     for target in $TARGETS; do
         [ -f "$DIST/vorra-$target.tar.gz" ] || { echo "Missing $DIST/vorra-$target.tar.gz" >&2; exit 1; }
     done
@@ -92,7 +97,7 @@ case "${1:-}" in
     { echo "vorra $OLD+$N."; echo; scripts/release_notes.sh "$WANT_SHA"; } > "$FILES.md"
     gh release create "v$OLD" --repo "$REPO" --target "$WANT_SHA" --latest --title "v$OLD" --notes-file "$FILES.md" "$FILES"/*
     gh release delete "$BETA" --repo "$REPO" --cleanup-tag --yes
-    echo "Published v$OLD."
+    echo "Published v$OLD. Submit the iOS build for $OLD to the App Store by hand with scripts/app_store_submit.sh."
     ;;
 
 *)

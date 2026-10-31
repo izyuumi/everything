@@ -464,7 +464,7 @@ impl LocalServer {
             process_id: std::process::id(),
             started_at: UnixMillis::now()
                 .map_err(|_| LocalError::Protocol("host clock cannot encode a timestamp"))?,
-            version: env!("CARGO_PKG_VERSION").to_owned(),
+            version: crate::VERSION.to_owned(),
         };
         Ok((
             Self {

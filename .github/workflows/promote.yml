@@ -18,6 +18,7 @@ jobs:
       GH_TOKEN: ${{ github.token }}
       REPO: ${{ github.repository }}
       BODY: ${{ github.event.pull_request.body }}
+      VORRA_RELEASES: ${{ vars.VORRA_RELEASES }}
     steps:
       - uses: actions/checkout@v4
         with:
