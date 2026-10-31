@@ -21,6 +21,21 @@ struct VaultProviderRow: Identifiable, Sendable {
         default: "This Mac (Keychain)"
         }
     }
+
+    var binary: String? {
+        guard state == "ready", let detail, let range = detail.range(of: " via /") else { return nil }
+        return String(detail[detail.index(range.upperBound, offsetBy: -1)...])
+    }
+}
+
+private func vaultKindLabel(_ kind: String) -> String {
+    switch kind {
+    case "api_secret": "API secret"
+    case "login": "Login"
+    case "card": "Card"
+    case "identity": "Identity"
+    default: JSONSummary.label(kind)
+    }
 }
 
 struct VaultItemRow: Identifiable, Sendable {
@@ -114,11 +129,12 @@ private struct VaultPutFrame: Encodable {
 private struct VaultConnectFrame: Encodable {
     let kind = "vault_connect"
     let requestID: String
+    let provider = "protonpass"
     let binary: String
     let token: String
 
     enum CodingKeys: String, CodingKey {
-        case kind, binary, token
+        case kind, provider, binary, token
         case requestID = "request_id"
     }
 }
@@ -352,6 +368,8 @@ struct VaultSettingsView: View {
         .formStyle(.grouped)
         .padding(12)
         .task { await vault.load() }
+        .onChange(of: vault.provider("1password")?.binary, initial: true) { _, binary in if let binary { opBinary = binary } }
+        .onChange(of: vault.provider("protonpass")?.binary, initial: true) { _, binary in if let binary { protonBinary = binary } }
         .sheet(isPresented: $adding) { VaultAddSheet(vault: vault) }
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didResignActiveNotification)) { _ in protonToken = "" }
         .onDisappear { protonToken = "" }
@@ -366,7 +384,7 @@ struct VaultSettingsView: View {
     }
 
     private func summary(_ item: VaultItemRow) -> String {
-        var parts = [JSONSummary.label(item.kind)]
+        var parts = [vaultKindLabel(item.kind)]
         if let env = item.envName { parts.append("$" + env) }
         if let service = item.service { parts.append(service) }
         if let username = item.username { parts.append(username) }
