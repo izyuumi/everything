@@ -480,6 +480,7 @@ enum CliError {
 }
 
 fn main() -> ExitCode {
+    let _ = rustls::crypto::ring::default_provider().install_default();
     let arguments = Arguments::parse();
     let runtime = match tokio::runtime::Builder::new_multi_thread()
         .enable_all()
