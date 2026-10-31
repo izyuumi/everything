@@ -103,7 +103,22 @@ xcodebuild -project apps/Apple/Everything.xcodeproj -scheme EverythingIOS -desti
 xcodebuild -project apps/Apple/Everything.xcodeproj -scheme EverythingIOS -destination 'generic/platform=iOS Simulator' CODE_SIGNING_ALLOWED=NO analyze
 ```
 
-An unsigned app has no `application-identifier` entitlement, so the iOS Keychain refuses its identity (`-34018`) and the app shows only the protected-identity error. The iOS target therefore no longer disables signing; Simulator builds are ad-hoc signed. A runnable Simulator app needs a plain build without `CODE_SIGNING_ALLOWED=NO`, for example `-destination 'platform=iOS Simulator,name=…' build`. Physical devices need the owner's development team.
+An unsigned app has no `application-identifier` entitlement, so the iOS Keychain refuses its identity (`-34018`) and the app shows only the protected-identity error. The iOS target therefore no longer disables signing; Simulator builds are ad-hoc signed. A runnable Simulator app needs a plain build without `CODE_SIGNING_ALLOWED=NO`, for example `-destination 'platform=iOS Simulator,name=…' build`. Both app targets use automatic signing with development team `AN5KM8QGEF`; physical-device and archive builds need an Xcode account or App Store Connect API key for that team.
+
+### TestFlight distribution
+
+`EverythingIOS` (bundle ID `ai.everything.ios`) carries a single 1024-pixel `AppIcon` and the iPad orientations App Store validation requires. `ITSAppUsesNonExemptEncryption` is `NO`: the app's cryptography is CryptoKit and the Security framework plus URLSession TLS, which is encryption within Apple's operating system and exempt, so uploads need no export-compliance answer. `CFBundleVersion` follows `scripts/ios-build-number.sh <major.minor.patch> <build>`, which encodes `major*10000000 + minor*100000 + patch*1000 + build` (0.1.0 build 1 is 100001). Archive and export with the API key, overriding the numbers:
+
+```sh
+xcodebuild archive -project apps/Apple/Everything.xcodeproj -scheme EverythingIOS -configuration Release \
+  -destination 'generic/platform=iOS' -archivePath build/ios/EverythingIOS.xcarchive \
+  -allowProvisioningUpdates -authenticationKeyPath "$KEY" -authenticationKeyID "$ASC_KEY_ID" -authenticationKeyIssuerID "$ASC_ISSUER_ID" \
+  MARKETING_VERSION=0.1.0 CURRENT_PROJECT_VERSION=$(scripts/ios-build-number.sh 0.1.0 1)
+xcodebuild -exportArchive -archivePath build/ios/EverythingIOS.xcarchive -exportOptionsPlist apps/Apple/iOS/ExportOptions.plist \
+  -exportPath build/ios/export -allowProvisioningUpdates -authenticationKeyPath "$KEY" -authenticationKeyID "$ASC_KEY_ID" -authenticationKeyIssuerID "$ASC_ISSUER_ID"
+```
+
+`ExportOptions.plist` exports an `app-store-connect` IPA; set its `destination` to `upload` to send the build to App Store Connect, which needs an existing app record for the bundle ID. A release workflow is not implemented.
 
 ### Simulator protocol walkthrough
 
