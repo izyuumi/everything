@@ -13,8 +13,8 @@ use crate::agent::{ConversationConfig, MAX_INSTRUCTIONS_BYTES, ProviderEndpoint,
 use crate::permissions::ExecutionMode;
 use crate::scheduler::ExecutionPolicy;
 use crate::service::{ServiceError, StateLease};
-use crate::tools::ToolRegistry;
 pub use crate::skills::SkillName;
+use crate::tools::ToolRegistry;
 
 pub const DEFAULT_AGENT_ID: AgentId = AgentId(Uuid::from_u128(1));
 pub const AGENTS_SCHEMA: u64 = 1;

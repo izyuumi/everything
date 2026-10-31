@@ -352,13 +352,36 @@ impl Actor {
                 let registry = Arc::clone(&self.registry);
                 let captured = run.clone();
                 let agents = crate::host::agents::AgentRepository::for_agent(&self.agent)?;
-                self.work(move |repository, _| {
-                    let agents = agents.snapshot()?;
-                    let agent = agents.resolve(captured.definition.target.agent)?;
-                    let policy = capture_policy(&captured, &registry, agent)?;
-                    Ok(repository.reserve_first_attempt(occurrence, &policy)?)
-                })
-                .await?
+                let reserved = self
+                    .work(move |repository, _| {
+                        let agents = agents.snapshot()?;
+                        let requested = captured.definition.target.agent;
+                        let agent = match agents.resolve(requested) {
+                            Ok(agent) => agent,
+                            Err(crate::host::agents::AgentsError::NotFound) => {
+                                return Ok(Err(requested
+                                    .map_or_else(|| "default".to_owned(), |id| id.to_string())));
+                            }
+                            Err(error) => return Err(error.into()),
+                        };
+                        let policy = capture_policy(&captured, &registry, agent)?;
+                        Ok(Ok(repository.reserve_first_attempt(occurrence, &policy)?))
+                    })
+                    .await?;
+                match reserved {
+                    Ok(attempt) => attempt,
+                    Err(agent) => {
+                        return self
+                            .finish(
+                                &run,
+                                RunOutcome::Failed {
+                                    code: "agent_not_found".into(),
+                                    message: format!("scheduled agent {agent} was not found"),
+                                },
+                            )
+                            .await;
+                    }
+                }
             }
         };
         let attempt_number = attempt.attempt_number;

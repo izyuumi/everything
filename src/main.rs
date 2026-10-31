@@ -2529,9 +2529,32 @@ async fn run_tool_chat(
     let (registry, authorizer, search, authority, initial, limits, budget) =
         tokio::task::spawn_blocking(move || {
             let retained_agent = preparation_owner;
-            let workspace = match &active {
-                Some(run) => run.workspace_root.clone(),
-                None => options.workspace.unwrap_or(std::env::current_dir()?),
+            let definition = match &active {
+                Some(_) => None,
+                None => {
+                    let stored = prepare_store
+                        .conversation_agent(&conversation_id.to_string())
+                        .map_err(AgentError::from)?
+                        .map(|id| id.parse::<vorra::host::agents::AgentId>())
+                        .transpose()?;
+                    Some(
+                        vorra::host::agents::AgentRepository::for_agent(&retained_agent)?
+                            .snapshot()?
+                            .resolve(stored)?
+                            .clone(),
+                    )
+                }
+            };
+            let workspace = match (&active, &definition) {
+                (Some(run), _) => run.workspace_root.clone(),
+                (None, definition) => match options.workspace.or_else(|| {
+                    definition
+                        .as_ref()
+                        .and_then(|agent| agent.workspace.clone())
+                }) {
+                    Some(path) => path,
+                    None => std::env::current_dir()?,
+                },
             };
             let mode = active.as_ref().map(|run| run.mode).unwrap_or_else(|| {
                 options
@@ -2557,19 +2580,10 @@ async fn run_tool_chat(
             registry.register(search.clone())?;
             scopes.insert(SEARCH_TOOLS_NAME.to_owned(), ToolScopeRule::LocalReadOnly);
             let registry = Arc::new(registry);
-            let ceiling = match &active {
-                Some(run) => Some((mode, Some(run.allowed_tools.iter().cloned().collect()))),
-                None => {
-                    let stored = prepare_store
-                        .conversation_agent(&conversation_id.to_string())
-                        .map_err(AgentError::from)?
-                        .map(|id| id.parse::<vorra::host::agents::AgentId>())
-                        .transpose()?;
-                    vorra::host::agents::AgentRepository::for_agent(&retained_agent)?
-                        .snapshot()?
-                        .resolve(stored)?
-                        .tool_ceiling(mode, &registry)
-                }
+            let ceiling = match (&active, &definition) {
+                (Some(run), _) => Some((mode, Some(run.allowed_tools.iter().cloned().collect()))),
+                (None, Some(agent)) => agent.tool_ceiling(mode, &registry),
+                (None, None) => None,
             };
             let tools_off = ceiling.is_none();
             let (mode, allowed) =
@@ -2615,20 +2629,6 @@ async fn run_tool_chat(
                     (*bytes <= 4096).then_some(character)
                 })
                 .collect();
-            let initial = if authority.permits_tool(SEARCH_TOOLS_NAME) {
-                selector.select_local(&authority, &query, 8)?.definitions()
-            } else {
-                registry
-                    .descriptors()
-                    .filter(|tool| authority.permits_tool(&tool.name))
-                    .take(8)
-                    .map(|tool| vorra::model::ToolDefinition {
-                        name: tool.name.clone(),
-                        description: tool.description.clone(),
-                        input_schema: tool.input_schema.clone(),
-                    })
-                    .collect()
-            };
             let mut limits = LoopLimits::default();
             if let Some(value) = options.max_model_attempts {
                 limits.max_model_attempts = value;
@@ -2648,6 +2648,22 @@ async fn run_tool_chat(
                 limits.max_tool_calls = 0;
             }
             limits.validate()?;
+            let initial = if authority.permits_tool(SEARCH_TOOLS_NAME) {
+                selector.select_local(&authority, &query, 8)?.definitions()
+            } else {
+                registry
+                    .descriptors()
+                    .filter(|tool| {
+                        authority.permits_tool(&tool.name) && tool.name != SEARCH_TOOLS_NAME
+                    })
+                    .take(limits.max_selected_tools)
+                    .map(|tool| vorra::model::ToolDefinition {
+                        name: tool.name.clone(),
+                        description: tool.description.clone(),
+                        input_schema: tool.input_schema.clone(),
+                    })
+                    .collect()
+            };
             let budget = ContextBudget {
                 max_context_tokens: options.context_tokens.unwrap_or(128_000),
                 reserved_output_tokens: output_tokens,

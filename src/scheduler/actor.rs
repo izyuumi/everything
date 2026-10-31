@@ -1178,6 +1178,7 @@ impl Actor {
                         operation,
                         tool_name,
                         active.cancellation.child_token(),
+                        task.definition.execution.agent.map(|agent| agent.id),
                     ))
                 })();
                 let _ = reply.send(result);

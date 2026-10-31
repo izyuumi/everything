@@ -1463,6 +1463,10 @@ pub(super) fn public_failure(error: &HostError) -> LocalFailure {
             LocalFailureCode::Unavailable,
             "schedule controls or engine are unavailable; inspect actual status",
         ),
+        HostError::ScheduleControl(ControlError::Agents(super::agents::AgentsError::NotFound)) => (
+            LocalFailureCode::InvalidRequest,
+            "schedule target agent was not found",
+        ),
         HostError::ScheduleControl(
             ControlError::Schedule(_) | ControlError::Invalid(_) | ControlError::ReplyTooLarge,
         ) => (
