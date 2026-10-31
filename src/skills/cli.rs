@@ -61,8 +61,8 @@ pub enum SkillsCliError {
     Body(SkillIssue),
     #[error("skills discovery was cancelled")]
     Cancelled,
-    #[error("could not serialize skills output")]
-    Serialization,
+    #[error("could not write skills output: {0}")]
+    Serialization(#[from] serde_json::Error),
     #[error(transparent)]
     Io(#[from] io::Error),
 }
@@ -240,8 +240,7 @@ fn listed(catalog: &Catalog) -> Vec<ListedSkill<'_>> {
 fn list(catalog: &Catalog, json: bool, output: &mut impl Write) -> Result<(), SkillsCliError> {
     let rows = listed(catalog);
     if json {
-        serde_json::to_writer_pretty(&mut *output, &rows)
-            .map_err(|_| SkillsCliError::Serialization)?;
+        serde_json::to_writer_pretty(&mut *output, &rows)?;
         writeln!(output)?;
         return Ok(());
     }
@@ -368,8 +367,7 @@ fn show(
                         rejected,
                         offered: false,
                     },
-                )
-                .map_err(|_| SkillsCliError::Serialization)?;
+                )?;
                 writeln!(output)?;
             } else {
                 writeln!(output, "name: {}", shown(&rejected.label))?;
@@ -403,8 +401,7 @@ fn show(
                 offered: record.offered(),
                 body,
             },
-        )
-        .map_err(|_| SkillsCliError::Serialization)?;
+        )?;
         writeln!(output)?;
         return Ok(());
     }

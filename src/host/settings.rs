@@ -243,6 +243,11 @@ impl SkillsSettings {
 }
 
 pub fn read_skills_settings(state_dir: &std::path::Path) -> Result<SkillsSettings, SettingsError> {
+    #[derive(Deserialize)]
+    struct Partial {
+        #[serde(default)]
+        skills: SkillsSettings,
+    }
     let path = state_dir.join(SETTINGS_FILE);
     let descriptor = match rustix::fs::open(
         &path,
@@ -270,13 +275,17 @@ pub fn read_skills_settings(state_dir: &std::path::Path) -> Result<SkillsSetting
     if bytes.len() > MAX_SETTINGS_BYTES {
         return Err(SettingsError::Invalid("settings exceed 64 KiB"));
     }
-    #[derive(Deserialize)]
-    struct Partial {
-        #[serde(default)]
-        skills: SkillsSettings,
-    }
-    let partial: Partial = serde_json::from_slice(&bytes)
-        .map_err(|_| SettingsError::Invalid("unsupported or malformed skills settings"))?;
+    let partial: Partial = serde_json::from_slice(&bytes).map_err(|error| {
+        SettingsError::Io(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "{}: skills settings malformed at line {} column {}",
+                path.display(),
+                error.line(),
+                error.column()
+            ),
+        ))
+    })?;
     partial.skills.validate()?;
     Ok(partial.skills)
 }
