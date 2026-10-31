@@ -157,6 +157,14 @@ struct SettingsView: View {
                 Text("These explicit controls manage to.yumi.vorra.host in your launchd login domain. They do not control a separately started foreground host.")
                     .font(.caption).foregroundStyle(.secondary)
             }.disabled(model.acting || model.closing || model.connection.executable.isEmpty || model.connectionEdited || model.pendingAction != nil)
+            Section("Updates") {
+                if let updater = MacUpdates.controller?.updater {
+                    UpdateSettings(updater: updater)
+                } else {
+                    Text("Updates are unavailable in this build: it has no Sparkle feed or public key.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+            }
             if let message = model.message { Text(message).font(.caption).textSelection(.enabled) }
         }
         .formStyle(.grouped)

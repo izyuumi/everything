@@ -18,5 +18,11 @@
     <key>NSPrincipalClass</key><string>NSApplication</string>
     <key>NSSupportsAutomaticTermination</key><false/>
     <key>NSSupportsSuddenTermination</key><false/>
+    <key>SUFeedURL</key><string>$(VORRA_SPARKLE_FEED_URL)</string>
+    <key>SUPublicEDKey</key><string>$(VORRA_SPARKLE_PUBLIC_KEY)</string>
+    <key>SUEnableAutomaticChecks</key><true/>
+    <key>SUAutomaticallyUpdate</key><true/>
+    <key>SUAllowsAutomaticUpdates</key><true/>
+    <key>SUScheduledCheckInterval</key><integer>3600</integer>
 </dict>
 </plist>

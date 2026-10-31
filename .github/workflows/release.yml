@@ -110,8 +110,86 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
+  mac:
+    needs: next
+    if: github.repository == 'izyuumi/everything' && vars.VORRA_RELEASES == 'enabled'
+    runs-on: macos-latest
+    timeout-minutes: 120
+    permissions:
+      contents: read
+    env:
+      VERSION: ${{ needs.next.outputs.version }}
+      BUILD: ${{ needs.next.outputs.build }}
+      VORRA_RELEASES: ${{ vars.VORRA_RELEASES }}
+      VORRA_SPARKLE_PUBLIC_KEY: ${{ vars.VORRA_SPARKLE_PUBLIC_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Signing identity, notary profile and Sparkle key
+        id: signing
+        env:
+          DEVELOPER_ID_P12: ${{ secrets.DEVELOPER_ID_P12 }}
+          DEVELOPER_ID_PASSWORD: ${{ secrets.DEVELOPER_ID_PASSWORD }}
+          ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+          ASC_KEY_P8: ${{ secrets.ASC_KEY_P8 }}
+          SPARKLE_ED_KEY: ${{ secrets.SPARKLE_ED_KEY }}
+        run: |
+          set -eu
+          for name in DEVELOPER_ID_P12 DEVELOPER_ID_PASSWORD ASC_KEY_ID ASC_ISSUER_ID ASC_KEY_P8 SPARKLE_ED_KEY VORRA_SPARKLE_PUBLIC_KEY; do
+            eval "value=\${$name:-}"
+            if [ -z "$value" ]; then
+              echo "::warning::$name is not set; this beta ships without the Mac app (Vorra.dmg and appcast.xml)."
+              echo "ready=false" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+          done
+          KEYCHAIN="$RUNNER_TEMP/release.keychain-db"
+          KEYCHAIN_PASSWORD=$(openssl rand -base64 24)
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          printf '%s' "$DEVELOPER_ID_P12" | base64 -d > "$RUNNER_TEMP/developer-id.p12"
+          security import "$RUNNER_TEMP/developer-id.p12" -P "$DEVELOPER_ID_PASSWORD" -A -t cert -f pkcs12 -k "$KEYCHAIN"
+          rm "$RUNNER_TEMP/developer-id.p12"
+          curl -fsSL -o "$RUNNER_TEMP/DeveloperIDG2CA.cer" https://www.apple.com/certificateauthority/DeveloperIDG2CA.cer
+          security import "$RUNNER_TEMP/DeveloperIDG2CA.cer" -t cert -k "$KEYCHAIN" 2>&1 | grep -v 'already exists' || true
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN" >/dev/null
+          security list-keychains -d user -s "$KEYCHAIN" login.keychain-db
+          security default-keychain -s "$KEYCHAIN"
+          IDENTITY=$(security find-identity -v -p codesigning "$KEYCHAIN" | sed -n 's/.*"\(Developer ID Application: .*\)"$/\1/p' | head -1)
+          [ -n "$IDENTITY" ] || { echo "DEVELOPER_ID_P12 holds no Developer ID Application identity" >&2; exit 1; }
+          echo "SIGN_IDENTITY=$IDENTITY" >> "$GITHUB_ENV"
+          umask 077
+          printf '%s' "$ASC_KEY_P8" | base64 -d > "$RUNNER_TEMP/AuthKey.p8"
+          xcrun notarytool store-credentials vorra-notary --keychain "$KEYCHAIN" \
+            --key "$RUNNER_TEMP/AuthKey.p8" --key-id "$ASC_KEY_ID" --issuer "$ASC_ISSUER_ID"
+          rm "$RUNNER_TEMP/AuthKey.p8"
+          echo "NOTARY_PROFILE=vorra-notary" >> "$GITHUB_ENV"
+          printf '%s' "$SPARKLE_ED_KEY" > "$RUNNER_TEMP/sparkle.key"
+          echo "SPARKLE_ED_KEY_FILE=$RUNNER_TEMP/sparkle.key" >> "$GITHUB_ENV"
+          echo "ready=true" >> "$GITHUB_OUTPUT"
+      - name: Build, sign, notarize and make the appcast
+        if: steps.signing.outputs.ready == 'true'
+        run: scripts/release_mac.sh "$RUNNER_TEMP/dist"
+      - name: Forget signing credentials
+        if: always()
+        run: |
+          rm -f "$RUNNER_TEMP/sparkle.key" "$RUNNER_TEMP/AuthKey.p8"
+          security delete-keychain "$RUNNER_TEMP/release.keychain-db" 2>/dev/null || true
+      - uses: actions/upload-artifact@v4
+        if: steps.signing.outputs.ready == 'true'
+        with:
+          name: vorra-mac
+          path: |
+            ${{ runner.temp }}/dist/Vorra.dmg
+            ${{ runner.temp }}/dist/appcast.xml
+          if-no-files-found: error
+          retention-days: 7
+
   publish:
-    needs: [next, build]
+    needs: [next, build, mac]
     if: github.repository == 'izyuumi/everything' && vars.VORRA_RELEASES == 'enabled'
     runs-on: ubuntu-latest
     timeout-minutes: 15
