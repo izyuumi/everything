@@ -9,6 +9,7 @@ pub mod memory;
 mod owner;
 pub mod providers;
 pub mod publication;
+pub mod relocation;
 pub mod runtime;
 pub mod selection;
 pub mod settings;

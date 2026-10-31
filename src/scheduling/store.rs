@@ -47,6 +47,38 @@ impl ScheduleRepository {
         Ok(created)
     }
 
+    pub(crate) fn relocate_paths(
+        &self,
+        sources: &[std::path::PathBuf],
+        target: &std::path::Path,
+        now: UnixMillis,
+    ) -> ScheduleResult<usize> {
+        let now = timestamp(now)?;
+        let mut connection = self.store.connection()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let jobs = transaction
+            .prepare("SELECT id,definition FROM scheduled_jobs")?
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut relocated = 0;
+        for (id, definition) in jobs {
+            let mut value: serde_json::Value = serde_json::from_str(&definition)?;
+            if !crate::host::relocation::relocate_value(&mut value, sources, target) {
+                continue;
+            }
+            let definition: ScheduleDefinition = serde_json::from_value(value)?;
+            transaction.execute(
+                "UPDATE scheduled_jobs SET definition=?2,generation=generation+1,revision=revision+1,updated_at=max(updated_at,?3) WHERE id=?1",
+                params![id, encode(&definition, MAX_SCHEDULE_DEFINITION_BYTES)?, now],
+            )?;
+            relocated += 1;
+        }
+        transaction.commit()?;
+        Ok(relocated)
+    }
+
     pub fn job(&self, id: ScheduledJobId) -> ScheduleResult<Option<ScheduledJob>> {
         let connection = self.store.connection()?;
         read_job(&connection, id)

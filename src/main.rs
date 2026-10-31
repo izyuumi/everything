@@ -429,6 +429,8 @@ enum CliError {
     #[error(transparent)]
     Service(#[from] vorra::service::ServiceError),
     #[error(transparent)]
+    Relocation(#[from] vorra::host::relocation::RelocationError),
+    #[error(transparent)]
     Agent(#[from] AgentError),
     #[error(transparent)]
     Model(#[from] vorra::model::ModelError),
@@ -558,6 +560,7 @@ async fn execute(arguments: Arguments, cancellation: CancellationToken) -> Resul
         && state_dir == home.join(".vorra")
     {
         vorra::service::migrate_legacy_state(home)?;
+        vorra::host::relocation::relocate_legacy_paths(home).await?;
     }
     if cancellation.is_cancelled() {
         return Err(AgentError::Cancelled.into());

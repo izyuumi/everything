@@ -62,6 +62,19 @@ impl StateLease {
         &self.directory.path
     }
 
+    pub(crate) fn existing_database(&self) -> Result<Option<File>, ServiceError> {
+        self.directory.migrate_database()?;
+        match rustix::fs::statat(
+            &self.directory.file,
+            "vorra.sqlite3",
+            AtFlags::SYMLINK_NOFOLLOW,
+        ) {
+            Ok(_) => self.validate_database().map(Some),
+            Err(error) if error == rustix::io::Errno::NOENT => Ok(None),
+            Err(error) => Err(error.into()),
+        }
+    }
+
     pub(crate) fn validate_database(&self) -> Result<File, ServiceError> {
         self.directory.migrate_database()?;
         let descriptor = rustix::fs::openat(
