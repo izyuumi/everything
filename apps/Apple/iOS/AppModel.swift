@@ -315,11 +315,10 @@ final class AppModel {
         }
     }
 
-    func addConversation(_ value: String, title: String) async -> Bool {
+    func newConversation() async {
         await perform {
-            guard let service, let id = UUID(uuidString: value), id != WireID.zero else { throw WireError.invalid }
-            try await service.addConversation(id, title: title)
-            selectedConversation = id
+            guard let service else { throw WireError.unavailable }
+            selectedConversation = try await service.createConversation(title: "New conversation")
         }
     }
 

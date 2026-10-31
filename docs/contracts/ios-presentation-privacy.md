@@ -1,6 +1,6 @@
 # Inactive iOS presentation cover
 
-The iOS app applies the same `InactivePrivacyCover` to its five app-owned presentation roots: main Root content, the pairing and add-conversation NavigationStacks, the nested QR scanner sheet and the steering NavigationStack. The module-internal modifier lives in the existing `VorraIOSApp.swift`; no project membership or presentation owner is added.
+The iOS app applies the same `InactivePrivacyCover` to its four app-owned presentation roots: main Root content, the pairing NavigationStack, the nested QR scanner sheet and the steering NavigationStack. The add-conversation sheet was removed when New conversation became one tap. The module-internal modifier lives in the existing `VorraIOSApp.swift`; no project membership or presentation owner is added.
 
 Each root reads its enclosing Scene's `scenePhase`, marks its content `privacySensitive()` and places the existing opaque background Rectangle with the Vorra lock label above that content whenever the phase is not active. The main root's previous visual treatment is unchanged. Separate sheets explicitly apply the modifier because an overlay on their presenting content does not cover their own root. Future app-owned presentation roots must also apply it.
 

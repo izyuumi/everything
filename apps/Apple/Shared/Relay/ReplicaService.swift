@@ -1892,10 +1892,15 @@ actor ReplicaService {
         pendingPairing = nil
     }
 
-    func addConversation(_ id: UUID, title: String) async throws {
+    func createConversation(title: String) async throws -> UUID {
+        try await store.checkActive()
+        guard try await store.host() != nil else { throw WireError.pairing }
+        let id = UUID()
         try await store.addConversation(id, title: title)
+        try await submit(conversation: id, payload: .object(["kind": .string("create_conversation"), "title": .string(title)]), now: WireID.now())
         selectedConversation = id
         preferSelectedSync = true
+        return id
     }
 
     func selectConversation(_ id: UUID?) {

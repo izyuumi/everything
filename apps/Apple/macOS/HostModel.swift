@@ -373,6 +373,15 @@ final class HostModel {
         } catch { if !Task.isCancelled { message = error.localizedDescription } }
     }
 
+    func newConversation() async {
+        let id = OwnerID()
+        do {
+            let request = try OwnerRequest.command(conversation: id, payload: ["kind": .string("create_conversation"), "title": .string("New conversation")])
+            await apply(request, label: "New conversation", expectedKind: "command")
+            if let created = conversations.first(where: { $0.id == id }) { open(created) }
+        } catch { message = error.localizedDescription }
+    }
+
     func cancel(_ task: HostTask) async {
         guard task.source == connection else { return }
         do {
