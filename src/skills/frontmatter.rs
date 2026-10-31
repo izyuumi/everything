@@ -1,9 +1,10 @@
 use std::collections::BTreeMap;
+use std::fmt;
 
 use serde::Deserialize;
-use serde_norway::Value;
+use serde::de::{self, Deserializer, MapAccess, SeqAccess, Visitor};
 
-use super::{MAX_FRONTMATTER_BYTES, SkillIssue};
+use super::{MAX_FRONTMATTER_BYTES, MAX_FRONTMATTER_STRING_BYTES, SkillIssue};
 
 pub(super) struct Document<'a> {
     pub frontmatter: &'a str,
@@ -26,13 +27,169 @@ pub(super) fn split(raw: &str) -> Option<Document<'_>> {
 #[derive(Default, Deserialize)]
 #[serde(default)]
 struct RawFrontmatter {
-    name: Option<Value>,
-    description: Option<Value>,
-    license: Option<Value>,
-    compatibility: Option<Value>,
+    name: Option<Scalar>,
+    description: Option<Scalar>,
+    license: Option<Scalar>,
+    compatibility: Option<Scalar>,
     #[serde(rename = "allowed-tools")]
-    allowed_tools: Option<Value>,
-    metadata: Option<Value>,
+    allowed_tools: Option<Scalar>,
+    metadata: Option<Metadata>,
+}
+
+enum Scalar {
+    Text(String),
+    Other,
+}
+
+impl Scalar {
+    fn bytes(&self) -> usize {
+        match self {
+            Self::Text(text) => text.len(),
+            Self::Other => 0,
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for Scalar {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        deserializer.deserialize_any(ScalarVisitor)
+    }
+}
+
+struct ScalarVisitor;
+
+impl<'de> Visitor<'de> for ScalarVisitor {
+    type Value = Scalar;
+
+    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("a scalar")
+    }
+
+    fn visit_str<E: de::Error>(self, value: &str) -> Result<Scalar, E> {
+        Ok(Scalar::Text(value.to_owned()))
+    }
+
+    fn visit_string<E: de::Error>(self, value: String) -> Result<Scalar, E> {
+        Ok(Scalar::Text(value))
+    }
+
+    fn visit_bool<E: de::Error>(self, _: bool) -> Result<Scalar, E> {
+        Ok(Scalar::Other)
+    }
+
+    fn visit_i64<E: de::Error>(self, _: i64) -> Result<Scalar, E> {
+        Ok(Scalar::Other)
+    }
+
+    fn visit_u64<E: de::Error>(self, _: u64) -> Result<Scalar, E> {
+        Ok(Scalar::Other)
+    }
+
+    fn visit_f64<E: de::Error>(self, _: f64) -> Result<Scalar, E> {
+        Ok(Scalar::Other)
+    }
+
+    fn visit_unit<E: de::Error>(self) -> Result<Scalar, E> {
+        Ok(Scalar::Other)
+    }
+
+    fn visit_none<E: de::Error>(self) -> Result<Scalar, E> {
+        Ok(Scalar::Other)
+    }
+
+    fn visit_seq<A: SeqAccess<'de>>(self, _: A) -> Result<Scalar, A::Error> {
+        Err(de::Error::invalid_type(de::Unexpected::Seq, &self))
+    }
+
+    fn visit_map<A: MapAccess<'de>>(self, _: A) -> Result<Scalar, A::Error> {
+        Err(de::Error::invalid_type(de::Unexpected::Map, &self))
+    }
+}
+
+#[derive(Default)]
+struct Metadata {
+    entries: BTreeMap<String, String>,
+    non_string: Vec<String>,
+    not_a_map: bool,
+    bytes: usize,
+}
+
+impl<'de> Deserialize<'de> for Metadata {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        deserializer.deserialize_any(MetadataVisitor)
+    }
+}
+
+struct MetadataVisitor;
+
+impl MetadataVisitor {
+    fn not_a_map() -> Metadata {
+        Metadata {
+            not_a_map: true,
+            ..Metadata::default()
+        }
+    }
+}
+
+impl<'de> Visitor<'de> for MetadataVisitor {
+    type Value = Metadata;
+
+    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("a map of strings to strings")
+    }
+
+    fn visit_str<E: de::Error>(self, _: &str) -> Result<Metadata, E> {
+        Ok(Self::not_a_map())
+    }
+
+    fn visit_bool<E: de::Error>(self, _: bool) -> Result<Metadata, E> {
+        Ok(Self::not_a_map())
+    }
+
+    fn visit_i64<E: de::Error>(self, _: i64) -> Result<Metadata, E> {
+        Ok(Self::not_a_map())
+    }
+
+    fn visit_u64<E: de::Error>(self, _: u64) -> Result<Metadata, E> {
+        Ok(Self::not_a_map())
+    }
+
+    fn visit_f64<E: de::Error>(self, _: f64) -> Result<Metadata, E> {
+        Ok(Self::not_a_map())
+    }
+
+    fn visit_unit<E: de::Error>(self) -> Result<Metadata, E> {
+        Ok(Metadata::default())
+    }
+
+    fn visit_none<E: de::Error>(self) -> Result<Metadata, E> {
+        Ok(Metadata::default())
+    }
+
+    fn visit_seq<A: SeqAccess<'de>>(self, _: A) -> Result<Metadata, A::Error> {
+        Err(de::Error::invalid_type(de::Unexpected::Seq, &self))
+    }
+
+    fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Metadata, A::Error> {
+        let mut metadata = Metadata::default();
+        while let Some(key) = map.next_key::<String>()? {
+            let value = map.next_value::<Scalar>()?;
+            metadata.bytes = metadata
+                .bytes
+                .saturating_add(key.len())
+                .saturating_add(value.bytes());
+            if metadata.bytes > MAX_FRONTMATTER_STRING_BYTES {
+                continue;
+            }
+            match value {
+                Scalar::Text(value) => {
+                    metadata.entries.insert(key, value);
+                }
+                Scalar::Other => metadata.non_string.push(key),
+            }
+        }
+        Ok(metadata)
+    }
 }
 
 #[derive(Default)]
@@ -50,8 +207,11 @@ pub(super) fn parse(yaml: &str) -> Result<Fields, SkillIssue> {
     if yaml.len() > MAX_FRONTMATTER_BYTES {
         return Err(SkillIssue::FrontmatterTooLarge { bytes: yaml.len() });
     }
-    if has_anchor_or_alias(yaml) {
-        return Err(SkillIssue::YamlAnchorOrAlias);
+    if yaml
+        .replace("\r\n", "\n")
+        .contains(['\r', '\u{85}', '\u{2028}', '\u{2029}'])
+    {
+        return Err(SkillIssue::UnsupportedLineBreak);
     }
     let raw: RawFrontmatter = if yaml.trim().is_empty() {
         RawFrontmatter::default()
@@ -60,136 +220,51 @@ pub(super) fn parse(yaml: &str) -> Result<Fields, SkillIssue> {
             message: error.to_string(),
         })?
     };
+    let metadata = raw.metadata.unwrap_or_default();
+    let bytes = [
+        &raw.name,
+        &raw.description,
+        &raw.license,
+        &raw.compatibility,
+        &raw.allowed_tools,
+    ]
+    .into_iter()
+    .flatten()
+    .map(Scalar::bytes)
+    .fold(metadata.bytes, usize::saturating_add);
+    if bytes > MAX_FRONTMATTER_STRING_BYTES {
+        return Err(SkillIssue::FrontmatterStringsTooLarge { bytes });
+    }
     let mut fields = Fields::default();
     fields.name = string_field(raw.name, "name", &mut fields.issues);
     fields.description = string_field(raw.description, "description", &mut fields.issues);
     fields.license = string_field(raw.license, "license", &mut fields.issues);
     fields.compatibility = string_field(raw.compatibility, "compatibility", &mut fields.issues);
     fields.allowed_tools = string_field(raw.allowed_tools, "allowed-tools", &mut fields.issues);
-    match raw.metadata {
-        None | Some(Value::Null) => {}
-        Some(Value::Mapping(mapping)) => {
-            let mut complete = true;
-            for (key, value) in mapping {
-                match (key, value) {
-                    (Value::String(key), Value::String(value)) => {
-                        fields.metadata.insert(key, value);
-                    }
-                    _ => complete = false,
-                }
-            }
-            if !complete {
-                fields.issues.push(SkillIssue::MetadataNotStringMap);
-            }
-        }
-        Some(_) => fields.issues.push(SkillIssue::MetadataNotStringMap),
+    if metadata.not_a_map {
+        fields.issues.push(SkillIssue::MetadataNotStringMap);
     }
+    fields.issues.extend(
+        metadata
+            .non_string
+            .into_iter()
+            .map(|key| SkillIssue::MetadataValueNotString { key }),
+    );
+    fields.metadata = metadata.entries;
     Ok(fields)
 }
 
 fn string_field(
-    value: Option<Value>,
+    value: Option<Scalar>,
     field: &'static str,
     issues: &mut Vec<SkillIssue>,
 ) -> Option<String> {
     match value {
-        None | Some(Value::Null) => None,
-        Some(Value::String(value)) => Some(value),
-        Some(_) => {
+        None => None,
+        Some(Scalar::Text(value)) => Some(value),
+        Some(Scalar::Other) => {
             issues.push(SkillIssue::NotAString { field });
             None
         }
     }
-}
-
-fn has_anchor_or_alias(yaml: &str) -> bool {
-    let mut quote: Option<char> = None;
-    let mut flow = 0_usize;
-    let mut block: Option<usize> = None;
-    let mut node = true;
-    for line in yaml.lines() {
-        let indent = line.len() - line.trim_start_matches(' ').len();
-        if quote.is_none() {
-            if let Some(parent) = block {
-                if line.trim().is_empty() || indent > parent {
-                    continue;
-                }
-                block = None;
-            }
-            if flow == 0 {
-                node = true;
-            }
-        }
-        let mut chars = line.chars().peekable();
-        let mut previous = ' ';
-        while let Some(character) = chars.next() {
-            let next_blank = chars.peek().is_none_or(|next| next.is_whitespace());
-            match quote {
-                Some('"') => {
-                    if character == '\\' {
-                        chars.next();
-                    } else if character == '"' {
-                        quote = None;
-                    }
-                    previous = character;
-                    continue;
-                }
-                Some(_) => {
-                    if character == '\'' {
-                        if chars.peek() == Some(&'\'') {
-                            chars.next();
-                        } else {
-                            quote = None;
-                        }
-                    }
-                    previous = character;
-                    continue;
-                }
-                None => {}
-            }
-            if character.is_whitespace() {
-                previous = character;
-                continue;
-            }
-            if character == '#' && previous.is_whitespace() {
-                break;
-            }
-            if node {
-                match character {
-                    '&' | '*' => return true,
-                    '"' | '\'' => {
-                        quote = Some(character);
-                        node = false;
-                    }
-                    '[' | '{' => flow += 1,
-                    ']' | '}' => {
-                        flow = flow.saturating_sub(1);
-                        node = false;
-                    }
-                    ',' if flow > 0 => {}
-                    '-' | '?' | ':' if next_blank => {}
-                    '|' | '>' if flow == 0 => {
-                        block = Some(indent);
-                        break;
-                    }
-                    '!' => while chars.next_if(|next| !next.is_whitespace()).is_some() {},
-                    _ => node = false,
-                }
-            } else if character == ':' && (next_blank || flow > 0) {
-                node = true;
-            } else if flow > 0 {
-                match character {
-                    ',' => node = true,
-                    '[' | '{' => {
-                        flow += 1;
-                        node = true;
-                    }
-                    ']' | '}' => flow = flow.saturating_sub(1),
-                    _ => {}
-                }
-            }
-            previous = character;
-        }
-    }
-    false
 }

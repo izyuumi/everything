@@ -17,6 +17,7 @@ pub use lock::LockEntry;
 pub const MAX_SKILL_DIRS_PER_ROOT: usize = 512;
 pub const MAX_SKILL_FILE_BYTES: u64 = 256 * 1024;
 pub const MAX_FRONTMATTER_BYTES: usize = 16 * 1024;
+pub const MAX_FRONTMATTER_STRING_BYTES: usize = 64 * 1024;
 pub const MAX_EXTRA_ROOTS: usize = 8;
 pub const MAX_NAME_BYTES: usize = 64;
 pub const MAX_DESCRIPTION_BYTES: usize = 1024;
@@ -179,9 +180,11 @@ pub enum SkillIssue {
     DescriptionTooLong { bytes: usize },
     CompatibilityTooLong { bytes: usize },
     MetadataNotStringMap,
+    MetadataValueNotString { key: String },
     MissingFrontmatter,
     FrontmatterTooLarge { bytes: usize },
-    YamlAnchorOrAlias,
+    FrontmatterStringsTooLarge { bytes: usize },
+    UnsupportedLineBreak,
     Frontmatter { message: String },
     SkillFileTooLarge { bytes: u64 },
     SkillFileNotRegular,
@@ -217,6 +220,9 @@ impl fmt::Display for SkillIssue {
             Self::MetadataNotStringMap => {
                 formatter.write_str("metadata is not a map of strings to strings")
             }
+            Self::MetadataValueNotString { key } => {
+                write!(formatter, "metadata {key:?} is not a string")
+            }
             Self::MissingFrontmatter => {
                 formatter.write_str("SKILL.md has no YAML frontmatter; not offered")
             }
@@ -224,9 +230,13 @@ impl fmt::Display for SkillIssue {
                 formatter,
                 "frontmatter is {bytes} bytes, above 16 KiB; not offered"
             ),
-            Self::YamlAnchorOrAlias => {
-                formatter.write_str("frontmatter uses a YAML anchor or alias; not offered")
-            }
+            Self::FrontmatterStringsTooLarge { bytes } => write!(
+                formatter,
+                "frontmatter strings total {bytes} bytes after alias expansion, above 64 KiB; not offered"
+            ),
+            Self::UnsupportedLineBreak => formatter.write_str(
+                "frontmatter contains a lone CR, U+0085, U+2028 or U+2029 line break; not offered",
+            ),
             Self::Frontmatter { message } => {
                 write!(formatter, "frontmatter is invalid: {message}; not offered")
             }
