@@ -1526,12 +1526,27 @@ pub(super) fn public_failure(error: &HostError) -> LocalFailure {
             LocalFailureCode::Busy,
             "host command or task capacity is exhausted",
         ),
-        HostError::Agents(error) => {
+        HostError::Agents(
+            error @ (super::agents::AgentsError::Invalid(_)
+            | super::agents::AgentsError::Configuration(_)
+            | super::agents::AgentsError::NotFound
+            | super::agents::AgentsError::Conflict),
+        ) => {
             return LocalFailure {
                 code: LocalFailureCode::InvalidRequest,
                 message: error.to_string(),
             };
         }
+        HostError::Agents(
+            super::agents::AgentsError::UnsupportedSchema(_)
+            | super::agents::AgentsError::Malformed
+            | super::agents::AgentsError::TooLarge
+            | super::agents::AgentsError::UnsafeFile,
+        ) => (
+            LocalFailureCode::Unavailable,
+            "agents file is unreadable; inspect it on the Host",
+        ),
+        HostError::Agents(_) => (LocalFailureCode::Internal, "agents state operation failed"),
         HostError::Invalid(message) | HostError::Inbox(InboxError::Invalid(message)) => {
             (LocalFailureCode::InvalidRequest, *message)
         }

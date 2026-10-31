@@ -42,6 +42,8 @@ pub enum AgentsError {
     UnsupportedSchema(u64),
     #[error("invalid agent definition: {0}")]
     Invalid(&'static str),
+    #[error("agent produces an invalid conversation configuration: {0}")]
+    Configuration(#[source] crate::agent::AgentError),
     #[error("agents changed; reload before saving")]
     Conflict,
     #[error("agent was not found")]
@@ -320,9 +322,9 @@ impl AgentDefinition {
                 configuration.temperature = model.temperature;
             }
         }
-        configuration.validate().map_err(|_| {
-            AgentsError::Invalid("agent produces an invalid conversation configuration")
-        })?;
+        configuration
+            .validate()
+            .map_err(AgentsError::Configuration)?;
         Ok(configuration)
     }
 
@@ -335,16 +337,22 @@ impl AgentDefinition {
         }
         if self.description.trim().is_empty()
             || self.description.len() > MAX_DESCRIPTION_BYTES
-            || self.description.contains('\0')
+            || self.description.chars().any(char::is_control)
         {
-            return Err(AgentsError::Invalid("description requires 1 to 1024 bytes"));
+            return Err(AgentsError::Invalid(
+                "description requires 1 to 1024 bytes without control characters",
+            ));
         }
         if let Some(persona) = &self.persona
             && (persona.trim().is_empty()
                 || persona.len() > MAX_PERSONA_BYTES
-                || persona.contains('\0'))
+                || persona
+                    .chars()
+                    .any(|character| character.is_control() && !matches!(character, '\n' | '\t')))
         {
-            return Err(AgentsError::Invalid("persona requires 1 to 32768 bytes"));
+            return Err(AgentsError::Invalid(
+                "persona requires 1 to 32768 bytes without control characters other than newline and tab",
+            ));
         }
         if self.traits.len() > MAX_TRAITS {
             return Err(AgentsError::Invalid("at most sixteen traits are allowed"));
@@ -372,9 +380,7 @@ impl AgentDefinition {
                 max_output_tokens: model.max_output_tokens.unwrap_or(4096),
                 temperature: model.temperature,
             };
-            probe
-                .validate()
-                .map_err(|_| AgentsError::Invalid("invalid agent model"))?;
+            probe.validate().map_err(AgentsError::Configuration)?;
         }
         if let AgentTools::On { max_mode, allow } = &self.tools {
             if *max_mode == ExecutionMode::SettingsRestricted {
@@ -488,7 +494,8 @@ impl AgentsFile {
     }
 
     fn encode(&self) -> Result<Vec<u8>, AgentsError> {
-        let bytes = serde_json::to_vec_pretty(self).map_err(|_| AgentsError::Malformed)?;
+        let bytes = serde_json::to_vec_pretty(self)
+            .map_err(|_| AgentsError::Invalid("agents encoding failed"))?;
         if bytes.len() > MAX_AGENTS_FILE_BYTES {
             return Err(AgentsError::TooLarge);
         }

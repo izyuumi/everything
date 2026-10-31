@@ -798,6 +798,9 @@ fn retryable_application(error: &HostError) -> bool {
     matches!(
         error,
         HostError::Agent(AgentError::Busy | AgentError::PendingTurn(_))
+            | HostError::Agents(
+                super::agents::AgentsError::Io(_) | super::agents::AgentsError::Service(_)
+            )
             | HostError::Draining
             | HostError::WorkerRecoveryUnavailable
             | HostError::Inbox(InboxError::Capacity)
