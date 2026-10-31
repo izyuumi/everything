@@ -214,6 +214,7 @@ enum SensitiveOwnerInput {
     },
     VaultConnect {
         request_id: CommandId,
+        provider: everything::vault::VaultProviderId,
         binary: std::path::PathBuf,
         token: everything::host::credentials::SecretTransfer,
     },
@@ -731,15 +732,21 @@ async fn owner_cli(
             }
             SensitiveOwnerInput::VaultConnect {
                 request_id,
+                provider,
                 binary,
                 token,
             } => {
+                if provider != everything::vault::VaultProviderId::ProtonPass {
+                    return Err(CliError::OwnerJson(
+                        "provider: only protonpass accepts a vault_connect token".to_owned(),
+                    ));
+                }
                 write_sensitive_json(
                     output,
                     client
                         .operate(
                             everything::ipc::OwnerOperation::VaultConnect {
-                                provider: everything::vault::VaultProviderId::ProtonPass,
+                                provider,
                                 binary,
                                 account: None,
                                 token: Some(token),
