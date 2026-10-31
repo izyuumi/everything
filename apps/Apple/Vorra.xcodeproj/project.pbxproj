@@ -319,6 +319,16 @@
             "path" = "MenuContent.swift";
             "sourceTree" = "<group>";
         };
+        "E4B27C9A13F5486D8C0A5B3E" = {
+            "isa" = "PBXFileReference";
+            "lastKnownFileType" = "sourcecode.swift";
+            "path" = "MacUpdates.swift";
+            "sourceTree" = "<group>";
+        };
+        "9F06D3B85A2E4C71B0E8A4D6" = {
+            "isa" = "PBXBuildFile";
+            "fileRef" = "E4B27C9A13F5486D8C0A5B3E";
+        };
         "14E3FDC1451F2DCE6763CA98" = {
             "isa" = "PBXBuildFile";
             "fileRef" = "7C5CDFEEFC4B839057387451";
@@ -529,6 +539,7 @@
                 "BA68F5D32E48B3CBF341D632",
                 "8D895A41A4241F5A0E80D77C",
                 "7C5CDFEEFC4B839057387451",
+                "E4B27C9A13F5486D8C0A5B3E",
                 "D7C84BABB04E783E04F7D6EB",
                 "3F1C7A52D90B4E6A8C21B7E4",
                 "E4DEA7C2A88FA1DC5F002B17",
@@ -622,6 +633,7 @@
                 "F77D0168812FD33BC283078B",
                 "5DD0C751C392C8F6847DCDF4",
                 "14E3FDC1451F2DCE6763CA98",
+                "9F06D3B85A2E4C71B0E8A4D6",
                 "7CA5E98DE69F2186DEA9BCC0",
                 "9A4E2D61C8B37F05E1D6A932",
                 "68B248F9B1B6FC26D9DD796C",
@@ -670,6 +682,7 @@
             "buildActionMask" = "2147483647";
             "files" = (
                 "21C767B34FBE81EE061A7317",
+                "C83F6A1D0B5E4927A6D2E8F1",
             );
             "runOnlyForDeploymentPostprocessing" = "0";
         };
@@ -693,6 +706,8 @@
                 "ENABLE_HARDENED_RUNTIME" = "YES";
                 "ENABLE_APP_SANDBOX" = "NO";
                 "PRODUCT_BUNDLE_IDENTIFIER" = "to.yumi.vorra.mac";
+                "VORRA_SPARKLE_FEED_URL" = "https://github.com/izyuumi/everything/releases/latest/download/appcast.xml";
+                "VORRA_SPARKLE_PUBLIC_KEY" = "";
                 "DEVELOPMENT_TEAM" = "AN5KM8QGEF";
                 "PRODUCT_NAME" = "Vorra";
                 "INFOPLIST_FILE" = "macOS/Info.plist";
@@ -722,6 +737,8 @@
                 "ENABLE_HARDENED_RUNTIME" = "YES";
                 "ENABLE_APP_SANDBOX" = "NO";
                 "PRODUCT_BUNDLE_IDENTIFIER" = "to.yumi.vorra.mac";
+                "VORRA_SPARKLE_FEED_URL" = "https://github.com/izyuumi/everything/releases/latest/download/appcast.xml";
+                "VORRA_SPARKLE_PUBLIC_KEY" = "";
                 "DEVELOPMENT_TEAM" = "AN5KM8QGEF";
                 "PRODUCT_NAME" = "Vorra";
                 "INFOPLIST_FILE" = "macOS/Info.plist";
@@ -760,6 +777,9 @@
             "dependencies" = (
             );
             "name" = "VorraMac";
+            "packageProductDependencies" = (
+                "7D41B0E9C6A2F3851E9B4D07",
+            );
             "productName" = "Vorra";
             "productReference" = "F54CD7E7026DFD0AE0A9ADAB";
             "productType" = "com.apple.product-type.application";
@@ -1246,6 +1266,9 @@
                 "Base",
             );
             "mainGroup" = "0D6E4079E36703EBD37C0072";
+            "packageReferences" = (
+                "5A9C3E7B21D84F06B3E1A7C2",
+            );
             "productRefGroup" = "0A3E27B8CA818264D75C8D81";
             "projectDirPath" = "";
             "projectRoot" = "";
@@ -1275,6 +1298,23 @@
         "21C767B34FBE81EE061A7317" = {
             "isa" = "PBXBuildFile";
             "fileRef" = "3B38C43243463B34043D02F5";
+        };
+        "5A9C3E7B21D84F06B3E1A7C2" = {
+            "isa" = "XCRemoteSwiftPackageReference";
+            "repositoryURL" = "https://github.com/sparkle-project/Sparkle";
+            "requirement" = {
+                "kind" = "upToNextMajorVersion";
+                "minimumVersion" = "2.9.0";
+            };
+        };
+        "7D41B0E9C6A2F3851E9B4D07" = {
+            "isa" = "XCSwiftPackageProductDependency";
+            "package" = "5A9C3E7B21D84F06B3E1A7C2";
+            "productName" = "Sparkle";
+        };
+        "C83F6A1D0B5E4927A6D2E8F1" = {
+            "isa" = "PBXBuildFile";
+            "productRef" = "7D41B0E9C6A2F3851E9B4D07";
         };
         "4EFC3B1B64D7B87D25B1B9B2" = {
             "isa" = "PBXFileReference";
