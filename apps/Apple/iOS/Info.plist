@@ -13,7 +13,8 @@
 <key>UIApplicationSceneManifest</key><dict><key>UIApplicationSupportsMultipleScenes</key><false/><key>UISceneConfigurations</key><dict/></dict>
 <key>UISupportedInterfaceOrientations</key><array><string>UIInterfaceOrientationPortrait</string><string>UIInterfaceOrientationLandscapeLeft</string><string>UIInterfaceOrientationLandscapeRight</string></array>
 <key>UISupportedInterfaceOrientations~ipad</key><array><string>UIInterfaceOrientationPortrait</string><string>UIInterfaceOrientationPortraitUpsideDown</string><string>UIInterfaceOrientationLandscapeLeft</string><string>UIInterfaceOrientationLandscapeRight</string></array>
+<key>CFBundleURLTypes</key><array><dict><key>CFBundleURLName</key><string>to.yumi.vorra.pair</string><key>CFBundleURLSchemes</key><array><string>vorra</string></array></dict></array>
 <key>ITSAppUsesNonExemptEncryption</key><false/>
-<key>NSCameraUsageDescription</key><string>Scan a pairing invitation from your Vorra host.</string>
+<key>NSCameraUsageDescription</key><string>Scan the pairing code that vorra pair shows on your Mac.</string>
 <key>NSLocalNetworkUsageDescription</key><string>Connect to an explicitly configured Vorra relay on your local network.</string>
 </dict></plist>

@@ -13,6 +13,8 @@ use crate::storage::StorageError;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
+const PAIRING_DELIVERY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
+
 impl HostInner {
     async fn task_snapshot(
         self: &Arc<Self>,
@@ -211,6 +213,11 @@ impl HostInner {
             OwnerQuery::SettingsOperation { .. } => Err(HostError::Invalid(
                 "settings operation inspection requires authenticated owner ingress",
             )),
+            OwnerQuery::PairingRequests { pairing_id } => Ok(OwnerQueryResult::PairingRequests {
+                requests: self
+                    .devices
+                    .pairing_requests(pairing_id, UnixMillis::now()?)?,
+            }),
             OwnerQuery::Identity => {
                 let keys = self.devices.public_keys();
                 Ok(OwnerQueryResult::Identity {
@@ -585,6 +592,76 @@ impl HostInner {
                             UnixMillis::now()?,
                         )?,
                     })
+                })
+                .await
+            }
+            OwnerOperation::DecidePairing {
+                pairing_id,
+                device_id,
+                approve,
+                access,
+            } => {
+                let progress = {
+                    let _mutation = self.mutation.lock().await;
+                    self.ensure_accepting()?;
+                    self.blocking(move |host| {
+                        Ok(host.devices.decide_pairing(
+                            pairing_id,
+                            device_id,
+                            approve,
+                            access,
+                            UnixMillis::now()?,
+                        )?)
+                    })
+                    .await?
+                };
+                let (decision, delivery) = match progress {
+                    crate::devices::PairingProgress::Decided(decision) => {
+                        return Ok(OwnerOperationResult::PairingDecided { decision });
+                    }
+                    crate::devices::PairingProgress::Awaiting { decision, delivery } => {
+                        (decision, delivery)
+                    }
+                };
+                let delivered = tokio::select! {
+                    _ = cancellation.cancelled() => None,
+                    result = tokio::time::timeout(PAIRING_DELIVERY_TIMEOUT, delivery) => {
+                        result.ok().and_then(Result::ok)
+                    }
+                };
+                if !matches!(delivered, Some(Ok(()))) {
+                    self.devices.abandon_pairing(pairing_id)?;
+                }
+                match delivered {
+                    Some(Ok(())) => {
+                        self.changed.notify_one();
+                        Ok(OwnerOperationResult::PairingDecided { decision })
+                    }
+                    Some(Err(
+                        crate::relay_protocol::RelayErrorCode::PairingExpired
+                        | crate::relay_protocol::RelayErrorCode::PairingRejected,
+                    )) => Err(HostError::Invalid(
+                        "the phone left before the approval reached it; nothing was paired. Run vorra pair again",
+                    )),
+                    Some(Err(crate::relay_protocol::RelayErrorCode::Internal)) => {
+                        Err(HostError::Invalid(
+                            "the phone received the approval but this host could not record the pairing; disable the device on the phone and run vorra pair again",
+                        ))
+                    }
+                    Some(Err(_)) => Err(HostError::Invalid(
+                        "the relay could not enroll the phone; nothing was paired. Check vorra relay devices and run vorra pair again",
+                    )),
+                    None => Err(HostError::Invalid(
+                        "the relay did not confirm that the phone received the approval; nothing was paired on this host. Run vorra pair again",
+                    )),
+                }
+            }
+            OwnerOperation::CancelPairing { pairing_id } => {
+                let _mutation = self.mutation.lock().await;
+                self.blocking(move |host| {
+                    host.devices
+                        .withdraw_pairing(pairing_id, UnixMillis::now()?)?;
+                    Ok(OwnerOperationResult::Applied)
                 })
                 .await
             }

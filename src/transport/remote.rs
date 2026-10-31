@@ -158,9 +158,12 @@ impl RelayConnection {
                     return Err(RemoteError::Protocol);
                 }
             }
-            RelayClientMessage::Acknowledge { .. } | RelayClientMessage::Ping { .. } => {}
+            RelayClientMessage::Acknowledge { .. }
+            | RelayClientMessage::Ping { .. }
+            | RelayClientMessage::PairingDecision { .. } => {}
             RelayClientMessage::BeginAuthentication { .. }
-            | RelayClientMessage::Authenticate { .. } => {
+            | RelayClientMessage::Authenticate { .. }
+            | RelayClientMessage::PairingRequest { .. } => {
                 return Err(RemoteError::Protocol);
             }
         }
@@ -188,9 +191,10 @@ impl RelayConnection {
         .await;
         self.last_received = last_received;
         let result = result.and_then(|message| match &message {
-            RelayServerMessage::Challenge { .. } | RelayServerMessage::Authenticated { .. } => {
-                Err(RemoteError::Protocol)
-            }
+            RelayServerMessage::Challenge { .. }
+            | RelayServerMessage::Authenticated { .. }
+            | RelayServerMessage::PairingPending { .. }
+            | RelayServerMessage::PairingAccepted { .. } => Err(RemoteError::Protocol),
             RelayServerMessage::Delivery { envelope, .. }
                 if envelope.header.recipient != self.device_id =>
             {

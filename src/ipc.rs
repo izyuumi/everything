@@ -147,6 +147,9 @@ pub enum OwnerQuery {
     Runtime,
     ToolRecovery,
     Transport,
+    PairingRequests {
+        pairing_id: Option<crate::protocol::MessageId>,
+    },
     Devices {
         limit: usize,
     },
@@ -447,6 +450,15 @@ pub enum OwnerOperation {
         expected_fingerprint: String,
         access: crate::devices::DeviceAccess,
     },
+    DecidePairing {
+        pairing_id: crate::protocol::MessageId,
+        device_id: DeviceId,
+        approve: bool,
+        access: crate::devices::DeviceAccess,
+    },
+    CancelPairing {
+        pairing_id: crate::protocol::MessageId,
+    },
     RevokeDevice {
         device_id: DeviceId,
     },
@@ -577,6 +589,9 @@ impl OwnerOperation {
             )
             .map(|_| ())
             .map_err(|_| "invalid pairing approval"),
+            Self::DecidePairing { access, .. } => access
+                .validate()
+                .map_err(|_| "invalid paired-device access"),
             Self::ChatGpt { operation } => operation.validate(),
             Self::ChatGptModels { binding } => crate::host::chatgpt::validate_binding(binding),
             Self::VaultPut { item } => item.validate().map_err(|_| "invalid vault item"),
@@ -716,6 +731,9 @@ pub enum OwnerQueryResult {
     },
     Transport {
         relay: RelayStatus,
+    },
+    PairingRequests {
+        requests: Vec<crate::devices::PendingPairingRequest>,
     },
     Runtime {
         state: HostRuntimeState,
@@ -889,6 +907,12 @@ impl OwnerQueryResult {
             #[cfg(feature = "local-embeddings")]
             (OwnerQuery::EmbeddingIndex, Self::EmbeddingIndex { .. }) => true,
             (OwnerQuery::Transport, Self::Transport { .. }) => true,
+            (OwnerQuery::PairingRequests { pairing_id }, Self::PairingRequests { requests }) => {
+                requests.len() <= 8
+                    && requests
+                        .iter()
+                        .all(|request| pairing_id.is_none_or(|id| id == request.pairing_id))
+            }
             (OwnerQuery::Runtime, Self::Runtime { .. }) => true,
             (
                 OwnerQuery::ToolRecovery,
@@ -1038,6 +1062,9 @@ pub enum OwnerOperationResult {
     },
     PairingApproved {
         acceptance: crate::crypto::PairingAcceptance,
+    },
+    PairingDecided {
+        decision: crate::devices::PairingDecision,
     },
     ToolRecovery {
         report: crate::tools::broker::RecoveryReport,
@@ -1240,11 +1267,18 @@ impl OwnerOperationResult {
                 | OwnerOperation::RevokeGrant { .. }
                 | OwnerOperation::RevokeWorkerPeer { .. }
                 | OwnerOperation::RevokeDevice { .. }
+                | OwnerOperation::CancelPairing { .. }
                 | OwnerOperation::WakeTask { .. }
                 | OwnerOperation::RetryProvider { .. },
                 Self::Applied,
             ) => true,
             (OwnerOperation::ResumeInterrupted { .. }, Self::Applied) => true,
+            (
+                OwnerOperation::DecidePairing {
+                    device_id, approve, ..
+                },
+                Self::PairingDecided { decision },
+            ) => decision.device_id == *device_id && decision.approved == *approve,
             (
                 OwnerOperation::VaultConnect {
                     provider: crate::vault::VaultProviderId::OnePassword,

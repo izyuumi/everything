@@ -91,6 +91,54 @@ actor RelayConnection {
         }
     }
 
+    static func pair(origin: RelayOrigin, responder: UUID, request: WireValue, deviceName: String, nameSignature: Data, expires: UInt64) async throws -> Data {
+        let connection = RelayConnection(origin: origin, localID: responder)
+        do {
+            let acceptance = try await connection.awaitPairing(request: request, deviceName: deviceName, nameSignature: nameSignature, expires: expires)
+            await connection.close()
+            return acceptance
+        } catch {
+            await connection.close()
+            throw error
+        }
+    }
+
+    private func awaitPairing(request: WireValue, deviceName: String, nameSignature: Data, expires: UInt64) async throws -> Data {
+        do {
+            try await send(.object(["type": .string("pairing_request"), "schema_version": .unsigned(1), "request": request,
+                                    "device_name": .string(deviceName), "name_signature": .bytes(nameSignature)]))
+            let pending = try Self.pairingFrame(await read(seconds: 20, maximum: 4_096))
+            guard try pending.object(keys: ["type", "schema_version"], required: ["type", "schema_version"]).required("type").text == "pairing_pending" else { throw PairingFailure.unsupportedRelay }
+        } catch let failure as PairingFailure {
+            throw failure
+        } catch {
+            throw PairingFailure.unreachable
+        }
+        let now = try WireID.now()
+        guard expires > now else { throw PairingFailure.expired }
+        let raw: WireValue
+        do { raw = try Self.pairingFrame(await read(seconds: Double(expires - now) / 1_000 + 5, maximum: 8_192)) }
+        catch let failure as PairingFailure { throw failure }
+        catch WireError.timeout { throw PairingFailure.expired }
+        catch { throw PairingFailure.unreachable }
+        let fields = try raw.object(keys: ["type", "schema_version", "acceptance"], required: ["type", "schema_version", "acceptance"])
+        guard try fields.required("type").text == "pairing_accepted", try fields.required("schema_version").integer == 1 else { throw WireError.invalid }
+        return try fields.required("acceptance").encoded(maximum: 4_096)
+    }
+
+    private static func pairingFrame(_ raw: WireValue) throws -> WireValue {
+        guard try raw.field("type").text == "error" else { return raw }
+        let fields = try raw.object(keys: ["type", "schema_version", "code"], required: ["type", "schema_version", "code"])
+        switch try fields.required("code").text {
+        case "pairing_rejected": throw PairingFailure.rejected
+        case "pairing_expired": throw PairingFailure.expired
+        case "pairing_in_use": throw PairingFailure.inUse
+        case "pairing_unavailable": throw PairingFailure.notAllowed
+        case "recipient_unavailable", "rate_limited", "queue_full", "internal": throw PairingFailure.unreachable
+        default: throw PairingFailure.unsupportedRelay
+        }
+    }
+
     private func authenticate(origin: RelayOrigin, identity: DeviceIdentity) async throws {
         let deadline = ContinuousClock.now.advanced(by: .seconds(20))
         try await send(.object(["type": .string("begin_authentication"), "schema_version": .unsigned(1), "device_id": .id(localID)]))

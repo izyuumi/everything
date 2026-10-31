@@ -3,10 +3,18 @@ import os
 
 let settingsClockSkewMilliseconds: UInt64 = 5_000
 
-struct PairingSummary: Sendable {
-    let deviceID: UUID
-    let fingerprint: String
-    let expires: UInt64
+struct PairingAttempt: Sendable, Equatable {
+    let id: UUID
+    let code: String
+    let hostName: String
+}
+
+private struct PendingPairing: Sendable {
+    let id: UUID
+    let link: PairingLink
+    let request: WireValue
+    let deviceName: String
+    let nameSignature: Data
 }
 
 struct ReplicaViewState: Sendable {
@@ -701,9 +709,7 @@ actor ReplicaService {
     private var syncPosition = 0
     private var notificationPosition = 0
     private var claimingNotifications = false
-    private var pendingInvitation: PairingInvitation?
-    private var pendingCompletion: PairingInvitation?
-    private var pairingEpoch = UUID()
+    private var pendingPairing: PendingPairing?
     private var processingInbox = false
     private var outbound: [OutboundID: OutboundSend] = [:]
     private var outboundSocket: RelayConnection?
@@ -1853,40 +1859,37 @@ actor ReplicaService {
         try await store.configure(origin: RelayOrigin(value))
     }
 
-    func inspectInvitation(_ text: String) async throws -> PairingSummary {
+    #if os(iOS)
+    func preparePairing(_ text: String, deviceName: String) async throws -> PairingAttempt {
         try await store.checkActive()
-        guard pendingCompletion == nil else { throw WireError.pairing }
-        let invitation = try PairingInvitation(Data(text.utf8), now: WireID.now())
-        if let host = try await store.host(), host != invitation.inviter { throw WireError.identity }
-        pendingInvitation = invitation
-        pairingEpoch = UUID()
-        return PairingSummary(deviceID: invitation.inviter.deviceID, fingerprint: invitation.inviter.fingerprint, expires: invitation.expires)
-    }
-
-    func createPairingRequest(confirmedFingerprint: String) async throws -> String {
-        guard let invitation = pendingInvitation else { throw WireError.pairing }
-        pendingInvitation = nil
-        let capturedEpoch = pairingEpoch
-        let request = try await invitation.request(identity: identity, confirmedFingerprint: confirmedFingerprint, now: WireID.now())
-        guard capturedEpoch == pairingEpoch else { throw WireError.pairing }
-        pendingCompletion = invitation
-        let data = try request.encoded(maximum: 4_096)
-        guard let text = String(data: data, encoding: .utf8) else { throw WireError.invalid }
-        return text
-    }
-
-    func finishPairing(_ text: String) async throws {
-        guard let invitation = pendingCompletion else { throw WireError.pairing }
-        pendingCompletion = nil
+        let link = try PairingLink(text, now: WireID.now())
+        if let host = try await store.host() {
+            throw host == link.invitation.inviter ? PairingFailure.alreadyPaired(link.hostName) : PairingFailure.otherHost
+        }
         let own = identity.publicKeys
-        let host = try invitation.finish(Data(text.utf8), responder: own, now: WireID.now())
-        try await store.pin(host, pairingID: invitation.id)
+        let created = try await link.invitation.request(identity: identity, confirmedFingerprint: link.invitation.inviter.fingerprint, now: WireID.now())
+        let nameSignature = try await identity.sign(link.invitation.nameBytes(responder: own, name: deviceName))
+        let pending = PendingPairing(id: UUID(), link: link, request: created.request, deviceName: deviceName, nameSignature: nameSignature)
+        pendingPairing = pending
+        return PairingAttempt(id: pending.id, code: link.invitation.code(responder: own, proof: created.proof), hostName: link.hostName)
     }
+
+    func completePairing(_ attempt: PairingAttempt) async throws {
+        guard let pending = pendingPairing, pending.id == attempt.id else { throw PairingFailure.expired }
+        let own = identity.publicKeys
+        let acceptance = try await RelayConnection.pair(origin: pending.link.origin, responder: own.deviceID, request: pending.request,
+                                                        deviceName: pending.deviceName, nameSignature: pending.nameSignature,
+                                                        expires: pending.link.invitation.expires)
+        guard pendingPairing?.id == attempt.id else { throw CancellationError() }
+        pendingPairing = nil
+        let host = try pending.link.invitation.finish(acceptance, responder: own, now: WireID.now())
+        try await store.configure(origin: pending.link.origin)
+        try await store.pin(host, pairingID: pending.link.invitation.id)
+    }
+    #endif
 
     func cancelPairing() {
-        pendingInvitation = nil
-        pendingCompletion = nil
-        pairingEpoch = UUID()
+        pendingPairing = nil
     }
 
     func addConversation(_ id: UUID, title: String) async throws {

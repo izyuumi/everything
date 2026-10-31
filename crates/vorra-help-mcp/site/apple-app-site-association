@@ -1,0 +1,13 @@
+{
+  "applinks": {
+    "details": [
+      {
+        "appIDs": ["AN5KM8QGEF.to.yumi.vorra.ios"],
+        "components": [
+          { "/": "/pair" },
+          { "/": "/pair/*" }
+        ]
+      }
+    ]
+  }
+}

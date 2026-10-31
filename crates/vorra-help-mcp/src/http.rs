@@ -21,6 +21,47 @@ const BURST: f64 = 60.0;
 const REFILL_PER_SECOND: f64 = 1.0;
 const MAX_TRACKED_CLIENTS: usize = 4096;
 const LOOPBACK_HOSTS: [&str; 3] = ["localhost", "127.0.0.1", "::1"];
+const APP_SITE_ASSOCIATION: &str = include_str!("../site/apple-app-site-association");
+const PAIR_PAGE: &str = include_str!("../site/pair.html");
+const PAIR_SCRIPT: &str = include_str!("../site/pair.js");
+const PAIR_POLICY: &str = "default-src 'none'; script-src 'self'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
+
+async fn app_site_association() -> impl IntoResponse {
+    (
+        [
+            (header::CONTENT_TYPE, "application/json"),
+            (header::CACHE_CONTROL, "max-age=3600"),
+            (header::X_CONTENT_TYPE_OPTIONS, "nosniff"),
+        ],
+        APP_SITE_ASSOCIATION,
+    )
+}
+
+async fn pair_page() -> impl IntoResponse {
+    (
+        [
+            (header::CONTENT_TYPE, "text/html; charset=utf-8"),
+            (header::CONTENT_SECURITY_POLICY, PAIR_POLICY),
+            (header::REFERRER_POLICY, "no-referrer"),
+            (header::X_CONTENT_TYPE_OPTIONS, "nosniff"),
+            (header::CACHE_CONTROL, "no-store"),
+        ],
+        PAIR_PAGE,
+    )
+}
+
+async fn pair_script() -> impl IntoResponse {
+    (
+        [
+            (header::CONTENT_TYPE, "text/javascript; charset=utf-8"),
+            (header::CONTENT_SECURITY_POLICY, PAIR_POLICY),
+            (header::REFERRER_POLICY, "no-referrer"),
+            (header::X_CONTENT_TYPE_OPTIONS, "nosniff"),
+            (header::CACHE_CONTROL, "max-age=3600"),
+        ],
+        PAIR_SCRIPT,
+    )
+}
 
 pub struct HttpOptions {
     pub address: SocketAddr,
@@ -118,6 +159,12 @@ pub async fn serve(server: HelpServer, options: HttpOptions) -> io::Result<()> {
     });
     let app = Router::new()
         .nest_service("/mcp", service)
+        .route(
+            "/.well-known/apple-app-site-association",
+            get(app_site_association),
+        )
+        .route("/pair", get(pair_page))
+        .route("/pair/open.js", get(pair_script))
         .layer(middleware::from_fn_with_state(limiter, rate_limit))
         .route("/healthz", get(|| async { "ok\n" }));
     let listener = tokio::net::TcpListener::bind(options.address).await?;
