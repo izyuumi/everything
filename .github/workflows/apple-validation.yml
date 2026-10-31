@@ -85,12 +85,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
+          fetch-depth: 0
           persist-credentials: false
       - name: Build and analyze
         env:
           APPLE_SCHEME: ${{ matrix.scheme }}
           APPLE_DESTINATION: ${{ matrix.destination }}
         run: |
+          VERSION=$(scripts/version.sh)
           xcodebuild \
             -project apps/Apple/Vorra.xcodeproj \
             -scheme "$APPLE_SCHEME" \
@@ -98,6 +100,9 @@ jobs:
             -destination "$APPLE_DESTINATION" \
             -derivedDataPath "$RUNNER_TEMP/vorra-apple-$APPLE_SCHEME" \
             CODE_SIGNING_ALLOWED=NO \
+            MARKETING_VERSION="$VERSION" \
+            CURRENT_PROJECT_VERSION="$(scripts/build-number.sh "$VERSION" 1)" \
+            VORRA_BUILD=1 \
             build analyze
   compatibility:
     name: Apple compatibility

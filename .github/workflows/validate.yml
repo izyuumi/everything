@@ -10,6 +10,16 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 jobs:
+  release-guards:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - run: scripts/check_version.sh
+      - run: scripts/external_testflight.sh --audit
+      - run: scripts/release_gate.sh
   rust:
     timeout-minutes: 25
     strategy:

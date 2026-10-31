@@ -35,10 +35,7 @@ mod queries;
 mod vault_cli;
 
 const DEFAULT_INSTRUCTIONS: &str = "You are Vorra, a helpful assistant.";
-const VERSION: &str = match option_env!("VORRA_VERSION") {
-    Some(version) => version,
-    None => env!("CARGO_PKG_VERSION"),
-};
+use vorra::VERSION;
 
 #[derive(Parser)]
 #[command(version = VERSION, about = "Local-first native AI conversations")]

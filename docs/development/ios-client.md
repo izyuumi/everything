@@ -107,18 +107,7 @@ An unsigned app has no `application-identifier` entitlement, so the iOS Keychain
 
 ### TestFlight distribution
 
-`VorraIOS` (bundle ID `to.yumi.vorra.ios`; the Mac app is `to.yumi.vorra.mac`) carries a single 1024-pixel `AppIcon` and the iPad orientations App Store validation requires. `ITSAppUsesNonExemptEncryption` is `NO`: the app's cryptography is CryptoKit and the Security framework plus URLSession TLS, which is encryption within Apple's operating system and exempt, so uploads need no export-compliance answer. `CFBundleVersion` follows `scripts/ios-build-number.sh <major.minor.patch> <build>`, which encodes `major*10000000 + minor*100000 + patch*1000 + build` (0.1.0 build 1 is 100001). Archive and export with the API key, overriding the numbers:
-
-```sh
-xcodebuild archive -project apps/Apple/Vorra.xcodeproj -scheme VorraIOS -configuration Release \
-  -destination 'generic/platform=iOS' -archivePath build/ios/VorraIOS.xcarchive \
-  -allowProvisioningUpdates -authenticationKeyPath "$KEY" -authenticationKeyID "$ASC_KEY_ID" -authenticationKeyIssuerID "$ASC_ISSUER_ID" \
-  MARKETING_VERSION=0.1.0 CURRENT_PROJECT_VERSION=$(scripts/ios-build-number.sh 0.1.0 1)
-xcodebuild -exportArchive -archivePath build/ios/VorraIOS.xcarchive -exportOptionsPlist apps/Apple/iOS/ExportOptions.plist \
-  -exportPath build/ios/export -allowProvisioningUpdates -authenticationKeyPath "$KEY" -authenticationKeyID "$ASC_KEY_ID" -authenticationKeyIssuerID "$ASC_ISSUER_ID"
-```
-
-`ExportOptions.plist` exports an `app-store-connect` IPA; set its `destination` to `upload` to send the build to App Store Connect, which needs an existing app record for the bundle ID. A release workflow is not implemented.
+`VorraIOS` (bundle ID `to.yumi.vorra.ios`; the Mac app is `to.yumi.vorra.mac`) carries a single 1024-pixel `AppIcon` and the iPad orientations App Store validation requires. `ITSAppUsesNonExemptEncryption` is `NO`: the app's cryptography is CryptoKit and the Security framework plus URLSession TLS, which is encryption within Apple's operating system and exempt, so uploads need no export-compliance answer. `CFBundleVersion` follows `scripts/build-number.sh <major.minor.patch> <build>`, which encodes `major*10000000 + minor*100000 + patch*1000 + build` (0.1.0 build 1, 100001, is already on TestFlight). The project holds only placeholders; `scripts/upload_ios.sh --confirm` archives, uploads (`ExportOptions.plist` `destination` is `upload`) and passes `MARKETING_VERSION`, `CURRENT_PROJECT_VERSION` and `VORRA_BUILD`, and `release-ios.yml` runs it once `VORRA_RELEASES` is enabled. See [releases](releases.md#ios-and-ipados-testflight) for numbering, What to Test, the external TestFlight switch and App Store submission.
 
 ### Simulator protocol walkthrough
 

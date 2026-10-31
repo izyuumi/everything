@@ -771,6 +771,9 @@
                 "CLANG_ENABLE_OBJC_ARC" = "YES";
                 "GCC_C_LANGUAGE_STANDARD" = "gnu17";
                 "GCC_WARN_INHIBIT_ALL_WARNINGS" = "NO";
+                "MARKETING_VERSION" = "0.1.0";
+                "CURRENT_PROJECT_VERSION" = "100001";
+                "VORRA_BUILD" = "1";
             };
             "name" = "Debug";
         };
@@ -781,6 +784,9 @@
                 "CLANG_ENABLE_OBJC_ARC" = "YES";
                 "GCC_C_LANGUAGE_STANDARD" = "gnu17";
                 "GCC_WARN_INHIBIT_ALL_WARNINGS" = "NO";
+                "MARKETING_VERSION" = "0.1.0";
+                "CURRENT_PROJECT_VERSION" = "100001";
+                "VORRA_BUILD" = "1";
             };
             "name" = "Release";
         };
@@ -1151,8 +1157,6 @@
                 "PRODUCT_NAME" = "Vorra";
                 "INFOPLIST_FILE" = "iOS/Info.plist";
                 "GENERATE_INFOPLIST_FILE" = "NO";
-                "MARKETING_VERSION" = "0.1.0";
-                "CURRENT_PROJECT_VERSION" = "100001";
                 "SWIFT_EMIT_LOC_STRINGS" = "NO";
                 "LD_RUNPATH_SEARCH_PATHS" = (
                     "$(inherited)",
@@ -1182,8 +1186,6 @@
                 "PRODUCT_NAME" = "Vorra";
                 "INFOPLIST_FILE" = "iOS/Info.plist";
                 "GENERATE_INFOPLIST_FILE" = "NO";
-                "MARKETING_VERSION" = "0.1.0";
-                "CURRENT_PROJECT_VERSION" = "100001";
                 "SWIFT_EMIT_LOC_STRINGS" = "NO";
                 "LD_RUNPATH_SEARCH_PATHS" = (
                     "$(inherited)",

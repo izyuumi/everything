@@ -124,6 +124,7 @@ jobs:
       REPO: ${{ github.repository }}
       VERSION: ${{ needs.next.outputs.version }}
       BUILD: ${{ needs.next.outputs.build }}
+      VORRA_RELEASES: ${{ vars.VORRA_RELEASES }}
     steps:
       - uses: actions/checkout@v4
         with:
