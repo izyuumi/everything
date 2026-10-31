@@ -1,3 +1,4 @@
+mod rendezvous;
 mod routing;
 mod session;
 mod settings;
@@ -9,6 +10,7 @@ mod settings_ingress;
 #[cfg(unix)]
 mod settings_publication;
 
+pub use rendezvous::{PairingDecision, PendingPairingRequest};
 pub use session::RelaySessionStatus;
 pub use settings::{
     DeviceSettingsPage, DeviceSettingsSummary, MAX_DEVICE_SETTINGS_PAGE,
@@ -295,6 +297,8 @@ struct EndpointInner {
     role: EndpointRole,
     pairings: Mutex<BTreeMap<MessageId, PendingPairing>>,
     completions: Mutex<BTreeMap<MessageId, (u64, PendingPairingCompletion)>>,
+    incoming: Mutex<BTreeMap<MessageId, rendezvous::IncomingPairing>>,
+    pairing_replies: Mutex<std::collections::VecDeque<crate::relay_protocol::RelayClientMessage>>,
     outbox_ready: Notify,
     inbox_ready: Notify,
     session: tokio::sync::Mutex<()>,
@@ -324,6 +328,8 @@ impl DeviceEndpoint {
                 role,
                 pairings: Mutex::new(BTreeMap::new()),
                 completions: Mutex::new(BTreeMap::new()),
+                incoming: Mutex::new(BTreeMap::new()),
+                pairing_replies: Mutex::new(std::collections::VecDeque::new()),
                 outbox_ready: Notify::new(),
                 inbox_ready: Notify::new(),
                 session: tokio::sync::Mutex::new(()),

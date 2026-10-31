@@ -40,4 +40,6 @@ pub enum RelayError {
     Timeout,
     #[error("operation cancelled")]
     Cancelled,
+    #[error("pairing ended: {0:?}")]
+    Pairing(crate::relay_protocol::RelayErrorCode),
 }

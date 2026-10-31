@@ -211,6 +211,11 @@ impl HostInner {
             OwnerQuery::SettingsOperation { .. } => Err(HostError::Invalid(
                 "settings operation inspection requires authenticated owner ingress",
             )),
+            OwnerQuery::PairingRequests { pairing_id } => Ok(OwnerQueryResult::PairingRequests {
+                requests: self
+                    .devices
+                    .pairing_requests(pairing_id, UnixMillis::now()?)?,
+            }),
             OwnerQuery::Identity => {
                 let keys = self.devices.public_keys();
                 Ok(OwnerQueryResult::Identity {
@@ -585,6 +590,36 @@ impl HostInner {
                             UnixMillis::now()?,
                         )?,
                     })
+                })
+                .await
+            }
+            OwnerOperation::DecidePairing {
+                pairing_id,
+                device_id,
+                approve,
+                access,
+            } => {
+                let _mutation = self.mutation.lock().await;
+                self.ensure_accepting()?;
+                self.blocking(move |host| {
+                    Ok(OwnerOperationResult::PairingDecided {
+                        decision: host.devices.decide_pairing(
+                            pairing_id,
+                            device_id,
+                            approve,
+                            access,
+                            UnixMillis::now()?,
+                        )?,
+                    })
+                })
+                .await
+            }
+            OwnerOperation::CancelPairing { pairing_id } => {
+                let _mutation = self.mutation.lock().await;
+                self.blocking(move |host| {
+                    host.devices
+                        .withdraw_pairing(pairing_id, UnixMillis::now()?)?;
+                    Ok(OwnerOperationResult::Applied)
                 })
                 .await
             }

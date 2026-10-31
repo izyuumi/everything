@@ -21,7 +21,15 @@ cargo build --release --locked
 ./target/release/vorra relay serve --database /var/lib/vorra-relay/relay.sqlite3 --origin wss://relay.example.com
 ```
 
-An identity file contains only the `DevicePublicKeys` JSON representation: device UUID and base64 Ed25519/X25519 public keys. Enrollment is a local operator decision after identity verification. No remote enrollment endpoint, trust-on-first-use registration, administrative bearer-token service, or automatic enrollment during host/client pairing exists. Exporting and safely transferring a paired device's public identity is a client/host integration responsibility. The file reader rejects files over 4096 bytes and unknown identity fields.
+An identity file contains only the `DevicePublicKeys` JSON representation: device UUID and base64 Ed25519/X25519 public keys. Enrollment is a local operator decision after identity verification. The file reader rejects files over 4096 bytes and unknown identity fields. There is no remote enrollment endpoint, trust-on-first-use registration or administrative bearer-token service.
+
+`--pairing-host` on `enroll` marks an operator-enrolled host as allowed to pair devices through this relay (it also works on an already enrolled identical identity). Such a host receives pairing requests, and when it approves one the relay enrolls the phone's keys after verifying the host's signed acceptance against the host's enrolled keys and the waiting request. The new row records the host as `sponsor`; a sponsored device can never become a pairing host. Hosts without the mark never see pairing frames, and their phones still need a manual `enroll`. Get a host's public keys with the owner `identity` query, for example `echo '{"kind":"query","query":{"kind":"identity"}}' > q.json && vorra owner --request-file q.json`, and save the `keys` object. See the [pairing contract](../contracts/device-pairing.md).
+
+```sh
+./target/release/vorra relay enroll --database /var/lib/vorra-relay/relay.sqlite3 --keys /secure-transfer/host-public.json --pairing-host
+```
+
+The relay database schema is version 2 (`pairing_host`, `sponsor`); opening a version 1 database migrates it in place, and an older `vorra relay` refuses a version 2 database.
 
 Enrollment of the same active UUID and identical keys is idempotent. Different keys for an existing UUID are rejected. Revocation is permanent for that UUID, including re-enrollment with the original keys; a replacement identity needs a new UUID and a new explicit enrollment. Device records, including revoked records, are bounded at 4096 and are not automatically removed.
 
@@ -39,7 +47,7 @@ The default backend bind address is `127.0.0.1:8787`. `/ws` is the WebSocket end
 
 Every JSON frame has a snake-case `type` tag and a required `schema_version: 1`. Unknown fields and unsupported versions are rejected during deserialization. The shared `parse`/`to_bytes` methods additionally enforce the 2 MiB total JSON-frame limit. Byte strings use padded RFC 4648 standard base64. UUIDs use the shared non-nil UUID types. Frames may be sent as WebSocket text or binary messages; the server emits binary JSON.
 
-Client frames are `begin_authentication`, `authenticate`, `send`, `acknowledge`, and `ping`. Server frames are `challenge`, `authenticated`, `accepted`, `delivery`, `acknowledged`, `pong`, and `error`. `send` and `delivery` contain only an `EncryptedEnvelope`. Errors use a fixed `RelayErrorCode`, never reflected external strings or conversational text. Applications must parse frames through the shared bounded interface.
+Client frames are `begin_authentication`, `authenticate`, `send`, `acknowledge`, `ping`, `pairing_request` and `pairing_decision`. Server frames are `challenge`, `authenticated`, `accepted`, `delivery`, `acknowledged`, `pong`, `error`, `pairing_pending`, `pairing_request` and `pairing_accepted`. A socket whose first frame is `pairing_request` is an unauthenticated pairing rendezvous handled by `src/relay/pairing.rs`; it never becomes an authenticated session. The pairing frames are specified in the [pairing contract](../contracts/device-pairing.md#relay-frames). `send` and `delivery` contain only an `EncryptedEnvelope`. Errors use a fixed `RelayErrorCode`, never reflected external strings or conversational text. Applications must parse frames through the shared bounded interface.
 
 The client first sends `BeginAuthentication { schema_version, device_id }`. Unknown or revoked UUIDs are rejected. The server returns `Challenge { schema_version, challenge }`, where `RelayChallenge` contains a version, fresh session UUID, device UUID, configured origin, issue/expiry times, and 32 random nonce bytes. The challenge expires after 20 seconds and is held only by that socket's authentication flow; it cannot be submitted to a different socket or reused for a second authentication.
 
