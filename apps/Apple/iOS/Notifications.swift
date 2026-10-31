@@ -45,10 +45,10 @@ final class NotificationService {
         guard try await prepare() else { return .suppressedPreparation }
         guard !Task.isCancelled, isEligible() else { return .suppressedEligibility }
         let content = UNMutableNotificationContent()
-        content.title = "Everything"
+        content.title = "Vorra"
         switch notice.category {
-        case .completion: content.body = "A task completed. Open Everything to review it."
-        case .attention: content.body = "A permission request needs attention. Open Everything to review it."
+        case .completion: content.body = "A task completed. Open Vorra to review it."
+        case .attention: content.body = "A permission request needs attention. Open Vorra to review it."
         }
         if settings.soundSetting == .enabled { content.sound = .default }
         let request = UNNotificationRequest(identifier: notice.identifier, content: content, trigger: nil)

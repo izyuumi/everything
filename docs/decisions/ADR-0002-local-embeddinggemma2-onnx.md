@@ -6,7 +6,7 @@ Accepted for the initial optional text embedding backend. Native Linux inference
 
 ## Context
 
-Everything requires fully local EmbeddingGemma 2 inference, optional configuration, selectable dimensions, and no Python daemon. Markdown remains authoritative and FTS5 must work without inference. The published GGUF uses the new `gemma-embedding2` architecture, which neither the selected crates.io llama.cpp Rust binding nor its current official Git submodule supports. Native upstream llama.cpp added support after the binding's bundled revision.
+Vorra requires fully local EmbeddingGemma 2 inference, optional configuration, selectable dimensions, and no Python daemon. Markdown remains authoritative and FTS5 must work without inference. The published GGUF uses the new `gemma-embedding2` architecture, which neither the selected crates.io llama.cpp Rust binding nor its current official Git submodule supports. Native upstream llama.cpp added support after the binding's bundled revision.
 
 The published, pinned ONNX conversion contains the trained projection, bidirectional attention, masked mean pooling, and normalized 768-dimensional sentence output. Established Rust `ort` and `tokenizers` libraries can execute this graph directly without a custom model implementation or local unsafe code.
 

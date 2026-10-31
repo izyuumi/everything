@@ -31,7 +31,7 @@ pub enum TuiError {
     #[error("{0}")]
     Invalid(&'static str),
     #[error(
-        "cannot reach the Everything host for {}; start it with `everything service start` or `everything serve`",
+        "cannot reach the Vorra host for {}; start it with `vorra service start` or `vorra serve`",
         .0.display()
     )]
     Unavailable(PathBuf),
@@ -39,7 +39,7 @@ pub enum TuiError {
     Setup(String),
     #[error("cancelled")]
     Interrupted,
-    #[error("the terminal UI needs an interactive terminal; run `everything --help` for commands")]
+    #[error("the terminal UI needs an interactive terminal; run `vorra --help` for commands")]
     NoTerminal,
 }
 

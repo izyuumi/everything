@@ -13,7 +13,7 @@ struct MenuContent: View {
                     .foregroundStyle(model.connected ? Color.green : Color.secondary)
                     .accessibilityHidden(true)
                 VStack(alignment: .leading) {
-                    Text("Everything").font(.headline)
+                    Text("Vorra").font(.headline)
                     Text(model.status).font(.caption).foregroundStyle(.secondary)
                     if let service = model.serviceStatus {
                         Text("Service: " + service).font(.caption2).foregroundStyle(.secondary)

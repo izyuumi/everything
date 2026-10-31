@@ -40,7 +40,7 @@ final class ThisDeviceSettingsStore {
 
         var message: String {
             switch self {
-            case .inactive: "Open Settings in the active Everything app before requesting permission."
+            case .inactive: "Open Settings in the active Vorra app before requesting permission."
             case .capacity: "This app session has reached its notification action limit."
             case .invalidRequest: "The notification action could not be prepared."
             }

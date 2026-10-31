@@ -15,7 +15,7 @@ enum OwnerClientError: Error, LocalizedError, Sendable {
 
     var errorDescription: String? {
         switch self {
-        case .invalidConfiguration: "Choose an absolute, trusted Everything executable and state directory."
+        case .invalidConfiguration: "Choose an absolute, trusted Vorra executable and state directory."
         case .invalidResponse: "The host returned an unsupported or invalid response."
         case .busy: "Another owner operation is still finishing."
         case .cancelled: "The request was cancelled. Inspect current state before repeating a mutation."

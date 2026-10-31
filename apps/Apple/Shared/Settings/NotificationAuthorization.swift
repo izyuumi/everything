@@ -41,9 +41,9 @@ enum DeviceNotificationGuidance: Equatable, Sendable {
     var instructions: String? {
         guard self == .instructions || self == .settingsUnavailable else { return nil }
         #if os(iOS)
-        return "Open Settings, choose Notifications, then Everything to review notification permissions."
+        return "Open Settings, choose Notifications, then Vorra to review notification permissions."
         #else
-        return "Open System Settings, choose Notifications, then Everything to review notification permissions."
+        return "Open System Settings, choose Notifications, then Vorra to review notification permissions."
         #endif
     }
 }

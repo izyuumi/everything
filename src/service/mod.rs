@@ -7,7 +7,7 @@ use thiserror::Error;
 
 pub use launchd::{LaunchdService, ServiceStatus};
 #[cfg(unix)]
-pub use state::StateLease;
+pub use state::{StateLease, migrate_legacy_state};
 
 #[derive(Debug, Error)]
 pub enum ServiceError {
@@ -19,6 +19,10 @@ pub enum ServiceError {
     Disabled,
     #[error("another host holds the state directory lock")]
     AlreadyRunning,
+    #[error(
+        "a host from ~/.everything is still running; stop it with `launchctl bootout gui/$(id -u)/com.everything.host` or by ending the old `everything serve`, then retry"
+    )]
+    LegacyHostRunning,
     #[error("service filesystem operation failed: {0}")]
     Io(#[from] std::io::Error),
     #[cfg(unix)]

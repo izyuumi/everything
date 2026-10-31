@@ -1467,7 +1467,7 @@ actor ReplicaService {
 
     static func open() async throws -> ReplicaService {
         guard let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first else { throw WireError.storage }
-        let store = try ReplicaStore(directory: support.appendingPathComponent("Everything", isDirectory: true))
+        let store = try ReplicaStore(directory: support.appendingPathComponent("Vorra", isDirectory: true))
         let identity = try KeychainIdentity.loadOrCreate(expectedID: await store.identityID())
         let own = identity.publicKeys
         try await store.bindIdentity(own.deviceID)

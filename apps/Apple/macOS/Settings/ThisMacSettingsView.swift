@@ -111,7 +111,7 @@ struct ThisMacSettingsView: View {
                 if let issue = store.notificationIssue { NativeSettingsNotice(issue.message) }
                 if let instructions = store.notificationGuidance.instructions { Text(instructions) }
                 if store.notificationObservation?.authorization == .denied {
-                    Text("Open System Settings, choose Notifications, then Everything to review permissions. A denied request cannot show another permission prompt.")
+                    Text("Open System Settings, choose Notifications, then Vorra to review permissions. A denied request cannot show another permission prompt.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }

@@ -16,7 +16,7 @@ enum KeychainIdentity {
     static func loadOrCreate(expectedID: UUID?) throws -> DeviceIdentity {
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: "ai.everything.ios.identity",
+            kSecAttrService as String: "to.yumi.vorra.ios.identity",
             kSecAttrAccount as String: "identity-v1",
             kSecAttrSynchronizable as String: false,
             kSecReturnData as String: true,
@@ -39,7 +39,7 @@ enum KeychainIdentity {
         defer { bytes.resetBytes(in: 0..<bytes.count) }
         let insertion: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: "ai.everything.ios.identity",
+            kSecAttrService as String: "to.yumi.vorra.ios.identity",
             kSecAttrAccount as String: "identity-v1",
             kSecAttrSynchronizable as String: false,
             kSecAttrAccessible as String: kSecAttrAccessibleWhenUnlockedThisDeviceOnly,

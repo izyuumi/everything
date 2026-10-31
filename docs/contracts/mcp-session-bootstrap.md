@@ -27,7 +27,7 @@ Automated assertions remain deferred to [#32](https://github.com/izyuumi/everyth
 
 ## Headless host entry point
 
-`everything --state-dir STATE serve --mcp-credential-environment-file BINDINGS.json` invokes `HostService::start_with_mcp_session_bootstrap(state, Some(path), cancellation)`. The host acquires its state lease and captures actual settings, installs the validated session batch into its one CredentialVault, then starts MCP discovery using that same vault. The default `serve` and `HostService::start` provide no binding file. A failed plan rejects startup before spawning any configured MCP child. Running owner `StoreMcp` for session storage returns an explicit invalid-operation error directing this startup path; it no longer reports an unusable Applied result. Removing a stored entry cannot recall an environment value already copied into a child.
+`vorra --state-dir STATE serve --mcp-credential-environment-file BINDINGS.json` invokes `HostService::start_with_mcp_session_bootstrap(state, Some(path), cancellation)`. The host acquires its state lease and captures actual settings, installs the validated session batch into its one CredentialVault, then starts MCP discovery using that same vault. The default `serve` and `HostService::start` provide no binding file. A failed plan rejects startup before spawning any configured MCP child. Running owner `StoreMcp` for session storage returns an explicit invalid-operation error directing this startup path; it no longer reports an unusable Applied result. Removing a stored entry cannot recall an environment value already copied into a child.
 
 An operator obtains the exact non-secret binding from the configured server's environment reference and complete approved manifest. A metadata-only example is:
 
@@ -42,7 +42,7 @@ An operator obtains the exact non-secret binding from the configured server's en
         "reference": "REPLACE_WITH_CONFIGURED_REFERENCE_UUID",
         "storage": "session"
       },
-      "source_environment_variable": "EVERYTHING_CONFIGURED_SERVER_TOKEN"
+      "source_environment_variable": "VORRA_CONFIGURED_SERVER_TOKEN"
     }
   ]
 }

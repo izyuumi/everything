@@ -92,7 +92,7 @@ pub async fn run(
         .with_state(state);
     let capacity = Arc::new(Semaphore::new(max_connections));
     let mut maintenance = interval_at(Instant::now(), HEARTBEAT_INTERVAL);
-    eprintln!("Everything relay listening on {address}");
+    eprintln!("Vorra relay listening on {address}");
     let result = loop {
         tokio::select! {
             biased;

@@ -28,8 +28,8 @@ pub use onepassword::{
 pub use protonpass::{ProtonPassConnection, ProtonPassProbe, ProtonPassProvider};
 pub use reference::{VaultProviderId, VaultReference};
 
-pub const DEFAULT_VAULT_SERVICE: &str = "ai.everything.vault";
-pub const VAULT_SERVICE_ENVIRONMENT: &str = "EVERYTHING_VAULT_SERVICE";
+pub const DEFAULT_VAULT_SERVICE: &str = "to.yumi.vorra.vault";
+pub const VAULT_SERVICE_ENVIRONMENT: &str = "VORRA_VAULT_SERVICE";
 pub const MAX_VAULT_LIST: usize = 100;
 
 #[derive(Debug, Error)]
@@ -48,7 +48,7 @@ pub enum VaultError {
     MissingSecret,
     #[error("vault item has no {0} field")]
     MissingField(String),
-    #[error("vault provider {0} is not connected; run everything vault connect")]
+    #[error("vault provider {0} is not connected; run vorra vault connect")]
     ProviderDisconnected(&'static str),
     #[error("vault provider {0} is locked or not signed in; approve the sign-in and retry")]
     ProviderLocked(&'static str),
@@ -354,7 +354,7 @@ fn service_from_environment() -> String {
         .ok()
         .filter(|value| {
             value
-                .strip_prefix("ai.everything.vault.")
+                .strip_prefix("to.yumi.vorra.vault.")
                 .is_some_and(|suffix| {
                     (1..=64).contains(&suffix.len())
                         && suffix.bytes().all(|byte| {

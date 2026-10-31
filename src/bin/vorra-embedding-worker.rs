@@ -9,7 +9,7 @@ fn main() -> ExitCode {
         Some(argument) if argument == "--probe" && arguments.next().is_none() => true,
         _ => return failure(),
     };
-    match std::panic::catch_unwind(|| everything::memory::embedding::worker::run(probe)) {
+    match std::panic::catch_unwind(|| vorra::memory::embedding::worker::run(probe)) {
         Ok(Ok(())) => ExitCode::SUCCESS,
         _ => failure(),
     }

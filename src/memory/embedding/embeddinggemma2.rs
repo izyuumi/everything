@@ -128,7 +128,7 @@ impl EmbeddingRuntime {
         })?;
         let initialization = std::panic::catch_unwind(|| {
             let initialized = ort::init_from(path_text)
-                .with_name("everything-local-embeddings")
+                .with_name("vorra-local-embeddings")
                 .with_telemetry(false)
                 .commit()?;
             Ok::<_, ort::Error>((initialized, ort::info().to_owned()))
@@ -441,7 +441,7 @@ impl Embedder for EmbeddingGemma2 {
             let (finished, completion) = mpsc::channel::<()>();
             let cancellation_options = &options;
             let monitor = std::thread::Builder::new()
-                .name("everything-embedding-cancellation".into())
+                .name("vorra-embedding-cancellation".into())
                 .spawn_scoped(scope, move || {
                     loop {
                         match completion.recv_timeout(Duration::from_millis(10)) {

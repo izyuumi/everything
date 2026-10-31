@@ -305,7 +305,7 @@ async fn ready(host: &Host, mut child: Option<&mut Child>) -> Result<(), String>
             && let Ok(Some(status)) = child.try_wait()
         {
             return Err(format!(
-                "the host exited ({status}); run `everything serve` to see why"
+                "the host exited ({status}); run `vorra serve` to see why"
             ));
         }
         if Instant::now() > deadline {
@@ -366,15 +366,12 @@ pub async fn ensure_host(
     let mut notice = None;
     loop {
         let mut body = vec![
-            text(format!(
-                "No Everything host is running for {}.",
-                state.display()
-            )),
+            text(format!("No Vorra host is running for {}.", state.display())),
             dim("The host owns conversations, tools and credentials; this window talks to it."),
         ];
         if options.len() == 3 {
             body.push(dim(
-                "The login service replaces any existing Everything LaunchAgent.",
+                "The login service replaces any existing Vorra LaunchAgent.",
             ));
         }
         if let Some(notice) = notice.take() {
@@ -624,7 +621,7 @@ impl Wizard<'_, '_> {
         Ok(
             match self
                 .screen
-                .choose("Welcome to Everything", &body, &options, 0)
+                .choose("Welcome to Vorra", &body, &options, 0)
                 .await?
             {
                 Some(0) => {
@@ -755,7 +752,7 @@ impl Wizard<'_, '_> {
                 format!("{} API (official)", provider_name(provider)),
                 "A compatible server on this machine (loopback URL)".to_owned(),
             ];
-            let body = [text("Which endpoint should Everything call?")];
+            let body = [text("Which endpoint should Vorra call?")];
             let endpoint = match self.screen.choose(&title, &body, &options, 0).await? {
                 None => return Ok(None),
                 Some(0) => ProviderEndpoint::Official,
@@ -1114,7 +1111,7 @@ impl Wizard<'_, '_> {
         let body = [
             text("Run the host automatically when you log in?"),
             dim(
-                "Installs a LaunchAgent for this state directory, replacing any existing Everything LaunchAgent.",
+                "Installs a LaunchAgent for this state directory, replacing any existing Vorra LaunchAgent.",
             ),
         ];
         let options = ["Not now".to_owned(), "Install the login service".to_owned()];
@@ -1133,12 +1130,12 @@ impl Wizard<'_, '_> {
                 OK,
                 if self.session {
                     format!(
-                        "Installed {}. After closing this window, start it with `everything service start`.",
+                        "Installed {}. After closing this window, start it with `vorra service start`.",
                         path.display()
                     )
                 } else {
                     format!(
-                        "Installed {}. It starts at your next login or with `everything service start` once the running host stops.",
+                        "Installed {}. It starts at your next login or with `vorra service start` once the running host stops.",
                         path.display()
                     )
                 },
@@ -1180,13 +1177,13 @@ impl Wizard<'_, '_> {
         let body = match self.screen.choose(title, &body, &options, 0).await? {
             Some(1) => [
                 text(
-                    "Connect 1Password from a terminal with `everything vault connect onepassword`; it needs the 1Password CLI (op 2.x) with desktop-app integration and asks you to pick an account.",
+                    "Connect 1Password from a terminal with `vorra vault connect onepassword`; it needs the 1Password CLI (op 2.x) with desktop-app integration and asks you to pick an account.",
                 ),
                 dim("Nothing was connected here."),
             ],
             Some(2) => [
                 text(
-                    "Connect Proton Pass from a terminal with `everything vault connect protonpass`; it needs pass-cli and a paid Proton Pass plan, and asks for a personal access token (or use --web for the browser login).",
+                    "Connect Proton Pass from a terminal with `vorra vault connect protonpass`; it needs pass-cli and a paid Proton Pass plan, and asks for a personal access token (or use --web for the browser login).",
                 ),
                 dim("Nothing was connected here."),
             ],
@@ -1244,10 +1241,7 @@ impl Wizard<'_, '_> {
                         }
                         Some(Ok(_)) => colored(ERROR, "unexpected vault response"),
                         Some(Err(error)) => colored(ERROR, format!("Could not save: {error}")),
-                        None => colored(
-                            WARN,
-                            "Saving was interrupted; check `everything vault list`.",
-                        ),
+                        None => colored(WARN, "Saving was interrupted; check `vorra vault list`."),
                     }
                 }
             }

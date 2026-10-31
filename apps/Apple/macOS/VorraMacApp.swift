@@ -2,7 +2,7 @@ import AppKit
 import SwiftUI
 
 @MainActor
-final class EverythingAppDelegate: NSObject, NSApplicationDelegate {
+final class VorraAppDelegate: NSObject, NSApplicationDelegate {
     var model: HostModel?
     private var terminating = false
 
@@ -58,8 +58,8 @@ final class EverythingAppDelegate: NSObject, NSApplicationDelegate {
 
 @main
 @MainActor
-struct EverythingMacApp: App {
-    @NSApplicationDelegateAdaptor(EverythingAppDelegate.self) private var delegate
+struct VorraMacApp: App {
+    @NSApplicationDelegateAdaptor(VorraAppDelegate.self) private var delegate
     @State private var model = HostModel()
 
     var body: some Scene {

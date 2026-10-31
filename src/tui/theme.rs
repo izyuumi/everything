@@ -1,7 +1,7 @@
 use ratatui::style::{Color, Modifier, Style};
 
 pub const GLYPH: &str = "◈";
-pub const AGENT: &str = "◈ Everything";
+pub const AGENT: &str = "◈ Vorra";
 
 pub const BORDER: Color = Color::Rgb(0xCD, 0x7F, 0x32);
 pub const TITLE: Color = Color::Rgb(0xFF, 0xD7, 0x00);

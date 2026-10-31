@@ -1,16 +1,16 @@
 # Worker coordinator owner CLI
 
-`everything worker coordinator` dispatches to `host::worker_commands` for issue [#29](https://github.com/izyuumi/everything/issues/29). Argument parsing, bounded owner-file input, actual owner IPC registration and the optional Host coordinator are composed in source. The six combined normal-package Rust 1.88 gates passed at `d273c52`; the actual production Host consent/native-admission/credential-rejection/recovery walkthrough also passed, while the earlier isolated leaf check alone establishes no live consumer behavior. Automated verification remains deferred to [#32](https://github.com/izyuumi/everything/issues/32).
+`vorra worker coordinator` dispatches to `host::worker_commands` for issue [#29](https://github.com/izyuumi/everything/issues/29). Argument parsing, bounded owner-file input, actual owner IPC registration and the optional Host coordinator are composed in source. The six combined normal-package Rust 1.88 gates passed at `d273c52`; the actual production Host consent/native-admission/credential-rejection/recovery walkthrough also passed, while the earlier isolated leaf check alone establishes no live consumer behavior. Automated verification remains deferred to [#32](https://github.com/izyuumi/everything/issues/32).
 
 The coordinator uses the ordinary running host's same-user owner socket. Start the actual configured host independently; these commands never open another Agent, start an executor, connect directly to a relay, load a model credential, run a task locally or create a second scheduling loop. A disabled or unavailable coordinator must report its actual state or reject unsupported actions. Executor commands such as `worker serve` use the separate dedicated-worker configuration and are not replaced by this surface.
 
 ## Inspect and pin purpose identity
 
 ```sh
-everything --state-dir STATE worker coordinator status
-everything --state-dir STATE worker coordinator identity
-everything --state-dir STATE worker coordinator peers
-everything --state-dir STATE worker coordinator pin-peer --file executor-public-keys.json --fingerprint FULL_EXECUTOR_FINGERPRINT --request-id REQUEST_UUID
+vorra --state-dir STATE worker coordinator status
+vorra --state-dir STATE worker coordinator identity
+vorra --state-dir STATE worker coordinator peers
+vorra --state-dir STATE worker coordinator pin-peer --file executor-public-keys.json --fingerprint FULL_EXECUTOR_FINGERPRINT --request-id REQUEST_UUID
 ```
 
 Replace the capitalized values with the actual state path, full confirmed fingerprint and non-nil request UUID. The pin input is exactly the existing DevicePublicKeys JSON object, containing `device_id`, `signing_key` and `encryption_key`; it is not an identity-response wrapper and contains no private keys. Read the executor's independently confirmed complete fingerprint before granting purpose trust. The actual operation validates the complete keys and fingerprint. Ordinary device pairing does not grant worker trust, and this CLI never discovers a server or approves a pin automatically.
@@ -20,7 +20,7 @@ Replace the capitalized values with the actual state path, full confirmed finger
 ## Prepare and review the full disclosure
 
 ```sh
-everything --state-dir STATE worker coordinator prepare --file preparation-request.json --request-id PREPARE_REQUEST_UUID
+vorra --state-dir STATE worker coordinator prepare --file preparation-request.json --request-id PREPARE_REQUEST_UUID
 ```
 
 The input is the complete strict [WorkerPreparationRequest](../contracts/host-worker.md#settings-and-preparation): explicit executor, physical workspace, objective, constraints, selected context, ordered input paths, allowed output paths, mode, worker model/reference, ContextBudget, LoopLimits, deadline and tool set. All five context-budget fields are required, unknown fields are rejected, and `limits.absolute_deadline` must equal `deadline`. Use a current deadline rather than a copied expired timestamp. This is metadata input; the host's existing descriptor-based capture and WorkerManifest validation remain responsible for actual file scope and supported policies.
@@ -34,8 +34,8 @@ The returned JSON is the complete validated owner reply, without truncating or h
 Copy the exact ticket, manifest digest, executor fingerprint and **local.create_command_id** from the reviewed preparation:
 
 ```sh
-everything --state-dir STATE worker coordinator delegate --ticket TICKET_UUID --manifest-digest MANIFEST_SHA256 --executor-fingerprint FULL_EXECUTOR_FINGERPRINT --request-id LOCAL_CREATE_COMMAND_UUID
-everything --state-dir STATE worker coordinator discard --ticket TICKET_UUID --request-id DISCARD_REQUEST_UUID
+vorra --state-dir STATE worker coordinator delegate --ticket TICKET_UUID --manifest-digest MANIFEST_SHA256 --executor-fingerprint FULL_EXECUTOR_FINGERPRINT --request-id LOCAL_CREATE_COMMAND_UUID
+vorra --state-dir STATE worker coordinator discard --ticket TICKET_UUID --request-id DISCARD_REQUEST_UUID
 ```
 
 Delegate requires an explicit request ID; there is no generated default for that command. It must equal the disclosed `local.create_command_id`. The Host compares that ID and the complete original ticket/pin/policy against its retained live preparation before effects, then mints a thirty-second admission approval bounded by the manifest deadline. The CLI cannot recreate the opaque ticket or validate its current authority from a printed JSON object. It does not refetch preparation, renew expiry, approve a replacement or retry after rejection/disconnect. Ticket expiry is not a stored reusable approval.
@@ -45,12 +45,12 @@ A successful Admission-shaped reply describes the actual durable owner command r
 ## Job, task, cancellation and revocation
 
 ```sh
-everything --state-dir STATE worker coordinator jobs --limit 16
-everything --state-dir STATE worker coordinator jobs --after-delegation-id LAST_RETURNED_UUID --limit 16
-everything --state-dir STATE worker coordinator inspect --delegation DELEGATION_UUID
-everything --state-dir STATE worker coordinator inspect --task LOCAL_TASK_UUID
-everything --state-dir STATE worker coordinator cancel --task LOCAL_TASK_UUID --delegation-id DELEGATION_UUID --attempt-id ATTEMPT_UUID --manifest-digest MANIFEST_SHA256 --request-id CANCEL_REQUEST_UUID
-everything --state-dir STATE worker coordinator revoke --peer EXECUTOR_DEVICE_UUID --request-id REVOKE_REQUEST_UUID
+vorra --state-dir STATE worker coordinator jobs --limit 16
+vorra --state-dir STATE worker coordinator jobs --after-delegation-id LAST_RETURNED_UUID --limit 16
+vorra --state-dir STATE worker coordinator inspect --delegation DELEGATION_UUID
+vorra --state-dir STATE worker coordinator inspect --task LOCAL_TASK_UUID
+vorra --state-dir STATE worker coordinator cancel --task LOCAL_TASK_UUID --delegation-id DELEGATION_UUID --attempt-id ATTEMPT_UUID --manifest-digest MANIFEST_SHA256 --request-id CANCEL_REQUEST_UUID
+vorra --state-dir STATE worker coordinator revoke --peer EXECUTOR_DEVICE_UUID --request-id REVOKE_REQUEST_UUID
 ```
 
 Jobs use exclusive ascending delegation UUID pagination, one through 32 records per page. The response's `next_after` is the actual next-request cursor; never synthesize a cursor by clock order. Inspect requires exactly one local task or delegation selector. Routine summaries omit copied files, manifest text and unaccepted raw result bodies. Actual compact inspections may contain an already accepted result report. The existing DTO validator checks response kind, IDs, cursor order, current phase and encoded byte limits before returning JSON.
@@ -60,7 +60,7 @@ Cancellation requires the exact immutable WorkerJobBinding as well as the local 
 ## Owner release of an unresolved reservation
 
 ```sh
-everything --state-dir STATE worker coordinator release --task LOCAL_TASK_UUID --delegation-id DELEGATION_UUID --attempt-id ATTEMPT_UUID --manifest-digest MANIFEST_SHA256 --expected-phase outcome-unknown --operator NAME --reason TEXT --request-id RELEASE_REQUEST_UUID
+vorra --state-dir STATE worker coordinator release --task LOCAL_TASK_UUID --delegation-id DELEGATION_UUID --attempt-id ATTEMPT_UUID --manifest-digest MANIFEST_SHA256 --expected-phase outcome-unknown --operator NAME --reason TEXT --request-id RELEASE_REQUEST_UUID
 ```
 
 Use `--expected-phase cancellation-requested` for a cancelled reservation that never received a result. `--request-id` is required. Rerun with the same ID and arguments to get the stored release back. A different ID after a release, a changed binding or a phase other than the expected one is rejected. Release frees the Host slot. It keeps the charge and any Unknown report, and makes later worker results for that task unacceptable. It does not prove the remote work stopped; confirm that out of band first.

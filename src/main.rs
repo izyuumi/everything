@@ -4,38 +4,38 @@ use std::process::ExitCode;
 use std::sync::Arc;
 
 use clap::{ArgGroup, Args, Parser, Subcommand, ValueEnum};
-use everything::agent::{
-    Agent, AgentError, Conversation, ConversationConfig, LoopLimits, LoopStatus,
-    MAX_CHAT_TEXT_BYTES, ProviderEndpoint, ProviderKind, ProviderResume, TextAcceptance,
-    TextCommand, ToolRunSetup, TurnEvent,
-};
-use everything::context::{ContextBudget, TaskContext};
-use everything::model::ModelProvider;
-use everything::model::anthropic::{AnthropicConfig, AnthropicProvider};
-use everything::model::openai::{OpenAiConfig, OpenAiProvider};
-use everything::permissions::{
-    ApprovalChoice, ApprovalResolution, Authorizer, ExecutionAuthority, ExecutionMode,
-    READ_ONLY_WRITES_UNAVAILABLE, ToolScopeRule,
-};
-use everything::protocol::{CommandId, ConversationId, ConversationMessage, MessageContent};
-use everything::selector::{SEARCH_TOOLS_NAME, SearchTools, ToolSelector};
-use everything::tools::{
-    ToolRegistry,
-    broker::{BrokerLimits, ToolBroker},
-    builtin::{BuiltinConfig, BuiltinTools},
-};
 use futures_util::StreamExt;
 use serde::Serialize;
 use thiserror::Error;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio_util::sync::CancellationToken;
+use vorra::agent::{
+    Agent, AgentError, Conversation, ConversationConfig, LoopLimits, LoopStatus,
+    MAX_CHAT_TEXT_BYTES, ProviderEndpoint, ProviderKind, ProviderResume, TextAcceptance,
+    TextCommand, ToolRunSetup, TurnEvent,
+};
+use vorra::context::{ContextBudget, TaskContext};
+use vorra::model::ModelProvider;
+use vorra::model::anthropic::{AnthropicConfig, AnthropicProvider};
+use vorra::model::openai::{OpenAiConfig, OpenAiProvider};
+use vorra::permissions::{
+    ApprovalChoice, ApprovalResolution, Authorizer, ExecutionAuthority, ExecutionMode,
+    READ_ONLY_WRITES_UNAVAILABLE, ToolScopeRule,
+};
+use vorra::protocol::{CommandId, ConversationId, ConversationMessage, MessageContent};
+use vorra::selector::{SEARCH_TOOLS_NAME, SearchTools, ToolSelector};
+use vorra::tools::{
+    ToolRegistry,
+    broker::{BrokerLimits, ToolBroker},
+    builtin::{BuiltinConfig, BuiltinTools},
+};
 use zeroize::Zeroizing;
 
 mod queries;
 mod vault_cli;
 
-const DEFAULT_INSTRUCTIONS: &str = "You are Everything, a helpful assistant.";
-const VERSION: &str = match option_env!("EVERYTHING_VERSION") {
+const DEFAULT_INSTRUCTIONS: &str = "You are Vorra, a helpful assistant.";
+const VERSION: &str = match option_env!("VORRA_VERSION") {
     Some(version) => version,
     None => env!("CARGO_PKG_VERSION"),
 };
@@ -43,7 +43,7 @@ const VERSION: &str = match option_env!("EVERYTHING_VERSION") {
 #[derive(Parser)]
 #[command(version = VERSION, about = "Local-first native AI conversations")]
 struct Arguments {
-    #[arg(long, env = "EVERYTHING_STATE_DIR", value_name = "PATH")]
+    #[arg(long, env = "VORRA_STATE_DIR", value_name = "PATH")]
     state_dir: Option<PathBuf>,
     #[command(subcommand)]
     command: Option<Command>,
@@ -52,18 +52,18 @@ struct Arguments {
 #[derive(Subcommand)]
 enum Command {
     Serve(ServeArguments),
-    Worker(everything::worker::commands::WorkerArguments),
-    Schedule(everything::scheduling::commands::ScheduleArguments),
+    Worker(vorra::worker::commands::WorkerArguments),
+    Schedule(vorra::scheduling::commands::ScheduleArguments),
     Owner(OwnerArguments),
-    Service(everything::service::cli::ServiceArguments),
+    Service(vorra::service::cli::ServiceArguments),
     Init(InitArguments),
     Chat(ChatArguments),
     Status(StatusArguments),
     #[command(name = "chatgpt")]
     ChatGpt(ChatGptArguments),
     Tui(TuiArguments),
-    Relay(everything::relay::cli::RelayArguments),
-    Update(everything::update::UpdateArguments),
+    Relay(vorra::relay::cli::RelayArguments),
+    Update(vorra::update::UpdateArguments),
     Cancel(queries::CancelArguments),
     Tasks(queries::TasksArguments),
     Approvals(queries::ApprovalsArguments),
@@ -145,7 +145,7 @@ enum StorageArgument {
     Native,
 }
 
-impl From<StorageArgument> for everything::host::settings::CredentialStorage {
+impl From<StorageArgument> for vorra::host::settings::CredentialStorage {
     fn from(value: StorageArgument) -> Self {
         match value {
             StorageArgument::Session => Self::Session,
@@ -164,7 +164,7 @@ enum AgentCommand {
 struct ServeArguments {
     #[arg(long, value_name = "PATH")]
     mcp_credential_environment_file: Option<PathBuf>,
-    #[arg(long, env = "EVERYTHING_MAX_PARALLEL_TASKS", value_name = "1-4", value_parser = clap::value_parser!(u8).range(1..=4))]
+    #[arg(long, env = "VORRA_MAX_PARALLEL_TASKS", value_name = "1-4", value_parser = clap::value_parser!(u8).range(1..=4))]
     max_parallel_tasks: Option<u8>,
 }
 
@@ -181,20 +181,20 @@ struct OwnerArguments {
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 enum OwnerInput {
     CredentialEnvironment {
-        binding: everything::host::settings::ModelCredentialReference,
+        binding: vorra::host::settings::ModelCredentialReference,
     },
     Query {
-        query: everything::ipc::OwnerQuery,
+        query: vorra::ipc::OwnerQuery,
     },
     Command {
         command: serde_json::Value,
     },
     Operation {
-        operation: Box<everything::ipc::OwnerOperation>,
+        operation: Box<vorra::ipc::OwnerOperation>,
         request_id: Option<CommandId>,
     },
     Synchronize {
-        request: everything::protocol::SyncRequest,
+        request: vorra::protocol::SyncRequest,
     },
 }
 
@@ -202,21 +202,21 @@ enum OwnerInput {
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 enum SensitiveOwnerInput {
     NativeSettings {
-        input: everything::host::settings::native::NativeSettingsInput,
+        input: vorra::host::settings::native::NativeSettingsInput,
     },
     Credential {
         request_id: CommandId,
-        operation: everything::host::credentials::CredentialOperation,
+        operation: vorra::host::credentials::CredentialOperation,
     },
     VaultPut {
         request_id: CommandId,
-        item: everything::vault::VaultPutRequest,
+        item: vorra::vault::VaultPutRequest,
     },
     VaultConnect {
         request_id: CommandId,
-        provider: everything::vault::VaultProviderId,
+        provider: vorra::vault::VaultProviderId,
         binary: std::path::PathBuf,
-        token: everything::host::credentials::SecretTransfer,
+        token: vorra::host::credentials::SecretTransfer,
     },
 }
 
@@ -402,33 +402,33 @@ struct StatusArguments {
 #[derive(Debug, Error)]
 enum CliError {
     #[error(transparent)]
-    WorkerCommand(#[from] everything::worker::commands::WorkerCommandError),
+    WorkerCommand(#[from] vorra::worker::commands::WorkerCommandError),
     #[error(
-        "worker commands require --state-dir or EVERYTHING_STATE_DIR pointing to dedicated worker state"
+        "worker commands require --state-dir or VORRA_STATE_DIR pointing to dedicated worker state"
     )]
     WorkerStateDirectory,
     #[error(transparent)]
-    ScheduleCommand(#[from] everything::scheduling::commands::CommandError),
+    ScheduleCommand(#[from] vorra::scheduling::commands::CommandError),
     #[error(transparent)]
-    Host(#[from] everything::host::runtime::HostError),
+    Host(#[from] vorra::host::runtime::HostError),
     #[error(transparent)]
-    HostClient(#[from] everything::host::client::HostClientError),
+    HostClient(#[from] vorra::host::client::HostClientError),
     #[error("invalid owner JSON input; use a bounded query or operation object")]
     OwnerInput,
     #[error("invalid owner JSON input: {0}")]
     OwnerJson(String),
-    #[error("detached from the host task; check it with `everything tasks`")]
+    #[error("detached from the host task; check it with `vorra tasks`")]
     Detached,
     #[error("native settings and credential input require the private stdin route")]
     SensitiveOwnerInput,
     #[error("private owner input or output was cancelled or exceeded its deadline")]
     SensitiveOwnerCancelled,
     #[error(transparent)]
-    Service(#[from] everything::service::ServiceError),
+    Service(#[from] vorra::service::ServiceError),
     #[error(transparent)]
     Agent(#[from] AgentError),
     #[error(transparent)]
-    Model(#[from] everything::model::ModelError),
+    Model(#[from] vorra::model::ModelError),
     #[error(transparent)]
     Io(#[from] io::Error),
     #[error("{0} is required when creating a conversation")]
@@ -440,7 +440,7 @@ enum CliError {
     #[error("command {0} is already pending; use --resume --conversation with its conversation ID")]
     ResumeRequired(CommandId),
     #[error(
-        "conversation {0} has no pending text turn to resume; its last turn already finished or was never accepted. Read the reply with `everything status --conversation {0} --history`, or start a new turn with `everything chat --conversation {0} --message TEXT`"
+        "conversation {0} has no pending text turn to resume; its last turn already finished or was never accepted. Read the reply with `vorra status --conversation {0} --history`, or start a new turn with `vorra chat --conversation {0} --message TEXT`"
     )]
     NothingToResume(ConversationId),
     #[error("message files require at most 131072 bytes of UTF-8 text")]
@@ -450,13 +450,13 @@ enum CliError {
     #[error("could not serialize CLI output")]
     Serialization,
     #[error(transparent)]
-    Tool(#[from] everything::tools::ToolError),
+    Tool(#[from] vorra::tools::ToolError),
     #[error(transparent)]
-    Permission(#[from] everything::permissions::PermissionError),
+    Permission(#[from] vorra::permissions::PermissionError),
     #[error(transparent)]
-    Selector(#[from] everything::selector::SelectorError),
+    Selector(#[from] vorra::selector::SelectorError),
     #[error(transparent)]
-    Broker(#[from] everything::tools::broker::BrokerError),
+    Broker(#[from] vorra::tools::broker::BrokerError),
     #[error("tool run stopped at a durable boundary; inspect status before resuming")]
     ToolPaused,
     #[error("invalid tool options: {0}")]
@@ -464,13 +464,13 @@ enum CliError {
     #[error("{0}")]
     ChatGpt(String),
     #[error(transparent)]
-    Tui(#[from] everything::tui::TuiError),
+    Tui(#[from] vorra::tui::TuiError),
     #[error(transparent)]
-    Relay(#[from] everything::relay::cli::RelayCommandError),
+    Relay(#[from] vorra::relay::cli::RelayCommandError),
     #[error(transparent)]
-    Update(#[from] everything::update::UpdateError),
+    Update(#[from] vorra::update::UpdateError),
     #[error(transparent)]
-    Vault(#[from] everything::vault::VaultError),
+    Vault(#[from] vorra::vault::VaultError),
     #[error("{0} does not apply to {1} items")]
     VaultFlag(&'static str, String),
     #[error("{0} is not a secret field of {1} items")]
@@ -488,7 +488,7 @@ fn main() -> ExitCode {
     {
         Ok(runtime) => runtime,
         Err(error) => {
-            eprintln!("everything: could not start async runtime: {error}");
+            eprintln!("vorra: could not start async runtime: {error}");
             return ExitCode::FAILURE;
         }
     };
@@ -513,7 +513,7 @@ async fn run_cli(arguments: Arguments) -> ExitCode {
     match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
-            eprintln!("everything: {error}");
+            eprintln!("vorra: {error}");
             if matches!(error, CliError::Detached)
                 || matches!(error, CliError::Agent(ref error) if error.is_cancelled())
             {
@@ -529,10 +529,16 @@ async fn execute(arguments: Arguments, cancellation: CancellationToken) -> Resul
     if matches!(&arguments.command, Some(Command::Worker(_))) && arguments.state_dir.is_none() {
         return Err(CliError::WorkerStateDirectory);
     }
+    let home = std::env::var_os("HOME").map(PathBuf::from);
     let state_dir = arguments
         .state_dir
-        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".everything")))
+        .or_else(|| home.as_ref().map(|home| home.join(".vorra")))
         .ok_or(CliError::StateDirectory)?;
+    if let Some(home) = &home
+        && state_dir == home.join(".vorra")
+    {
+        vorra::service::migrate_legacy_state(home)?;
+    }
     if cancellation.is_cancelled() {
         return Err(AgentError::Cancelled.into());
     }
@@ -542,16 +548,16 @@ async fn execute(arguments: Arguments, cancellation: CancellationToken) -> Resul
     {
         Command::Worker(arguments) => {
             return write_json(
-                everything::worker::commands::run(arguments, state_dir, cancellation).await?,
+                vorra::worker::commands::run(arguments, state_dir, cancellation).await?,
             )
             .await;
         }
         Command::Serve(arguments) => {
-            let mut limits = everything::scheduler::SchedulerLimits::default();
+            let mut limits = vorra::scheduler::SchedulerLimits::default();
             if let Some(maximum) = arguments.max_parallel_tasks {
                 limits.max_primary_tasks = maximum.into();
             }
-            return everything::host::runtime::HostService::start_with_mcp_session_bootstrap(
+            return vorra::host::runtime::HostService::start_with_mcp_session_bootstrap(
                 &state_dir,
                 arguments.mcp_credential_environment_file,
                 limits,
@@ -564,43 +570,43 @@ async fn execute(arguments: Arguments, cancellation: CancellationToken) -> Resul
         }
         Command::Schedule(arguments) => {
             return write_json(
-                everything::scheduling::commands::run(arguments, state_dir, cancellation).await?,
+                vorra::scheduling::commands::run(arguments, state_dir, cancellation).await?,
             )
             .await;
         }
         Command::Owner(arguments) => return owner_cli(state_dir, arguments, cancellation).await,
         Command::Cancel(arguments) => {
-            let client = everything::host::client::HostClient::new(state_dir)?;
+            let client = vorra::host::client::HostClient::new(state_dir)?;
             return queries::cancel(&client, arguments, cancellation).await;
         }
         Command::Tasks(arguments) => {
-            let client = everything::host::client::HostClient::new(state_dir)?;
+            let client = vorra::host::client::HostClient::new(state_dir)?;
             return queries::tasks(&client, arguments, cancellation).await;
         }
         Command::Approvals(arguments) => {
-            let client = everything::host::client::HostClient::new(state_dir)?;
+            let client = vorra::host::client::HostClient::new(state_dir)?;
             return queries::approvals(&client, arguments, cancellation).await;
         }
         Command::Conversations(arguments) => {
-            let client = everything::host::client::HostClient::new(state_dir)?;
+            let client = vorra::host::client::HostClient::new(state_dir)?;
             return queries::conversations(&client, arguments, cancellation).await;
         }
         Command::Schedules(arguments) => {
-            let client = everything::host::client::HostClient::new(state_dir)?;
+            let client = vorra::host::client::HostClient::new(state_dir)?;
             return queries::schedules(&client, arguments, cancellation).await;
         }
         Command::Memory(arguments) => {
-            let client = everything::host::client::HostClient::new(state_dir)?;
+            let client = vorra::host::client::HostClient::new(state_dir)?;
             return queries::memory(&client, arguments, cancellation).await;
         }
         Command::Vault(arguments) => {
-            let client = everything::host::client::HostClient::new(state_dir)?;
+            let client = vorra::host::client::HostClient::new(state_dir)?;
             return vault_cli::run(&client, arguments, cancellation).await;
         }
         Command::Tui(arguments) => {
-            return everything::tui::run(
+            return vorra::tui::run(
                 state_dir,
-                everything::tui::Options {
+                vorra::tui::Options {
                     conversation: arguments.conversation,
                     resume_latest: arguments.resume_latest,
                     provider: arguments.provider.map(Into::into),
@@ -614,12 +620,12 @@ async fn execute(arguments: Arguments, cancellation: CancellationToken) -> Resul
             .map_err(CliError::from);
         }
         Command::Relay(arguments) => {
-            return everything::relay::cli::run(arguments, state_dir, cancellation)
+            return vorra::relay::cli::run(arguments, state_dir, cancellation)
                 .await
                 .map_err(CliError::from);
         }
         Command::Update(arguments) => {
-            return everything::update::run(arguments, VERSION, state_dir, cancellation)
+            return vorra::update::run(arguments, VERSION, state_dir, cancellation)
                 .await
                 .map_err(CliError::from);
         }
@@ -628,7 +634,7 @@ async fn execute(arguments: Arguments, cancellation: CancellationToken) -> Resul
         }
         Command::Service(arguments) => {
             return write_json(
-                everything::service::cli::manage(arguments, state_dir, cancellation).await?,
+                vorra::service::cli::manage(arguments, state_dir, cancellation).await?,
             )
             .await;
         }
@@ -638,7 +644,7 @@ async fn execute(arguments: Arguments, cancellation: CancellationToken) -> Resul
     };
     let agent = match Agent::open(&state_dir).await {
         Ok(agent) => agent,
-        Err(AgentError::Service(everything::service::ServiceError::AlreadyRunning)) => {
+        Err(AgentError::Service(vorra::service::ServiceError::AlreadyRunning)) => {
             return proxy_cli(state_dir, command, cancellation).await;
         }
         Err(error) => return Err(error.into()),
@@ -661,8 +667,8 @@ async fn execute(arguments: Arguments, cancellation: CancellationToken) -> Resul
                 if arguments.history {
                     #[derive(Serialize)]
                     struct Status {
-                        conversation: everything::agent::ConversationInfo,
-                        messages: Vec<everything::agent::RecordedMessage>,
+                        conversation: vorra::agent::ConversationInfo,
+                        messages: Vec<vorra::agent::RecordedMessage>,
                     }
                     write_json(Status {
                         conversation: conversation.info,
@@ -694,7 +700,7 @@ async fn owner_cli(
         let output = tokio::net::unix::pipe::Sender::from_owned_fd(output_descriptor)
             .map_err(|_| CliError::SensitiveOwnerInput)?;
         let input = read_sensitive_input(input, cancellation.clone()).await?;
-        let client = everything::host::client::HostClient::new(state)?;
+        let client = vorra::host::client::HostClient::new(state)?;
         return match input {
             SensitiveOwnerInput::NativeSettings { input } => {
                 let result = client.native_settings(input, cancellation.clone()).await?;
@@ -708,7 +714,7 @@ async fn owner_cli(
                     output,
                     client
                         .operate(
-                            everything::ipc::OwnerOperation::Credential { operation },
+                            vorra::ipc::OwnerOperation::Credential { operation },
                             request_id,
                             cancellation.clone(),
                         )
@@ -722,7 +728,7 @@ async fn owner_cli(
                     output,
                     client
                         .operate(
-                            everything::ipc::OwnerOperation::VaultPut { item },
+                            vorra::ipc::OwnerOperation::VaultPut { item },
                             request_id,
                             cancellation.clone(),
                         )
@@ -737,7 +743,7 @@ async fn owner_cli(
                 binary,
                 token,
             } => {
-                if provider != everything::vault::VaultProviderId::ProtonPass {
+                if provider != vorra::vault::VaultProviderId::ProtonPass {
                     return Err(CliError::OwnerJson(
                         "provider: only protonpass accepts a vault_connect token".to_owned(),
                     ));
@@ -746,7 +752,7 @@ async fn owner_cli(
                     output,
                     client
                         .operate(
-                            everything::ipc::OwnerOperation::VaultConnect {
+                            vorra::ipc::OwnerOperation::VaultConnect {
                                 provider,
                                 binary,
                                 account: None,
@@ -787,16 +793,14 @@ async fn owner_cli(
             CliError::OwnerJson(
                 serde_json::from_slice(&bytes)
                     .ok()
-                    .and_then(|mut value| {
-                        everything::ipc::decode_json::<OwnerInput>(&mut value).err()
-                    })
+                    .and_then(|mut value| vorra::ipc::decode_json::<OwnerInput>(&mut value).err())
                     .map_or_else(|| error.to_string(), |error| error.to_string()),
             )
         })
     })
     .await
     .map_err(|_| CliError::Worker)??;
-    let client = everything::host::client::HostClient::new(state)?;
+    let client = vorra::host::client::HostClient::new(state)?;
     match input {
         OwnerInput::CredentialEnvironment { binding } => {
             let variable = match binding.provider {
@@ -804,13 +808,13 @@ async fn owner_cli(
                 ProviderKind::OpenAi => "OPENAI_API_KEY",
             };
             let value = std::env::var(variable).map_err(|_| CliError::Credential(variable))?;
-            let secret = everything::host::credentials::SecretTransfer::new(value)
+            let secret = vorra::host::credentials::SecretTransfer::new(value)
                 .map_err(|_| CliError::Credential(variable))?;
             write_json(
                 client
                     .operate(
-                        everything::ipc::OwnerOperation::Credential {
-                            operation: everything::host::credentials::CredentialOperation::Store {
+                        vorra::ipc::OwnerOperation::Credential {
+                            operation: vorra::host::credentials::CredentialOperation::Store {
                                 binding,
                                 secret,
                             },
@@ -824,10 +828,10 @@ async fn owner_cli(
         }
         OwnerInput::Query { query } => write_json(client.query(query, cancellation).await?).await,
         OwnerInput::Command { command } => {
-            let typed: everything::protocol::CommandEnvelope =
-                everything::ipc::decode_json(&mut command.clone()).map_err(|error| {
+            let typed: vorra::protocol::CommandEnvelope =
+                vorra::ipc::decode_json(&mut command.clone()).map_err(|error| {
                     CliError::OwnerJson(
-                        everything::ipc::JsonFieldError {
+                        vorra::ipc::JsonFieldError {
                             path: match error.path.as_str() {
                                 "" => "command".to_owned(),
                                 path => format!("command.{path}"),
@@ -848,19 +852,19 @@ async fn owner_cli(
         } => {
             if matches!(
                 &*operation,
-                everything::ipc::OwnerOperation::Credential { .. }
-                    | everything::ipc::OwnerOperation::VaultPut { .. }
-                    | everything::ipc::OwnerOperation::VaultConnect { token: Some(_), .. }
+                vorra::ipc::OwnerOperation::Credential { .. }
+                    | vorra::ipc::OwnerOperation::VaultPut { .. }
+                    | vorra::ipc::OwnerOperation::VaultConnect { token: Some(_), .. }
             ) {
                 return Err(CliError::SensitiveOwnerInput);
             }
             let request_id = match (&*operation, request_id) {
-                (everything::ipc::OwnerOperation::SetSettingsGrant { change }, Some(original))
+                (vorra::ipc::OwnerOperation::SetSettingsGrant { change }, Some(original))
                     if original == change.request_id =>
                 {
                     original
                 }
-                (everything::ipc::OwnerOperation::SetSettingsGrant { .. }, _) => {
+                (vorra::ipc::OwnerOperation::SetSettingsGrant { .. }, _) => {
                     return Err(CliError::OwnerInput);
                 }
                 (_, original) => original.unwrap_or_default(),
@@ -872,12 +876,12 @@ async fn owner_cli(
             request.validate().map_err(|_| CliError::OwnerInput)?;
             match client
                 .request(
-                    everything::transport::local::LocalRequestPayload::Synchronize { request },
+                    vorra::transport::local::LocalRequestPayload::Synchronize { request },
                     cancellation,
                 )
                 .await?
             {
-                response @ everything::transport::local::LocalResponsePayload::Synchronized {
+                response @ vorra::transport::local::LocalResponsePayload::Synchronized {
                     ..
                 } => write_json(response).await,
                 _ => Err(CliError::OwnerInput),
@@ -891,10 +895,10 @@ async fn chatgpt_cli(
     command: ChatGptCommand,
     cancellation: CancellationToken,
 ) -> Result<(), CliError> {
-    use everything::host::chatgpt::{ChatGptOperation, ChatGptRevocation};
-    use everything::host::settings::{ModelCredentialReference, ModelCredentialSource};
-    use everything::ipc::{OwnerQuery, OwnerQueryResult};
-    let client = everything::host::client::HostClient::new(state)?;
+    use vorra::host::chatgpt::{ChatGptOperation, ChatGptRevocation};
+    use vorra::host::settings::{ModelCredentialReference, ModelCredentialSource};
+    use vorra::ipc::{OwnerQuery, OwnerQueryResult};
+    let client = vorra::host::client::HostClient::new(state)?;
     let OwnerQueryResult::Settings { settings } = client
         .query(OwnerQuery::Settings, cancellation.clone())
         .await?
@@ -928,7 +932,7 @@ async fn chatgpt_cli(
             (None, Some(reference), Some(storage)) => Ok(binding(reference, storage)),
             (None, None, storage) if create => Ok(binding(
                 uuid::Uuid::new_v4(),
-                storage.unwrap_or(everything::host::settings::CredentialStorage::Native),
+                storage.unwrap_or(vorra::host::settings::CredentialStorage::Native),
             )),
             (None, _, _) => Err(CliError::ChatGpt(
                 "no ChatGPT binding is selected in settings; pass --reference and --storage session|native for an existing sign-in".into(),
@@ -949,9 +953,9 @@ async fn chatgpt_cli(
         }
         ChatGptCommand::Models(arguments) => {
             let binding = resolve(&arguments.binding, false)?;
-            let everything::ipc::OwnerOperationResult::ChatGptModels { models, .. } = client
+            let vorra::ipc::OwnerOperationResult::ChatGptModels { models, .. } = client
                 .operate(
-                    everything::ipc::OwnerOperation::ChatGptModels { binding },
+                    vorra::ipc::OwnerOperation::ChatGptModels { binding },
                     CommandId::new(),
                     cancellation,
                 )
@@ -991,7 +995,7 @@ async fn chatgpt_cli(
                     .await?;
             if status.revocation == Some(ChatGptRevocation::Unconfirmed) {
                 eprintln!(
-                    "signed out locally, but OpenAI did not confirm revocation; disconnect Everything in ChatGPT settings if needed"
+                    "signed out locally, but OpenAI did not confirm revocation; disconnect Vorra in ChatGPT settings if needed"
                 );
             }
             write_json(mask_email(status)).await
@@ -1030,26 +1034,26 @@ async fn chatgpt_cli(
 }
 
 async fn chatgpt_operate(
-    client: &everything::host::client::HostClient,
-    operation: everything::host::chatgpt::ChatGptOperation,
+    client: &vorra::host::client::HostClient,
+    operation: vorra::host::chatgpt::ChatGptOperation,
     cancellation: CancellationToken,
-) -> Result<everything::host::chatgpt::ChatGptStatus, CliError> {
+) -> Result<vorra::host::chatgpt::ChatGptStatus, CliError> {
     match client
         .operate(
-            everything::ipc::OwnerOperation::ChatGpt { operation },
+            vorra::ipc::OwnerOperation::ChatGpt { operation },
             CommandId::new(),
             cancellation,
         )
         .await?
     {
-        everything::ipc::OwnerOperationResult::ChatGpt { status } => Ok(*status),
+        vorra::ipc::OwnerOperationResult::ChatGpt { status } => Ok(*status),
         _ => Err(CliError::OwnerInput),
     }
 }
 
 fn mask_email(
-    mut status: everything::host::chatgpt::ChatGptStatus,
-) -> everything::host::chatgpt::ChatGptStatus {
+    mut status: vorra::host::chatgpt::ChatGptStatus,
+) -> vorra::host::chatgpt::ChatGptStatus {
     status.email = status.email.map(|email| {
         email
             .rsplit_once('@')
@@ -1059,16 +1063,16 @@ fn mask_email(
 }
 
 async fn chatgpt_replace_settings(
-    client: &everything::host::client::HostClient,
-    settings: everything::host::settings::HostSettings,
+    client: &vorra::host::client::HostClient,
+    settings: vorra::host::settings::HostSettings,
     expected_revision: u64,
     cancellation: CancellationToken,
-) -> Result<everything::ipc::OwnerOperationResult, CliError> {
+) -> Result<vorra::ipc::OwnerOperationResult, CliError> {
     let request_id = CommandId::new();
     eprintln!("owner request {request_id}; reuse this ID for an explicit retry");
     Ok(client
         .operate(
-            everything::ipc::OwnerOperation::ReplaceSettings {
+            vorra::ipc::OwnerOperation::ReplaceSettings {
                 expected_revision,
                 settings: Box::new(settings),
             },
@@ -1079,11 +1083,11 @@ async fn chatgpt_replace_settings(
 }
 
 async fn chatgpt_select(
-    client: &everything::host::client::HostClient,
-    binding: everything::host::settings::ModelCredentialReference,
+    client: &vorra::host::client::HostClient,
+    binding: vorra::host::settings::ModelCredentialReference,
     cancellation: CancellationToken,
-) -> Result<everything::ipc::OwnerOperationResult, CliError> {
-    use everything::ipc::{OwnerQuery, OwnerQueryResult};
+) -> Result<vorra::ipc::OwnerOperationResult, CliError> {
+    use vorra::ipc::{OwnerQuery, OwnerQueryResult};
     let OwnerQueryResult::Settings { settings } = client
         .query(OwnerQuery::Settings, cancellation.clone())
         .await?
@@ -1108,13 +1112,13 @@ async fn chatgpt_select(
 }
 
 async fn chatgpt_sign_in(
-    client: &everything::host::client::HostClient,
-    binding: everything::host::settings::ModelCredentialReference,
+    client: &vorra::host::client::HostClient,
+    binding: vorra::host::settings::ModelCredentialReference,
     selected: bool,
     arguments: ChatGptSignInArguments,
     cancellation: CancellationToken,
 ) -> Result<(), CliError> {
-    use everything::host::chatgpt::{ChatGptAttemptPhase, ChatGptOperation};
+    use vorra::host::chatgpt::{ChatGptAttemptPhase, ChatGptOperation};
     let status = chatgpt_operate(
         client,
         ChatGptOperation::SignIn {
@@ -1201,11 +1205,11 @@ async fn chatgpt_sign_in(
                 return Ok(());
             }
             let hint = format!(
-                "API-key credentials remain in use. Select it with: everything chatgpt select --reference {} --storage {}",
+                "API-key credentials remain in use. Select it with: vorra chatgpt select --reference {} --storage {}",
                 binding.reference,
                 match binding.storage {
-                    everything::host::settings::CredentialStorage::Session => "session",
-                    everything::host::settings::CredentialStorage::Native => "native",
+                    vorra::host::settings::CredentialStorage::Session => "session",
+                    vorra::host::settings::CredentialStorage::Native => "native",
                 }
             );
             if !plan_usage_enabled {
@@ -1214,11 +1218,11 @@ async fn chatgpt_sign_in(
             }
             match chatgpt_select(client, binding, cancellation).await {
                 Ok(
-                    everything::ipc::OwnerOperationResult::SettingsReceipt {
+                    vorra::ipc::OwnerOperationResult::SettingsReceipt {
                         restart_required: true,
                         ..
                     }
-                    | everything::ipc::OwnerOperationResult::Settings {
+                    | vorra::ipc::OwnerOperationResult::Settings {
                         restart_required: true,
                         ..
                     },
@@ -1254,8 +1258,8 @@ async fn proxy_cli(
     command: AgentCommand,
     cancellation: CancellationToken,
 ) -> Result<(), CliError> {
-    use everything::ipc::{OwnerCommand, OwnerQuery, OwnerQueryResult};
-    let client = everything::host::client::HostClient::new(state)?;
+    use vorra::ipc::{OwnerCommand, OwnerQuery, OwnerQueryResult};
+    let client = vorra::host::client::HostClient::new(state)?;
     match command {
         AgentCommand::Init(arguments) => {
             let conversation_id = arguments.conversation.unwrap_or_default();
@@ -1325,13 +1329,13 @@ async fn proxy_cli(
 }
 
 async fn proxy_messages(
-    client: &everything::host::client::HostClient,
+    client: &vorra::host::client::HostClient,
     conversation_id: ConversationId,
     through: u64,
     cancellation: CancellationToken,
-) -> Result<Vec<everything::agent::RecordedMessage>, CliError> {
-    use everything::protocol::{ConversationEvent, SyncCursor, SyncRequest};
-    use everything::transport::local::{LocalRequestPayload, LocalResponsePayload};
+) -> Result<Vec<vorra::agent::RecordedMessage>, CliError> {
+    use vorra::protocol::{ConversationEvent, SyncCursor, SyncRequest};
+    use vorra::transport::local::{LocalRequestPayload, LocalResponsePayload};
     let mut cursor = SyncCursor {
         conversation_id,
         after_sequence: 0,
@@ -1370,7 +1374,7 @@ async fn proxy_messages(
                 return Err(AgentError::ResourceLimit("CLI history").into());
             }
             if let ConversationEvent::MessageAppended { message } = event.payload {
-                messages.push(everything::agent::RecordedMessage {
+                messages.push(vorra::agent::RecordedMessage {
                     event_id: event.event_id,
                     sequence: event.sequence,
                     causation_id: event.causation_id,
@@ -1383,14 +1387,14 @@ async fn proxy_messages(
 }
 
 async fn proxy_chat(
-    client: &everything::host::client::HostClient,
+    client: &vorra::host::client::HostClient,
     arguments: ChatArguments,
     cancellation: CancellationToken,
 ) -> Result<(), CliError> {
-    use everything::ipc::{
+    use vorra::ipc::{
         OwnerCommand, OwnerOperation, OwnerQuery, OwnerQueryResult, RequestedRunOptions,
     };
-    use everything::protocol::TaskId;
+    use vorra::protocol::TaskId;
     let text = match (arguments.message, arguments.message_file) {
         (Some(message), None) => Some(message),
         (None, Some(path)) => Some(read_message(path).await?),
@@ -1473,9 +1477,9 @@ async fn proxy_chat(
                 (
                     id,
                     if arguments.tools.for_task {
-                        everything::protocol::PermissionDecision::AllowForTask
+                        vorra::protocol::PermissionDecision::AllowForTask
                     } else {
-                        everything::protocol::PermissionDecision::Allow
+                        vorra::protocol::PermissionDecision::Allow
                     },
                 )
             })
@@ -1483,7 +1487,7 @@ async fn proxy_chat(
                 arguments
                     .tools
                     .deny
-                    .map(|id| (id, everything::protocol::PermissionDecision::Deny))
+                    .map(|id| (id, vorra::protocol::PermissionDecision::Deny))
             })
         {
             resolve_host_approval(
@@ -1507,8 +1511,8 @@ async fn proxy_chat(
                     Some(
                         status @ LoopStatus::Paused {
                             reason:
-                                everything::agent::PauseReason::Cancellation
-                                | everything::agent::PauseReason::InterruptedTool,
+                                vorra::agent::PauseReason::Cancellation
+                                | vorra::agent::PauseReason::InterruptedTool,
                         },
                     ) => OwnerOperation::ResumeInterrupted {
                         task_id,
@@ -1619,9 +1623,9 @@ async fn proxy_chat(
 }
 
 async fn interrupt_host_task(
-    client: &everything::host::client::HostClient,
+    client: &vorra::host::client::HostClient,
     conversation_id: ConversationId,
-    task_id: everything::protocol::TaskId,
+    task_id: vorra::protocol::TaskId,
 ) -> Result<(), CliError> {
     eprintln!("\ncancelling host task {task_id}; press Ctrl-C again to detach");
     let detach = CancellationToken::new();
@@ -1640,18 +1644,18 @@ async fn interrupt_host_task(
 }
 
 async fn follow_host_task(
-    client: &everything::host::client::HostClient,
+    client: &vorra::host::client::HostClient,
     conversation_id: ConversationId,
     command_id: CommandId,
-    task_id: everything::protocol::TaskId,
-    mut information: everything::ipc::ConversationSummary,
+    task_id: vorra::protocol::TaskId,
+    mut information: vorra::ipc::ConversationSummary,
     wait: bool,
     cancellation: CancellationToken,
 ) -> Result<(), CliError> {
-    use everything::ipc::{OwnerQuery, OwnerQueryResult};
+    use vorra::ipc::{OwnerQuery, OwnerQueryResult};
     let mut lines = None;
     let mut reported = None;
-    let mut streamed = None::<everything::scheduler::LiveText>;
+    let mut streamed = None::<vorra::scheduler::LiveText>;
     let mut output = tokio::io::stdout();
     loop {
         match client
@@ -1659,7 +1663,7 @@ async fn follow_host_task(
             .await?
         {
             OwnerQueryResult::Task { task, .. }
-                if task.status == everything::protocol::TaskStatus::Completed =>
+                if task.status == vorra::protocol::TaskStatus::Completed =>
             {
                 let OwnerQueryResult::Conversation { information, .. } = client
                     .query(
@@ -1683,13 +1687,12 @@ async fn follow_host_task(
             OwnerQueryResult::Task { task, execution }
                 if matches!(
                     task.status,
-                    everything::protocol::TaskStatus::Queued
-                        | everything::protocol::TaskStatus::Running
-                ) || (task.status == everything::protocol::TaskStatus::WaitingForChildren
+                    vorra::protocol::TaskStatus::Queued | vorra::protocol::TaskStatus::Running
+                ) || (task.status == vorra::protocol::TaskStatus::WaitingForChildren
                     && !execution.cancel_requested
                     && matches!(
                         execution.waiting,
-                        Some(everything::scheduler::WaitingReason::Children { .. })
+                        Some(vorra::scheduler::WaitingReason::Children { .. })
                     )) =>
             {
                 if execution.diagnostic != reported {
@@ -1719,7 +1722,7 @@ async fn follow_host_task(
                 }
             }
             OwnerQueryResult::Task { task, .. }
-                if task.status == everything::protocol::TaskStatus::AwaitingPermission =>
+                if task.status == vorra::protocol::TaskStatus::AwaitingPermission =>
             {
                 if !wait {
                     print_host_approvals(client, conversation_id, task_id, &cancellation).await?;
@@ -1743,7 +1746,7 @@ async fn follow_host_task(
                 }
                 if matches!(
                     execution.waiting,
-                    Some(everything::scheduler::WaitingReason::ProviderUnavailable)
+                    Some(vorra::scheduler::WaitingReason::ProviderUnavailable)
                 ) && let ProviderEndpoint::Loopback(endpoint) = &information.endpoint
                     && let OwnerQueryResult::Settings { settings } = client
                         .query(OwnerQuery::Settings, cancellation.clone())
@@ -1757,15 +1760,15 @@ async fn follow_host_task(
                         ProviderKind::Anthropic => "ANTHROPIC_API_KEY",
                         ProviderKind::OpenAi => "OPENAI_API_KEY",
                     };
-                    let binding = everything::host::settings::ModelCredentialReference {
+                    let binding = vorra::host::settings::ModelCredentialReference {
                         provider: information.provider,
                         endpoint: information.endpoint.clone(),
                         reference: uuid::Uuid::new_v4(),
-                        storage: everything::host::settings::CredentialStorage::Session,
+                        storage: vorra::host::settings::CredentialStorage::Session,
                         source: Default::default(),
                     };
                     eprintln!(
-                        "the host does not read {variable} for loopback endpoint {endpoint}; with {variable} set, run `everything owner --request-file FILE` with {} and add the same binding to settings model_credentials",
+                        "the host does not read {variable} for loopback endpoint {endpoint}; with {variable} set, run `vorra owner --request-file FILE` with {} and add the same binding to settings model_credentials",
                         serde_json::json!({"kind": "credential_environment", "binding": binding})
                     );
                 }
@@ -1793,8 +1796,8 @@ async fn follow_host_task(
         information = current;
         client
             .request(
-                everything::transport::local::LocalRequestPayload::Wait {
-                    request: everything::ipc::ConversationWait {
+                vorra::transport::local::LocalRequestPayload::Wait {
+                    request: vorra::ipc::ConversationWait {
                         conversation_id,
                         after_sequence: information.last_sequence,
                         timeout_ms: 1000,
@@ -1807,14 +1810,14 @@ async fn follow_host_task(
 }
 
 async fn resolve_host_approval(
-    client: &everything::host::client::HostClient,
+    client: &vorra::host::client::HostClient,
     conversation_id: ConversationId,
-    task_id: everything::protocol::TaskId,
+    task_id: vorra::protocol::TaskId,
     id: String,
-    decision: everything::protocol::PermissionDecision,
+    decision: vorra::protocol::PermissionDecision,
     cancellation: &CancellationToken,
 ) -> Result<(), CliError> {
-    use everything::ipc::{ApprovalLookup, OwnerQuery, OwnerQueryResult};
+    use vorra::ipc::{ApprovalLookup, OwnerQuery, OwnerQueryResult};
     let OwnerQueryResult::Approval { approval } = client
         .query(
             OwnerQuery::Approval {
@@ -1829,7 +1832,7 @@ async fn resolve_host_approval(
     };
     let approval = approval
         .filter(|approval| {
-            approval.status == everything::permissions::ApprovalStatus::Pending
+            approval.status == vorra::permissions::ApprovalStatus::Pending
                 && approval.request.scope.task_id == task_id.to_string()
         })
         .ok_or(CliError::ToolOptions(
@@ -1841,11 +1844,11 @@ async fn resolve_host_approval(
         .operation_id
         .parse()
         .map_err(AgentError::from)?;
-    let command = everything::protocol::CommandEnvelope::new(
+    let command = vorra::protocol::CommandEnvelope::new(
         conversation_id,
         None,
-        everything::protocol::UnixMillis::now().map_err(AgentError::from)?,
-        everything::protocol::Command::ResolvePermission {
+        vorra::protocol::UnixMillis::now().map_err(AgentError::from)?,
+        vorra::protocol::Command::ResolvePermission {
             operation_id,
             decision,
         },
@@ -1855,12 +1858,12 @@ async fn resolve_host_approval(
 }
 
 async fn pending_host_approvals(
-    client: &everything::host::client::HostClient,
+    client: &vorra::host::client::HostClient,
     conversation_id: ConversationId,
-    task_id: everything::protocol::TaskId,
+    task_id: vorra::protocol::TaskId,
     cancellation: &CancellationToken,
-) -> Result<Vec<everything::permissions::ApprovalRequest>, CliError> {
-    use everything::ipc::{ApprovalLookup, OwnerQuery, OwnerQueryResult};
+) -> Result<Vec<vorra::permissions::ApprovalRequest>, CliError> {
+    use vorra::ipc::{ApprovalLookup, OwnerQuery, OwnerQueryResult};
     let mut pending = Vec::new();
     let mut cursor = None;
     loop {
@@ -1896,9 +1899,9 @@ async fn pending_host_approvals(
             else {
                 return Err(CliError::OwnerInput);
             };
-            if let Some(approval) = approval.filter(|approval| {
-                approval.status == everything::permissions::ApprovalStatus::Pending
-            }) {
+            if let Some(approval) = approval
+                .filter(|approval| approval.status == vorra::permissions::ApprovalStatus::Pending)
+            {
                 pending.push(approval.request);
             }
         }
@@ -1910,9 +1913,9 @@ async fn pending_host_approvals(
 }
 
 async fn print_host_approvals(
-    client: &everything::host::client::HostClient,
+    client: &vorra::host::client::HostClient,
     conversation_id: ConversationId,
-    task_id: everything::protocol::TaskId,
+    task_id: vorra::protocol::TaskId,
     cancellation: &CancellationToken,
 ) -> Result<(), CliError> {
     for request in pending_host_approvals(client, conversation_id, task_id, cancellation).await? {
@@ -1927,14 +1930,14 @@ async fn print_host_approvals(
 
 fn resume_hint(conversation_id: ConversationId, approval_id: &str) -> String {
     format!(
-        "approve with: everything chat --conversation {conversation_id} --tools --resume --approve {approval_id}\ndeny with:    everything chat --conversation {conversation_id} --tools --resume --deny {approval_id}"
+        "approve with: vorra chat --conversation {conversation_id} --tools --resume --approve {approval_id}\ndeny with:    vorra chat --conversation {conversation_id} --tools --resume --deny {approval_id}"
     )
 }
 
 fn terminal_lines() -> Result<tokio::sync::mpsc::Receiver<String>, CliError> {
     let (sender, receiver) = tokio::sync::mpsc::channel(16);
     std::thread::Builder::new()
-        .name("everything-approval-input".into())
+        .name("vorra-approval-input".into())
         .spawn(move || {
             for line in io::stdin().lines() {
                 let Ok(line) = line else { break };
@@ -1947,15 +1950,15 @@ fn terminal_lines() -> Result<tokio::sync::mpsc::Receiver<String>, CliError> {
 }
 
 async fn await_host_approval(
-    client: &everything::host::client::HostClient,
+    client: &vorra::host::client::HostClient,
     conversation_id: ConversationId,
-    task_id: everything::protocol::TaskId,
+    task_id: vorra::protocol::TaskId,
     lines: &mut Option<tokio::sync::mpsc::Receiver<String>>,
     cancellation: &CancellationToken,
 ) -> Result<(), CliError> {
-    use everything::ipc::{ApprovalLookup, OwnerQuery, OwnerQueryResult};
-    use everything::permissions::ApprovalStatus;
-    use everything::protocol::PermissionDecision;
+    use vorra::ipc::{ApprovalLookup, OwnerQuery, OwnerQueryResult};
+    use vorra::permissions::ApprovalStatus;
+    use vorra::protocol::PermissionDecision;
     let Some(request) = pending_host_approvals(client, conversation_id, task_id, cancellation)
         .await?
         .into_iter()
@@ -2065,10 +2068,10 @@ async fn await_host_approval(
 }
 
 async fn proxy_reply(
-    client: &everything::host::client::HostClient,
+    client: &vorra::host::client::HostClient,
     conversation_id: ConversationId,
     command_id: CommandId,
-    information: &everything::ipc::ConversationSummary,
+    information: &vorra::ipc::ConversationSummary,
     streamed: &str,
     cancellation: CancellationToken,
 ) -> Result<(), CliError> {
@@ -2084,7 +2087,7 @@ async fn proxy_reply(
         .rev()
         .find(|message| {
             message.causation_id == Some(command_id)
-                && message.message.role == everything::protocol::MessageRole::Assistant
+                && message.message.role == vorra::protocol::MessageRole::Assistant
                 && !message
                     .message
                     .content
@@ -2310,7 +2313,7 @@ async fn run_tool_chat(
     conversation: Conversation,
     command_id: CommandId,
     provider: Arc<dyn ModelProvider>,
-    task: &everything::protocol::TaskRecord,
+    task: &vorra::protocol::TaskRecord,
     options: ToolArguments,
     cancellation: CancellationToken,
 ) -> Result<(), CliError> {
@@ -2403,7 +2406,7 @@ async fn run_tool_chat(
             let authorizer = Arc::new(Authorizer::new(prepare_store, registry.clone(), scopes)?);
             if let Some((id, choice)) = approval {
                 let now = i64::try_from(
-                    everything::protocol::UnixMillis::now()
+                    vorra::protocol::UnixMillis::now()
                         .map_err(AgentError::from)?
                         .get(),
                 )
@@ -2686,7 +2689,7 @@ async fn read_sensitive_input(
     input: tokio::net::unix::pipe::Receiver,
     cancellation: CancellationToken,
 ) -> Result<SensitiveOwnerInput, CliError> {
-    use everything::host::settings::native::MAX_NATIVE_SETTINGS_INPUT_BYTES;
+    use vorra::host::settings::native::MAX_NATIVE_SETTINGS_INPUT_BYTES;
     let mut bytes = Zeroizing::new(Vec::new());
     let mut input = input.take((MAX_NATIVE_SETTINGS_INPUT_BYTES + 1) as u64);
     tokio::select! {

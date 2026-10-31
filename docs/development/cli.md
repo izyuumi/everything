@@ -1,17 +1,17 @@
 # Persistent native CLI
 
-For an interactive full-screen chat, run `everything` with no subcommand (alias [`everything tui`](tui.md)). It can start a Host for the session and runs first-run model onboarding when no usable credential is configured.
+For an interactive full-screen chat, run `vorra` with no subcommand (alias [`vorra tui`](tui.md)). It can start a Host for the session and runs first-run model onboarding when no usable credential is configured.
 
-Build with `cargo build --release --locked`. `everything --state-dir /absolute/private/path` places the global state option before the subcommand. `EVERYTHING_STATE_DIR` supplies the same default; otherwise the CLI uses `$HOME/.everything`. The state directory is created with owner-only permissions and validated on every foreground open. Ancestors may be symlinks owned by you or root, such as `/tmp`, `$TMPDIR` under `/var/folders` or a symlinked `$HOME`; they are resolved during validation. The state directory itself must not be a symlink. One host owns its exclusive lock.
+Build with `cargo build --release --locked`. `vorra --state-dir /absolute/private/path` places the global state option before the subcommand. `VORRA_STATE_DIR` supplies the same default; otherwise the CLI uses `$HOME/.vorra`. The state directory is created with owner-only permissions and validated on every foreground open. Ancestors may be symlinks owned by you or root, such as `/tmp`, `$TMPDIR` under `/var/folders` or a symlinked `$HOME`; they are resolved during validation. The state directory itself may be a symlink owned by you, such as the `~/.vorra -> ~/.everything` migration fallback; its target must be an owner-only directory. When the state directory resolves to `$HOME/.vorra` (by default or explicitly), `$HOME/.vorra` is absent and `$HOME/.everything` exists, the CLI first renames `$HOME/.everything` to `$HOME/.vorra` (a symlink `$HOME/.vorra -> $HOME/.everything` if the rename fails), refusing while an old host holds its lock. Opening the host database renames a legacy `everything.sqlite3` with its `-wal`, `-shm` and `-journal` files to `vorra.sqlite3` when no `vorra.sqlite3` exists, in any state directory. Nothing is copied or deleted. One host owns its exclusive lock.
 
 ## Initialize and inspect
 
 Initialization is offline and requires no provider credential:
 
 ```sh
-everything --state-dir /absolute/private/path init --provider anthropic --model claude-sonnet-4-6 --title "Work"
-everything --state-dir /absolute/private/path status
-everything --state-dir /absolute/private/path status --conversation CONVERSATION_UUID --history
+vorra --state-dir /absolute/private/path init --provider anthropic --model claude-sonnet-4-6 --title "Work"
+vorra --state-dir /absolute/private/path status
+vorra --state-dir /absolute/private/path status --conversation CONVERSATION_UUID --history
 ```
 
 Select `--provider openai` and a native Responses model ID for OpenAI. Model IDs are explicit strings passed to the provider; the CLI does not claim every model supports every request option. Initialization prints JSON with the conversation UUID and safe metadata. `status --conversation` prints metadata; `--history` explicitly includes persisted text. List output defaults to 20 conversations and supports `--limit` from 1 through 1000. Status output excludes private native continuation payloads.
@@ -23,8 +23,8 @@ Optional creation parameters are `--instructions`, `--max-output-tokens` (defaul
 Set the selected provider's credential in the process environment using your preferred secret-management mechanism: `ANTHROPIC_API_KEY` or `OPENAI_API_KEY`. Do not put credentials in command arguments or source files.
 
 ```sh
-everything --state-dir /absolute/private/path chat --conversation CONVERSATION_UUID --message "Summarize my options."
-everything --state-dir /absolute/private/path chat --conversation CONVERSATION_UUID --message-file /absolute/message.txt
+vorra --state-dir /absolute/private/path chat --conversation CONVERSATION_UUID --message "Summarize my options."
+vorra --state-dir /absolute/private/path chat --conversation CONVERSATION_UUID --message-file /absolute/message.txt
 ```
 
 Each invocation performs one text turn; invoke `chat` again with the same UUID to continue its persisted history. A first `chat` can omit `--conversation` if it supplies `--provider` and `--model`; it creates a conversation and prints the conversation and command UUIDs to standard error. `--title` applies to that new conversation. Streaming text goes to standard output. It is provisional until standard error reports `saved message`. If the authoritative completed text differs from streamed deltas, the CLI prints the saved text separately.
@@ -36,8 +36,8 @@ Message files must be regular UTF-8 files at most 128 KiB. Input text must be no
 Supply `--command-id COMMAND_UUID` to give a new message an explicit durable identity. Repeating the same conversation, command ID, and exact text returns the saved result when completed. Different text or conversation identity under that command ID is rejected before inference. An accepted pending command is never retried automatically.
 
 ```sh
-everything --state-dir /absolute/private/path status --conversation CONVERSATION_UUID --history
-everything --state-dir /absolute/private/path chat --conversation CONVERSATION_UUID --resume
+vorra --state-dir /absolute/private/path status --conversation CONVERSATION_UUID --history
+vorra --state-dir /absolute/private/path chat --conversation CONVERSATION_UUID --resume
 ```
 
 `--resume` resumes the one pending command; optional `--command-id` must match it. A new message is rejected until the pending turn completes. Through a running host, a message to a conversation whose pending turn's task was cancelled or failed fails immediately with "this conversation's last task … was cancelled or failed before its turn completed …; start a new conversation". A missing credential, network failure, malformed provider response, or cancellation leaves an already accepted user message pending and preserves earlier messages. Inspect history before resuming. Provider processing may have happened before a disconnect; resume can issue another paid request. A durable completion may win a race with a termination signal, so always inspect status after an uncertain exit.
@@ -49,12 +49,12 @@ Initialization supports explicit `--conversation` and `--command-id` values for 
 With a running host, common owner queries have subcommands that print one tab-separated line per item; `--json` prints the raw owner response instead:
 
 ```sh
-everything tasks [--conversation UUID] [--limit N]       # id, status, updated, conversation, instruction
-everything approvals [--conversation UUID] [--limit N]   # pending approvals: id, tool, requested, conversation, task
-everything conversations [--limit N]                     # id, idle|pending, messages, provider/model, title
-everything schedules [--limit N]                         # id, enabled|disabled, next run, name
-everything memory "QUESTION"                             # retrieved memory excerpts
-everything cancel TASK_UUID                              # request cancellation and report the outcome
+vorra tasks [--conversation UUID] [--limit N]       # id, status, updated, conversation, instruction
+vorra approvals [--conversation UUID] [--limit N]   # pending approvals: id, tool, requested, conversation, task
+vorra conversations [--limit N]                     # id, idle|pending, messages, provider/model, title
+vorra schedules [--limit N]                         # id, enabled|disabled, next run, name
+vorra memory "QUESTION"                             # retrieved memory excerpts
+vorra cancel TASK_UUID                              # request cancellation and report the outcome
 ```
 
 Limits default to 20 and the host accepts 1–100. `tasks` uses the owner query's creation order, newest first. `approvals` without `--conversation` checks the 100 most recently updated conversations that have a pending turn and prints their pending approvals; its `--json` output is the combined list of approval summaries rather than one owner response. `schedules` is the first page of `schedule list`; page further with `schedule list --after-id`. Times are local. These commands need the host and do not fall back to the foreground store.
@@ -65,17 +65,17 @@ In host-proxied `chat`, the first Ctrl-C after the turn is admitted (while text 
 
 ## Credential vault
 
-`everything vault` manages the local [credential vault](../contracts/vault.md) of a running host over owner IPC:
+`vorra vault` manages the local [credential vault](../contracts/vault.md) of a running host over owner IPC:
 
 ```sh
-everything vault status                     # provider statuses and host-managed model credentials
-everything vault list [--limit N]           # ref, kind, label, secret field names, detail
-everything vault add KIND --label LABEL [metadata flags] [--field FIELD]...
-everything vault remove ID|vault://local/ID
-everything vault connect onepassword [--binary /absolute/path/op] [--account ACCOUNT_UUID] [--json]
-everything vault disconnect onepassword
-everything vault connect protonpass [--binary /absolute/path/pass-cli] [--web] [--json]
-everything vault disconnect protonpass
+vorra vault status                     # provider statuses and host-managed model credentials
+vorra vault list [--limit N]           # ref, kind, label, secret field names, detail
+vorra vault add KIND --label LABEL [metadata flags] [--field FIELD]...
+vorra vault remove ID|vault://local/ID
+vorra vault connect onepassword [--binary /absolute/path/op] [--account ACCOUNT_UUID] [--json]
+vorra vault disconnect onepassword
+vorra vault connect protonpass [--binary /absolute/path/pass-cli] [--web] [--json]
+vorra vault disconnect protonpass
 ```
 
 `status`, `list`, `add` and `remove` accept `--json` for the raw response. `status` lists `local` (`ready` with its Keychain service name, or `unavailable` with the sanitized store error), `1password` (`disconnected`, `locked`, `ready` with the account UUID and pinned `op` path, or `unavailable` when the pinned binary is gone) and `protonpass` (`disconnected`, `locked`, `ready` with the token name or account and pinned `pass-cli` path, or `unavailable` with a sanitized reason; the Host runs `pass-cli info` for it), then each model credential binding from settings as `host_managed`: API keys show `configured`, ChatGPT bindings `signed_in`, `signed_out` or `unknown` from the host's status. Model credentials are never vault items and cannot be listed or used through the vault. `list` prints non-ready providers and incomplete (`pending`/`removing`) rows on stderr with the command that removes them.
@@ -88,15 +88,15 @@ everything vault disconnect protonpass
 
 ## Optional ChatGPT plan
 
-`everything chatgpt sign-in|status|models|sign-out|select|deselect` lets a running host use your ChatGPT plan for the official OpenAI endpoint instead of an API key. It is optional. See the [host guide](host.md#optional-sign-in-with-chatgpt). A completed `sign-in` with no ChatGPT binding selected selects the new one, as `select` would, when plan usage was granted. `models` lists the model slugs your plan accepts. `status` masks the account email to its domain unless `--json` or `--show-email` is given. The foreground path without a host always uses `OPENAI_API_KEY`.
+`vorra chatgpt sign-in|status|models|sign-out|select|deselect` lets a running host use your ChatGPT plan for the official OpenAI endpoint instead of an API key. It is optional. See the [host guide](host.md#optional-sign-in-with-chatgpt). A completed `sign-in` with no ChatGPT binding selected selects the new one, as `select` would, when plan usage was granted. `models` lists the model slugs your plan accepts. `status` masks the account email to its domain unless `--json` or `--show-email` is given. The foreground path without a host always uses `OPENAI_API_KEY`.
 
 ## Optional relay
 
-`everything relay on --origin wss://relay.example.com` and `everything relay off` set or clear this Host's relay origin, offline through the state lease or through a running Host's owner settings (which then needs a restart). `everything relay serve|enroll|revoke|devices` run or administer the blind relay server on `--database PATH`, defaulting to `relay.sqlite3` in the state directory. `everything relay status` prints JSON for both the Host connection and that server database. See [relay](../architecture/relay.md).
+`vorra relay on --origin wss://relay.example.com` and `vorra relay off` set or clear this Host's relay origin, offline through the state lease or through a running Host's owner settings (which then needs a restart). `vorra relay serve|enroll|revoke|devices` run or administer the blind relay server on `--database PATH`, defaulting to `relay.sqlite3` in the state directory. `vorra relay status` prints JSON for both the Host connection and that server database. See [relay](../architecture/relay.md).
 
 ## Update
 
-`everything update` installs the newest stable release over the running binary; `--beta` follows the single `v<version>-beta` prerelease instead, and `--check` only prints `channel=… current=… available=… tag=… status=newer|up-to-date` plus a sentence and exits 0. On macOS a team-signed binary is never replaced by an unsigned, ad-hoc or differently signed one unless `--allow-unsigned` is given, because the Sign in with ChatGPT keychain item would become unreadable. A loaded launchd service running this same executable is restarted. Details, integrity limits and `EVERYTHING_UPDATE_BASE_URL` are in [CLI releases](releases.md#update).
+`vorra update` installs the newest stable release over the running binary; `--beta` follows the single `v<version>-beta` prerelease instead, and `--check` only prints `channel=… current=… available=… tag=… status=newer|up-to-date` plus a sentence and exits 0. On macOS a team-signed binary is never replaced by an unsigned, ad-hoc or differently signed one unless `--allow-unsigned` is given, because the Sign in with ChatGPT keychain item would become unreadable. A loaded launchd service running this same executable is restarted. Details, integrity limits and `VORRA_UPDATE_BASE_URL` are in [CLI releases](releases.md#update).
 
 ## Local proxy and verification boundaries
 
@@ -109,8 +109,8 @@ Compilation and static analysis do not verify live inference. Focused local vali
 Use a fresh conversation when entering native tool/context mode after a legacy text continuation. A new native turn saves the workspace, mode, context budget, memory inputs, selected tools, and run limits. The foreground CLI currently uses no memory excerpts; an injected host can supply retrieved excerpts and provenance.
 
 ```sh
-everything --state-dir /absolute/private/path chat --provider openai --model MODEL_ID --tools --workspace /absolute/workspace --message "Find the relevant source files."
-everything --state-dir /absolute/private/path chat --conversation CONVERSATION_UUID --tools --resume
+vorra --state-dir /absolute/private/path chat --provider openai --model MODEL_ID --tools --workspace /absolute/workspace --message "Find the relevant source files."
+vorra --state-dir /absolute/private/path chat --conversation CONVERSATION_UUID --tools --resume
 ```
 
 Read-only mode is the default. `--execution-mode trusted-workspace` permits authorized native writes inside the saved workspace. The mode is saved per native turn, so a later message in the same conversation can pass a different `--execution-mode`. In read-only mode `search_tools` omits write tools and reports in `diagnostics` that writes are unavailable; a direct `write_file` call returns a `read_only_mode` tool error naming the write-capable modes, and the CLI prints `writes are disabled in read-only mode; send the next message with --tools --execution-mode trusted-workspace (or full-host) to allow writes`. `--execution-mode full-host` exposes host-scoped capabilities, including shell, subject to exact operation approval. Arbitrary shell has full host access; path checks are not a sandbox. The registered tools are read_file, write_file, search_files, shell, and offline search_tools. The kernel can expand advertised schemas through successful local discovery without discarding native provider continuation.
@@ -118,8 +118,8 @@ Read-only mode is the default. `--execution-mode trusted-workspace` permits auth
 With a running host and an interactive terminal, `chat` prompts for a required approval in place and continues the same turn, also accepting a decision made in another client; see the [host guide](host.md). `--no-wait` keeps the exit-and-resume behaviour below. The foreground path and non-interactive host use print the exact request, arguments, scope, expiry, and UUID, followed by the exact commands for a separate decision:
 
 ```sh
-everything --state-dir /absolute/private/path chat --conversation CONVERSATION_UUID --tools --resume --approve APPROVAL_UUID
-everything --state-dir /absolute/private/path chat --conversation CONVERSATION_UUID --tools --resume --deny APPROVAL_UUID
+vorra --state-dir /absolute/private/path chat --conversation CONVERSATION_UUID --tools --resume --approve APPROVAL_UUID
+vorra --state-dir /absolute/private/path chat --conversation CONVERSATION_UUID --tools --resume --deny APPROVAL_UUID
 ```
 
 For a `vault_use` approval the in-place prompt also offers `[t]ask`, which allows that exact reference and destination for the rest of the task (a vault lease, at most one hour); the non-interactive form is `--resume --approve APPROVAL_UUID --for-task`. See the [vault contract](../contracts/vault.md#vault-lease-grant).

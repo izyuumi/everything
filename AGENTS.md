@@ -1,6 +1,6 @@
-# Everything development
+# Vorra development
 
-Everything is a local-first native Rust AI host with an optional blind relay and native Apple clients. The host owns execution and durable state. Start at [docs/INDEX.md](docs/INDEX.md) and [implementation status](docs/status/implementation.md).
+Vorra is a local-first native Rust AI host with an optional blind relay and native Apple clients. The host owns execution and durable state. Start at [docs/INDEX.md](docs/INDEX.md) and [implementation status](docs/status/implementation.md).
 
 For scheduling, read the [architecture and module map](docs/architecture/scheduling.md), [owner CLI](docs/development/scheduling-cli.md), and [execution policy](docs/contracts/scheduled-execution.md). ScheduleEngine admits occurrences into the existing native Scheduler; preserve that single-runtime boundary and the captured authority, deadline and replay identities.
 

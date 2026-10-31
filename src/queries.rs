@@ -1,13 +1,13 @@
 use std::time::Duration;
 
 use clap::Args;
-use everything::agent::AgentError;
-use everything::host::client::HostClient;
-use everything::ipc::{OwnerQuery, OwnerQueryResult};
-use everything::protocol::{ConversationId, TaskId, TaskStatus};
 use serde::Serialize;
 use tokio::io::AsyncWriteExt;
 use tokio_util::sync::CancellationToken;
+use vorra::agent::AgentError;
+use vorra::host::client::HostClient;
+use vorra::ipc::{OwnerQuery, OwnerQueryResult};
+use vorra::protocol::{ConversationId, TaskId, TaskStatus};
 
 use crate::{CliError, write_json};
 
@@ -83,11 +83,11 @@ pub async fn cancel_task(
     if !task.status.is_terminal() {
         client
             .submit_domain(
-                everything::protocol::CommandEnvelope::new(
+                vorra::protocol::CommandEnvelope::new(
                     task.conversation_id,
                     None,
-                    everything::protocol::UnixMillis::now().map_err(AgentError::from)?,
-                    everything::protocol::Command::CancelTask { task_id },
+                    vorra::protocol::UnixMillis::now().map_err(AgentError::from)?,
+                    vorra::protocol::Command::CancelTask { task_id },
                 ),
                 cancellation.clone(),
             )
@@ -323,7 +323,7 @@ pub async fn schedules(
     arguments: ListArguments,
     cancellation: CancellationToken,
 ) -> Result<(), CliError> {
-    use everything::scheduling::controls::{ScheduleQuery, ScheduleQueryResult};
+    use vorra::scheduling::controls::{ScheduleQuery, ScheduleQueryResult};
     let result = client
         .query(
             OwnerQuery::Schedule {
@@ -350,7 +350,7 @@ pub async fn schedules(
         eprintln!("no schedules");
     }
     if next_after.is_some() {
-        eprintln!("more schedules exist; use `everything schedule list --after-id` to page");
+        eprintln!("more schedules exist; use `vorra schedule list --after-id` to page");
     }
     print_lines(
         jobs.iter()

@@ -6,7 +6,7 @@ A returned runtime-build I/O error is printed and returns failure. This does not
 
 ## Optional public command observation
 
-The manual [Extended validation workflow](../../.github/workflows/extended-validation.yml) has an explicit `inspect_cli_startup` boolean, default false. It runs only for workflow_dispatch on Linux, after the default release build and optional artifact upload, before the all-feature build can overwrite the executable. Its two-minute step invokes only `target/release/everything --help` and `target/release/everything --version`, with task-specific disposable HOME/TMPDIR. Public output appears directly in the run log. It starts no Host, opens no application data and invokes no model/provider command. No assertion harness, test framework or fixture is added.
+The manual [Extended validation workflow](../../.github/workflows/extended-validation.yml) has an explicit `inspect_cli_startup` boolean, default false. It runs only for workflow_dispatch on Linux, after the default release build and optional artifact upload, before the all-feature build can overwrite the executable. Its two-minute step invokes only `target/release/vorra --help` and `target/release/vorra --version`, with task-specific disposable HOME/TMPDIR. Public output appears directly in the run log. It starts no Host, opens no application data and invokes no model/provider command. No assertion harness, test framework or fixture is added.
 
 An explicit dispatch after the workflow is available on the default branch is:
 

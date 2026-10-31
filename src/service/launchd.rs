@@ -5,7 +5,9 @@ use tokio_util::sync::CancellationToken;
 
 use super::ServiceError;
 
-const SERVICE_LABEL: &str = "com.everything.host";
+const SERVICE_LABEL: &str = "to.yumi.vorra.host";
+#[cfg(target_os = "macos")]
+const LEGACY_SERVICE_LABEL: &str = "com.everything.host";
 
 #[derive(Debug, Clone)]
 pub struct LaunchdService {
@@ -94,6 +96,7 @@ impl LaunchdService {
     pub async fn install(&self, cancellation: CancellationToken) -> Result<PathBuf, ServiceError> {
         #[cfg(target_os = "macos")]
         {
+            self.remove_legacy(cancellation.clone()).await?;
             self.filesystem(cancellation, |service| service.install_file())
                 .await
         }
@@ -107,6 +110,7 @@ impl LaunchdService {
     pub async fn start(&self, cancellation: CancellationToken) -> Result<(), ServiceError> {
         #[cfg(target_os = "macos")]
         {
+            self.remove_legacy(cancellation.clone()).await?;
             let status = self.status(cancellation.clone()).await?;
             if !status.installed {
                 return Err(ServiceError::UnsafePath(
@@ -213,6 +217,7 @@ impl LaunchdService {
     ) -> Result<bool, ServiceError> {
         #[cfg(target_os = "macos")]
         {
+            self.remove_legacy(cancellation.clone()).await?;
             let status = self.status(cancellation.clone()).await?;
             if !status.installed || !status.loaded {
                 return Ok(false);
@@ -339,6 +344,65 @@ impl LaunchdService {
             biased;
             _ = cancellation.cancelled() => Err(ServiceError::Cancelled),
             result = worker => result.map_err(|_| ServiceError::InvalidResponse("filesystem worker failed"))?,
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    async fn remove_legacy(&self, cancellation: CancellationToken) -> Result<(), ServiceError> {
+        let present = self
+            .filesystem(cancellation.clone(), |service| {
+                service.legacy_plist(|directory, name| {
+                    rustix::fs::statat(directory, name, rustix::fs::AtFlags::SYMLINK_NOFOLLOW)
+                        .map(|_| ())
+                })
+            })
+            .await?;
+        if !present {
+            return Ok(());
+        }
+        let output = run_launchctl(
+            vec![
+                "bootout".to_owned(),
+                format!("{}/{LEGACY_SERVICE_LABEL}", user_domain()),
+            ],
+            cancellation.clone(),
+        )
+        .await?;
+        if !output.status.success() && !matches!(output.status.code(), Some(3 | 113)) {
+            return Err(ServiceError::Launchctl {
+                operation: "bootout",
+                status: output.status.code(),
+            });
+        }
+        self.filesystem(cancellation, |service| {
+            service.legacy_plist(|directory, name| {
+                rustix::fs::unlinkat(directory, name, rustix::fs::AtFlags::empty())
+            })?;
+            Ok(())
+        })
+        .await
+    }
+
+    #[cfg(target_os = "macos")]
+    fn legacy_plist(
+        &self,
+        operation: impl FnOnce(&std::fs::File, &str) -> rustix::io::Result<()>,
+    ) -> Result<bool, ServiceError> {
+        let directory =
+            match super::state::StateDirectory::open_shared(&self.launch_agents_directory, false) {
+                Ok(directory) => directory,
+                Err(ServiceError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
+                    return Ok(false);
+                }
+                Err(ServiceError::Filesystem(error)) if error == rustix::io::Errno::NOENT => {
+                    return Ok(false);
+                }
+                Err(error) => return Err(error),
+            };
+        match operation(&directory.file, &format!("{LEGACY_SERVICE_LABEL}.plist")) {
+            Ok(()) => Ok(true),
+            Err(error) if error == rustix::io::Errno::NOENT => Ok(false),
+            Err(error) => Err(error.into()),
         }
     }
 

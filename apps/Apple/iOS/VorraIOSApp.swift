@@ -3,7 +3,7 @@ import UIKit
 
 @main
 @MainActor
-struct EverythingIOSApp: App {
+struct VorraIOSApp: App {
     @State private var model = AppModel()
     @Environment(\.scenePhase) private var scenePhase
     @State private var appliedAppearance: DeviceAppearance?
@@ -44,7 +44,7 @@ struct InactivePrivacyCover: ViewModifier {
     func body(content: Content) -> some View {
         content.privacySensitive().overlay {
             if scenePhase != .active {
-                Rectangle().fill(.background).ignoresSafeArea().overlay { Label("Everything", systemImage: "lock.fill").font(.title) }
+                Rectangle().fill(.background).ignoresSafeArea().overlay { Label("Vorra", systemImage: "lock.fill").font(.title) }
             }
         }
     }

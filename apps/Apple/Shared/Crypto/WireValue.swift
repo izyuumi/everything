@@ -176,7 +176,7 @@ enum WireError: Error, LocalizedError, Sendable, Equatable {
 
     var errorDescription: String? {
         switch self {
-        case .invalid: "The received data does not match the Everything protocol."
+        case .invalid: "The received data does not match the Vorra protocol."
         case .size: "The operation exceeds its bounded size."
         case .signature: "The device signature or encrypted message could not be authenticated."
         case .expired: "The message, invitation or permission request has expired."

@@ -31,17 +31,17 @@ case "${1:-}" in
     TAG="v$VERSION-beta"
     [ -z "$(git status --porcelain)" ] || { echo "Refusing to publish from a dirty tree: candidate.json names the commit." >&2; exit 1; }
     for target in $TARGETS; do
-        [ -f "$DIST/everything-$target.tar.gz" ] || { echo "Missing $DIST/everything-$target.tar.gz" >&2; exit 1; }
+        [ -f "$DIST/vorra-$target.tar.gz" ] || { echo "Missing $DIST/vorra-$target.tar.gz" >&2; exit 1; }
     done
-    (cd "$DIST" && shasum -a 256 everything-*.tar.gz > SHA256SUMS)
+    (cd "$DIST" && shasum -a 256 vorra-*.tar.gz > SHA256SUMS)
     jq -n --arg tag "$TAG" --arg version "$VERSION" --arg build "$BUILD" --arg sha "$SOURCE_SHA" --arg targets "$TARGETS" \
         '{schema: 1, tag: $tag, version: $version, build: ($build | tonumber), source_branch: "main", source_sha: $sha,
-          assets: ($targets | split(" ") | map({target: ., name: "everything-\(.).tar.gz"}))}' > "$DIST/candidate.json"
-    { echo "everything $VERSION+$BUILD, beta."; echo; scripts/release_notes.sh "$SOURCE_SHA"; } > "$DIST.notes.md"
+          assets: ($targets | split(" ") | map({target: ., name: "vorra-\(.).tar.gz"}))}' > "$DIST/candidate.json"
+    { echo "vorra $VERSION+$BUILD, beta."; echo; scripts/release_notes.sh "$SOURCE_SHA"; } > "$DIST.notes.md"
     BETA=$(beta_tag)
     [ -z "$BETA" ] || gh release delete "$BETA" --repo "$REPO" --cleanup-tag --yes
     gh release create "$TAG" --repo "$REPO" --target "$SOURCE_SHA" --prerelease --latest=false --title "$TAG" \
-        --notes-file "$DIST.notes.md" "$DIST"/everything-*.tar.gz "$DIST/SHA256SUMS" "$DIST/candidate.json"
+        --notes-file "$DIST.notes.md" "$DIST"/vorra-*.tar.gz "$DIST/SHA256SUMS" "$DIST/candidate.json"
     echo "Published $TAG."
     scripts/release_pr.sh "$VERSION" "$BUILD" "$SOURCE_SHA" "$(digest "$DIST/SHA256SUMS")"
     ;;
@@ -81,15 +81,15 @@ case "${1:-}" in
     have=$([ -f "$FILES/SHA256SUMS" ] && digest "$FILES/SHA256SUMS" || true)
     [ "$have" = "$WANT_DIGEST" ] || mismatch "the downloaded SHA256SUMS's digest" "$have" "$WANT_DIGEST"
     for target in $TARGETS; do
-        grep -qE "  everything-$target\.tar\.gz\$" "$FILES/SHA256SUMS" 2>/dev/null \
-            || mismatch "SHA256SUMS's entry for $target" "" "everything-$target.tar.gz"
+        grep -qE "  vorra-$target\.tar\.gz\$" "$FILES/SHA256SUMS" 2>/dev/null \
+            || mismatch "SHA256SUMS's entry for $target" "" "vorra-$target.tar.gz"
     done
     (cd "$FILES" && shasum -a 256 -c SHA256SUMS >/dev/null 2>&1) || mismatch "the downloaded tarballs" "different from SHA256SUMS" "matching tarballs"
     if [ -n "$bad" ]; then
         echo "Not promoting $BETA: it is not the beta the release PR named, so nothing was published or deleted. The next beta opens a new release PR; check that beta, then merge it." >&2
         exit 1
     fi
-    { echo "everything $OLD+$N."; echo; scripts/release_notes.sh "$WANT_SHA"; } > "$FILES.md"
+    { echo "vorra $OLD+$N."; echo; scripts/release_notes.sh "$WANT_SHA"; } > "$FILES.md"
     gh release create "v$OLD" --repo "$REPO" --target "$WANT_SHA" --latest --title "v$OLD" --notes-file "$FILES.md" "$FILES"/*
     gh release delete "$BETA" --repo "$REPO" --cleanup-tag --yes
     echo "Published v$OLD."

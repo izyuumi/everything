@@ -1,17 +1,17 @@
 # Scheduling CLI
 
-The `schedule` command connects to the existing same-user background host through `HostClient`. Run `everything --state-dir STATE serve` in its managed service or another terminal first. CLI exit does not stop the host, Scheduler or ScheduleEngine. No command opens another Store or starts foreground agent execution.
+The `schedule` command connects to the existing same-user background host through `HostClient`. Run `vorra --state-dir STATE serve` in its managed service or another terminal first. CLI exit does not stop the host, Scheduler or ScheduleEngine. No command opens another Store or starts foreground agent execution.
 
 ## Manage a job
 
 Create and update read a complete `ScheduleJobDraft` JSON file. Give each new job a non-nil UUID; deleted IDs cannot be reused. Updates replace the whole draft, including its original job ID, and require the exact observed revision. Enabling a job uses update with `enabled: true`; disabling has its own command. The host calculates its next occurrence. Deletion retains its history.
 
 ```sh
-everything --state-dir STATE schedule create --file weekday-reminder.json
-everything --state-dir STATE schedule list --limit 20
-everything --state-dir STATE schedule show 3e154b91-094f-4c70-93a3-a70164a20f0e
-everything --state-dir STATE schedule update --file weekday-reminder.json --expected-revision 1
-everything --state-dir STATE schedule disable 3e154b91-094f-4c70-93a3-a70164a20f0e --expected-revision 2
+vorra --state-dir STATE schedule create --file weekday-reminder.json
+vorra --state-dir STATE schedule list --limit 20
+vorra --state-dir STATE schedule show 3e154b91-094f-4c70-93a3-a70164a20f0e
+vorra --state-dir STATE schedule update --file weekday-reminder.json --expected-revision 1
+vorra --state-dir STATE schedule disable 3e154b91-094f-4c70-93a3-a70164a20f0e --expected-revision 2
 ```
 
 Use the current response's revision before each new mutation. A concurrent edit or manual/automatic claim can change it. Create, update, disable and delete use ordinary uniqueness/CAS rules. Reusing their IPC request ID does not convert them into replayable commands. After an ambiguous error, inspect the stored job before deciding on another mutation; the CLI never refreshes revisions or retries automatically.
@@ -25,10 +25,10 @@ List accepts `--after-id UUID`, `--enabled true|false`, `--include-deleted`, and
 A disabled job can still be run explicitly. Manual execution durably claims an isolated occurrence on the same host engine; the CLI does not wait for successful inference. Its stderr prints the IPC request ID and complete manual claim before dispatch. Preserve that output if the response is interrupted.
 
 ```sh
-everything --state-dir STATE schedule run 3e154b91-094f-4c70-93a3-a70164a20f0e --expected-revision 3 --occurrence-id 9109b0de-19d6-4ef4-9cf6-5320527cd2e5 --command-id 9856d983-a2dc-41f1-a55b-a275456670e6 --request-id 1787d312-eafb-4599-b97d-4a8ce6a5a770
-everything --state-dir STATE schedule status
-everything --state-dir STATE schedule status --occurrence-id 9109b0de-19d6-4ef4-9cf6-5320527cd2e5
-everything --state-dir STATE schedule history 3e154b91-094f-4c70-93a3-a70164a20f0e --limit 20
+vorra --state-dir STATE schedule run 3e154b91-094f-4c70-93a3-a70164a20f0e --expected-revision 3 --occurrence-id 9109b0de-19d6-4ef4-9cf6-5320527cd2e5 --command-id 9856d983-a2dc-41f1-a55b-a275456670e6 --request-id 1787d312-eafb-4599-b97d-4a8ce6a5a770
+vorra --state-dir STATE schedule status
+vorra --state-dir STATE schedule status --occurrence-id 9109b0de-19d6-4ef4-9cf6-5320527cd2e5
+vorra --state-dir STATE schedule history 3e154b91-094f-4c70-93a3-a70164a20f0e --limit 20
 ```
 
 These explicit IDs are examples for one new occurrence. If omitted, occurrence, command and request IDs are each generated once and printed before dispatch. An exact manual retry must retain the original job ID, ORIGINAL expected revision, occurrence ID and command ID, plus the same IPC request ID. Repeating that exact command returns the saved claim even if later job revisions advanced. Changing its original revision is a changed claim and conflicts. A different occurrence is new work, subject to overlap and uncertainty guards. Replaying a claim grants no provider retry and refunds no budgets.
@@ -42,7 +42,7 @@ History JSON supplies `next_before` with `claimed_at` and `occurrence_id`. Conti
 This operation is available only through the authenticated same-user owner route. Inspect the exact occurrence and its outcome digest first. Acknowledgement records an operator decision to release that occurrence's overlap hold. It does not change its Unknown outcome, start another attempt, authorize provider retry, clear broker quarantine, or prove an external effect stopped. Model-facing scheduling tools and paired execution controls do not expose it.
 
 ```sh
-everything --state-dir STATE schedule acknowledge-unknown 9109b0de-19d6-4ef4-9cf6-5320527cd2e5 --outcome-digest DIGEST --note 'Inspected the affected local resources and accepted this recorded uncertainty'
+vorra --state-dir STATE schedule acknowledge-unknown 9109b0de-19d6-4ef4-9cf6-5320527cd2e5 --outcome-digest DIGEST --note 'Inspected the affected local resources and accepted this recorded uncertainty'
 ```
 
 Replace `DIGEST` with the exact 64-character lowercase hexadecimal digest returned by occurrence status. The note is 1–1024 UTF-8 bytes without NUL and is printed, JSON-escaped, in the local stderr replay record. The CLI generates a command ID, IPC request ID and acceptance timestamp once, prints the complete acknowledgement before dispatch, then contacts the host. The host derives the real effective UID; no client UID is accepted.
@@ -51,7 +51,7 @@ For exact retry supply `--command-id UUID --request-id UUID --accepted-at-ms MIL
 
 ## Credential-free draft examples
 
-Both examples below are disabled, isolated, read-only, zero-tool, one-attempt jobs. Create `/tmp/everything-schedule-workspace` as an existing physical directory, or replace the path with the intended authorized physical workspace. The host validates that workspace and requested authority. There are no credential values or credential references in a draft. Stored execution configuration does not follow later host defaults.
+Both examples below are disabled, isolated, read-only, zero-tool, one-attempt jobs. Create `/tmp/vorra-schedule-workspace` as an existing physical directory, or replace the path with the intended authorized physical workspace. The host validates that workspace and requested authority. There are no credential values or credential references in a draft. Stored execution configuration does not follow later host defaults.
 
 The first example uses the native official OpenAI endpoint. CRUD performs no model request. Explicit execution requires the host's matching configured credential and can disclose its captured instruction to that provider. The second uses a literal loopback endpoint for local failure inspection; it does not create a model server or simulate a successful model. Neither example asserts provider/model availability.
 
@@ -73,7 +73,7 @@ The first example uses the native official OpenAI endpoint. CRUD performs no mod
       "configuration": {
         "provider": "openai",
         "model": "gpt-4.1-mini",
-        "instructions": "You are Everything, a helpful assistant.",
+        "instructions": "You are Vorra, a helpful assistant.",
         "endpoint": {
           "kind": "official"
         },
@@ -81,7 +81,7 @@ The first example uses the native official OpenAI endpoint. CRUD performs no mod
         "temperature": null
       },
       "instruction": "Write a short reminder to review the public project notes.",
-      "workspace_root": "/tmp/everything-schedule-workspace",
+      "workspace_root": "/tmp/vorra-schedule-workspace",
       "permissions": {
         "mode": "read_only",
         "allowed_tools": []
@@ -131,7 +131,7 @@ The first example uses the native official OpenAI endpoint. CRUD performs no mod
       "configuration": {
         "provider": "openai",
         "model": "gpt-4.1-mini",
-        "instructions": "You are Everything, a helpful assistant.",
+        "instructions": "You are Vorra, a helpful assistant.",
         "endpoint": {
           "kind": "loopback",
           "url": "http://127.0.0.1:9/"
@@ -140,7 +140,7 @@ The first example uses the native official OpenAI endpoint. CRUD performs no mod
         "temperature": null
       },
       "instruction": "Write a short reminder to review the public project notes.",
-      "workspace_root": "/tmp/everything-schedule-workspace",
+      "workspace_root": "/tmp/vorra-schedule-workspace",
       "permissions": {
         "mode": "read_only",
         "allowed_tools": []

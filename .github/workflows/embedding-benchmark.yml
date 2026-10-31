@@ -44,7 +44,7 @@ jobs:
                       shutil.copyfileobj(response, output, 1024 * 1024)
               print(f'Downloaded {name}: {destination.stat().st_size} bytes')
           PY
-      - run: cargo build --release --locked --features local-embeddings --bin everything-embedding-bench
+      - run: cargo build --release --locked --features local-embeddings --bin vorra-embedding-bench
       - name: Run native CPU benchmark
         env:
           MODEL_ROOT: ${{ runner.temp }}/embeddinggemma2
@@ -58,7 +58,7 @@ jobs:
           print(libraries[0].resolve())
           PY
           )
-          /usr/bin/time -l target/release/everything-embedding-bench --runtime-library "$runtime_library" --model-dir "$MODEL_ROOT" --threads 2 --max-tokens 2048 --repetitions 3 --warmup-iterations 1 --inference-timeout-seconds 30 --load-timeout-seconds 120 --deadline-seconds 600 > embedding-report.json 2> embedding-process.txt
+          /usr/bin/time -l target/release/vorra-embedding-bench --runtime-library "$runtime_library" --model-dir "$MODEL_ROOT" --threads 2 --max-tokens 2048 --repetitions 3 --warmup-iterations 1 --inference-timeout-seconds 30 --load-timeout-seconds 120 --deadline-seconds 600 > embedding-report.json 2> embedding-process.txt
       - name: Publish public measurement summary
         env:
           GH_TOKEN: ${{ github.token }}

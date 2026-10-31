@@ -122,7 +122,7 @@ impl ClientHandler for Handler {
     fn get_info(&self) -> ClientConfig {
         ClientConfig::new(
             ClientCapabilities::default(),
-            Implementation::new("everything", env!("CARGO_PKG_VERSION")),
+            Implementation::new("vorra", env!("CARGO_PKG_VERSION")),
         )
     }
 
@@ -515,7 +515,7 @@ async fn request_once(
     if response.is_err() {
         let cancelled = tokio::time::timeout(
             Duration::from_millis(250),
-            handle.cancel(Some("Everything stopped the request".to_owned())),
+            handle.cancel(Some("Vorra stopped the request".to_owned())),
         )
         .await;
         if !matches!(cancelled, Ok(Ok(()))) {

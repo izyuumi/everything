@@ -65,7 +65,7 @@ struct ThisDeviceSettingsView: View {
                 } else {
                     Text("Saved notification preferences are unavailable.")
                 }
-                Text("These preferences are saved on this iPhone independently of the Host connection. When system permission allows, Everything can show task completion and permission-request alerts while the app is active and synchronization is enabled. OS permission is shown separately below.")
+                Text("These preferences are saved on this iPhone independently of the Host connection. When system permission allows, Vorra can show task completion and permission-request alerts while the app is active and synchronization is enabled. OS permission is shown separately below.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                 HStack {
@@ -115,7 +115,7 @@ struct ThisDeviceSettingsView: View {
                 if let issue = store.notificationIssue { Text(issue.message).foregroundStyle(.red) }
                 if let instructions = store.notificationGuidance.instructions { Text(instructions) }
                 if store.notificationObservation?.authorization == .denied {
-                    Text("Open Settings, choose Notifications, then Everything to review permissions. A denied request cannot show another permission prompt.")
+                    Text("Open Settings, choose Notifications, then Vorra to review permissions. A denied request cannot show another permission prompt.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }

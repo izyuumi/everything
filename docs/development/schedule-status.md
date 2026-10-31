@@ -1,6 +1,6 @@
 # Native schedule status
 
-The macOS menu bar app has a read-only Schedules tab backed by the existing trusted Everything CLI and authenticated owner IPC. It displays actual ScheduleEngine activation/stopped state, blocked-job diagnostics, pending result-delivery count and engine/delivery errors. A job opens its durable occurrence history with status, recorded summaries/reasons, attempt count and recorded usage. No generic configuration or response JSON is rendered in this flow.
+The macOS menu bar app has a read-only Schedules tab backed by the existing trusted Vorra CLI and authenticated owner IPC. It displays actual ScheduleEngine activation/stopped state, blocked-job diagnostics, pending result-delivery count and engine/delivery errors. A job opens its durable occurrence history with status, recorded summaries/reasons, attempt count and recorded usage. No generic configuration or response JSON is rendered in this flow.
 
 The host remains authoritative. Opening, refreshing or closing the view does not activate the engine, claim an occurrence, retry inference, acknowledge an Unknown outcome, edit a schedule or stop the host. Explicit scheduling mutations remain in the [owner CLI](scheduling-cli.md). Native schedule results and encrypted conversation delivery are existing host responsibilities; this UI adds no notification service or execution loop. The iOS client consumes the separate encrypted scheduled-result event; this change does not modify it.
 
@@ -33,8 +33,8 @@ The local environment has no Apple SDK, Xcode, Simulator or physical device. Pub
 On macOS with Xcode:
 
 ```sh
-xcodebuild -project apps/Apple/Everything.xcodeproj -scheme EverythingMac -configuration Debug -destination 'platform=macOS' CODE_SIGNING_ALLOWED=NO build analyze
-xcodebuild -project apps/Apple/Everything.xcodeproj -scheme EverythingMac -configuration Release -destination 'platform=macOS' CODE_SIGNING_ALLOWED=NO build
+xcodebuild -project apps/Apple/Vorra.xcodeproj -scheme VorraMac -configuration Debug -destination 'platform=macOS' CODE_SIGNING_ALLOWED=NO build analyze
+xcodebuild -project apps/Apple/Vorra.xcodeproj -scheme VorraMac -configuration Release -destination 'platform=macOS' CODE_SIGNING_ALLOWED=NO build
 ```
 
 Then inspect disposable real jobs and run history, refresh during host drain and connection changes, confirm Unknown remains distinct from accounting certainty, and quit the app while verifying the same host PID remains alive. No real user schedules are needed for validation.

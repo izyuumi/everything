@@ -242,7 +242,7 @@ impl ProtonPassProvider {
                 | VaultError::NotReady
                 | VaultError::MissingSecret
                 | VaultError::MissingField(_) => PASS.failed(
-                    "the stored personal access token item is missing; run everything vault connect protonpass",
+                    "the stored personal access token item is missing; run vorra vault connect protonpass",
                 ),
                 error => error,
             })?;
