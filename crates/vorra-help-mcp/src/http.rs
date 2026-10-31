@@ -117,8 +117,7 @@ pub async fn serve(server: HelpServer, options: HttpOptions) -> io::Result<()> {
         buckets: Mutex::new(HashMap::new()),
     });
     let app = Router::new()
-        .nest_service("/mcp", service.clone())
-        .nest_service("/vorra", service)
+        .nest_service("/mcp", service)
         .layer(middleware::from_fn_with_state(limiter, rate_limit))
         .route("/healthz", get(|| async { "ok\n" }));
     let listener = tokio::net::TcpListener::bind(options.address).await?;

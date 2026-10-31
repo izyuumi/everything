@@ -42,10 +42,10 @@ vorra-help-mcp --http --bind 127.0.0.1 --port 18790
 curl -fsS http://127.0.0.1:18790/healthz
 ```
 
-- MCP is served at `/mcp` and `/vorra`; `GET /healthz` returns `200 ok` and is not rate limited.
+- MCP is served at `/mcp` only; `GET /healthz` returns `200 ok` and is not rate limited.
 - Request bodies over 64 KiB receive `413 Payload Too Large` from rmcp's streaming body limit.
 - Each client address gets a token bucket of 60 requests refilled at one per second; an empty bucket receives `429 Too Many Requests` with `Retry-After: 1`. At most 4096 addresses are tracked; when the table is full of active clients, new addresses receive 429 rather than growing memory.
-- rmcp validates the `Host` header against `localhost`, `127.0.0.1` and `::1`. Add a public name with `--allowed-host mcp.yumi.to` (repeatable).
+- rmcp validates the `Host` header against `localhost`, `127.0.0.1` and `::1`. Add a public name with `--allowed-host vorra.yumi.to` (repeatable).
 - The rate limit keys on the TCP peer address. `--trust-forwarded-for` keys on the last `X-Forwarded-For` entry instead, which is the address the nearest proxy saw. Use it only when the server is reachable solely through one trusted proxy that appends that header, such as a Cloudflare tunnel to a loopback bind; otherwise any client can choose its own key.
 - No authentication. Origin validation is off, matching rmcp's default; the server returns only public documentation.
 
@@ -57,14 +57,14 @@ Build and install the binary from a clone (it is not published to crates.io or a
 cargo install --locked --path crates/vorra-help-mcp
 ```
 
-The hosted endpoint `https://mcp.yumi.to/vorra` is **planned and not yet deployed**. The planned deployment runs `vorra-help-mcp --http --allowed-host mcp.yumi.to --trust-forwarded-for` on loopback behind a Cloudflare tunnel. Build that binary with `RUSTFLAGS="--remap-path-prefix=$HOME=/home" cargo build --release --locked -p vorra-help-mcp`: an ordinary build keeps the builder's `~/.cargo/registry` paths in dependency panic locations, though no embedded content contains a home path.
+The hosted endpoint `https://vorra.yumi.to/mcp` is **planned and not yet deployed**. Only the `/mcp` path on `vorra.yumi.to` is this server; the same host also serves other Vorra paths such as the pairing `/.well-known/apple-app-site-association` file and `/pair`, so the proxy routes `/mcp` (and optionally `/healthz`) here and nothing else. The planned deployment runs `vorra-help-mcp --http --allowed-host vorra.yumi.to --trust-forwarded-for` on loopback behind a Cloudflare tunnel. Build that binary with `RUSTFLAGS="--remap-path-prefix=$HOME=/home" cargo build --release --locked -p vorra-help-mcp`: an ordinary build keeps the builder's `~/.cargo/registry` paths in dependency panic locations, though no embedded content contains a home path.
 
 | Client | Local stdio | Hosted (planned) |
 | --- | --- | --- |
-| Claude Code | `claude mcp add vorra-help -- vorra-help-mcp` | `claude mcp add --transport http vorra-help https://mcp.yumi.to/vorra` |
-| Claude Desktop | `claude_desktop_config.json`: `{"mcpServers": {"vorra-help": {"command": "vorra-help-mcp"}}}` | Settings → Connectors → Add custom connector, URL `https://mcp.yumi.to/vorra` |
-| Codex | `codex mcp add vorra-help -- vorra-help-mcp`, or `~/.codex/config.toml`: `[mcp_servers.vorra-help]` with `command = "vorra-help-mcp"` | `~/.codex/config.toml`: `[mcp_servers.vorra-help]` with `url = "https://mcp.yumi.to/vorra"` |
-| Cursor | `~/.cursor/mcp.json`: `{"mcpServers": {"vorra-help": {"command": "vorra-help-mcp"}}}` | `~/.cursor/mcp.json`: `{"mcpServers": {"vorra-help": {"url": "https://mcp.yumi.to/vorra"}}}` |
+| Claude Code | `claude mcp add vorra-help -- vorra-help-mcp` | `claude mcp add --transport http vorra-help https://vorra.yumi.to/mcp` |
+| Claude Desktop | `claude_desktop_config.json`: `{"mcpServers": {"vorra-help": {"command": "vorra-help-mcp"}}}` | Settings → Connectors → Add custom connector, URL `https://vorra.yumi.to/mcp` |
+| Codex | `codex mcp add vorra-help -- vorra-help-mcp`, or `~/.codex/config.toml`: `[mcp_servers.vorra-help]` with `command = "vorra-help-mcp"` | `~/.codex/config.toml`: `[mcp_servers.vorra-help]` with `url = "https://vorra.yumi.to/mcp"` |
+| Cursor | `~/.cursor/mcp.json`: `{"mcpServers": {"vorra-help": {"command": "vorra-help-mcp"}}}` | `~/.cursor/mcp.json`: `{"mcpServers": {"vorra-help": {"url": "https://vorra.yumi.to/mcp"}}}` |
 
 Use the absolute path to `vorra-help-mcp` when the client does not inherit a shell `PATH` that contains `~/.cargo/bin`.
 
