@@ -554,7 +554,7 @@ async fn restart_service(
 }
 
 #[cfg(target_os = "macos")]
-const SIGNING_IDENTIFIER: &str = "ai.everything.cli";
+const SIGNING_IDENTIFIER: &str = "to.yumi.everything.cli";
 
 #[cfg(target_os = "macos")]
 #[derive(Debug)]
