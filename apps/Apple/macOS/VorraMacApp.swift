@@ -6,6 +6,8 @@ final class VorraAppDelegate: NSObject, NSApplicationDelegate {
     var model: HostModel?
     private var terminating = false
 
+    func applicationDidFinishLaunching(_ notification: Notification) { MacUpdates.start() }
+
     func bindLocalPreferences(to model: HostModel) {
         guard !terminating else { return }
         self.model = model
