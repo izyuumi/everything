@@ -692,7 +692,7 @@
                 "CODE_SIGN_STYLE" = "Automatic";
                 "ENABLE_HARDENED_RUNTIME" = "YES";
                 "ENABLE_APP_SANDBOX" = "NO";
-                "PRODUCT_BUNDLE_IDENTIFIER" = "ai.everything.mac";
+                "PRODUCT_BUNDLE_IDENTIFIER" = "to.yumi.everything.mac";
                 "DEVELOPMENT_TEAM" = "AN5KM8QGEF";
                 "PRODUCT_NAME" = "Everything";
                 "INFOPLIST_FILE" = "macOS/Info.plist";
@@ -721,7 +721,7 @@
                 "CODE_SIGN_STYLE" = "Automatic";
                 "ENABLE_HARDENED_RUNTIME" = "YES";
                 "ENABLE_APP_SANDBOX" = "NO";
-                "PRODUCT_BUNDLE_IDENTIFIER" = "ai.everything.mac";
+                "PRODUCT_BUNDLE_IDENTIFIER" = "to.yumi.everything.mac";
                 "DEVELOPMENT_TEAM" = "AN5KM8QGEF";
                 "PRODUCT_NAME" = "Everything";
                 "INFOPLIST_FILE" = "macOS/Info.plist";
@@ -1145,7 +1145,7 @@
                 "TARGETED_DEVICE_FAMILY" = "1,2";
                 "CODE_SIGN_IDENTITY[sdk=iphonesimulator*]" = "-";
                 "CODE_SIGN_STYLE" = "Automatic";
-                "PRODUCT_BUNDLE_IDENTIFIER" = "ai.everything.ios";
+                "PRODUCT_BUNDLE_IDENTIFIER" = "to.yumi.everything.ios";
                 "DEVELOPMENT_TEAM" = "AN5KM8QGEF";
                 "ASSETCATALOG_COMPILER_APPICON_NAME" = "AppIcon";
                 "PRODUCT_NAME" = "Everything";
@@ -1176,7 +1176,7 @@
                 "TARGETED_DEVICE_FAMILY" = "1,2";
                 "CODE_SIGN_IDENTITY[sdk=iphonesimulator*]" = "-";
                 "CODE_SIGN_STYLE" = "Automatic";
-                "PRODUCT_BUNDLE_IDENTIFIER" = "ai.everything.ios";
+                "PRODUCT_BUNDLE_IDENTIFIER" = "to.yumi.everything.ios";
                 "DEVELOPMENT_TEAM" = "AN5KM8QGEF";
                 "ASSETCATALOG_COMPILER_APPICON_NAME" = "AppIcon";
                 "PRODUCT_NAME" = "Everything";

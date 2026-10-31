@@ -107,7 +107,7 @@ An unsigned app has no `application-identifier` entitlement, so the iOS Keychain
 
 ### TestFlight distribution
 
-`EverythingIOS` (bundle ID `ai.everything.ios`) carries a single 1024-pixel `AppIcon` and the iPad orientations App Store validation requires. `ITSAppUsesNonExemptEncryption` is `NO`: the app's cryptography is CryptoKit and the Security framework plus URLSession TLS, which is encryption within Apple's operating system and exempt, so uploads need no export-compliance answer. `CFBundleVersion` follows `scripts/ios-build-number.sh <major.minor.patch> <build>`, which encodes `major*10000000 + minor*100000 + patch*1000 + build` (0.1.0 build 1 is 100001). Archive and export with the API key, overriding the numbers:
+`EverythingIOS` (bundle ID `to.yumi.everything.ios`; the Mac app is `to.yumi.everything.mac`) carries a single 1024-pixel `AppIcon` and the iPad orientations App Store validation requires. `ITSAppUsesNonExemptEncryption` is `NO`: the app's cryptography is CryptoKit and the Security framework plus URLSession TLS, which is encryption within Apple's operating system and exempt, so uploads need no export-compliance answer. `CFBundleVersion` follows `scripts/ios-build-number.sh <major.minor.patch> <build>`, which encodes `major*10000000 + minor*100000 + patch*1000 + build` (0.1.0 build 1 is 100001). Archive and export with the API key, overriding the numbers:
 
 ```sh
 xcodebuild archive -project apps/Apple/Everything.xcodeproj -scheme EverythingIOS -configuration Release \
