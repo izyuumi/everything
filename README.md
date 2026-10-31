@@ -8,7 +8,7 @@ cargo run --bin vorra -- --help
 cargo run --bin vorra -- relay --help
 ```
 
-Prebuilt macOS and Linux binaries install with `curl -fsSL https://raw.githubusercontent.com/izyuumi/everything/main/install.sh | sh` (add `-s -- --beta` for the beta) and update in place with `vorra update` (`--beta`, `--check`); see [CLI releases](docs/development/releases.md).
+Prebuilt macOS and Linux binaries install with `curl -fsSL https://raw.githubusercontent.com/izyuumi/everything/main/install.sh | sh` (add `-s -- --beta` for the beta) and update in place with `vorra update` (`--beta`, `--check`); see [CLI releases](docs/development/releases.md). `vorra completions <bash|zsh|fish|powershell|elvish>` prints a shell tab-completion script; see [shell completions](docs/development/cli.md#shell-completions).
 
 Vorra was formerly named Everything. Install the first Vorra release manually once with `install.sh`: an old `everything update` refuses the new signing identifier and cannot find the new `vorra-<target>.tar.gz` asset. The first `vorra` run moves `~/.everything` to `~/.vorra`. Then run `vorra chatgpt sign-in` again and re-enter any vault, MCP or System One credentials, because keychain items are stored under new `to.yumi.vorra.*` service names. See [first Vorra release](docs/development/releases.md#first-vorra-release-install-manually-once).
 

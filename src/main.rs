@@ -1,9 +1,9 @@
-use std::io::{self, IsTerminal, Read};
+use std::io::{self, IsTerminal, Read, Write};
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::Arc;
 
-use clap::{ArgGroup, Args, Parser, Subcommand, ValueEnum};
+use clap::{ArgGroup, Args, CommandFactory, Parser, Subcommand, ValueEnum};
 use futures_util::StreamExt;
 use serde::Serialize;
 use thiserror::Error;
@@ -71,6 +71,9 @@ enum Command {
     Schedules(queries::ListArguments),
     Memory(queries::MemoryArguments),
     Vault(vault_cli::VaultArguments),
+    Completions {
+        shell: clap_complete::Shell,
+    },
 }
 
 #[derive(Args, Default)]
@@ -482,6 +485,15 @@ enum CliError {
 fn main() -> ExitCode {
     let _ = rustls::crypto::ring::default_provider().install_default();
     let arguments = Arguments::parse();
+    if let Some(Command::Completions { shell }) = arguments.command {
+        return match write_completions(shell) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => {
+                eprintln!("vorra: {error}");
+                ExitCode::FAILURE
+            }
+        };
+    }
     let runtime = match tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
@@ -493,6 +505,14 @@ fn main() -> ExitCode {
         }
     };
     runtime.block_on(run_cli(arguments))
+}
+
+fn write_completions(shell: clap_complete::Shell) -> io::Result<()> {
+    let mut script = Vec::new();
+    clap_complete::generate(shell, &mut Arguments::command(), "vorra", &mut script);
+    let mut stdout = io::stdout().lock();
+    stdout.write_all(&script)?;
+    stdout.flush()
 }
 
 async fn run_cli(arguments: Arguments) -> ExitCode {
@@ -638,6 +658,7 @@ async fn execute(arguments: Arguments, cancellation: CancellationToken) -> Resul
             )
             .await;
         }
+        Command::Completions { shell } => return write_completions(shell).map_err(CliError::from),
         Command::Init(arguments) => AgentCommand::Init(arguments),
         Command::Status(arguments) => AgentCommand::Status(arguments),
         Command::Chat(arguments) => AgentCommand::Chat(arguments),
