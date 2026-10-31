@@ -71,6 +71,100 @@ enum Command {
     Completions {
         shell: clap_complete::Shell,
     },
+    #[command(hide = true)]
+    HelpManifest,
+}
+
+#[derive(Serialize)]
+struct HelpManifest {
+    commands: CommandManifest,
+    settings: vorra::host::settings::contract::SettingRegistry,
+}
+
+#[derive(Serialize)]
+struct CommandManifest {
+    name: String,
+    about: Option<String>,
+    arguments: Vec<ArgumentManifest>,
+    subcommands: Vec<CommandManifest>,
+}
+
+#[derive(Serialize)]
+struct ArgumentManifest {
+    id: String,
+    long: Option<String>,
+    short: Option<char>,
+    positional: bool,
+    required: bool,
+    takes_value: bool,
+    value_names: Vec<String>,
+    possible_values: Vec<String>,
+    default_values: Vec<String>,
+    env: Option<String>,
+    help: Option<String>,
+}
+
+fn help_manifest() -> HelpManifest {
+    let mut command = <Arguments as clap::CommandFactory>::command();
+    command.build();
+    HelpManifest {
+        commands: command_manifest(&command),
+        settings: vorra::host::settings::contract::SettingRegistry::from_profile(None),
+    }
+}
+
+fn command_manifest(command: &clap::Command) -> CommandManifest {
+    CommandManifest {
+        name: command.get_name().to_owned(),
+        about: command.get_about().map(ToString::to_string),
+        arguments: command
+            .get_arguments()
+            .filter(|argument| {
+                !argument.is_hide_set()
+                    && !matches!(
+                        argument.get_action(),
+                        clap::ArgAction::Help
+                            | clap::ArgAction::HelpShort
+                            | clap::ArgAction::HelpLong
+                            | clap::ArgAction::Version
+                    )
+            })
+            .map(|argument| ArgumentManifest {
+                id: argument.get_id().to_string(),
+                long: argument.get_long().map(str::to_owned),
+                short: argument.get_short(),
+                positional: argument.is_positional(),
+                required: argument.is_required_set(),
+                takes_value: argument.get_action().takes_values(),
+                value_names: argument
+                    .get_value_names()
+                    .unwrap_or_default()
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect(),
+                possible_values: argument
+                    .get_possible_values()
+                    .iter()
+                    .filter(|value| !value.is_hide_set())
+                    .map(|value| value.get_name().to_owned())
+                    .collect(),
+                default_values: argument
+                    .get_default_values()
+                    .iter()
+                    .map(|value| value.to_string_lossy().into_owned())
+                    .collect(),
+                env: argument
+                    .get_env()
+                    .map(|value| value.to_string_lossy().into_owned()),
+                help: argument.get_help().map(ToString::to_string),
+            })
+            .collect(),
+        subcommands: command
+            .get_subcommands()
+            .filter(|subcommand| !subcommand.is_hide_set() && subcommand.get_name() != "help")
+            .map(command_manifest)
+            .collect(),
+    }
 }
 
 #[derive(Args, Default)]
@@ -545,6 +639,9 @@ async fn run_cli(arguments: Arguments) -> ExitCode {
 }
 
 async fn execute(arguments: Arguments, cancellation: CancellationToken) -> Result<(), CliError> {
+    if matches!(&arguments.command, Some(Command::HelpManifest)) {
+        return write_json(help_manifest()).await;
+    }
     if matches!(&arguments.command, Some(Command::Worker(_))) && arguments.state_dir.is_none() {
         return Err(CliError::WorkerStateDirectory);
     }
@@ -659,6 +756,7 @@ async fn execute(arguments: Arguments, cancellation: CancellationToken) -> Resul
             .await;
         }
         Command::Completions { shell } => return write_completions(shell).map_err(CliError::from),
+        Command::HelpManifest => return write_json(help_manifest()).await,
         Command::Init(arguments) => AgentCommand::Init(arguments),
         Command::Status(arguments) => AgentCommand::Status(arguments),
         Command::Chat(arguments) => AgentCommand::Chat(arguments),
