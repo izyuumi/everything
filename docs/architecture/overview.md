@@ -8,6 +8,8 @@ The [agent kernel](../contracts/agent.md) captures immutable provider configurat
 
 One host must own the private state directory lock, shared Agent, registry, Authorizer and [Tool Broker](broker.md). The broker journals stable operations and applies permission checks immediately before execution. Its supervised workers retain admission and concurrency gates through cleanup and durable outcomes. Native filesystem tools use scoped capabilities; shell and MCP require FullHost authority and exact operation approval. Arbitrary shell is not an application-path sandbox. Offline discovery selects only permission-visible schemas and remains advisory.
 
+Named agents with per-agent tool ceilings, agent-to-agent messaging and native Agent Skills are planned, not implemented; see the [agents and skills design](agents-and-skills.md).
+
 The CLI currently composes native filesystem/shell tools and offline discovery. The library also supplies explicit native MCP client registration. Background service and IPC libraries exist, but the actual background command processor and concurrent-task scheduler are separate pending integrations. No GUI process is required for the current CLI or relay.
 
 ## Storage, context and memory
