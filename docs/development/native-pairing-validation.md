@@ -68,6 +68,8 @@ The host was enrolled with `vorra relay enroll --keys HOST.json --pairing-host`.
 | Ctrl+C after a timed-out prompt | SIGINT: `vorra: pairing stopped; the code shown is no longer valid`, process exited. The first attempt hung on a blocked stdin read; stdin now uses a detached thread. | — |
 | Relay down | — | "Your Mac could not be reached through its relay." |
 
+After merging main (Sparkle, versioning) and adding the code-match hint, the approve, reject, timeout and already-paired paths were repeated on a fresh throwaway simulator against the same disposable host and relay: the prompt showed `Approve only if your phone shows this same code; the name is chosen by the phone.` above `Approve? [y/N]`, and the phone screens showed the final "Couldn't pair" title.
+
 A version 1 relay database written by the installed `vorra relay enroll` was migrated to version 2 by the new `enroll --pairing-host` (`user_version` 2, `pairing_host` 1); the old binary then refused it as unsupported.
 
 Not exercised: a real iPhone, the stock Camera app scanning the terminal QR, the universal link (needs the live domain and association file), the in-app camera scanner (the simulator has no camera), two phones racing on one code, `pairing_in_use` and `pairing_unavailable` replies, an older relay without pairing support, TLS relays and cloudflared, the TUI onboarding pairing step, host restart during a pending request, and the Mac app (which still uses its older ceremony, [#272](https://github.com/izyuumi/everything/issues/272)). Screenshots and terminal captures stay outside the repository because the captures contain throwaway invitations. No tests were added; deferred coverage remains [#32](https://github.com/izyuumi/everything/issues/32).
