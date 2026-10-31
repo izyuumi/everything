@@ -997,22 +997,7 @@ async fn chatgpt_cli(
         }
         ChatGptCommand::Select(arguments) => {
             let binding = resolve(&arguments, false)?;
-            if let Some(existing) = settings.model_credentials.iter().find(|existing| {
-                existing.provider == ProviderKind::OpenAi
-                    && existing.endpoint == ProviderEndpoint::Official
-            }) {
-                return Err(CliError::ChatGpt(if *existing == binding {
-                    "ChatGPT plan usage is already selected for the official OpenAI endpoint".into()
-                } else {
-                    format!(
-                        "the official OpenAI endpoint already uses credential reference {}; remove it from settings model_credentials before selecting ChatGPT",
-                        existing.reference
-                    )
-                }));
-            }
-            let mut updated = (*settings).clone();
-            updated.model_credentials.push(binding);
-            chatgpt_replace_settings(&client, updated, settings.revision, cancellation).await
+            write_json(chatgpt_select(&client, binding, cancellation).await?).await
         }
         ChatGptCommand::Deselect => {
             if configured.is_none() {
@@ -1024,7 +1009,10 @@ async fn chatgpt_cli(
             updated
                 .model_credentials
                 .retain(|binding| binding.source != ModelCredentialSource::ChatGpt);
-            chatgpt_replace_settings(&client, updated, settings.revision, cancellation).await
+            write_json(
+                chatgpt_replace_settings(&client, updated, settings.revision, cancellation).await?,
+            )
+            .await
         }
         ChatGptCommand::SignIn(arguments) => {
             let binding = resolve(&arguments.binding, true)?;
@@ -1074,22 +1062,48 @@ async fn chatgpt_replace_settings(
     settings: everything::host::settings::HostSettings,
     expected_revision: u64,
     cancellation: CancellationToken,
-) -> Result<(), CliError> {
+) -> Result<everything::ipc::OwnerOperationResult, CliError> {
     let request_id = CommandId::new();
     eprintln!("owner request {request_id}; reuse this ID for an explicit retry");
-    write_json(
-        client
-            .operate(
-                everything::ipc::OwnerOperation::ReplaceSettings {
-                    expected_revision,
-                    settings: Box::new(settings),
-                },
-                request_id,
-                cancellation,
+    Ok(client
+        .operate(
+            everything::ipc::OwnerOperation::ReplaceSettings {
+                expected_revision,
+                settings: Box::new(settings),
+            },
+            request_id,
+            cancellation,
+        )
+        .await?)
+}
+
+async fn chatgpt_select(
+    client: &everything::host::client::HostClient,
+    binding: everything::host::settings::ModelCredentialReference,
+    cancellation: CancellationToken,
+) -> Result<everything::ipc::OwnerOperationResult, CliError> {
+    use everything::ipc::{OwnerQuery, OwnerQueryResult};
+    let OwnerQueryResult::Settings { settings } = client
+        .query(OwnerQuery::Settings, cancellation.clone())
+        .await?
+    else {
+        return Err(CliError::OwnerInput);
+    };
+    if let Some(existing) = settings.model_credentials.iter().find(|existing| {
+        existing.provider == ProviderKind::OpenAi && existing.endpoint == ProviderEndpoint::Official
+    }) {
+        return Err(CliError::ChatGpt(if *existing == binding {
+            "ChatGPT plan usage is already selected for the official OpenAI endpoint".into()
+        } else {
+            format!(
+                "the official OpenAI endpoint already uses credential reference {}; remove it from settings model_credentials before selecting ChatGPT",
+                existing.reference
             )
-            .await?,
-    )
-    .await
+        }));
+    }
+    let mut updated = (*settings).clone();
+    updated.model_credentials.push(binding);
+    chatgpt_replace_settings(client, updated, settings.revision, cancellation).await
 }
 
 async fn chatgpt_sign_in(
@@ -1182,15 +1196,40 @@ async fn chatgpt_sign_in(
                     "signed in, but ChatGPT plan usage was not granted; sign in again and allow plan usage, or keep using an API key"
                 );
             }
-            if !selected {
-                eprintln!(
-                    "ChatGPT plan usage is not selected; API-key credentials remain in use. Select it with: everything chatgpt select --reference {} --storage {}",
-                    binding.reference,
-                    match binding.storage {
-                        everything::host::settings::CredentialStorage::Session => "session",
-                        everything::host::settings::CredentialStorage::Native => "native",
+            if selected {
+                return Ok(());
+            }
+            let hint = format!(
+                "API-key credentials remain in use. Select it with: everything chatgpt select --reference {} --storage {}",
+                binding.reference,
+                match binding.storage {
+                    everything::host::settings::CredentialStorage::Session => "session",
+                    everything::host::settings::CredentialStorage::Native => "native",
+                }
+            );
+            if !plan_usage_enabled {
+                eprintln!("ChatGPT plan usage is not selected; {hint}");
+                return Ok(());
+            }
+            match chatgpt_select(client, binding, cancellation).await {
+                Ok(
+                    everything::ipc::OwnerOperationResult::SettingsReceipt {
+                        restart_required: true,
+                        ..
                     }
-                );
+                    | everything::ipc::OwnerOperationResult::Settings {
+                        restart_required: true,
+                        ..
+                    },
+                ) => eprintln!(
+                    "ChatGPT plan usage is now selected for the official OpenAI endpoint; restart the host to apply it"
+                ),
+                Ok(_) => {
+                    eprintln!("ChatGPT plan usage is now selected for the official OpenAI endpoint")
+                }
+                Err(error) => {
+                    eprintln!("ChatGPT plan usage was not selected: {error}; {hint}")
+                }
             }
             Ok(())
         }
