@@ -70,7 +70,7 @@ Build and install the binary from a clone (it is not published to crates.io or a
 cargo install --locked --path crates/vorra-help-mcp
 ```
 
-The hosted endpoint `https://vorra.yumi.to/mcp` is **planned and not yet deployed**. Only the `/mcp` path on `vorra.yumi.to` is this server; the same host also serves other Vorra paths such as the pairing `/.well-known/apple-app-site-association` file and `/pair`, so the proxy routes `/mcp` (and optionally `/healthz`) here and nothing else. The planned deployment runs `vorra-help-mcp --http --allowed-host vorra.yumi.to --trust-forwarded-for` on loopback behind a Cloudflare tunnel. Build that binary with `RUSTFLAGS="--remap-path-prefix=$HOME=/home" cargo build --release --locked -p vorra-help-mcp`: an ordinary build keeps the builder's `~/.cargo/registry` paths in dependency panic locations, though no embedded content contains a home path.
+The hosted endpoint `https://vorra.yumi.to/mcp` is **planned and not yet deployed**. Only the `/mcp` path on `vorra.yumi.to` is this server; the same host also serves other Vorra paths such as the pairing `/.well-known/apple-app-site-association` file and `/pair`, so the proxy routes `/mcp`, `/healthz`, `/.well-known/apple-app-site-association`, `/pair` and `/pair/open.js` here and nothing else. The planned deployment runs `vorra-help-mcp --http --allowed-host vorra.yumi.to --trust-forwarded-for` on loopback behind a Cloudflare tunnel. Build that binary with `RUSTFLAGS="--remap-path-prefix=$HOME=/home" cargo build --release --locked -p vorra-help-mcp`: an ordinary build keeps the builder's `~/.cargo/registry` paths in dependency panic locations, though no embedded content contains a home path.
 
 | Client | Local stdio | Hosted (planned) |
 | --- | --- | --- |
