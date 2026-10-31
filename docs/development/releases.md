@@ -1,23 +1,43 @@
-# CLI releases
+# Releases
 
-How the `vorra` binary is versioned, built, published as a GitHub Releases beta and promoted to stable. The scheme is ported from izyuumi/yorozu's Mac release flow. Only the `vorra` binary ships; the relay and the optional embedding binaries do not.
+How Vorra is versioned, and how the `vorra` CLI is published as a GitHub Releases beta and promoted to stable, and the iOS app uploaded to TestFlight and submitted to the App Store. The scheme mirrors izyuumi/yorozu's `docs/release.md`; Vorra differs in shipping CLI tarballs instead of a Mac DMG with Sparkle, and in gating every publishing path behind the repository variable `VORRA_RELEASES`. The relay, the optional embedding binaries and the Mac app are not released.
 
-## Version
+## Version and build numbers
 
-- `scripts/version.sh` prints the next version, by SemVer from the Conventional Commits since the last stable tag `v<major.minor.patch>` (prerelease tags such as `v0.2.0-beta` are ignored): a breaking change (`type!:` or a `BREAKING CHANGE:` footer) bumps major, or minor while below 1.0; a `feat` bumps minor; anything else patch. No file holds the version and nobody picks it. The scripts need the tags (`fetch-depth: 0` in CI). `VERSION=<x.y.z>` overrides it.
-- The build number restarts at 1 per version: the current `v<version>-beta` release's `candidate.json` build plus one, or 1 (`scripts/release.sh --next`).
-- The release build sets `VORRA_VERSION=<version>+<build>` at compile time, so `vorra --version` prints for example `vorra 0.1.0+3`. Build metadata does not affect SemVer precedence. Without that variable (ordinary `cargo build`) it prints the `Cargo.toml` package version, which stays a fixed placeholder (`0.1.0`) and is never bumped by the release flow. Other places that report a version (`vorra tui` title, MCP client info, HTTP user agent, local transport) still use the `Cargo.toml` version.
+- The version follows SemVer and is the same for the CLI and the Apple apps. `scripts/version.sh` computes it from the Conventional Commits since the last stable tag `v<major.minor.patch>` (prerelease tags such as `v0.2.0-beta` are ignored): a breaking change (`type!:` or a `BREAKING CHANGE:` footer) bumps major (minor while below 1.0), a `feat` bumps minor, anything else patch. Nobody picks it by hand. The scripts need the tags (`fetch-depth: 0` in CI). `VERSION=<x.y.z>` overrides it for local builds; `--publish` refuses a beta tag that differs from `scripts/version.sh`.
+- The 0.x rule is Yorozu's, kept so both projects read the same: below 1.0 a breaking change and a `feat` both bump minor, so `0.y.z` patch releases carry only fixes and chores. Cargo's 0.x compatibility rule (minor is the compatibility number) holds as a consequence. From 1.0 it is plain SemVer.
+- Start: with no stable tag, the history's `feat` commits give `0.1.0`, the first release.
+- Placeholders: `Cargo.toml`'s package version is the fixed `0.1.0` and never bumped (the release PR does not touch it, so merging the PR starts no new beta). The Apple project holds `MARKETING_VERSION = 0.1.0`, `CURRENT_PROJECT_VERSION = 100001` and `VORRA_BUILD = 1` once, at project level, so local Xcode builds stay sane; both `Info.plist`s read `$(MARKETING_VERSION)`, `$(CURRENT_PROJECT_VERSION)` and `VorraBuild = $(VORRA_BUILD)`. Every script passes the real `MARKETING_VERSION`, `CURRENT_PROJECT_VERSION` and `VORRA_BUILD` to `xcodebuild`.
+- The CLI build restarts at 1 per version: the current `v<version>-beta` release's `candidate.json` build plus one, or 1 (`scripts/release.sh --next`). The iOS build is the highest build App Store Connect has for this version plus one (`scripts/upload_ios.sh`); 0.1.0 build 1 (100001) is already on TestFlight, so the next 0.1.0 upload is build 2 (100002).
+- `CFBundleVersion` encodes version and build as one integer, `scripts/build-number.sh <version> <build>`:
 
-On this repository's history before any tag, `scripts/version.sh` prints `0.1.0`: no tag, `feat` commits and no breaking marker.
+  ```
+  major·10⁷ + minor·10⁵ + patch·10³ + build      e.g. 0.1.0 build 2 = 100002
+  ```
 
-## Workflows
+  It exits 64 on a non-numeric input and 65 unless minor and patch are below 100 and build is 1 to 999. Versions only rise and the build only rises within a version, so the integer only rises and never repeats.
+
+### One stamped version
+
+The release build sets `VORRA_VERSION=<version>+<build>` at compile time (`scripts/release_build.sh`, which also checks that a host-target binary's `--version` prints exactly `vorra <version>+<build>`). `vorra::VERSION` is that value, or the `Cargo.toml` placeholder for an ordinary `cargo build`. Everything that reports a version reads it: `vorra --version`, `vorra update`'s current version and user agent, the Anthropic client's user agent, the MCP client `Implementation`, the local transport's host status, the `vorra tui` title and the embedding benchmark report. `vorra update` compares it with `candidate.json`'s `version` and `build`, which `--publish` writes from the same `VERSION` and `BUILD`. A help or MCP tool reporting the running version (such as the planned help MCP's `latest_version`, #261) should report `vorra::VERSION`; one reporting the latest release should read the newest non-prerelease `v<x.y.z>` the way `vorra update` does.
+
+### Drift guard
+
+`scripts/check_version.sh [<tag>]` runs in the `release-guards` job of `validate.yml` on every push and pull request. It fails when `Cargo.toml`'s package version is not the `0.1.0` placeholder, when `Cargo.lock`'s `vorra` entry differs from `Cargo.toml`, when the Apple project sets any `MARKETING_VERSION`, `CURRENT_PROJECT_VERSION` or `VORRA_BUILD` other than the placeholders, or when an `Info.plist` hard-codes `CFBundleShortVersionString`, `CFBundleVersion` or `VorraBuild`. With a tag (as `--publish` passes `v<version>-beta`) it also fails unless the tag's version is what `scripts/version.sh` computes at that commit. `--promote` checks that `candidate.json`'s version is the beta tag's.
+
+## CI
 
 | Workflow | Trigger | Does |
 | --- | --- | --- |
+| `validate.yml` | every push to `main` and pull request | `release-guards`: `scripts/check_version.sh` and `scripts/external_testflight.sh --audit`. `rust`: fmt and strict Clippy. |
+| `apple-validation.yml` | push and pull request touching Apple or shared-protocol paths | Build and analyze `VorraMac` and `VorraIOS` unsigned with `MARKETING_VERSION=$(scripts/version.sh)`, `CURRENT_PROJECT_VERSION` from `build-number.sh <version> 1` and `VORRA_BUILD=1`. |
 | `release.yml` | push to `main` except a change to only `CHANGELOG.md`; manual | `next`: `scripts/release.sh --next`. `build`: `scripts/release_build.sh <target>` on each target, signing macOS binaries when the secrets exist. `publish`: `scripts/release.sh --publish`, which replaces the beta and opens or updates the release PR. |
 | `promote.yml` | the release PR (branch `release`, same repository) merged | `scripts/release.sh --promote <build> <sha> <digest>` with the PR body's `Release-Build:`, `Release-Commit:` and `Release-Digest:` lines. |
+| `release-ios.yml` | push to `main` touching `apps/Apple/**`, `scripts/upload_ios.sh`, `scripts/asc_lib.sh`, `scripts/version.sh` or `scripts/build-number.sh`; manual | `scripts/upload_ios.sh --confirm`. Concurrency group `release-ios`, one upload at a time. |
 
-Both share the `release` concurrency group without cancellation, so a promote and the next beta never interleave. Both run only in `izyuumi/everything` and only while the repository variable `VORRA_RELEASES` is `enabled`; otherwise every job is skipped. They run no tests; the normal [POC CI](poc-ci.md) gates merges.
+`release.yml` and `promote.yml` share the `release` concurrency group without cancellation, so a promote and the next beta never interleave. `release.yml`, `promote.yml` and `release-ios.yml` run only in `izyuumi/everything` and only while the repository variable `VORRA_RELEASES` is `enabled`; otherwise every job is skipped. `scripts/release.sh --publish|--promote`, `scripts/release_pr.sh`, `scripts/upload_ios.sh --confirm` and the write flags of `scripts/app_store_submit.sh` also refuse unless the environment has `VORRA_RELEASES=enabled`, which the workflows pass from the variable. The release workflows run no tests; the normal [POC CI](poc-ci.md) gates merges. They run on `macos-latest` (Apple) and `ubuntu-*` (Linux CLI) with the runner's default Xcode.
+
+Secrets, by name: `release.yml` uses `DEVELOPER_ID_P12`, `DEVELOPER_ID_PASSWORD`, `ASC_KEY_ID`, `ASC_ISSUER_ID`, `ASC_KEY_P8`; `release-ios.yml` uses `MAC_CERT_P12`, `MAC_CERT_PASSWORD` (the Apple Distribution identity, despite the name), `ASC_KEY_ID`, `ASC_ISSUER_ID`, `ASC_KEY_P8`.
 
 Targets and runners: `aarch64-apple-darwin` and `x86_64-apple-darwin` on `macos-latest` (x86_64 cross-compiled), `x86_64-unknown-linux-gnu` on `ubuntu-22.04` and `aarch64-unknown-linux-gnu` on `ubuntu-22.04-arm`. The Linux binaries need glibc 2.35 or newer.
 
@@ -32,6 +52,23 @@ Stable releases work like release-please. After each beta, `scripts/release_pr.s
 Check that beta, then merge the PR. `--promote` then republishes the beta's assets unchanged as `v<version>`, marked latest, and deletes the beta release and tag. Before publishing anything it checks that `candidate.json`'s build, tag, version and source commit, the release's target commit, the commit the beta tag names, the `SHA256SUMS` digest on GitHub and as downloaded, and every tarball against `SHA256SUMS` all match what the PR named; every mismatch is reported and it exits 1 without publishing or deleting anything. A newer beta updates the PR to name it. It does nothing if `v<version>` already exists. A missing or malformed argument exits 64.
 
 Merging the release PR changes only `CHANGELOG.md`, so it starts no new beta; the next push does.
+
+Release notes come from `scripts/release_notes.sh [<commit>]`: the pull requests merged into `main` since the last stable tag (never a `-beta` tag), grouped by the feat, fix and perf types of their titles, dependency bumps and other types left out. `--what-to-test <locale> <version> <build> [<commit>]` gives the same list as plain text within App Store Connect's 4,000 bytes for a TestFlight build, with the intro, headings and closing line from `apps/Apple/metadata/testflight/<locale>/what_to_test.txt` (`en-US` only).
+
+## iOS and iPadOS: TestFlight
+
+`scripts/upload_ios.sh --confirm` archives `VorraIOS` for `generic/platform=iOS` (Release, automatic signing, `-allowProvisioningUpdates` with the App Store Connect key) and uploads it: `apps/Apple/iOS/ExportOptions.plist` has `destination` `upload`, so the export step is the upload. Each upload uses up its build number.
+
+- Without `--confirm` it exits 64; without `VORRA_RELEASES=enabled` it exits 1. Needs `ASC_KEY_ID`, `ASC_ISSUER_ID` and the `.p8` key (`ASC_KEY_PATH`, else `~/.appstoreconnect/private_keys/AuthKey_<id>.p8`); `scripts/asc_lib.sh` signs the API token (app ID `6829295744`, "Vorra AI") and keeps the key and token out of arguments and output.
+- Visible build (`VORRA_BUILD`, Info.plist `VorraBuild`): the highest build App Store Connect has for this version, plus one; `BUILD=<n>` skips the lookup. After uploading it waits up to `LIST_WAIT` seconds (default 3600) until App Store Connect lists the build and fails if it never does, so with the `release-ios` concurrency group the next upload cannot reuse its number. `build-number.sh` rejects a build past 999: promote, so the next build starts a new version.
+- After the upload it sets the build's What to Test from `release_notes.sh --what-to-test` in each locale folder under `apps/Apple/metadata/testflight`. A locale the build lacks is created; one it has is set only while empty or still holding this script's text, so text written by hand stays. TestFlight gives processed builds to the internal group only.
+- External TestFlight is off. Nothing gives a build to an external group or submits it to Beta App Review. A step that ever does must run `scripts/external_testflight.sh` first and stop unless it exits 0, which it does only when the repository variable `VORRA_EXTERNAL_TESTFLIGHT` (passed by `release-ios.yml`, unset) is exactly `true`. `scripts/external_testflight.sh --audit`, in `validate.yml`'s `release-guards` job, fails a pull request whose workflows or scripts name an App Store Connect group or Beta App Review call (`betaGroups`, `betaAppReviewSubmissions`, …) without running the switch.
+
+## App Store submission
+
+`scripts/app_store_submit.sh <version> <build> [--release-type MANUAL|AFTER_APPROVAL] [--create] [--attach] [--submit]`, run by hand and never in CI. `<build>` is the `CFBundleVersion`. Without a flag it only reads App Store Connect and prints its plan, exiting 65 with the reason if anything would stop it. `--create` creates the iOS version if missing, else reuses it, and sets its release type (default: that of the newest version on sale, so the first submission needs `--release-type`). `--attach` attaches the build only if it is `VALID`, not expired and uploaded for that version. `--submit` reuses an open review submission or creates one, adds the version once and submits it. It reports the content rights declaration and the build's export compliance against `ITSAppUsesNonExemptEncryption` in `apps/Apple/iOS/Info.plist`, and writes nothing while any of these block. A write flag also needs `VORRA_RELEASES=enabled`. Exit codes: 64 bad arguments, 65 blocked, 70 App Store Connect refused a write, 1 no key. For example `scripts/app_store_submit.sh 0.1.0 100002 --release-type MANUAL`, then with `--create --attach`, then `--submit` once the owner approves.
+
+Not ported from Yorozu yet: `testflight_metadata.sh` and `app_store_metadata.sh` (beta description and App Store listing from files), `app_store_media.sh` (screenshots) and a notarized `VorraMac` release; set those in App Store Connect by hand for now.
 
 ## Asset contract
 
@@ -107,7 +144,7 @@ It writes `/tmp/vorra-dist/vorra-aarch64-apple-darwin.tar.gz`. A macOS target is
 
 ## Owner setup not done by this change
 
-- Releases are off. `release.yml` (every job, including manual runs) and `promote.yml` run only when the repository variable `VORRA_RELEASES` is `enabled`, so merging this publishes nothing. Set it after adding the signing secrets:
+- Releases are off. `release.yml` (every job, including manual runs), `promote.yml` and `release-ios.yml` run only when the repository variable `VORRA_RELEASES` is `enabled`, so merging this publishes nothing. Set it after adding the signing secrets:
 
   ```sh
   gh variable set VORRA_RELEASES --body enabled -R izyuumi/everything
@@ -115,4 +152,5 @@ It writes `/tmp/vorra-dist/vorra-aarch64-apple-darwin.tar.gz`. A macOS target is
 
 - Repository setting "Allow GitHub Actions to create and approve pull requests" is off, so `release_pr.sh` cannot open the release PR until it is enabled; the beta still publishes first.
 - No tag ruleset exists. To make stable tags immutable, add a ruleset on `v*` tags that blocks update and deletion, excluding `v*-beta`, which the beta flow deletes.
-- None of the signing and notarization secrets above exist yet (repository secret list empty on 2026-10-31), so betas ship unsigned macOS binaries until they are added.
+- None of the signing and notarization secrets above exist yet (repository secret list empty on 2026-10-31), so betas ship unsigned macOS binaries until they are added. `release-ios.yml` needs `MAC_CERT_P12`, `MAC_CERT_PASSWORD`, `ASC_KEY_ID`, `ASC_ISSUER_ID` and `ASC_KEY_P8` before it can upload.
+- Leave `VORRA_EXTERNAL_TESTFLIGHT` unset: builds reach only the internal TestFlight group.

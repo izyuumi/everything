@@ -1,6 +1,6 @@
 # POC integration CI
 
-Normal pull requests and pushes to main run the lightweight Validate and Apple validation workflows. Branch pushes have no separate automatic workflow run. Both workflows also support explicit manual dispatch. Per-workflow/event/PR-or-ref concurrency cancels superseded runs without cancelling another PR, main or a separately selected manual run. Pushes to main also run the [Release](releases.md) workflow, which publishes the CLI beta and gates nothing.
+Normal pull requests and pushes to main run the lightweight Validate and Apple validation workflows. Branch pushes have no separate automatic workflow run. Both workflows also support explicit manual dispatch. Per-workflow/event/PR-or-ref concurrency cancels superseded runs without cancelling another PR, main or a separately selected manual run. Pushes to main also run the [Release and Release iOS](releases.md) workflows, which publish the CLI beta and upload to TestFlight only while `VORRA_RELEASES` is `enabled`, and gate nothing.
 
 ## Normal merge feedback
 
@@ -11,6 +11,8 @@ cargo fmt --all --check
 cargo clippy --workspace --all-targets --locked -- -D warnings
 cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 ```
+
+Its `release-guards` job runs `scripts/check_version.sh` (version placeholder drift) and `scripts/external_testflight.sh --audit` ([releases](releases.md#drift-guard)). It is a new context, not yet a required check.
 
 These Clippy forms compile and statically inspect the complete default and all-feature workspace/all-target graph. Normal PRs perform no redundant cargo check, optimized build, macOS Rust job, MSRV job or embedding benchmark. Existing tests remain in the tree and no new tests, fixtures, framework or test requirement is introduced.
 

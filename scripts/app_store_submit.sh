@@ -16,6 +16,10 @@ while [ $# -gt 0 ]; do
     shift
 done
 [ -n "$VERSION" ] && [ -n "$BUILD" ] || usage
+if [ -n "$CREATE$ATTACH$SUBMIT" ] && [ "${VORRA_RELEASES:-}" != enabled ]; then
+    echo "Refusing App Store Connect writes: VORRA_RELEASES is '${VORRA_RELEASES:-}', not enabled. Without --create, --attach or --submit it only prints the plan." >&2
+    exit 65
+fi
 printf '%s' "$VERSION" | grep -qE '^[0-9]+(\.[0-9]+){0,2}$' || { echo "The version must look like 1.2.3, not '$VERSION'." >&2; exit 64; }
 printf '%s' "$BUILD" | grep -qE '^[0-9]+$' || { echo "The build number must be digits, not '$BUILD'." >&2; exit 64; }
 case "$RELEASE_TYPE" in
