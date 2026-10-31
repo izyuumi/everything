@@ -15,7 +15,7 @@ use thiserror::Error;
 use tokio_util::sync::CancellationToken;
 use zeroize::Zeroizing;
 
-pub const LINK_PREFIX: &str = "vorra://pair#";
+pub const LINK_PREFIX: &str = "https://vorra.yumi.to/pair#";
 const LINK_VERSION: u8 = 1;
 const MAX_HOST_NAME_BYTES: usize = 64;
 
