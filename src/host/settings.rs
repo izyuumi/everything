@@ -389,6 +389,28 @@ impl SettingsRepository {
     }
 }
 
+pub(crate) fn relocate_paths(
+    lease: &Arc<StateLease>,
+    sources: &[PathBuf],
+) -> Result<bool, SettingsError> {
+    let Some(settings) = read_settings(lease)? else {
+        return Ok(false);
+    };
+    let mut value = serde_json::to_value(&settings)
+        .map_err(|_| SettingsError::Invalid("settings encoding failed"))?;
+    if !super::relocation::relocate_value(&mut value, sources, lease.path()) {
+        return Ok(false);
+    }
+    let mut relocated: HostSettings = serde_json::from_value(value)
+        .map_err(|_| SettingsError::Invalid("relocated settings could not be decoded"))?;
+    relocated.revision = settings
+        .revision
+        .checked_add(1)
+        .ok_or(SettingsError::Invalid("settings revision overflow"))?;
+    write_settings(lease, &relocated)?;
+    Ok(true)
+}
+
 fn read_settings(lease: &StateLease) -> Result<Option<HostSettings>, SettingsError> {
     let descriptor = match rustix::fs::openat(
         &lease.directory.file,
