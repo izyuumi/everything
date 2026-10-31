@@ -11,6 +11,8 @@
 <key>UILaunchScreen</key><dict/>
 <key>UIApplicationSceneManifest</key><dict><key>UIApplicationSupportsMultipleScenes</key><false/><key>UISceneConfigurations</key><dict/></dict>
 <key>UISupportedInterfaceOrientations</key><array><string>UIInterfaceOrientationPortrait</string><string>UIInterfaceOrientationLandscapeLeft</string><string>UIInterfaceOrientationLandscapeRight</string></array>
+<key>UISupportedInterfaceOrientations~ipad</key><array><string>UIInterfaceOrientationPortrait</string><string>UIInterfaceOrientationPortraitUpsideDown</string><string>UIInterfaceOrientationLandscapeLeft</string><string>UIInterfaceOrientationLandscapeRight</string></array>
+<key>ITSAppUsesNonExemptEncryption</key><false/>
 <key>NSCameraUsageDescription</key><string>Scan a pairing invitation from your Everything host.</string>
 <key>NSLocalNetworkUsageDescription</key><string>Connect to an explicitly configured Everything relay on your local network.</string>
 </dict></plist>
