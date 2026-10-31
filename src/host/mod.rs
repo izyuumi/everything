@@ -1,3 +1,4 @@
+pub mod agents;
 pub mod chatgpt;
 pub mod client;
 mod commands;

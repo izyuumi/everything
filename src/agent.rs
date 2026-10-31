@@ -42,7 +42,7 @@ use crate::storage::{
 
 pub const MAX_PUBLIC_EVENT_BYTES: usize = 256 * 1_024;
 pub const MAX_CHAT_TEXT_BYTES: usize = 128 * 1_024;
-const MAX_INSTRUCTIONS_BYTES: usize = 32 * 1_024;
+pub const MAX_INSTRUCTIONS_BYTES: usize = 32 * 1_024;
 const MAX_CHECKPOINT_BYTES: usize = 8 * 1_024 * 1_024;
 const MAX_HISTORY_BYTES: usize = 64 * 1_024 * 1_024;
 const MAX_HISTORY_EVENTS: usize = 65_536;
@@ -410,6 +410,18 @@ impl Agent {
         title: String,
         config: ConversationConfig,
     ) -> Result<Conversation, AgentError> {
+        self.create_conversation_as(id, command_id, title, config, None)
+            .await
+    }
+
+    pub async fn create_conversation_as(
+        &self,
+        id: ConversationId,
+        command_id: CommandId,
+        title: String,
+        config: ConversationConfig,
+        agent_id: Option<crate::host::agents::AgentId>,
+    ) -> Result<Conversation, AgentError> {
         if let Some(profile) = &self.settings_profile {
             profile.check_conversation(id)?;
             if command_id != profile.create_command_id() || config != *profile.configuration() {
@@ -450,7 +462,7 @@ impl Agent {
                 Some(existing) if existing.last_sequence == 0 && existing.title == title
                     && store.conversation_state(&id.to_string())?.is_none() => {}
                 Some(_) => return Err(AgentError::InvalidData("conversation ID already exists")),
-                None => { store.create_conversation(&id.to_string(), &title, timestamp(now)?)?; }
+                None => { store.create_conversation(&id.to_string(), &title, timestamp(now)?, agent_id.map(|agent| agent.to_string()).as_deref())?; }
             }
             let checkpoint = Checkpoint {
                 version: CHECKPOINT_VERSION, config, message_head: 0, message_count: 0,

@@ -496,6 +496,15 @@ struct StatusArguments {
     limit: usize,
 }
 
+fn bind_agent(
+    agent: &Agent,
+    configuration: ConversationConfig,
+) -> Result<(vorra::host::agents::AgentId, ConversationConfig), CliError> {
+    let agents = vorra::host::agents::AgentRepository::for_agent(agent)?.snapshot()?;
+    let definition = agents.resolve(None)?;
+    Ok((definition.id, definition.configure(configuration)?))
+}
+
 #[derive(Debug, Error)]
 enum CliError {
     #[error(transparent)]
@@ -530,6 +539,8 @@ enum CliError {
     Relocation(#[from] vorra::host::relocation::RelocationError),
     #[error(transparent)]
     Agent(#[from] AgentError),
+    #[error(transparent)]
+    Agents(#[from] vorra::host::agents::AgentsError),
     #[error(transparent)]
     Model(#[from] vorra::model::ModelError),
     #[error(transparent)]
@@ -781,12 +792,14 @@ async fn execute(arguments: Arguments, cancellation: CancellationToken) -> Resul
     };
     match command {
         AgentCommand::Init(arguments) => {
+            let (agent_id, configuration) = bind_agent(&agent, arguments.model.create()?)?;
             let conversation = agent
-                .create_conversation(
+                .create_conversation_as(
                     arguments.conversation.unwrap_or_default(),
                     arguments.command_id.unwrap_or_default(),
                     arguments.title,
-                    arguments.model.create()?,
+                    configuration,
+                    Some(agent_id),
                 )
                 .await?;
             write_json(conversation.info).await
@@ -2284,12 +2297,14 @@ async fn chat(
                     .take(80)
                     .collect()
             });
+            let (agent_id, configuration) = bind_agent(&agent, arguments.model.create()?)?;
             agent
-                .create_conversation(
+                .create_conversation_as(
                     ConversationId::new(),
                     CommandId::new(),
                     title,
-                    arguments.model.create()?,
+                    configuration,
+                    Some(agent_id),
                 )
                 .await?
         }

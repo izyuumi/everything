@@ -29,7 +29,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 use thiserror::Error;
 
-const SCHEMA_VERSION: i64 = 17;
+const SCHEMA_VERSION: i64 = 18;
 const MAX_JSON_BYTES: usize = 1_048_576;
 const MAX_APPEND_EVENTS: usize = 256;
 const MAX_STATE_BYTES: usize = 8 * MAX_JSON_BYTES;
@@ -410,6 +410,9 @@ impl Store {
         if version < 17 {
             transaction.execute_batch(include_str!("../migrations/0017_vault_items.sql"))?;
         }
+        if version < 18 {
+            transaction.execute_batch(include_str!("../migrations/0018_agents.sql"))?;
+        }
         transaction.pragma_update(None, "user_version", SCHEMA_VERSION)?;
         if let Some(now) = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -456,10 +459,14 @@ impl Store {
         id: &str,
         title: &str,
         created_at: i64,
+        agent_id: Option<&str>,
     ) -> StorageResult<ConversationRow> {
         validate_id(id)?;
         validate_text(title, "title", 4_096)?;
         validate_time(created_at)?;
+        if let Some(agent_id) = agent_id {
+            validate_id(agent_id)?;
+        }
         let row = ConversationRow {
             id: id.to_owned(),
             title: title.to_owned(),
@@ -468,8 +475,8 @@ impl Store {
             last_sequence: 0,
         };
         self.connection()?.execute(
-            "INSERT INTO conversations(id, title, created_at, updated_at) VALUES (?1, ?2, ?3, ?3)",
-            params![id, title, created_at],
+            "INSERT INTO conversations(id, title, created_at, updated_at, agent_id) VALUES (?1, ?2, ?3, ?3, ?4)",
+            params![id, title, created_at, agent_id],
         )?;
         Ok(row)
     }
