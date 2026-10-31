@@ -453,7 +453,7 @@ async fn process_frame(
             reason,
             ..
         } => {
-            state
+            if let Some(outcome) = state
                 .rendezvous
                 .decide(
                     &state.database,
@@ -463,7 +463,10 @@ async fn process_frame(
                     acceptance,
                     reason,
                 )
-                .await?;
+                .await?
+            {
+                send_frame(socket, &outcome, &state.cancellation).await?;
+            }
         }
         RelayClientMessage::Authenticate { .. }
         | RelayClientMessage::BeginAuthentication { .. }

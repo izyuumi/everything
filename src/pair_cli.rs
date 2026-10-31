@@ -143,6 +143,9 @@ async fn wait(
                     matches!(answer.trim(), "y" | "Y" | "yes" | "Yes" | "YES")
                 }),
             };
+            if approve {
+                println!("Sending the approval to the phone…");
+            }
             let decision = pair::decide(client, request, approve, cancellation.clone()).await?;
             return Ok(if decision.approved {
                 println!("paired: {}", decision.label);

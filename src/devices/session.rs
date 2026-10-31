@@ -324,6 +324,28 @@ impl DeviceEndpoint {
                         }
                     }
                     RelayServerMessage::Pong { .. } => {}
+                    RelayServerMessage::PairingDelivered {
+                        pairing_id,
+                        responder,
+                        ..
+                    } => {
+                        let now = UnixMillis::now()?;
+                        self.blocking(move |endpoint| {
+                            endpoint.pairing_delivered(pairing_id, responder, now)
+                        })
+                        .await?;
+                    }
+                    RelayServerMessage::PairingFailed {
+                        pairing_id,
+                        responder,
+                        code,
+                        ..
+                    } => {
+                        self.blocking(move |endpoint| {
+                            endpoint.pairing_failed(pairing_id, responder, code)
+                        })
+                        .await?;
+                    }
                     RelayServerMessage::PairingRequest {
                         request,
                         device_name,

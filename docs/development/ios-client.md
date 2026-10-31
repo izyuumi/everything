@@ -31,11 +31,11 @@ Failures are plain messages: invalid link, expired or already used, rejected on 
 
 ### Pairing links and vorra.yumi.to
 
-`vorra pair` encodes the custom scheme `vorra://pair#…` today because the universal-link domain is not live. Switching is the one-line `LINK_PREFIX` constant in `src/host/pair.rs`. For the universal link to open the app, host the files in `web/vorra.yumi.to/`:
+`vorra pair` encodes the custom scheme `vorra://pair#…` today because the universal-link route is not live. Switching is the one-line `LINK_PREFIX` constant in `src/host/pair.rs`. `vorra.yumi.to` is served through the Mac mini's Cloudflare tunnel by `vorra-help-mcp`, which embeds the [pairing site](../architecture/help-mcp.md#pairing-site) from `crates/vorra-help-mcp/site/`:
 
-- DNS for `vorra.yumi.to` and a valid HTTPS certificate. Apple fetches the association file over HTTPS without following redirects.
-- `https://vorra.yumi.to/.well-known/apple-app-site-association` served as `Content-Type: application/json`, HTTP 200, no redirect, from `web/vorra.yumi.to/.well-known/apple-app-site-association` (app ID `AN5KM8QGEF.to.yumi.vorra.ios`, paths `/pair` and `/pair/*`).
-- `https://vorra.yumi.to/pair` serving `web/vorra.yumi.to/pair/index.html`, shown when Vorra is not installed. It runs no script and loads nothing, so the fragment holding the invitation is never read or sent anywhere.
+- `https://vorra.yumi.to/.well-known/apple-app-site-association`: HTTP 200, `Content-Type: application/json`, no redirect, no file extension, app ID `AN5KM8QGEF.to.yumi.vorra.ios`, components `/pair` and `/pair/*`. Apple fetches it over HTTPS without following redirects.
+- `https://vorra.yumi.to/pair`: the fallback page when the universal link does not open the app. Its script tries `vorra://pair` plus the fragment in the browser, and otherwise the page links to the App Store (`https://apps.apple.com/app/id6829295744`) with a TestFlight note. The fragment never leaves the phone.
+- To go live, the running service must be a build that includes these routes; then flip `LINK_PREFIX`.
 - VorraIOS carries `com.apple.developer.associated-domains` = `applinks:vorra.yumi.to` (`apps/Apple/iOS/VorraIOS.entitlements`). The App ID `to.yumi.vorra.ios` needs the Associated Domains capability. Automatic signing with `-allowProvisioningUpdates` normally enables it; if an archive fails with a provisioning profile that lacks `com.apple.developer.associated-domains`, enable Associated Domains for that identifier at developer.apple.com → Certificates, Identifiers & Profiles → Identifiers, then archive again.
 
 Device secrets use one versioned binary Keychain item, with `kSecAttrAccessibleWhenUnlockedThisDeviceOnly` and synchronization disabled. Ed25519 and X25519 use independent CryptoKit private keys. Secrets are never serialized into JSON, SQLite, preferences, relay frames or logs. An existing database whose identity Keychain item is missing fails closed rather than generating a replacement identity. These Curve25519 keys are not Secure Enclave keys. Temporary buffer clearing is best effort; Swift copies do not provide a general secret-memory-erasure guarantee.

@@ -1,6 +1,7 @@
 use super::*;
 use crate::protocol::DeviceId;
 use crate::relay_protocol::{RELAY_SCHEMA_VERSION, RelayClientMessage, RelayErrorCode};
+use tokio::sync::oneshot;
 
 const MAX_REPLIES: usize = 32;
 
@@ -27,6 +28,21 @@ pub struct PairingDecision {
     pub device_id: DeviceId,
     pub label: String,
     pub approved: bool,
+}
+
+pub(super) struct AwaitingDelivery {
+    responder: DeviceId,
+    keys: DevicePublicKeys,
+    approval: PairingApproval,
+    reply: oneshot::Sender<Result<(), RelayErrorCode>>,
+}
+
+pub enum PairingProgress {
+    Decided(PairingDecision),
+    Awaiting {
+        decision: PairingDecision,
+        delivery: oneshot::Receiver<Result<(), RelayErrorCode>>,
+    },
 }
 
 impl DeviceEndpoint {
@@ -125,7 +141,7 @@ impl DeviceEndpoint {
         approve: bool,
         access: DeviceAccess,
         now: UnixMillis,
-    ) -> Result<PairingDecision, DeviceError> {
+    ) -> Result<PairingProgress, DeviceError> {
         self.ensure_active()?;
         if self.inner.role != EndpointRole::Host {
             return Err(DeviceError::AccessDenied);
@@ -147,38 +163,136 @@ impl DeviceEndpoint {
         if !approve {
             self.cancel_pairing(pairing_id, now)?;
             self.reply(pairing_id, device_id, RelayErrorCode::PairingRejected)?;
-            return Ok(PairingDecision {
+            return Ok(PairingProgress::Decided(PairingDecision {
                 device_id,
                 label: entry.device_name,
                 approved: false,
-            });
+            }));
         }
         let approval = PairingApproval::new(
             entry.device_name.clone(),
             entry.request.responder.fingerprint(),
             access,
         )?;
-        match self.approve_pairing(&entry.request, approval, now) {
-            Ok(acceptance) => {
-                self.queue_reply(RelayClientMessage::PairingDecision {
-                    schema_version: RELAY_SCHEMA_VERSION,
-                    pairing_id,
-                    responder: device_id,
-                    acceptance: Some(acceptance),
-                    reason: None,
-                })?;
-                Ok(PairingDecision {
-                    device_id,
-                    label: entry.device_name,
-                    approved: true,
-                })
-            }
+        let (keys, acceptance) = match self.accept_unpinned(&entry.request, &approval, now) {
+            Ok(accepted) => accepted,
             Err(error) => {
                 self.cancel_pairing(pairing_id, now)?;
                 self.reply(pairing_id, device_id, RelayErrorCode::PairingUnavailable)?;
-                Err(error)
+                return Err(error);
             }
+        };
+        let (reply, delivery) = oneshot::channel();
+        self.inner
+            .awaiting
+            .lock()
+            .map_err(|_| DeviceError::Poisoned)?
+            .insert(
+                pairing_id,
+                AwaitingDelivery {
+                    responder: device_id,
+                    keys,
+                    approval,
+                    reply,
+                },
+            );
+        self.queue_reply(RelayClientMessage::PairingDecision {
+            schema_version: RELAY_SCHEMA_VERSION,
+            pairing_id,
+            responder: device_id,
+            acceptance: Some(acceptance),
+            reason: None,
+        })?;
+        Ok(PairingProgress::Awaiting {
+            decision: PairingDecision {
+                device_id,
+                label: entry.device_name,
+                approved: true,
+            },
+            delivery,
+        })
+    }
+
+    fn accept_unpinned(
+        &self,
+        request: &PairingRequest,
+        approval: &PairingApproval,
+        now: UnixMillis,
+    ) -> Result<(DevicePublicKeys, PairingAcceptance), DeviceError> {
+        let pending = self
+            .inner
+            .pairings
+            .lock()
+            .map_err(|_| DeviceError::Poisoned)?
+            .remove(&request.pairing_id)
+            .ok_or(DeviceError::PairingNotFound)?;
+        let (keys, acceptance) = pending.accept(&self.inner.identity, request, now.get())?;
+        let registration = serde_json::to_value(PeerRegistration {
+            version: REGISTRATION_VERSION,
+            keys: keys.clone(),
+            access: approval.access.clone(),
+        })?;
+        if let Some(existing) = self.inner.store.device(&keys.device_id.to_string())?
+            && (existing.revoked_at.is_some() || existing.public_identity != registration)
+        {
+            return Err(DeviceError::Invalid(
+                "this device was revoked or is already paired with different keys or access",
+            ));
         }
+        Ok((keys, acceptance))
+    }
+
+    pub(super) fn pairing_delivered(
+        &self,
+        pairing_id: MessageId,
+        responder: DeviceId,
+        now: UnixMillis,
+    ) -> Result<(), DeviceError> {
+        let Some(entry) = self.take_awaiting(pairing_id, responder)? else {
+            return Ok(());
+        };
+        let pinned = self.pin_peer(entry.keys, pairing_id, entry.approval, now);
+        let _ = entry
+            .reply
+            .send(pinned.map_err(|_| RelayErrorCode::PairingUnavailable));
+        Ok(())
+    }
+
+    pub(super) fn pairing_failed(
+        &self,
+        pairing_id: MessageId,
+        responder: DeviceId,
+        code: RelayErrorCode,
+    ) -> Result<(), DeviceError> {
+        if let Some(entry) = self.take_awaiting(pairing_id, responder)? {
+            let _ = entry.reply.send(Err(code));
+        }
+        Ok(())
+    }
+
+    pub fn abandon_pairing(&self, pairing_id: MessageId) -> Result<(), DeviceError> {
+        self.inner
+            .awaiting
+            .lock()
+            .map_err(|_| DeviceError::Poisoned)?
+            .remove(&pairing_id);
+        Ok(())
+    }
+
+    fn take_awaiting(
+        &self,
+        pairing_id: MessageId,
+        responder: DeviceId,
+    ) -> Result<Option<AwaitingDelivery>, DeviceError> {
+        let mut awaiting = self
+            .inner
+            .awaiting
+            .lock()
+            .map_err(|_| DeviceError::Poisoned)?;
+        Ok(match awaiting.get(&pairing_id) {
+            Some(entry) if entry.responder == responder => awaiting.remove(&pairing_id),
+            _ => None,
+        })
     }
 
     pub fn withdraw_pairing(

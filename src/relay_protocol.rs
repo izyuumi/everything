@@ -304,6 +304,19 @@ pub enum RelayServerMessage {
         schema_version: u16,
         acceptance: PairingAcceptance,
     },
+    PairingDelivered {
+        #[serde(deserialize_with = "deserialize_version")]
+        schema_version: u16,
+        pairing_id: MessageId,
+        responder: DeviceId,
+    },
+    PairingFailed {
+        #[serde(deserialize_with = "deserialize_version")]
+        schema_version: u16,
+        pairing_id: MessageId,
+        responder: DeviceId,
+        code: RelayErrorCode,
+    },
 }
 
 impl RelayServerMessage {
@@ -332,7 +345,9 @@ impl RelayServerMessage {
             | Self::Error { schema_version, .. }
             | Self::PairingPending { schema_version }
             | Self::PairingRequest { schema_version, .. }
-            | Self::PairingAccepted { schema_version, .. } => *schema_version,
+            | Self::PairingAccepted { schema_version, .. }
+            | Self::PairingDelivered { schema_version, .. }
+            | Self::PairingFailed { schema_version, .. } => *schema_version,
         };
         validate_version(version)?;
         if let Self::Challenge { challenge, .. } = self {

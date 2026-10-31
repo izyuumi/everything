@@ -16,15 +16,16 @@ use std::{
 };
 use tokio::{
     sync::{broadcast, oneshot},
-    time::{Instant, interval_at, sleep_until},
+    time::{Instant, interval_at, sleep_until, timeout},
 };
 use tokio_util::sync::CancellationToken;
 
 const MAX_WAITERS: usize = 32;
 const MAX_WAITERS_PER_HOST: usize = 4;
 const HEARTBEAT: Duration = Duration::from_secs(20);
+const DELIVERY_TIMEOUT: Duration = Duration::from_secs(10);
 
-type Decision = Result<PairingAcceptance, RelayErrorCode>;
+type Decision = Result<(PairingAcceptance, oneshot::Sender<bool>), RelayErrorCode>;
 
 struct Waiter {
     token: u64,
@@ -148,7 +149,7 @@ impl Rendezvous {
         responder: DeviceId,
         acceptance: Option<PairingAcceptance>,
         reason: Option<RelayErrorCode>,
-    ) -> Result<(), RelayError> {
+    ) -> Result<Option<RelayServerMessage>, RelayError> {
         let waiter = {
             let mut inner = self.inner.lock().map_err(|_| poisoned())?;
             match inner.waiters.get(&pairing_id) {
@@ -160,31 +161,57 @@ impl Rendezvous {
                 _ => None,
             }
         };
-        let Some(waiter) = waiter else {
-            return Ok(());
+        let Some(acceptance) = acceptance else {
+            if let Some(waiter) = waiter {
+                let _ = waiter.decision.send(Err(match reason {
+                    Some(
+                        code @ (RelayErrorCode::PairingExpired
+                        | RelayErrorCode::PairingInUse
+                        | RelayErrorCode::PairingUnavailable),
+                    ) => code,
+                    _ => RelayErrorCode::PairingRejected,
+                }));
+            }
+            return Ok(None);
         };
-        let decision = match acceptance {
-            None => Err(match reason {
-                Some(
-                    code @ (RelayErrorCode::PairingExpired
-                    | RelayErrorCode::PairingInUse
-                    | RelayErrorCode::PairingUnavailable),
-                ) => code,
-                _ => RelayErrorCode::PairingRejected,
-            }),
-            Some(acceptance) => match sponsor(database, host, &waiter.request, &acceptance).await {
-                Ok(()) => Ok(acceptance),
+        let outcome = match waiter {
+            None => Err(RelayErrorCode::PairingExpired),
+            Some(waiter) => match sponsor(database, host, &waiter.request, &acceptance).await {
                 Err(error) => {
                     eprintln!("relay pairing sponsorship refused: {error}");
-                    Err(match error {
+                    let code = match error {
                         RelayError::Pairing(code) => code,
                         _ => RelayErrorCode::PairingUnavailable,
-                    })
+                    };
+                    let _ = waiter.decision.send(Err(code));
+                    Err(code)
+                }
+                Ok(()) => {
+                    let (sender, receiver) = oneshot::channel();
+                    if waiter.decision.send(Ok((acceptance, sender))).is_err() {
+                        Err(RelayErrorCode::PairingExpired)
+                    } else {
+                        match timeout(DELIVERY_TIMEOUT, receiver).await {
+                            Ok(Ok(true)) => Ok(()),
+                            _ => Err(RelayErrorCode::PairingExpired),
+                        }
+                    }
                 }
             },
         };
-        let _ = waiter.decision.send(decision);
-        Ok(())
+        Ok(Some(match outcome {
+            Ok(()) => RelayServerMessage::PairingDelivered {
+                schema_version: RELAY_SCHEMA_VERSION,
+                pairing_id,
+                responder,
+            },
+            Err(code) => RelayServerMessage::PairingFailed {
+                schema_version: RELAY_SCHEMA_VERSION,
+                pairing_id,
+                responder,
+                code,
+            },
+        }))
     }
 }
 
@@ -268,15 +295,19 @@ pub(super) async fn run(
             _ = context.cancellation.cancelled() => return Err(RelayError::Cancelled),
             result = &mut decision => {
                 return match result {
-                    Ok(Ok(acceptance)) => send_frame(
-                        socket,
-                        &RelayServerMessage::PairingAccepted {
-                            schema_version: RELAY_SCHEMA_VERSION,
-                            acceptance,
-                        },
-                        context.cancellation,
-                    )
-                    .await,
+                    Ok(Ok((acceptance, delivered))) => {
+                        let sent = send_frame(
+                            socket,
+                            &RelayServerMessage::PairingAccepted {
+                                schema_version: RELAY_SCHEMA_VERSION,
+                                acceptance,
+                            },
+                            context.cancellation,
+                        )
+                        .await;
+                        let _ = delivered.send(sent.is_ok());
+                        sent
+                    }
                     Ok(Err(code)) => Err(RelayError::Pairing(code)),
                     Err(_) => Err(RelayError::Pairing(RelayErrorCode::PairingUnavailable)),
                 };
