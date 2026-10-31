@@ -35,6 +35,7 @@ It sits next to [`src/host/credentials.rs`](../../src/host/credentials.rs), whos
 - A prompt-injected model trying to read, exfiltrate or widen access to secrets: it only ever handles references, every use needs an exact approval scoped to its own task, empty searches are refused, and output is redacted.
 - A stolen or compromised paired device or relay: it sees references and metadata, never values. Secret entry is not possible over the relay in v1.
 - Accidental leaks into logs, events, journals, permission rows, memory, settings or error text: values only exist in `CredentialSecret`/`SecretTransfer` buffers, whose Debug is redacted and which no durable record serializes.
+- A partly masked value: the broker masks tool error text before shortening it to a diagnostic ([#241](https://github.com/izyuumi/everything/issues/241)), and a poisoned task value set is discarded and its tasks refused instead of being reused in an unknown state ([#243](https://github.com/izyuumi/everything/issues/243)).
 - A model trying to reach its own provider's bearer token: SIWC and other model credentials are not vault items and cannot be listed or resolved.
 
 **Out of scope, stated honestly.**

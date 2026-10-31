@@ -1098,6 +1098,11 @@ impl BrokerInner {
                 None
             }
         });
+        let literals = match &vault {
+            Some(vault) => vault.literals(vault_authority.task_id()),
+            None => Ok(Vec::new()),
+        };
+        let redaction = literals.as_deref().unwrap_or_default();
         let mut result = match returned {
             Some(Ok(Ok(output))) if output.is_error => OperationResult::Failed {
                 code: "completed_tool_error".into(),
@@ -1108,7 +1113,7 @@ impl BrokerInner {
             Some(Ok(Err(ToolError::FailedWithoutSideEffects { message, .. }))) => {
                 OperationResult::Failed {
                     code: "failed_without_side_effects".into(),
-                    message: diagnostic(&message),
+                    message: redacted_diagnostic(&message, redaction),
                     output: None,
                 }
             }
@@ -1123,7 +1128,7 @@ impl BrokerInner {
                     UnknownReason::ToolFailureAfterInvocation
                 },
                 cleanup_completed,
-                diagnostic: Some(diagnostic(&message)),
+                diagnostic: Some(redacted_diagnostic(&message, redaction)),
             },
             Some(Ok(Err(error))) => OperationResult::Unknown {
                 reason: if matches!(error, ToolError::Cancelled { .. }) {
@@ -1132,7 +1137,7 @@ impl BrokerInner {
                     UnknownReason::ToolFailureAfterInvocation
                 },
                 cleanup_completed: false,
-                diagnostic: Some(diagnostic(&error)),
+                diagnostic: Some(redacted_diagnostic(&error, redaction)),
             },
             Some(Err(_)) => OperationResult::Unknown {
                 reason: UnknownReason::ToolPanicked,
@@ -1146,10 +1151,38 @@ impl BrokerInner {
             },
         };
         drop(execution);
-        if let Some(vault) = &vault {
-            redact_result(&mut result, &vault.literals(vault_authority.task_id()));
-        }
-        let mut record = record(result, interruption);
+        let mut record = match literals {
+            Ok(literals) => {
+                redact_result(&mut result, &literals);
+                record(result, interruption)
+            }
+            Err(error) => record(
+                match result {
+                    OperationResult::Failed { code, .. } => OperationResult::Failed {
+                        code,
+                        message: error.to_string(),
+                        output: None,
+                    },
+                    OperationResult::Unknown {
+                        reason,
+                        cleanup_completed,
+                        ..
+                    } => OperationResult::Unknown {
+                        reason,
+                        cleanup_completed,
+                        diagnostic: Some(error.to_string()),
+                    },
+                    OperationResult::Succeeded { .. } => OperationResult::Unknown {
+                        reason: UnknownReason::ResultNotPersistable,
+                        cleanup_completed: true,
+                        diagnostic: Some(error.to_string()),
+                    },
+                    other
+                    @ (OperationResult::Cancelled { .. } | OperationResult::Denied { .. }) => other,
+                },
+                interruption,
+            ),
+        };
         if profile.is_some()
             && serde_json::to_vec(&record).map_or(true, |bytes| bytes.len() > MAX_BROKER_RECORD)
         {
@@ -1596,6 +1629,15 @@ fn now() -> Result<i64, BrokerError> {
         .duration_since(UNIX_EPOCH)
         .map_err(|_| BrokerError::Clock)?;
     i64::try_from(elapsed.as_millis()).map_err(|_| BrokerError::Clock)
+}
+
+fn redacted_diagnostic(
+    value: &impl std::fmt::Display,
+    literals: &[Arc<CredentialSecret>],
+) -> String {
+    let mut text = value.to_string();
+    redact_text(&mut text, literals);
+    diagnostic(&text)
 }
 
 fn diagnostic(value: &impl std::fmt::Display) -> String {
