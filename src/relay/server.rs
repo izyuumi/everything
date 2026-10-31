@@ -1,6 +1,7 @@
 use super::{
     database::{DELIVERY_WINDOW, Database},
     error::RelayError,
+    pairing::{self, PairingContext, Rendezvous},
 };
 use crate::{
     crypto::DevicePublicKeys,
@@ -56,6 +57,7 @@ struct ServerState {
     active_sessions: Arc<Mutex<HashSet<DeviceId>>>,
     notifications: broadcast::Sender<DeviceId>,
     authentication_admission: Arc<Mutex<AuthenticationAdmission>>,
+    rendezvous: Rendezvous,
 }
 
 pub async fn run(
@@ -85,6 +87,7 @@ pub async fn run(
             window_started: Instant::now(),
             attempts: 0,
         })),
+        rendezvous: Rendezvous::default(),
     };
     let router = Router::new()
         .route("/ws", get(websocket))
@@ -195,11 +198,41 @@ async fn websocket(State(state): State<ServerState>, upgrade: WebSocketUpgrade) 
 }
 
 async fn run_session(socket: &mut WebSocket, state: &ServerState) -> Result<(), RelayError> {
-    let keys = tokio::select! {
+    {
+        let mut admission = state.authentication_admission.lock().map_err(|_| {
+            RelayError::Configuration("authentication admission lock poisoned".to_owned())
+        })?;
+        admission.admit()?;
+    }
+    let first = tokio::select! {
         _ = state.cancellation.cancelled() => return Err(RelayError::Cancelled),
-        result = timeout(Duration::from_millis(AUTH_CHALLENGE_LIFETIME_MS), authenticate(socket, state)) => {
+        result = timeout(Duration::from_millis(AUTH_CHALLENGE_LIFETIME_MS), authentication_frame(socket)) => {
             result.map_err(|_| RelayError::Timeout)??
         }
+    };
+    let keys = match RelayClientMessage::parse(&first)? {
+        RelayClientMessage::PairingRequest {
+            request,
+            device_name,
+            name_signature,
+            ..
+        } => {
+            let context = PairingContext {
+                database: &state.database,
+                rendezvous: &state.rendezvous,
+                active_sessions: &state.active_sessions,
+                notifications: &state.notifications,
+                cancellation: &state.cancellation,
+            };
+            return pairing::run(socket, context, request, device_name, name_signature).await;
+        }
+        RelayClientMessage::BeginAuthentication { device_id, .. } => tokio::select! {
+            _ = state.cancellation.cancelled() => return Err(RelayError::Cancelled),
+            result = timeout(Duration::from_millis(AUTH_CHALLENGE_LIFETIME_MS), authenticate(socket, state, device_id, first.len())) => {
+                result.map_err(|_| RelayError::Timeout)??
+            }
+        },
+        _ => return Err(RelayError::AuthenticationFailed),
     };
     let _lease = SessionLease::acquire(keys.device_id, state.active_sessions.clone())?;
     send_frame(
@@ -213,7 +246,9 @@ async fn run_session(socket: &mut WebSocket, state: &ServerState) -> Result<(), 
     .await?;
     let mut notifications = state.notifications.subscribe();
     let mut delivered = HashSet::with_capacity(DELIVERY_WINDOW);
+    let mut pairings = HashSet::new();
     deliver_pending(socket, state, keys.device_id, &mut delivered).await?;
+    deliver_pairings(socket, state, keys.device_id, &mut pairings).await?;
     let mut heartbeat = interval_at(Instant::now() + HEARTBEAT_INTERVAL, HEARTBEAT_INTERVAL);
     let mut last_activity = Instant::now();
     loop {
@@ -264,10 +299,12 @@ async fn run_session(socket: &mut WebSocket, state: &ServerState) -> Result<(), 
             }
             Trigger::Notification(Ok(recipient)) if recipient == keys.device_id => {
                 deliver_pending(socket, state, keys.device_id, &mut delivered).await?;
+                deliver_pairings(socket, state, keys.device_id, &mut pairings).await?;
             }
             Trigger::Notification(Ok(_)) => {}
             Trigger::Notification(Err(broadcast::error::RecvError::Lagged(_))) => {
                 deliver_pending(socket, state, keys.device_id, &mut delivered).await?;
+                deliver_pairings(socket, state, keys.device_id, &mut pairings).await?;
             }
             Trigger::Notification(Err(broadcast::error::RecvError::Closed)) => {
                 return Err(RelayError::Cancelled);
@@ -275,6 +312,7 @@ async fn run_session(socket: &mut WebSocket, state: &ServerState) -> Result<(), 
             Trigger::Heartbeat => {
                 state.database.active_keys(keys.device_id).await?;
                 deliver_pending(socket, state, keys.device_id, &mut delivered).await?;
+                deliver_pairings(socket, state, keys.device_id, &mut pairings).await?;
                 send_socket(
                     socket,
                     Message::Ping(Vec::new().into()),
@@ -295,19 +333,9 @@ enum Trigger {
 async fn authenticate(
     socket: &mut WebSocket,
     state: &ServerState,
+    device_id: DeviceId,
+    begin_length: usize,
 ) -> Result<DevicePublicKeys, RelayError> {
-    {
-        let mut admission = state.authentication_admission.lock().map_err(|_| {
-            RelayError::Configuration("authentication admission lock poisoned".to_owned())
-        })?;
-        admission.admit()?;
-    }
-    let begin_bytes = authentication_frame(socket).await?;
-    let RelayClientMessage::BeginAuthentication { device_id, .. } =
-        RelayClientMessage::parse(&begin_bytes)?
-    else {
-        return Err(RelayError::AuthenticationFailed);
-    };
     let now = now_ms()?;
     let keys = state.database.active_keys(device_id).await?;
     let challenge = RelayChallenge::new(state.origin.clone(), device_id, now)?;
@@ -338,7 +366,7 @@ async fn authenticate(
     state.database.active_keys(device_id).await?;
     state
         .database
-        .charge(device_id, begin_bytes.len() + bytes.len(), now_ms()?)
+        .charge(device_id, begin_length + bytes.len(), now_ms()?)
         .await?;
     Ok(keys)
 }
@@ -418,10 +446,45 @@ async fn process_frame(
             )
             .await?;
         }
+        RelayClientMessage::PairingDecision {
+            pairing_id,
+            responder,
+            acceptance,
+            reason,
+            ..
+        } => {
+            if let Some(outcome) = state
+                .rendezvous
+                .decide(
+                    &state.database,
+                    device_id,
+                    pairing_id,
+                    responder,
+                    acceptance,
+                    reason,
+                )
+                .await?
+            {
+                send_frame(socket, &outcome, &state.cancellation).await?;
+            }
+        }
         RelayClientMessage::Authenticate { .. }
-        | RelayClientMessage::BeginAuthentication { .. } => {
+        | RelayClientMessage::BeginAuthentication { .. }
+        | RelayClientMessage::PairingRequest { .. } => {
             return Err(RelayError::AuthenticationFailed);
         }
+    }
+    Ok(())
+}
+
+async fn deliver_pairings(
+    socket: &mut WebSocket,
+    state: &ServerState,
+    host: DeviceId,
+    delivered: &mut HashSet<u64>,
+) -> Result<(), RelayError> {
+    for frame in state.rendezvous.undelivered(host, delivered)? {
+        send_frame(socket, &frame, &state.cancellation).await?;
     }
     Ok(())
 }
@@ -464,7 +527,7 @@ async fn deliver_pending(
     Ok(())
 }
 
-async fn send_frame(
+pub(super) async fn send_frame(
     socket: &mut WebSocket,
     frame: &RelayServerMessage,
     cancellation: &CancellationToken,
@@ -477,7 +540,7 @@ async fn send_frame(
     .await
 }
 
-async fn send_socket(
+pub(super) async fn send_socket(
     socket: &mut WebSocket,
     frame: Message,
     cancellation: &CancellationToken,
@@ -503,6 +566,7 @@ fn error_code(error: &RelayError) -> RelayErrorCode {
         RelayError::MessageConflict => RelayErrorCode::MessageConflict,
         RelayError::RateLimited => RelayErrorCode::RateLimited,
         RelayError::SessionAlreadyActive => RelayErrorCode::SessionAlreadyActive,
+        RelayError::Pairing(code) => *code,
         _ => RelayErrorCode::Internal,
     }
 }

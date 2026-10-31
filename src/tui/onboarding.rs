@@ -18,7 +18,9 @@ use super::render::{centered, overlay_block};
 use super::theme::{ACCENT, BORDER, DIM, ERROR, MUTED, OK, SELECT_BG, TEXT, TITLE, WARN, bold, fg};
 use crate::agent::{ConversationConfig, ProviderEndpoint, ProviderKind};
 use crate::host::chatgpt::{ChatGptAttemptPhase, ChatGptOperation};
+use crate::host::client::HostClient;
 use crate::host::credentials::{CredentialOperation, SecretTransfer};
+use crate::host::pair;
 use crate::host::providers::api_key_provider;
 use crate::host::settings::{CredentialStorage, ModelCredentialReference, ModelCredentialSource};
 use crate::ipc::{OwnerOperation, OwnerOperationResult};
@@ -487,15 +489,17 @@ enum Step {
     Verify,
     Save,
     Service,
+    Pair,
     Vault,
 }
 
-const STEPS: [Step; 6] = [
+const STEPS: [Step; 7] = [
     Step::Welcome,
     Step::Provider,
     Step::Verify,
     Step::Save,
     Step::Service,
+    Step::Pair,
     Step::Vault,
 ];
 
@@ -600,6 +604,7 @@ impl Wizard<'_, '_> {
             Step::Verify => self.verify().await,
             Step::Save => self.save().await,
             Step::Service => self.service().await,
+            Step::Pair => self.pair().await,
             Step::Vault => self.vault().await,
         }
     }
@@ -1160,6 +1165,110 @@ impl Wizard<'_, '_> {
 }
 
 impl Wizard<'_, '_> {
+    async fn pair(&mut self) -> Result<Flow, TuiError> {
+        let title = "Pair your iPhone";
+        let cancellation = CancellationToken::new();
+        let Ok(client) = HostClient::new(self.state) else {
+            return Ok(Flow::Next);
+        };
+        let relay = match pair::relay(&client, cancellation.clone()).await {
+            Ok(relay) => relay,
+            Err(pair::PairError::NoRelay) => {
+                let body = [
+                    text("To use Vorra on your iPhone, give this host a relay:"),
+                    dim(
+                        "vorra relay on --origin wss://relay.example.com, restart the host, then run vorra pair.",
+                    ),
+                ];
+                self.screen
+                    .choose(title, &body, &["Continue".to_owned()], 0)
+                    .await?;
+                return Ok(Flow::Next);
+            }
+            Err(_) => return Ok(Flow::Next),
+        };
+        let body = [
+            text("Pair an iPhone with this host now?"),
+            dim(
+                "You scan a QR code, then approve the iPhone here. You can do this later with vorra pair.",
+            ),
+        ];
+        let options = ["Not now".to_owned(), "Show the pairing QR code".to_owned()];
+        if self.screen.choose(title, &body, &options, 0).await? != Some(1) {
+            return Ok(Flow::Next);
+        }
+        let name = pair::host_name();
+        let message = loop {
+            let invitation =
+                match pair::begin(&client, &relay.origin, &name, 300_000, cancellation.clone())
+                    .await
+                {
+                    Ok(invitation) => invitation,
+                    Err(error) => {
+                        break colored(ERROR, format!("Could not start pairing: {error}"));
+                    }
+                };
+            let mut body: Vec<Line<'static>> = invitation.qr.lines().map(text).collect();
+            body.push(dim(
+                "Scan with your iPhone camera. Too narrow to scan? Quit and run vorra pair.",
+            ));
+            if !relay.connected {
+                body.push(colored(
+                    WARN,
+                    "This host is not connected to its relay yet.",
+                ));
+            }
+            let work = next_request(&client, &invitation, cancellation.clone());
+            let outcome = self.screen.wait(title, &body, work).await?;
+            let request = match outcome {
+                Some(Ok(Some(request))) => request,
+                Some(Ok(None)) => {
+                    let _ = pair::cancel(&client, invitation.pairing_id, CancellationToken::new())
+                        .await;
+                    continue;
+                }
+                Some(Err(error)) => {
+                    let _ = pair::cancel(&client, invitation.pairing_id, CancellationToken::new())
+                        .await;
+                    break colored(ERROR, format!("Pairing failed: {error}"));
+                }
+                None => {
+                    let _ = pair::cancel(&client, invitation.pairing_id, CancellationToken::new())
+                        .await;
+                    break colored(WARN, "Pairing stopped. Run vorra pair any time.");
+                }
+            };
+            let body = [
+                text(format!(
+                    "{} wants to pair  code {}  device {}",
+                    request.device_name,
+                    request.code,
+                    pair::short_fingerprint(&request.fingerprint)
+                )),
+                colored(
+                    WARN,
+                    "Approve only if your phone shows this same code; the name is chosen by the phone.",
+                ),
+                dim(
+                    "Approving lets it read all conversations, send messages and answer permission prompts.",
+                ),
+            ];
+            let options = ["Reject".to_owned(), "Approve".to_owned()];
+            let approve = self.screen.choose(title, &body, &options, 0).await? == Some(1);
+            break match pair::decide(&client, &request, approve, cancellation.clone()).await {
+                Ok(decision) if decision.approved => {
+                    colored(OK, format!("Paired: {}", decision.label))
+                }
+                Ok(decision) => colored(WARN, format!("Rejected: {}", decision.label)),
+                Err(error) => colored(ERROR, format!("Pairing failed: {error}")),
+            };
+        };
+        self.screen
+            .choose(title, &[message], &["Continue".to_owned()], 0)
+            .await?;
+        Ok(Flow::Next)
+    }
+
     async fn vault(&mut self) -> Result<Flow, TuiError> {
         let title = "Connect a password manager";
         let body = [
@@ -1250,6 +1359,29 @@ impl Wizard<'_, '_> {
             .choose(title, &[message], &["Continue".to_owned()], 0)
             .await?;
         Ok(Flow::Next)
+    }
+}
+
+async fn next_request(
+    client: &HostClient,
+    invitation: &pair::Invitation,
+    cancellation: CancellationToken,
+) -> Result<Option<crate::devices::PendingPairingRequest>, pair::PairError> {
+    loop {
+        let now = crate::protocol::UnixMillis::now()
+            .map_err(|_| pair::PairError::Protocol)?
+            .get();
+        if now + 30_000 >= invitation.expires_at_ms {
+            return Ok(None);
+        }
+        if let Some(request) = pair::requests(client, invitation.pairing_id, cancellation.clone())
+            .await?
+            .into_iter()
+            .next()
+        {
+            return Ok(Some(request));
+        }
+        tokio::time::sleep(Duration::from_secs(1)).await;
     }
 }
 

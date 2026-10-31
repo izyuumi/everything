@@ -2,66 +2,87 @@ import SwiftUI
 
 struct PairingView: View {
     let model: AppModel
+    var link: String?
     @Environment(\.dismiss) private var dismiss
-    @State private var invitation = ""
-    @State private var acceptance = ""
-    @State private var confirmed = false
-    @State private var scanning: CameraSheet?
-
-    private enum CameraSheet: String, Identifiable {
-        case invitation
-        var id: String { rawValue }
-    }
+    @State private var scanning = false
 
     var body: some View {
-        Form {
-            Section("1. Receive the host invitation") {
-                Text("Use a fresh invitation displayed by your trusted host. Invitations contain a secret; keep them out of messages, relay traffic and logs.").font(.footnote)
-                Button("Scan invitation", systemImage: "qrcode.viewfinder") { scanning = .invitation }
-                SecureField("Or paste invitation JSON", text: $invitation).textInputAutocapitalization(.never).autocorrectionDisabled()
-                Button("Inspect invitation") {
-                    let value = invitation
-                    invitation = ""
-                    confirmed = false
-                    Task { await model.inspectInvitation(value) }
-                }.disabled(model.busy || invitation.isEmpty || invitation.utf8.count > 4_096)
-            }
-            if let pairing = model.pairing {
-                Section("2. Confirm the host fingerprint") {
-                    Text(pairing.fingerprint).font(.caption.monospaced()).textSelection(.enabled)
-                    Text("Compare every group with the fingerprint on your host before continuing. A QR code alone does not confirm the host you intended to pair.").font(.footnote)
-                    Toggle("Fingerprint matches my host", isOn: $confirmed)
-                    Button("Create pairing request") { Task { await model.requestPairing(confirmedFingerprint: pairing.fingerprint) } }
-                        .disabled(!confirmed || model.busy || !model.pairingRequest.isEmpty)
-                }
-            }
-            if !model.pairingRequest.isEmpty {
-                Section("3. Ask the host owner to accept") {
-                    Text(model.pairingRequest).font(.caption.monospaced()).textSelection(.enabled)
-                    Text("Transfer this public authenticated request to the host. Its owner must confirm this phone's fingerprint and choose its access. Relay public-key enrollment is a separate operator step.").font(.footnote)
-                    if let keys = model.state?.identity { Text("Phone fingerprint\n" + keys.fingerprint).font(.caption.monospaced()) }
-                    TextField("Paste signed acceptance JSON", text: $acceptance, axis: .vertical).textInputAutocapitalization(.never).autocorrectionDisabled().lineLimit(3...6)
-                    Button("Verify acceptance and pair") {
-                        let value = acceptance
-                        acceptance = ""
-                        Task { if await model.finishPairing(value) { dismiss() } }
-                    }.disabled(model.busy || acceptance.isEmpty || acceptance.utf8.count > 4_096)
-                }
+        VStack(spacing: 24) {
+            switch model.pairingPhase {
+            case .idle:
+                start
+            case .connecting:
+                Spacer()
+                ProgressView("Contacting your Mac…")
+                Spacer()
+            case .waiting(let attempt):
+                Spacer()
+                Image(systemName: "desktopcomputer").font(.system(size: 56)).foregroundStyle(.tint)
+                Text("Approve on your Mac").font(.title2.bold())
+                Text(attempt.code).font(.system(size: 44, weight: .semibold, design: .monospaced)).accessibilityLabel("Code \(attempt.code)")
+                Text("\(attempt.hostName) shows this code with the request. Approve it there.").multilineTextAlignment(.center).foregroundStyle(.secondary)
+                ProgressView()
+                Spacer()
+            case .paired(let host):
+                Spacer()
+                Image(systemName: "checkmark.circle.fill").font(.system(size: 64)).foregroundStyle(.green)
+                Text("Paired with \(host)").font(.title2.bold()).multilineTextAlignment(.center)
+                Spacer()
+                Button("Done") { dismiss() }.buttonStyle(.borderedProminent).controlSize(.large)
+            case .failed(let message):
+                Spacer()
+                Image(systemName: "exclamationmark.triangle.fill").font(.system(size: 56)).foregroundStyle(.orange)
+                Text("Couldn’t pair").font(.title2.bold())
+                Text(message).multilineTextAlignment(.center).foregroundStyle(.secondary)
+                Spacer()
+                Button("Try again") { Task { await model.cancelPairing() } }.buttonStyle(.borderedProminent).controlSize(.large)
             }
         }
+        .padding()
+        .frame(maxWidth: .infinity)
         .privacySensitive()
-        .navigationTitle("Pair with host")
-        .toolbar { ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } } }
-        .sheet(item: $scanning) { _ in
+        .navigationTitle("Pair with Mac")
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            ToolbarItem(placement: .cancellationAction) {
+                if model.pairingPhase != .idle, !isFinished { Button("Cancel") { Task { await model.cancelPairing() } } }
+                else { Button("Close") { dismiss() } }
+            }
+        }
+        .sheet(isPresented: $scanning) {
             QRScanner { value in
-                scanning = nil
-                invitation = ""
-                confirmed = false
-                Task { await model.inspectInvitation(value) }
+                scanning = false
+                model.startPairing(value)
             }
             .ignoresSafeArea()
             .modifier(InactivePrivacyCover())
         }
-        .onDisappear { invitation = ""; acceptance = ""; Task { await model.cancelPairing() } }
+        .task(id: link) {
+            if let link { model.startPairing(link) }
+        }
+        .onDisappear { Task { await model.cancelPairing() } }
+    }
+
+    private var isFinished: Bool {
+        if case .paired = model.pairingPhase { return true }
+        if case .failed = model.pairingPhase { return true }
+        return false
+    }
+
+    private var start: some View {
+        VStack(spacing: 20) {
+            Spacer()
+            Image(systemName: "qrcode.viewfinder").font(.system(size: 64)).foregroundStyle(.tint)
+            Text("Pair with your Mac").font(.title2.bold())
+            Text("On your Mac, run vorra pair, then scan the code it shows. You can also scan it with the Camera app.").multilineTextAlignment(.center).foregroundStyle(.secondary)
+            Spacer()
+            Button { scanning = true } label: { Label("Scan QR code", systemImage: "camera").frame(maxWidth: .infinity) }
+                .buttonStyle(.borderedProminent).controlSize(.large)
+            PasteButton(payloadType: String.self) { values in
+                guard let value = values.first else { return }
+                Task { @MainActor in model.startPairing(value) }
+            }
+            .labelStyle(.titleAndIcon)
+        }
     }
 }

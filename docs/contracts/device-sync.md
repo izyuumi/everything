@@ -35,7 +35,7 @@ These reads preserve the original payloads, receipts, sender identities and pend
 
 - `DeviceEndpoint::new(Store, Arc<DeviceIdentity>, EndpointRole)` binds immutable local identity/role to one database.
 - `load_or_create_identity_in(&cap_std::fs::Dir)` loads/publishes owner-only identity using an already trusted directory descriptor on Linux/Apple. Host bootstrap supplies the service StateDirectory handle and retains its host lock.
-- `begin_pairing`, `create_pairing_request`, `approve_pairing`, and `finish_pairing` implement a bounded out-of-band QR/secret ceremony with explicit fingerprint confirmation.
+- `begin_pairing`, `create_pairing_request`, `approve_pairing`, and `finish_pairing` implement a bounded out-of-band QR/secret ceremony with explicit fingerprint confirmation. The host side also holds relay-delivered requests (`receive_pairing_request`, `pairing_requests`) and decides them (`decide_pairing`, `withdraw_pairing`), approving through the same `approve_pairing`; see the [pairing contract](device-pairing.md).
 - `submit_command`, `request_sync`, and `complete_command` queue real encrypted packets through durable outbox transactions.
 - `receive_envelope` performs authenticated durable receipt; it does not ACK a socket itself.
 - `process_inbox(now, limit)` performs scoped protocol operations and returns durable host commands, result notifications or explicit rejections. It does not execute tools/agents.

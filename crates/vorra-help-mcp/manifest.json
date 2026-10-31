@@ -2642,6 +2642,23 @@
                 "default_values": [],
                 "env": null,
                 "help": "Local JSON file containing public device keys only"
+              },
+              {
+                "id": "pairing_host",
+                "long": "pairing-host",
+                "short": null,
+                "positional": false,
+                "required": false,
+                "takes_value": false,
+                "value_names": [
+                  "PAIRING_HOST"
+                ],
+                "possible_values": [],
+                "default_values": [
+                  "false"
+                ],
+                "env": null,
+                "help": "Let this host pair new devices through the relay, which then enrolls each device the host approves"
               }
             ],
             "subcommands": []
@@ -2756,6 +2773,45 @@
             "subcommands": []
           }
         ]
+      },
+      {
+        "name": "pair",
+        "about": "Pair a phone: show a QR code, then approve the phone here",
+        "arguments": [
+          {
+            "id": "lifetime_seconds",
+            "long": "lifetime-seconds",
+            "short": null,
+            "positional": false,
+            "required": false,
+            "takes_value": true,
+            "value_names": [
+              "1-600"
+            ],
+            "possible_values": [],
+            "default_values": [
+              "300"
+            ],
+            "env": null,
+            "help": "Seconds each QR code stays valid before it is replaced"
+          },
+          {
+            "id": "name",
+            "long": "name",
+            "short": null,
+            "positional": false,
+            "required": false,
+            "takes_value": true,
+            "value_names": [
+              "NAME"
+            ],
+            "possible_values": [],
+            "default_values": [],
+            "env": null,
+            "help": "Host name shown on the phone [default: this computer's name]"
+          }
+        ],
+        "subcommands": []
       },
       {
         "name": "update",

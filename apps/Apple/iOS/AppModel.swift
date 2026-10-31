@@ -75,6 +75,13 @@ enum LocalSettingsCover: Hashable {
     case rootSheet, globalError, deviceDisable, localConfirmation
 }
 
+enum PairingPhase: Equatable {
+    case idle, connecting
+    case waiting(PairingAttempt)
+    case paired(String)
+    case failed(String)
+}
+
 @MainActor
 @Observable
 final class AppModel {
@@ -108,8 +115,9 @@ final class AppModel {
     private(set) var assistant = HostSettingsAssistant()
     private(set) var selectedTab: ClientTab = .chat
     private(set) var settingsPath: [ClientSettingsDestination] = []
-    var pairing: PairingSummary?
-    var pairingRequest = ""
+    private(set) var pairingPhase: PairingPhase = .idle
+    var pairingLink: String?
+    @ObservationIgnored private var pairingTask: Task<Void, Never>?
     @ObservationIgnored private var service: ReplicaService?
     @ObservationIgnored private var opening: (id: UUID, task: Task<ReplicaService, Error>)?
     @ObservationIgnored private let notifications = NotificationService()
@@ -350,34 +358,50 @@ final class AppModel {
         }
     }
 
-    func inspectInvitation(_ value: String) async {
-        await perform {
-            guard let service else { throw WireError.unavailable }
-            pairing = try await service.inspectInvitation(value)
-            pairingRequest = ""
-        }
+    func openPairingLink(_ url: URL) {
+        pairingLink = url.absoluteString
     }
 
-    func requestPairing(confirmedFingerprint: String) async {
-        await perform {
-            guard let service else { throw WireError.unavailable }
-            pairingRequest = try await service.createPairingRequest(confirmedFingerprint: confirmedFingerprint)
-        }
+    func startPairing(_ text: String) {
+        pairingTask?.cancel()
+        pairingPhase = .connecting
+        pairingTask = Task { [weak self] in await self?.runPairing(text) }
     }
 
-    func finishPairing(_ value: String) async -> Bool {
-        await perform {
+    private func runPairing(_ text: String) async {
+        do {
+            var waited = 0
+            while service == nil, waited < 100 {
+                try await Task.sleep(for: .milliseconds(100))
+                waited += 1
+            }
             guard let service else { throw WireError.unavailable }
-            try await service.finishPairing(value)
-            pairing = nil
-            pairingRequest = ""
+            let attempt = try await service.preparePairing(text, deviceName: Self.pairingDeviceName)
+            guard !Task.isCancelled else { return }
+            pairingPhase = .waiting(attempt)
+            try await service.completePairing(attempt)
+            guard !Task.isCancelled else { return }
+            pairingPhase = .paired(attempt.hostName)
+            await refresh()
+            await connect()
+        } catch is CancellationError {
+        } catch {
+            guard !Task.isCancelled else { return }
+            pairingPhase = .failed((error as? LocalizedError)?.errorDescription ?? "Pairing could not be completed.")
         }
     }
 
     func cancelPairing() async {
+        pairingTask?.cancel()
+        pairingTask = nil
         await service?.cancelPairing()
-        pairing = nil
-        pairingRequest = ""
+        pairingPhase = .idle
+    }
+
+    private static var pairingDeviceName: String {
+        var name = UIDevice.current.name.unicodeScalars.filter { !CharacterSet.controlCharacters.contains($0) }.map(String.init).joined()
+        while name.utf8.count > 64 { name.removeLast() }
+        return name.trimmingCharacters(in: .whitespaces).isEmpty ? "iPhone" : name
     }
 
     func disable() async {

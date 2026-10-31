@@ -31,6 +31,7 @@ use vorra::tools::{
 };
 use zeroize::Zeroizing;
 
+mod pair_cli;
 mod queries;
 mod vault_cli;
 
@@ -60,6 +61,8 @@ enum Command {
     ChatGpt(ChatGptArguments),
     Tui(TuiArguments),
     Relay(vorra::relay::cli::RelayArguments),
+    #[command(about = "Pair a phone: show a QR code, then approve the phone here")]
+    Pair(pair_cli::PairArguments),
     Update(vorra::update::UpdateArguments),
     Cancel(queries::CancelArguments),
     Tasks(queries::TasksArguments),
@@ -516,6 +519,10 @@ enum CliError {
     Host(#[from] vorra::host::runtime::HostError),
     #[error(transparent)]
     HostClient(#[from] vorra::host::client::HostClientError),
+    #[error(transparent)]
+    Pair(#[from] vorra::host::pair::PairError),
+    #[error("{0}")]
+    Pairing(&'static str),
     #[error("invalid owner JSON input; use a bounded query or operation object")]
     OwnerInput,
     #[error("invalid owner JSON input: {0}")]
@@ -726,6 +733,10 @@ async fn execute(arguments: Arguments, cancellation: CancellationToken) -> Resul
         Command::Memory(arguments) => {
             let client = vorra::host::client::HostClient::new(state_dir)?;
             return queries::memory(&client, arguments, cancellation).await;
+        }
+        Command::Pair(arguments) => {
+            let client = vorra::host::client::HostClient::new(state_dir)?;
+            return pair_cli::run(&client, arguments, cancellation).await;
         }
         Command::Vault(arguments) => {
             let client = vorra::host::client::HostClient::new(state_dir)?;

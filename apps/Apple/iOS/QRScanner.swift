@@ -12,7 +12,7 @@ struct QRScanner: View {
             if authorized == true {
                 CameraPreview(onCode: onCode)
             } else if authorized == false {
-                ContentUnavailableView("Camera unavailable", systemImage: "camera", description: Text("Allow camera access in iOS Settings, or paste the invitation manually."))
+                ContentUnavailableView("Camera unavailable", systemImage: "camera", description: Text("Allow camera access in iOS Settings, or copy the pairing link on your Mac and paste it."))
             } else { ProgressView("Requesting camera access") }
             Button("Close", systemImage: "xmark.circle.fill") { dismiss() }.font(.title).padding().accessibilityLabel("Close QR scanner")
         }
@@ -86,7 +86,7 @@ private final class CameraController: UIViewController, AVCaptureMetadataOutputO
             Task { @MainActor in
                 guard let self, !available else { return }
                 let label = UILabel()
-                label.text = "Camera capture is unavailable. Paste the invitation manually."
+                label.text = "Camera capture is unavailable. Paste the pairing link instead."
                 label.textColor = .white
                 label.numberOfLines = 0
                 label.frame = self.view.bounds.insetBy(dx: 24, dy: 64)

@@ -31,8 +31,8 @@ struct SettingsView: View {
                         Text(host.fingerprint).font(.caption.monospaced()).textSelection(.enabled)
                     }
                 }
-                Button("Pair with host", action: pair).disabled(model.busy || model.state?.snapshot.revoked == true)
-                Text("The host chooses access separately; its signed acceptance does not contain conversation or permission grants. Add only conversation IDs that its owner authorized.").font(.footnote)
+                Button("Pair with Mac", action: pair).disabled(model.busy || model.state?.snapshot.revoked == true)
+                Text("Pairing sets the relay from the code your Mac shows. The Mac owner approves this iPhone and chooses its access there.").font(.footnote)
             }
             Section("Connected Host access") {
                 Button("Refresh Host settings") { model.refreshHostSettings() }
@@ -128,7 +128,7 @@ private struct PublicKeysView: View {
     var body: some View {
         DisclosureGroup("Public relay enrollment keys") {
             Text(text).font(.caption.monospaced()).textSelection(.enabled)
-            Text("Only public keys are shown. The relay operator must enroll these exact keys before this device can authenticate.").font(.footnote)
+            Text("Only public keys are shown. Pairing enrolls them on a relay that lets your host pair devices; otherwise the relay operator must enroll these exact keys.").font(.footnote)
         }
     }
 }

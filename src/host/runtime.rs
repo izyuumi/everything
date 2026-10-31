@@ -1550,6 +1550,17 @@ pub(super) fn public_failure(error: &HostError) -> LocalFailure {
         HostError::Invalid(message) | HostError::Inbox(InboxError::Invalid(message)) => {
             (LocalFailureCode::InvalidRequest, *message)
         }
+        HostError::Device(
+            error @ (DeviceError::PairingNotFound
+            | DeviceError::PairingCapacity
+            | DeviceError::FingerprintMismatch
+            | DeviceError::Invalid(_)),
+        ) => {
+            return LocalFailure {
+                code: LocalFailureCode::InvalidRequest,
+                message: error.to_string(),
+            };
+        }
         HostError::Inbox(InboxError::Conflict(_))
         | HostError::SettingsService(SettingsServiceError::Conflict)
         | HostError::Settings(SettingsError::Conflict) => (

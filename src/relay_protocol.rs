@@ -1,5 +1,5 @@
 use crate::{
-    crypto::EncryptedEnvelope,
+    crypto::{EncryptedEnvelope, PairingAcceptance, PairingRequest as SignedPairingRequest},
     protocol::{DeviceId, MessageId},
 };
 use base64::{Engine, engine::general_purpose::STANDARD};
@@ -202,6 +202,22 @@ pub enum RelayClientMessage {
         #[serde(deserialize_with = "deserialize_version")]
         schema_version: u16,
     },
+    PairingRequest {
+        #[serde(deserialize_with = "deserialize_version")]
+        schema_version: u16,
+        request: SignedPairingRequest,
+        device_name: String,
+        #[serde(with = "fixed_bytes")]
+        name_signature: [u8; 64],
+    },
+    PairingDecision {
+        #[serde(deserialize_with = "deserialize_version")]
+        schema_version: u16,
+        pairing_id: MessageId,
+        responder: DeviceId,
+        acceptance: Option<PairingAcceptance>,
+        reason: Option<RelayErrorCode>,
+    },
 }
 
 impl RelayClientMessage {
@@ -225,7 +241,9 @@ impl RelayClientMessage {
             | Self::Authenticate { schema_version, .. }
             | Self::Send { schema_version, .. }
             | Self::Acknowledge { schema_version, .. }
-            | Self::Ping { schema_version } => *schema_version,
+            | Self::Ping { schema_version }
+            | Self::PairingRequest { schema_version, .. }
+            | Self::PairingDecision { schema_version, .. } => *schema_version,
         };
         validate_version(version)
     }
@@ -269,6 +287,36 @@ pub enum RelayServerMessage {
         schema_version: u16,
         code: RelayErrorCode,
     },
+    PairingPending {
+        #[serde(deserialize_with = "deserialize_version")]
+        schema_version: u16,
+    },
+    PairingRequest {
+        #[serde(deserialize_with = "deserialize_version")]
+        schema_version: u16,
+        request: SignedPairingRequest,
+        device_name: String,
+        #[serde(with = "fixed_bytes")]
+        name_signature: [u8; 64],
+    },
+    PairingAccepted {
+        #[serde(deserialize_with = "deserialize_version")]
+        schema_version: u16,
+        acceptance: PairingAcceptance,
+    },
+    PairingDelivered {
+        #[serde(deserialize_with = "deserialize_version")]
+        schema_version: u16,
+        pairing_id: MessageId,
+        responder: DeviceId,
+    },
+    PairingFailed {
+        #[serde(deserialize_with = "deserialize_version")]
+        schema_version: u16,
+        pairing_id: MessageId,
+        responder: DeviceId,
+        code: RelayErrorCode,
+    },
 }
 
 impl RelayServerMessage {
@@ -294,7 +342,12 @@ impl RelayServerMessage {
             | Self::Delivery { schema_version, .. }
             | Self::Acknowledged { schema_version, .. }
             | Self::Pong { schema_version }
-            | Self::Error { schema_version, .. } => *schema_version,
+            | Self::Error { schema_version, .. }
+            | Self::PairingPending { schema_version }
+            | Self::PairingRequest { schema_version, .. }
+            | Self::PairingAccepted { schema_version, .. }
+            | Self::PairingDelivered { schema_version, .. }
+            | Self::PairingFailed { schema_version, .. } => *schema_version,
         };
         validate_version(version)?;
         if let Self::Challenge { challenge, .. } = self {
@@ -316,6 +369,10 @@ pub enum RelayErrorCode {
     MessageConflict,
     SessionAlreadyActive,
     Internal,
+    PairingUnavailable,
+    PairingInUse,
+    PairingRejected,
+    PairingExpired,
 }
 
 fn deserialize_version<'de, D>(deserializer: D) -> Result<u16, D::Error>

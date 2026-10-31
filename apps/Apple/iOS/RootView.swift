@@ -8,6 +8,7 @@ private enum ClientSheet: String, Identifiable {
 struct RootView: View {
     @Bindable var model: AppModel
     @State private var sheet: ClientSheet?
+    @State private var link: String?
 
     var body: some View {
         TabView(selection: Binding(get: { model.selectedTab }, set: { model.localTabChanged($0) })) {
@@ -22,7 +23,7 @@ struct RootView: View {
                             } description: {
                                 Text("Pair with your host, then add a conversation ID that the host explicitly authorized.")
                             } actions: {
-                                Button("Pair device") { showSheet(.pairing) }
+                                Button("Pair with Mac") { showSheet(.pairing) }
                                 Button("Add conversation") { showSheet(.conversation) }
                             }
                         } else {
@@ -37,7 +38,7 @@ struct RootView: View {
                     ToolbarItem(placement: .topBarTrailing) {
                         Menu {
                             Button("Add conversation", systemImage: "plus.bubble") { showSheet(.conversation) }
-                            Button("Pair device", systemImage: "qrcode") { showSheet(.pairing) }
+                            Button("Pair with Mac", systemImage: "qrcode") { showSheet(.pairing) }
                         } label: { Image(systemName: "plus") }
                         .accessibilityLabel("Conversation and pairing actions")
                     }
@@ -74,14 +75,22 @@ struct RootView: View {
             if value != nil { model.localCoverChanged(.rootSheet, presented: true) }
             sheet = value
         }), onDismiss: {
-            if sheet == nil { model.localCoverChanged(.rootSheet, presented: false) }
+            if sheet == nil { model.localCoverChanged(.rootSheet, presented: false); link = nil }
         }) { item in
             switch item {
-            case .pairing: NavigationStack { PairingView(model: model) }.modifier(InactivePrivacyCover())
+            case .pairing: NavigationStack { PairingView(model: model, link: link) }.modifier(InactivePrivacyCover())
             case .conversation: NavigationStack { AddConversationView(model: model) }.modifier(InactivePrivacyCover())
             }
         }
         .onDisappear { model.localDestinationChanged(presented: false) }
+        .onChange(of: model.pairingLink, initial: true) { _, value in
+            guard let value else { return }
+            model.pairingLink = nil
+            if sheet == .pairing { model.startPairing(value); return }
+            guard sheet == nil else { return }
+            link = value
+            showSheet(.pairing)
+        }
         .alert("Operation unavailable", isPresented: Binding(get: { model.error != nil }, set: { if !$0 { model.dismissError() } })) {
             Button("OK", role: .cancel) { model.dismissError() }
         } message: { Text(model.error ?? "") }
