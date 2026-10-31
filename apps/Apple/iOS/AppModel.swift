@@ -336,10 +336,10 @@ final class AppModel {
         }
     }
 
-    func resolve(_ approval: ReplicaApproval, allow: Bool) async {
+    func resolve(_ approval: ReplicaApproval, decision: String) async {
         await perform {
             guard let service else { throw WireError.unavailable }
-            try await service.resolve(approval, allow: allow)
+            try await service.resolve(approval, decision: decision)
         }
     }
 

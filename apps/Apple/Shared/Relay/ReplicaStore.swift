@@ -30,6 +30,14 @@ struct ReplicaApproval: Identifiable, Sendable, Equatable {
         let now = UInt64(milliseconds.rounded(.down))
         return id == callID && inspection.requestedAt <= now && now < inspection.expiresAt
     }
+
+    var vaultUse: Bool { tool == "vault_use" && inspection?.targets.contains("vault_use") == true }
+    var leasable: Bool { vaultUse && inspection?.targets.contains("vault_kind=card") == false }
+    var vaultReason: String? { inspection.flatMap { try? WireValue.parse(Data($0.argumentsJSON.utf8), maximum: 16_384).field("reason").text } }
+
+    func vaultTargets(_ name: String) -> [String] {
+        (inspection?.targets ?? []).compactMap { $0.hasPrefix("vault_" + name + "=") ? String($0.dropFirst(name.count + 7)) : nil }
+    }
 }
 
 struct ReplicaPendingCommand: Identifiable, Sendable {
@@ -357,8 +365,8 @@ actor ReplicaStore: DurableEnvelopeInbox {
                 guard let permission, permission.conversationID.uuidString.lowercased() == conversation,
                       try payload.field("operation_id").identifier == permission.id else { throw WireError.conflict }
                 let decision = try payload.field("decision").text
-                guard ["allow", "deny"].contains(decision) else { throw WireError.invalid }
-                try requireCurrent(permission, allow: decision == "allow", now: WireID.now())
+                guard ["allow", "deny"].contains(decision) || (decision == "allow_for_task" && permission.leasable) else { throw WireError.invalid }
+                try requireCurrent(permission, allow: decision != "deny", now: WireID.now())
             } else if permission != nil { throw WireError.invalid }
             let previous = try database.rows("SELECT original FROM commands WHERE id=?", [.text(id)]) { try ReplicaDatabase.data($0, 0) }.first
             if let previous {
