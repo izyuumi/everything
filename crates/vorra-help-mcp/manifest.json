@@ -3507,6 +3507,123 @@
         ]
       },
       {
+        "name": "skills",
+        "about": null,
+        "arguments": [],
+        "subcommands": [
+          {
+            "name": "list",
+            "about": "List Agent Skills in the project, global and extra roots",
+            "arguments": [
+              {
+                "id": "json",
+                "long": "json",
+                "short": null,
+                "positional": false,
+                "required": false,
+                "takes_value": false,
+                "value_names": [
+                  "JSON"
+                ],
+                "possible_values": [],
+                "default_values": [
+                  "false"
+                ],
+                "env": null,
+                "help": null
+              },
+              {
+                "id": "workspace",
+                "long": "workspace",
+                "short": null,
+                "positional": false,
+                "required": false,
+                "takes_value": true,
+                "value_names": [
+                  "PATH"
+                ],
+                "possible_values": [],
+                "default_values": [],
+                "env": null,
+                "help": null
+              }
+            ],
+            "subcommands": []
+          },
+          {
+            "name": "show",
+            "about": "Show one skill's frontmatter, source and issues",
+            "arguments": [
+              {
+                "id": "name",
+                "long": null,
+                "short": null,
+                "positional": true,
+                "required": true,
+                "takes_value": true,
+                "value_names": [
+                  "NAME"
+                ],
+                "possible_values": [],
+                "default_values": [],
+                "env": null,
+                "help": null
+              },
+              {
+                "id": "json",
+                "long": "json",
+                "short": null,
+                "positional": false,
+                "required": false,
+                "takes_value": false,
+                "value_names": [
+                  "JSON"
+                ],
+                "possible_values": [],
+                "default_values": [
+                  "false"
+                ],
+                "env": null,
+                "help": null
+              },
+              {
+                "id": "body",
+                "long": "body",
+                "short": null,
+                "positional": false,
+                "required": false,
+                "takes_value": false,
+                "value_names": [
+                  "BODY"
+                ],
+                "possible_values": [],
+                "default_values": [
+                  "false"
+                ],
+                "env": null,
+                "help": null
+              },
+              {
+                "id": "workspace",
+                "long": "workspace",
+                "short": null,
+                "positional": false,
+                "required": false,
+                "takes_value": true,
+                "value_names": [
+                  "PATH"
+                ],
+                "possible_values": [],
+                "default_values": [],
+                "env": null,
+                "help": null
+              }
+            ],
+            "subcommands": []
+          }
+        ]
+      },
+      {
         "name": "completions",
         "about": null,
         "arguments": [

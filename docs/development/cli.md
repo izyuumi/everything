@@ -86,6 +86,17 @@ vorra vault disconnect protonpass
 
 `connect protonpass` finds `pass-cli` on the CLI's `PATH` (or takes `--binary`) and prints the path it pins. By default it reads a Proton Pass personal access token (echo off on a terminal, otherwise exactly one piped line; never argv) and sends it in `vault_connect`; the Host stores it as a local vault item, logs in with it in an isolated session directory and saves the path and token reference in settings. `--web` instead runs `pass-cli login` in the current terminal with the Host's session directory, so pass-cli prints its sign-in URL and asks for any extra password at its own hidden prompt, and then asks the Host to confirm the session. `disconnect protonpass` runs `pass-cli logout` in that directory, removes the token item and the connection; a failed logout is logged and the connection is still removed. See [Proton Pass setup](protonpass.md).
 
+## Agent Skills
+
+`vorra skills` reads installed [Agent Skills](../architecture/agents-and-skills.md#native-skills) straight from the filesystem. It needs no Host and never runs `npx`:
+
+```sh
+vorra skills list [--json] [--workspace PATH]
+vorra skills show NAME [--json] [--body] [--workspace PATH]
+```
+
+Roots, first name wins: `<workspace>/.agents/skills` (default workspace: the current directory), `~/.agents/skills`, then the `skills.extra_roots` Host setting, by default `$CLAUDE_CONFIG_DIR/skills` or `~/.claude/skills`. Sources come from the global lock (`$XDG_STATE_HOME/skills/.skill-lock.json` or `~/.agents/.skill-lock.json`) and the project `skills-lock.json`; a skill without an entry shows as `local`. Text output lists name, root (marked `shadowed` for a later duplicate), source and path, with each issue on an indented `!` line. Rejected directories (unsafe name, missing frontmatter or name, oversize file, refused symlink) are listed with their reason; lock entries without a directory show as `missing from disk`. `--json` emits the `npx skills list -g --json` fields plus `status`, `root`, `root_path`, `dir_name`, `description`, `offered`, `shadowed` and `issues`; `agents` is always empty. `show` matches NAME the way `npx skills remove` does (sanitized name, then folder) and prints frontmatter, source and issues; `allowed-tools` is shown and never applied, and `--body` prints the Markdown body. Installing, updating and removing are not implemented yet; use `npx skills add SOURCE -g -a codex -y`, which installs into `~/.agents/skills`.
+
 ## Optional ChatGPT plan
 
 `vorra chatgpt sign-in|status|models|sign-out|select|deselect` lets a running host use your ChatGPT plan for the official OpenAI endpoint instead of an API key. It is optional. See the [host guide](host.md#optional-sign-in-with-chatgpt). A completed `sign-in` with no ChatGPT binding selected selects the new one, as `select` would, when plan usage was granted. `models` lists the model slugs your plan accepts. `status` masks the account email to its domain unless `--json` or `--show-email` is given. The foreground path without a host always uses `OPENAI_API_KEY`.

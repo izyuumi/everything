@@ -1,6 +1,6 @@
 # Agents and skills design
 
-Status: **design only, nothing here is implemented.** This document plans named agents with their own tool sets, agent-to-agent messaging and native Agent Skills support. It is split into eight units, one PR each ([implementation units](#implementation-units)). Until a unit merges, the [implementation status](../status/implementation.md) and the existing architecture pages describe the actual behavior.
+Status: **unit 5 (skills discovery, `vorra skills list` and `show`) is implemented; the other units are design only.** This document plans named agents with their own tool sets, agent-to-agent messaging and native Agent Skills support. It is split into eight units, one PR each ([implementation units](#implementation-units)). Until a unit merges, the [implementation status](../status/implementation.md) and the existing architecture pages describe the actual behavior.
 
 Owner request: users can create one or more agents for specific tasks. Each agent has its own configurable characteristics, its own tool set, and can talk to other agents. Vorra supports skills natively: a skills interface that lists all skills, and easy install and update that stays in sync with `npx skills`.
 
@@ -25,7 +25,7 @@ What exists, and what each design part builds on.
 | Owner IPC | `OwnerCommand`, `OwnerQuery`, `OwnerOperation` (`src/ipc.rs:54,88-156,371-495`), with `deny_unknown_fields` on requests. Apple clients use `vorra owner --request-file` (`src/main.rs:171-221`) and an allowlist of operation kinds (`apps/Apple/Shared/OwnerIPC/OwnerWire.swift:61-73`). |
 | Replicated events | `CURRENT_SCHEMA_VERSION = 1` (`src/protocol.rs:17`). Swift `WireEvent` throws on an unknown `kind` (`apps/Apple/Shared/Crypto/WireRecords.swift:29-81`), so a new event kind breaks shipped Apple clients. |
 | CLI and TUI | `enum Command` (`src/main.rs:49-74`). The TUI has no screen enum: onboarding steps (`src/tui/onboarding.rs:484-500`), one `App` loop and overlays `Approval`, `Picker`, `Help`, `Secret` (`src/tui/app.rs:119-149`); slash commands in `COMMANDS` (`:22`). |
-| Skills | Nothing. No code, settings or docs. |
+| Skills | Unit 5: `src/skills/` discovers skills read-only and backs `vorra skills list` and `show`; `HostSettings.skills.extra_roots` (`src/host/settings.rs`). Nothing writes skills or offers them to a turn yet. |
 
 Consequences for the design:
 
@@ -314,7 +314,15 @@ Names come in two forms, mirroring `npx skills`:
 
 Spec validation is reported, not enforced. Spec checks: `name` matches `^[a-z0-9]+(-[a-z0-9]+)*$`; the directory equals the name; `description` is 1–1024 bytes; `compatibility` is at most 500 bytes; `metadata` maps strings to strings. A skill that passes the safety rules but fails a spec check is still listed and offered, with the issue shown. A missing or over-long `description` is the exception: such a skill is not offered, because agents select skills by description. The `npx` CLI is looser than the spec, so these cases are real.
 
-Frontmatter is parsed with **`serde_norway` 0.9.42**, a maintained fork of `serde_yaml` 0.9 (MIT or Apache-2.0, MSRV 1.71, so it fits the repository's Rust 1.88). On 2026-11-01 RustSec had no advisory for it. RustSec does flag the alternatives: `serde_yml` (RUSTSEC-2025-0068, unsound and unmaintained), `serde_yaml` (unmaintained) and `yaml-rust` (RUSTSEC-2024-0320). `serde-saphyr` is pure Rust and more active, but 1.2 and later need Rust 1.89. Switch to it when the repository's MSRV reaches 1.89. Parsing happens only after the 16-KiB frontmatter bound, into a typed struct of strings and one string map. Unit 5 confirms that the fork keeps `serde_yaml`'s recursion and alias-repetition limits. If it does not, unit 5 rejects alias tokens before parsing.
+Unit 5 as implemented:
+
+- `SkillRecord` also carries `shadowed`. A directory that fails the safety rules, has no readable `SKILL.md` frontmatter or no `name`, or is a refused symlink is a separate `RejectedSkill { label, root, dir, issues }`, so a `SkillRecord` always holds a valid `SkillName`. Directories without `SKILL.md` are skipped silently, as `npx` does. A lock entry with no installed directory is a `MissingSkill`, like the CLI's `missing` rows.
+- The source label follows `npx skills list`: the global lock serves the global and extra roots, the project `skills-lock.json` v1 serves the project root, matched by exact key and then by `sanitize`. A global lock below version 3, a project lock other than version 1, malformed JSON or a malformed entry reads as empty or skipped, with a warning on stderr.
+- The CLI's project root is `--workspace PATH`, default the current directory. Identical roots are scanned once, so running from `$HOME` does not list `~/.agents/skills` twice.
+- `skills.extra_roots` is `null` by default, meaning the single default root; an explicit list replaces it. It is validated (at most 8 absolute UTF-8 paths) and omitted from the settings file while unset. The CLI reads only that object from `<state>/host-settings-v1.json` (owner-only regular file, no lease, no Host). There is no owner operation or CLI to change it yet; it can be set by editing the file while the Host is stopped.
+- Symlinked skill directories are opened once and checked with `fstat` on the opened descriptor; `SKILL.md` is opened relative to it with `O_NOFOLLOW`, so a symlinked `SKILL.md` is refused.
+
+Frontmatter is parsed with **`serde_norway` 0.9.42**, a maintained fork of `serde_yaml` 0.9 (MIT or Apache-2.0, MSRV 1.71, so it fits the repository's Rust 1.88). On 2026-11-01 RustSec had no advisory for it. RustSec does flag the alternatives: `serde_yml` (RUSTSEC-2025-0068, unsound and unmaintained), `serde_yaml` (unmaintained) and `yaml-rust` (RUSTSEC-2024-0320). `serde-saphyr` is pure Rust and more active, but 1.2 and later need Rust 1.89. Switch to it when the repository's MSRV reaches 1.89. Parsing happens only after the 16-KiB frontmatter bound, into a typed struct of strings and one string map. Unit 5 confirmed in the 0.9.42 source that the fork keeps `serde_yaml`'s limits: a recursion depth of 128 (`remaining_depth`) and at most 100 alias jumps per parsed event (`RepetitionLimitExceeded`). Both were observed on hand-made fixtures. Alias tokens are therefore not pre-rejected: an alias that stays within the limits is resolved, and one that exceeds them makes the skill rejected with the parser error. Anything else would need a YAML tokenizer of its own.
 
 ### `vorra skills`
 
@@ -328,7 +336,9 @@ vorra skills update [NAME]... [--check]
 vorra skills remove NAME... [--yes]
 ```
 
-`list --json` emits the same objects as `npx skills list -g --json` (`name`, `path`, `scope`, `agents`, `source`, `sourceUrl`, `sourceType`) plus `root`, `issues` and `assigned_to` (agent names).
+`list --json` emits the same objects as `npx skills list -g --json` (`name`, `path`, `scope`, `agents`, `source`, `sourceUrl`, `sourceType`) plus `status` (`tracked`, `untracked`, `missing`, as in newer CLI releases, or `rejected`), `root`, `root_path`, `dir_name`, `description`, `offered`, `shadowed` and `issues`, and later `assigned_to` (agent names, unit 7).
+
+As implemented in unit 5, `agents` is always `[]`: Vorra does not detect other agents. `npx` 1.7.4 also printed `[]` for a codex-only install. `npx` scans every known agent's global directory (`~/.cursor/skills`, …); Vorra scans only the configured extra roots. Rows are ordered by root, then directory name; shadowed duplicates and rejected directories are extra rows that `npx` does not print. `show NAME` matches the winning skill by `sanitize` of its name, then of its folder name, then a rejected directory by label or folder; `--body` re-reads `SKILL.md` under the same checks.
 
 `SOURCE` grammar, a subset of the CLI's: `owner/repo`, `owner/repo/sub/path`, `owner/repo@skill`, `github:owner/repo`, `https://github.com/owner/repo[/tree/REF/PATH]`, any `https://…/*.git` or `git@…` URL, and an absolute local path. Other forms (well-known URLs, archive downloads, GitLab shorthand) are rejected with a pointer to `npx skills add`.
 
