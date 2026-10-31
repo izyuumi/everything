@@ -10,7 +10,7 @@ The latch protects other Store users from an uncertain transaction. It does not 
 
 ## Initialization and migrations
 
-`Store::open(path)` opens or creates a database at an existing parent directory. Startup enables foreign keys, WAL, full synchronous durability, and a five-second busy timeout before applying pending versioned migrations in one immediate transaction. Fresh databases apply migrations `0001_initial.sql` through `0017_vault_items.sql` in order; existing databases apply only their pending migrations. The current schema version is SQLite `user_version = 17`; newer databases are rejected. The ordered additions are:
+`Store::open(path)` opens or creates a database at an existing parent directory. Startup enables foreign keys, WAL, full synchronous durability, and a five-second busy timeout before applying pending versioned migrations in one immediate transaction. Fresh databases apply migrations `0001_initial.sql` through `0018_agents.sql` in order; existing databases apply only their pending migrations. The current schema version is SQLite `user_version = 18`; newer databases are rejected. The ordered additions are:
 
 | Migration | Addition |
 | --- | --- |
@@ -31,10 +31,13 @@ The latch protects other Store users from an uncertain transaction. It does not 
 | 15 | Immutable scoped Settings grant decisions, current heads and reserved revocation capacity |
 | 16 | Private Settings reply reservations and immutable encrypted outbox associations ([transport storage](settings-transport-storage.md)) |
 | 17 | Local vault item index: metadata, secret field names and a `pending`/`ready`/`removing` state, no value column ([vault](vault.md#local-provider)) |
+| 18 | Nullable, indexed `agent_id TEXT` on `conversations` and `tasks`; `NULL` means the current default agent ([agents](../architecture/agents-and-skills.md#storage)) |
 
 See [scheduled storage](scheduling-storage.md), [host inbox](host-inbox.md), [schedule admission](scheduling-engine.md), [scheduled execution](scheduled-execution.md), [worker terminal sources](worker-terminal-sources.md) and [remote binding lookup](remote-binding-lookup.md) for component invariants. `open_in_memory` uses the same migrations and constraints, with SQLite's in-memory journal mode because WAL is unavailable for memory databases. There is no backup or restore API.
 
 The schema contains conversations, ordered events, command deduplication records, tasks, tool calls, permission grants, devices, and encrypted outbox envelopes. All tables use SQLite STRICT typing. Foreign keys reject dangling references. Parent tasks must exist and may belong to another conversation so child agents can isolate their histories. Associated tool calls must belong to their task's conversation. The scheduler owns parent authority inheritance and child lifecycle enforcement. IDs are nonempty strings of at most 256 bytes without control characters; domain UUID interpretation belongs to `protocol`. JSON payloads are opaque to storage and limited to 1 MiB each. All timestamps are nonnegative Unix milliseconds. Callers own access control and semantic validation of opaque data.
+
+`Store::create_conversation` takes an optional agent ID and writes it to `conversations.agent_id`. Rows created before migration 18, and conversations created by subagents, scheduled jobs, workers and the restricted Settings profile, keep `NULL`. Nothing writes `tasks.agent_id` yet; per-task binding arrives with per-agent tool ceilings ([#277](https://github.com/izyuumi/everything/issues/277)).
 
 ## Conversation events and commands
 
