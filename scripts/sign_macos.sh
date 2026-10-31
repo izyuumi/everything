@@ -1,6 +1,6 @@
 #!/bin/sh
 set -eu
-IDENTIFIER=ai.everything.cli
+IDENTIFIER=to.yumi.everything.cli
 if [ "$(uname -s)" != "Darwin" ]; then
     echo "sign_macos.sh: macOS only" >&2
     exit 1

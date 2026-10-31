@@ -88,7 +88,7 @@ The underlying owner operation is `{"kind":"operation","operation":{"kind":"chat
 
 ### Keep the ChatGPT sign-in across rebuilds and updates
 
-The macOS keychain trusts the code-signing designated requirement of the binary that created an item. Plain `cargo build` output is ad-hoc signed, so every rebuild is a new identity: the host's read fails (or prompts) and the next start looks signed out. Sign each build with a stable identity and the fixed identifier `ai.everything.cli`:
+The macOS keychain trusts the code-signing designated requirement of the binary that created an item. Plain `cargo build` output is ad-hoc signed, so every rebuild is a new identity: the host's read fails (or prompts) and the next start looks signed out. Sign each build with a stable identity and the fixed identifier `to.yumi.everything.cli`:
 
 ```sh
 cargo build --release && scripts/sign_macos.sh           # signs target/debug and target/release `everything` if present
