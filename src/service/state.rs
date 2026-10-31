@@ -6,7 +6,7 @@ use std::os::unix::ffi::OsStrExt;
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 
-use rustix::fs::{AtFlags, FileType, Mode, OFlags};
+use rustix::fs::{AtFlags, FileType, Mode, OFlags, RenameFlags};
 
 use super::ServiceError;
 
@@ -63,9 +63,10 @@ impl StateLease {
     }
 
     pub(crate) fn validate_database(&self) -> Result<File, ServiceError> {
+        self.directory.migrate_database()?;
         let descriptor = rustix::fs::openat(
             &self.directory.file,
-            "everything.sqlite3",
+            "vorra.sqlite3",
             OFlags::RDWR | OFlags::CREATE | OFlags::NOFOLLOW | OFlags::CLOEXEC | OFlags::NONBLOCK,
             Mode::from_raw_mode(0o600),
         )?;
@@ -161,11 +162,6 @@ impl StateDirectory {
                         rustix::fs::statat(&directory, &name, AtFlags::SYMLINK_NOFOLLOW)?;
                     if FileType::from_raw_mode(metadata.st_mode) != FileType::Symlink {
                         return Err(io::Error::from(error).into());
-                    }
-                    if final_component {
-                        return Err(ServiceError::UnsafePath(
-                            "the directory itself must not be a symbolic link",
-                        ));
                     }
                     if metadata.st_uid != uid && metadata.st_uid != 0 {
                         return Err(ServiceError::UnsafePath(
@@ -293,5 +289,68 @@ impl StateDirectory {
     pub(crate) fn unlink_socket(&self) -> Result<(), ServiceError> {
         rustix::fs::unlinkat(&self.file, "host.sock", AtFlags::empty())?;
         Ok(())
+    }
+
+    fn migrate_database(&self) -> Result<(), ServiceError> {
+        let present =
+            |name: &str| match rustix::fs::statat(&self.file, name, AtFlags::SYMLINK_NOFOLLOW) {
+                Ok(_) => Ok(true),
+                Err(error) if error == rustix::io::Errno::NOENT => Ok(false),
+                Err(error) => Err(ServiceError::Filesystem(error)),
+            };
+        if present("vorra.sqlite3")? || !present(LEGACY_DATABASE)? {
+            return Ok(());
+        }
+        for suffix in ["-wal", "-shm", "-journal", ""] {
+            match rustix::fs::renameat_with(
+                &self.file,
+                format!("{LEGACY_DATABASE}{suffix}"),
+                &self.file,
+                format!("vorra.sqlite3{suffix}"),
+                RenameFlags::NOREPLACE,
+            ) {
+                Ok(()) => {}
+                Err(error) if error == rustix::io::Errno::NOENT => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
+        self.file.sync_all()?;
+        Ok(())
+    }
+}
+
+const LEGACY_DATABASE: &str = "everything.sqlite3";
+
+pub fn migrate_legacy_state(home: &Path) -> Result<(), ServiceError> {
+    let current = home.join(".vorra");
+    let legacy = home.join(".everything");
+    let present = |path: &Path| match path.symlink_metadata() {
+        Ok(_) => Ok(true),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(ServiceError::Io(error)),
+    };
+    if !home.is_absolute() || present(&current)? || !present(&legacy)? {
+        return Ok(());
+    }
+    let directory = StateDirectory::open(&legacy, false)?;
+    let _lock = directory.lock().map_err(|error| match error {
+        ServiceError::AlreadyRunning => ServiceError::LegacyHostRunning,
+        error => error,
+    })?;
+    let renamed = rustix::fs::renameat_with(
+        rustix::fs::CWD,
+        &legacy,
+        rustix::fs::CWD,
+        &current,
+        RenameFlags::NOREPLACE,
+    );
+    match renamed {
+        Ok(()) => Ok(()),
+        Err(error) if error == rustix::io::Errno::EXIST => Ok(()),
+        Err(_) => match std::os::unix::fs::symlink(&legacy, &current) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => Ok(()),
+            Err(error) => Err(error.into()),
+        },
     }
 }

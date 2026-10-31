@@ -677,7 +677,7 @@ async fn credential_owned(
         "deleted"
     };
     Ok(
-        json!({"credential":action,"purpose":"ai.everything.worker.models","executor":endpoint.public_keys().device_id,"credential_reference":config.model.credential_reference}),
+        json!({"credential":action,"purpose":"to.yumi.vorra.worker.models","executor":endpoint.public_keys().device_id,"credential_reference":config.model.credential_reference}),
     )
 }
 

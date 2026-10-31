@@ -477,7 +477,7 @@ final class AppModel {
             guard let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first else {
                 throw DevicePreferenceError.storage
             }
-            let directory = support.appendingPathComponent("Everything", isDirectory: true).appendingPathComponent("DevicePreferences", isDirectory: true)
+            let directory = support.appendingPathComponent("Vorra", isDirectory: true).appendingPathComponent("DevicePreferences", isDirectory: true)
             let owner = try ThisDeviceSettingsStore(directory: directory, deviceID: identity.deviceID)
             localSettings = owner
             owner.open()

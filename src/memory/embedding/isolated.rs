@@ -184,7 +184,7 @@ mod platform {
     const STDERR_DRAIN_BYTES: usize = 64 * 1024;
     const POLL_INTERVAL: Duration = Duration::from_millis(5);
     const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
-    const HELPER_DESTINATION: &str = "/worker/everything-embedding-worker";
+    const HELPER_DESTINATION: &str = "/worker/vorra-embedding-worker";
     const MODEL_FILES: [&str; 4] = [
         "config.json",
         "tokenizer.json",
@@ -507,7 +507,7 @@ mod platform {
             let helper = executable
                 .parent()
                 .ok_or_else(|| failure(IsolationError::Unavailable("worker location unavailable")))?
-                .join("everything-embedding-worker");
+                .join("vorra-embedding-worker");
             let helper = canonical_file(&helper)?;
             let mut libraries = Vec::with_capacity(8);
             for name in [

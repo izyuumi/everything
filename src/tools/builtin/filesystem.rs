@@ -383,7 +383,7 @@ fn write_file(
         Err(error) => return Err(no_effect(name, redactor.error(error))),
     }
     check_cancelled(name, cancellation)?;
-    let temporary = format!(".everything-write-{}.tmp", Uuid::new_v4());
+    let temporary = format!(".vorra-write-{}.tmp", Uuid::new_v4());
     let mut options = OpenOptions::new();
     options.write(true).create_new(true).mode(0o600);
     let mut file = directory

@@ -78,9 +78,9 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - scheme: EverythingMac
+          - scheme: VorraMac
             destination: 'generic/platform=macOS'
-          - scheme: EverythingIOS
+          - scheme: VorraIOS
             destination: 'generic/platform=iOS Simulator'
     steps:
       - uses: actions/checkout@v4
@@ -92,11 +92,11 @@ jobs:
           APPLE_DESTINATION: ${{ matrix.destination }}
         run: |
           xcodebuild \
-            -project apps/Apple/Everything.xcodeproj \
+            -project apps/Apple/Vorra.xcodeproj \
             -scheme "$APPLE_SCHEME" \
             -configuration Debug \
             -destination "$APPLE_DESTINATION" \
-            -derivedDataPath "$RUNNER_TEMP/everything-apple-$APPLE_SCHEME" \
+            -derivedDataPath "$RUNNER_TEMP/vorra-apple-$APPLE_SCHEME" \
             CODE_SIGNING_ALLOWED=NO \
             build analyze
   compatibility:

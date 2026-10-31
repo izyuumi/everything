@@ -104,7 +104,7 @@ impl ModelCredentialSource {
 
 impl ModelCredentialReference {
     pub fn credential_key(&self) -> Result<CredentialKey, CredentialError> {
-        CredentialKey::new("ai.everything.models", &self.scope_key())
+        CredentialKey::new("to.yumi.vorra.models", &self.scope_key())
     }
 
     pub(crate) fn scope_key(&self) -> String {

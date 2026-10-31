@@ -1,6 +1,6 @@
 # Architecture overview
 
-Everything contains one native Rust agent kernel, and one owner-operated `everything` CLI whose optional `relay` subcommand runs the ciphertext relay server and toggles the host relay connection. The CLI initializes and reopens durable conversations, calls native Anthropic Messages or OpenAI Responses adapters, and runs explicit tool rounds through the central broker. The graphical applications do not own runtime state. Background task orchestration and native clients remain under integration; consult [implementation status](../status/implementation.md) for local integration, main-branch and validation boundaries.
+Vorra (formerly Everything) contains one native Rust agent kernel, and one owner-operated `vorra` CLI whose optional `relay` subcommand runs the ciphertext relay server and toggles the host relay connection. The CLI initializes and reopens durable conversations, calls native Anthropic Messages or OpenAI Responses adapters, and runs explicit tool rounds through the central broker. The graphical applications do not own runtime state. Background task orchestration and native clients remain under integration; consult [implementation status](../status/implementation.md) for local integration, main-branch and validation boundaries.
 
 ## Execution and authority
 

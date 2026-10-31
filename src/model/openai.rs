@@ -33,8 +33,7 @@ const MAX_OUTPUT_ITEMS: usize = 1_024;
 const EXCERPT_READ_BYTES: usize = 512;
 const EXCERPT_BYTES: usize = 500;
 const FUNCTION_NAMESPACE: &str = "functions";
-const MODELS_HINT: &str =
-    "; run `everything chatgpt models` to list models your ChatGPT plan can use";
+const MODELS_HINT: &str = "; run `vorra chatgpt models` to list models your ChatGPT plan can use";
 
 #[async_trait]
 pub trait OpenAiBearer: Send + Sync {

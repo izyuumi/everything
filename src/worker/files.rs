@@ -98,7 +98,7 @@ mod unix {
             let state = crate::service::state::StateDirectory::open(path, false)
                 .map_err(crate::agent::AgentError::from)?;
             let directory = Dir::from_std_file(state.file);
-            let database = directory.symlink_metadata("everything.sqlite3")?;
+            let database = directory.symlink_metadata("vorra.sqlite3")?;
             regular(&database)?;
             if database.uid() != state.uid || database.mode() & 0o7777 != 0o600 {
                 return Err(WorkerError::Invalid(

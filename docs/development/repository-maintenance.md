@@ -31,7 +31,7 @@ Routine actions within the user's delegated maintenance scope do not need repeat
 
 ## Durable ledger and restart
 
-Resolve the shared Git directory with `git rev-parse --path-format=absolute --git-common-dir`. The cleanup ledger lives at `<git-common-dir>/everything-orchestration/branch-cleanup/checkpoint.json`, separate from the authoritative backlog checkpoint. The coordinator records its location and the external working scan/report paths in the orchestration checkpoint. Workflow/run/check identities and live assignments remain in the coordinator's PR/orchestration ledger; cleanup records reference that ownership and review rather than creating a second CI authority. Do not assume a cleanup executable or network watcher is shipped by this repository.
+Resolve the shared Git directory with `git rev-parse --path-format=absolute --git-common-dir`. The cleanup ledger lives at `<git-common-dir>/vorra-orchestration/branch-cleanup/checkpoint.json`, separate from the authoritative backlog checkpoint. The coordinator records its location and the external working scan/report paths in the orchestration checkpoint. Workflow/run/check identities and live assignments remain in the coordinator's PR/orchestration ledger; cleanup records reference that ownership and review rather than creating a second CI authority. Do not assume a cleanup executable or network watcher is shipped by this repository.
 
 Persist each completed scan and mutation receipt atomically, including file and directory synchronization. Retain:
 

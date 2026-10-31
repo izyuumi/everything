@@ -1249,66 +1249,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "everything"
-version = "0.1.0"
-dependencies = [
- "async-stream",
- "async-trait",
- "axum",
- "base64 0.22.1",
- "bytes",
- "cap-std",
- "chacha20poly1305",
- "chrono",
- "chrono-tz",
- "clap",
- "command-fds",
- "croner",
- "crossterm",
- "ed25519-dalek",
- "eventsource-stream",
- "fs2",
- "futures-core",
- "futures-util",
- "hkdf",
- "hmac",
- "hyper",
- "hyper-util",
- "jsonschema",
- "keyring",
- "ort",
- "plist",
- "pulldown-cmark",
- "qrcode",
- "rand_core 0.6.4",
- "ratatui",
- "reqwest 0.12.28",
- "ring",
- "rmcp",
- "rusqlite",
- "rustix 1.1.5",
- "rustls",
- "self_update",
- "serde",
- "serde_json",
- "sha2",
- "sqlite-vec",
- "thiserror",
- "tokenizers",
- "tokio",
- "tokio-rusqlite",
- "tokio-tungstenite",
- "tokio-util",
- "toml",
- "tracing",
- "unicode-width 0.2.0",
- "url",
- "uuid",
- "x25519-dalek",
- "zeroize",
-]
-
-[[package]]
 name = "fallible-iterator"
 version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4498,6 +4438,66 @@ name = "version_check"
 version = "0.9.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
+
+[[package]]
+name = "vorra"
+version = "0.1.0"
+dependencies = [
+ "async-stream",
+ "async-trait",
+ "axum",
+ "base64 0.22.1",
+ "bytes",
+ "cap-std",
+ "chacha20poly1305",
+ "chrono",
+ "chrono-tz",
+ "clap",
+ "command-fds",
+ "croner",
+ "crossterm",
+ "ed25519-dalek",
+ "eventsource-stream",
+ "fs2",
+ "futures-core",
+ "futures-util",
+ "hkdf",
+ "hmac",
+ "hyper",
+ "hyper-util",
+ "jsonschema",
+ "keyring",
+ "ort",
+ "plist",
+ "pulldown-cmark",
+ "qrcode",
+ "rand_core 0.6.4",
+ "ratatui",
+ "reqwest 0.12.28",
+ "ring",
+ "rmcp",
+ "rusqlite",
+ "rustix 1.1.5",
+ "rustls",
+ "self_update",
+ "serde",
+ "serde_json",
+ "sha2",
+ "sqlite-vec",
+ "thiserror",
+ "tokenizers",
+ "tokio",
+ "tokio-rusqlite",
+ "tokio-tungstenite",
+ "tokio-util",
+ "toml",
+ "tracing",
+ "unicode-width 0.2.0",
+ "url",
+ "uuid",
+ "x25519-dalek",
+ "zeroize",
+]
 
 [[package]]
 name = "vsimd"

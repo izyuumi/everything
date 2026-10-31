@@ -2,19 +2,19 @@ use std::io::{self, IsTerminal, Read, Write};
 use std::path::{Path, PathBuf};
 
 use clap::{Args, Subcommand, ValueEnum};
-use everything::host::chatgpt::ChatGptOperation;
-use everything::host::client::HostClient;
-use everything::host::credentials::SecretTransfer;
-use everything::host::settings::{CredentialStorage, ModelCredentialSource};
-use everything::ipc::{OwnerOperation, OwnerOperationResult, OwnerQuery, OwnerQueryResult};
-use everything::protocol::CommandId;
-use everything::vault::protonpass::child_environment;
-use everything::vault::{
+use serde::Serialize;
+use tokio_util::sync::CancellationToken;
+use vorra::host::chatgpt::ChatGptOperation;
+use vorra::host::client::HostClient;
+use vorra::host::credentials::SecretTransfer;
+use vorra::host::settings::{CredentialStorage, ModelCredentialSource};
+use vorra::ipc::{OwnerOperation, OwnerOperationResult, OwnerQuery, OwnerQueryResult};
+use vorra::protocol::CommandId;
+use vorra::vault::protonpass::child_environment;
+use vorra::vault::{
     MAX_VAULT_LIST, OnePasswordProbe, ProtonPassProbe, ProviderStatus, VaultItemKind,
     VaultItemMetadata, VaultProviderId, VaultProviderState, VaultPutRequest, VaultReference,
 };
-use serde::Serialize;
-use tokio_util::sync::CancellationToken;
 use zeroize::Zeroizing;
 
 use crate::queries::{label, print_lines};
@@ -618,7 +618,7 @@ async fn list(
     }
     for item in &listing.incomplete {
         eprintln!(
-            "incomplete {} {} ({}): {}; remove it with `everything vault remove {}`",
+            "incomplete {} {} ({}): {}; remove it with `vorra vault remove {}`",
             label(item.kind),
             item.label,
             label(item.state),

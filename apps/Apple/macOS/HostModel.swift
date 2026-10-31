@@ -75,7 +75,7 @@ final class HostModel {
 
     init() {
         let executable = UserDefaults.standard.string(forKey: "hostExecutable") ?? ""
-        let directory = UserDefaults.standard.string(forKey: "hostStateDirectory") ?? NSHomeDirectory() + "/.everything"
+        let directory = UserDefaults.standard.string(forKey: "hostStateDirectory") ?? NSHomeDirectory() + "/.vorra"
         let client = OwnerIPCClient()
         let connection = OwnerConnection(executable: executable, stateDirectory: directory)
         let connectionKey = UUID()
@@ -85,7 +85,7 @@ final class HostModel {
         activeConnection = connection
         connectionVersion = connectionKey
         thisMacSettings = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first.map {
-            ThisMacSettingsStore(directory: $0.appendingPathComponent("Everything", isDirectory: true).appendingPathComponent("DevicePreferences", isDirectory: true))
+            ThisMacSettingsStore(directory: $0.appendingPathComponent("Vorra", isDirectory: true).appendingPathComponent("DevicePreferences", isDirectory: true))
         }
         let nativeSettings = NativeSettingsStore(client: client, connection: connection, connectionKey: connectionKey)
         self.nativeSettings = nativeSettings
@@ -666,7 +666,7 @@ final class HostModel {
             let status = try await chatGPT(["kind": .string("sign_out"), "binding": binding], connection: original)
             guard original == connection, !closing else { return }
             chatGPTStatus = status
-            message = status["revocation"].string == "unconfirmed" ? "Signed out locally. OpenAI did not confirm revocation; you can disconnect Everything in ChatGPT settings." : "Signed out of ChatGPT."
+            message = status["revocation"].string == "unconfirmed" ? "Signed out locally. OpenAI did not confirm revocation; you can disconnect Vorra in ChatGPT settings." : "Signed out of ChatGPT."
         } catch { if original == connection, !closing { message = error.localizedDescription } }
     }
 

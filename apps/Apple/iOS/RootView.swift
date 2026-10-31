@@ -29,10 +29,10 @@ struct RootView: View {
                             ChatView(model: model)
                         }
                     } else {
-                        ContentUnavailableView("Local storage unavailable", systemImage: "lock", description: Text("Unlock the device and reopen Everything to access its protected identity and history."))
+                        ContentUnavailableView("Local storage unavailable", systemImage: "lock", description: Text("Unlock the device and reopen Vorra to access its protected identity and history."))
                     }
                 }
-                .navigationTitle("Everything")
+                .navigationTitle("Vorra")
                 .toolbar {
                     ToolbarItem(placement: .topBarTrailing) {
                         Menu {
@@ -60,7 +60,7 @@ struct RootView: View {
                                 .onAppear { model.localDestinationChanged(presented: true) }
                                 .onDisappear { model.localDestinationChanged(presented: false) }
                             } else {
-                                ContentUnavailableView("Local preferences unavailable", systemImage: "lock", description: Text(model.localSettingsIssue ?? "Unlock this iPhone and reopen Everything to access its existing protected identity."))
+                                ContentUnavailableView("Local preferences unavailable", systemImage: "lock", description: Text(model.localSettingsIssue ?? "Unlock this iPhone and reopen Vorra to access its existing protected identity."))
                             }
                         case .hostAssistant:
                             HostSettingsAssistantView(model: model)

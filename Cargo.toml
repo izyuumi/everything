@@ -1,11 +1,11 @@
 [package]
-name = "everything"
+name = "vorra"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.88"
 license = "Apache-2.0"
 description = "Local-first native AI agent host"
-default-run = "everything"
+default-run = "vorra"
 
 [workspace]
 resolver = "3"
@@ -72,13 +72,13 @@ features = ["std", "load-dynamic"]
 optional = true
 
 [[bin]]
-name = "everything-embedding-bench"
-path = "src/bin/everything-embedding-bench.rs"
+name = "vorra-embedding-bench"
+path = "src/bin/vorra-embedding-bench.rs"
 required-features = ["local-embeddings"]
 
 [[bin]]
-name = "everything-embedding-worker"
-path = "src/bin/everything-embedding-worker.rs"
+name = "vorra-embedding-worker"
+path = "src/bin/vorra-embedding-worker.rs"
 required-features = ["local-embeddings"]
 
 [dependencies.tokenizers]

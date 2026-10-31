@@ -10,7 +10,7 @@ concurrency:
   cancel-in-progress: false
 jobs:
   next:
-    if: github.repository == 'izyuumi/everything' && vars.EVERYTHING_RELEASES == 'enabled'
+    if: github.repository == 'izyuumi/everything' && vars.VORRA_RELEASES == 'enabled'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
@@ -31,7 +31,7 @@ jobs:
 
   build:
     needs: next
-    if: github.repository == 'izyuumi/everything' && vars.EVERYTHING_RELEASES == 'enabled'
+    if: github.repository == 'izyuumi/everything' && vars.VORRA_RELEASES == 'enabled'
     name: build (${{ matrix.target }})
     runs-on: ${{ matrix.os }}
     timeout-minutes: 60
@@ -95,24 +95,24 @@ jobs:
           fi
           umask 077
           printf '%s' "$ASC_KEY_P8" | base64 -d > "$RUNNER_TEMP/AuthKey.p8"
-          xcrun notarytool store-credentials everything-notary --keychain "$KEYCHAIN" \
+          xcrun notarytool store-credentials vorra-notary --keychain "$KEYCHAIN" \
             --key "$RUNNER_TEMP/AuthKey.p8" --key-id "$ASC_KEY_ID" --issuer "$ASC_ISSUER_ID"
           rm "$RUNNER_TEMP/AuthKey.p8"
-          echo "NOTARY_PROFILE=everything-notary" >> "$GITHUB_ENV"
+          echo "NOTARY_PROFILE=vorra-notary" >> "$GITHUB_ENV"
       - run: scripts/release_build.sh "${{ matrix.target }}" "$RUNNER_TEMP/dist"
       - name: Forget signing credentials
         if: always() && runner.os == 'macOS'
         run: security delete-keychain "$RUNNER_TEMP/release.keychain-db" 2>/dev/null || true
       - uses: actions/upload-artifact@v4
         with:
-          name: everything-${{ matrix.target }}
-          path: ${{ runner.temp }}/dist/everything-${{ matrix.target }}.tar.gz
+          name: vorra-${{ matrix.target }}
+          path: ${{ runner.temp }}/dist/vorra-${{ matrix.target }}.tar.gz
           if-no-files-found: error
           retention-days: 7
 
   publish:
     needs: [next, build]
-    if: github.repository == 'izyuumi/everything' && vars.EVERYTHING_RELEASES == 'enabled'
+    if: github.repository == 'izyuumi/everything' && vars.VORRA_RELEASES == 'enabled'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
@@ -131,7 +131,7 @@ jobs:
           persist-credentials: false
       - uses: actions/download-artifact@v4
         with:
-          pattern: everything-*
+          pattern: vorra-*
           path: ${{ runner.temp }}/dist
           merge-multiple: true
       - run: scripts/release.sh --publish "$RUNNER_TEMP/dist"

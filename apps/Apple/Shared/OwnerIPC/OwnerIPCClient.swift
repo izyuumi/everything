@@ -19,7 +19,7 @@ private final class ProcessCancellation: @unchecked Sendable {
 }
 
 final class OwnerIPCClient: @unchecked Sendable {
-    private let queue = DispatchQueue(label: "ai.everything.owner-commands", qos: .utility, attributes: .concurrent)
+    private let queue = DispatchQueue(label: "to.yumi.vorra.owner-commands", qos: .utility, attributes: .concurrent)
     private let lock = NSLock()
     private var active: [UUID: ProcessCancellation] = [:]
     private var closed = false
@@ -328,7 +328,7 @@ private struct PrivateOwnerInput {
     let path: String
 
     init(_ bytes: Data) throws {
-        var template = Array((NSTemporaryDirectory() + "everything-owner-XXXXXX").utf8CString)
+        var template = Array((NSTemporaryDirectory() + "vorra-owner-XXXXXX").utf8CString)
         let created = template.withUnsafeMutableBufferPointer { buffer -> String? in
             guard let base = buffer.baseAddress, mkdtemp(base) != nil else { return nil }
             return String(cString: base)

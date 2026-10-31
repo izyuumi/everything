@@ -60,7 +60,7 @@ impl WorkerModelBinding {
         let value =
             serde_json::to_vec(&(executor, self)).map_err(|_| CredentialError::InvalidKey)?;
         CredentialKey::new(
-            "ai.everything.worker.models",
+            "to.yumi.vorra.worker.models",
             &digest(b"everything.worker.credential.v1\0", &value),
         )
     }

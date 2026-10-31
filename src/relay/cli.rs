@@ -241,7 +241,7 @@ where
     let database = Database::open(path).await?;
     let result = operation(database.clone()).await;
     if let Err(error) = database.close().await {
-        eprintln!("everything: relay database cleanup failed: {error}");
+        eprintln!("vorra: relay database cleanup failed: {error}");
         if result.is_ok() {
             return Err(error);
         }

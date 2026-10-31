@@ -36,7 +36,7 @@ const RESOURCE: &str = "https://api.openai.com/v1";
 const SCOPE: &str = "openid profile email offline_access resource.invoke chatgpt.tokens.use.direct";
 const PLAN_SCOPE: &str = "chatgpt.tokens.use.direct";
 const REGISTRATION_CLIENT: &str = "dynamic_agent_client";
-const AGENT_NAME: &str = "Everything";
+const AGENT_NAME: &str = "Vorra";
 const PREFERRED_PORT: u16 = 1455;
 const HOST_ID_FILE: &str = "chatgpt-host-id";
 const REFRESH_MARGIN_SECONDS: i64 = 300;
@@ -629,7 +629,7 @@ impl ChatGptAccounts {
                 respond(
                     &mut stream,
                     "400 Bad Request",
-                    "This response does not match the pending Everything sign-in.",
+                    "This response does not match the pending Vorra sign-in.",
                 )
                 .await;
                 continue;
@@ -657,7 +657,7 @@ impl ChatGptAccounts {
                     respond(
                         &mut stream,
                         "200 OK",
-                        "Signed in with ChatGPT. You can close this window and return to Everything.",
+                        "Signed in with ChatGPT. You can close this window and return to Vorra.",
                     )
                     .await;
                     ChatGptAttemptPhase::Completed
@@ -667,7 +667,7 @@ impl ChatGptAccounts {
                     respond(
                         &mut stream,
                         "200 OK",
-                        "ChatGPT sign-in could not be completed. Return to Everything for details.",
+                        "ChatGPT sign-in could not be completed. Return to Vorra for details.",
                     )
                     .await;
                     ChatGptAttemptPhase::Failed {
@@ -1234,7 +1234,7 @@ async fn read_callback(stream: &mut TcpStream) -> Option<BTreeMap<String, String
 
 async fn respond(stream: &mut TcpStream, status: &str, message: &str) {
     let body = format!(
-        "<!doctype html><html><head><meta charset=\"utf-8\"><title>Everything</title></head><body><p>{message}</p></body></html>"
+        "<!doctype html><html><head><meta charset=\"utf-8\"><title>Vorra</title></head><body><p>{message}</p></body></html>"
     );
     let response = format!(
         "HTTP/1.1 {status}\r\nContent-Type: text/html; charset=utf-8\r\nCache-Control: no-store\r\nReferrer-Policy: no-referrer\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{body}",

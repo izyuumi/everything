@@ -2,7 +2,7 @@
 
 The manual [Extended validation workflow](../../.github/workflows/extended-validation.yml) can retain the default-feature Linux CLI. The `retain_runtime_artifact` boolean defaults to `false`; it moved from Validate when normal POC checks were reduced to formatting and strict Clippy. The manual workflow runs Linux/macOS strict default/all-feature Clippy and release builds plus the Rust 1.88 check. Normal pushes and pull requests never upload this artifact. See [POC CI](poc-ci.md) for the separate normal and manual gates.
 
-On `ubuntu-latest`, an opted-in manual run uploads only `target/release/everything` immediately after the default-feature release build and before the all-feature release build can replace it. The artifact is named `everything-linux-default-<full commit SHA>`, uses compression level 6, expires after three days, and fails its upload step if the binary is absent. No library directory, workspace data, Host state, keys or model files are included. This is a compiled public-source artifact, not an Apple application or an all-feature executable.
+On `ubuntu-latest`, an opted-in manual run uploads only `target/release/vorra` immediately after the default-feature release build and before the all-feature release build can replace it. The artifact is named `vorra-linux-default-<full commit SHA>`, uses compression level 6, expires after three days, and fails its upload step if the binary is absent. No library directory, workspace data, Host state, keys or model files are included. This is a compiled public-source artifact, not an Apple application or an all-feature executable.
 
 ## Request and identify a build
 
@@ -18,9 +18,9 @@ For an identified run:
 
 ```sh
 gh run view <run-id> --repo izyuumi/everything --json headSha,event,status,conclusion,url,attempt
-gh run download <run-id> --repo izyuumi/everything --name everything-linux-default-<full-commit-sha> --dir <new-artifact-directory>
+gh run download <run-id> --repo izyuumi/everything --name vorra-linux-default-<full-commit-sha> --dir <new-artifact-directory>
 git rev-parse '<full-commit-sha>^{tree}'
-sha256sum <new-artifact-directory>/everything
+sha256sum <new-artifact-directory>/vorra
 ```
 
 Use a new disposable download directory. Record the commit and tree from that exact run, the downloaded binary's SHA-256 and size, the artifact ID and digest reported by the upload step, and the runner/toolchain details from the build log. The uploaded archive's digest and the executable's SHA-256 identify different bytes; retain both with their meanings. Do not substitute the current branch tip, a local build, an all-feature binary or a different run's artifact when attributing observations. Retain provenance before the three-day artifact expires. This workflow does not promise reproducible binary hashes across runner or toolchain changes.

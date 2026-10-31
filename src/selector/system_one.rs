@@ -146,7 +146,7 @@ impl SystemOneSettings {
                 digest.update([0]);
                 digest.update(reference.as_bytes());
                 CredentialKey::new(
-                    "ai.everything.system-one",
+                    "to.yumi.vorra.system-one",
                     &format!("{:x}", digest.finalize()),
                 )
             })

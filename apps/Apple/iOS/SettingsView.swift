@@ -72,7 +72,7 @@ struct SettingsView: View {
             Section("This iPhone") {
                 NavigationLink("Appearance and notifications", value: ClientSettingsDestination.thisDevice)
                 if let issue = model.localSettingsIssue { Text(issue).foregroundStyle(.red) }
-                Text("Local preferences remain available while the Host is offline. Notifications use your saved choices and system permission while Everything is active and synchronization is enabled. Your first sync stays quiet.").font(.footnote)
+                Text("Local preferences remain available while the Host is offline. Notifications use your saved choices and system permission while Vorra is active and synchronization is enabled. Your first sync stays quiet.").font(.footnote)
                 if let status = model.notificationDeliveryStatus { Text(status).font(.footnote).foregroundStyle(.secondary) }
             }
             Section("Local privacy") {

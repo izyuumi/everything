@@ -12,7 +12,7 @@ use crate::service::ServiceError;
 
 const REPOSITORY: &str = "izyuumi/everything";
 const DEFAULT_BASE_URL: &str = "https://api.github.com";
-const BASE_URL_VARIABLE: &str = "EVERYTHING_UPDATE_BASE_URL";
+const BASE_URL_VARIABLE: &str = "VORRA_UPDATE_BASE_URL";
 const MAX_METADATA_BYTES: usize = 4 * 1024 * 1024;
 const MAX_ARCHIVE_BYTES: usize = 512 * 1024 * 1024;
 
@@ -67,7 +67,7 @@ pub enum UpdateError {
         expected: String,
         actual: String,
     },
-    #[error("could not extract everything from {asset}: {source}")]
+    #[error("could not extract vorra from {asset}: {source}")]
     Extract {
         asset: String,
         #[source]
@@ -81,7 +81,7 @@ pub enum UpdateError {
     },
     #[error("could not resolve the running executable: {0}")]
     CurrentExecutable(#[source] std::io::Error),
-    #[error("{} reports {actual:?}, expected \"everything {expected}\"", path.display())]
+    #[error("{} reports {actual:?}, expected \"vorra {expected}\"", path.display())]
     UnexpectedBinary {
         path: PathBuf,
         expected: String,
@@ -98,7 +98,7 @@ pub enum UpdateError {
     #[error("{0}")]
     SignaturePolicy(String),
     #[error(
-        "everything {version} was installed, but restarting the launchd service failed: {source}; restart it with `everything service stop` and `everything service start`"
+        "vorra {version} was installed, but restarting the launchd service failed: {source}; restart it with `vorra service stop` and `vorra service start`"
     )]
     ServiceRestart {
         version: String,
@@ -231,7 +231,7 @@ pub async fn run(
     let current = Version::running(running_version)?;
     let target = target_triple().ok_or(UpdateError::UnsupportedPlatform)?;
     let client = reqwest::Client::builder()
-        .user_agent(concat!("everything-update/", env!("CARGO_PKG_VERSION")))
+        .user_agent(concat!("vorra-update/", env!("CARGO_PKG_VERSION")))
         .connect_timeout(Duration::from_secs(15))
         .read_timeout(Duration::from_secs(60))
         .build()
@@ -285,19 +285,19 @@ pub async fn run(
         if newer { "newer" } else { "up-to-date" }
     );
     if !newer {
-        println!("everything {current} is up to date on the {channel} channel.");
+        println!("vorra {current} is up to date on the {channel} channel.");
         return Ok(());
     }
     if arguments.check {
         println!(
-            "everything {available} ({}) is available; run `everything update{}` to install it.",
+            "vorra {available} ({}) is available; run `vorra update{}` to install it.",
             release.tag_name,
             if arguments.beta { " --beta" } else { "" }
         );
         return Ok(());
     }
 
-    let asset = format!("everything-{target}.tar.gz");
+    let asset = format!("vorra-{target}.tar.gz");
     let archive_url = release.asset(&asset)?;
     let sums_url = release.asset("SHA256SUMS")?;
     let sums = fetch(&client, sums_url, MAX_METADATA_BYTES, &cancellation).await?;
@@ -331,12 +331,12 @@ pub async fn run(
         .archive(self_update::ArchiveKind::Tar(Some(
             self_update::Compression::Gz,
         )))
-        .extract_file(&work.path, "everything")
+        .extract_file(&work.path, "vorra")
         .map_err(|source| UpdateError::Extract {
             asset: asset.clone(),
             source,
         })?;
-    let replacement = work.path.join("everything");
+    let replacement = work.path.join("vorra");
     check_signatures(&executable, &replacement, &asset, arguments.allow_unsigned).await?;
     check_version(&replacement, &available, &cancellation).await?;
     if cancellation.is_cancelled() {
@@ -453,7 +453,7 @@ struct WorkDirectory {
 impl WorkDirectory {
     fn create() -> Result<Self, UpdateError> {
         use std::os::unix::fs::DirBuilderExt;
-        let path = std::env::temp_dir().join(format!("everything-update-{}", uuid::Uuid::new_v4()));
+        let path = std::env::temp_dir().join(format!("vorra-update-{}", uuid::Uuid::new_v4()));
         std::fs::DirBuilder::new()
             .mode(0o700)
             .create(&path)
@@ -489,7 +489,7 @@ async fn check_version(
         Ok(Err(source)) => return Err(io_error(binary)(source)),
         Err(_) => "no answer within 15 seconds".to_owned(),
     };
-    if actual == format!("everything {expected}") {
+    if actual == format!("vorra {expected}") {
         Ok(())
     } else {
         Err(UpdateError::UnexpectedBinary {
@@ -506,7 +506,7 @@ fn replace(executable: &Path, replacement: &Path) -> Result<(), UpdateError> {
         path: executable.to_owned(),
         source: std::io::Error::other("executable has no parent directory"),
     })?;
-    let temporary = directory.join(format!(".everything.update.{}", uuid::Uuid::new_v4()));
+    let temporary = directory.join(format!(".vorra.update.{}", uuid::Uuid::new_v4()));
     let result = (|| {
         let mut file = std::fs::OpenOptions::new()
             .write(true)
@@ -554,7 +554,7 @@ async fn restart_service(
 }
 
 #[cfg(target_os = "macos")]
-const SIGNING_IDENTIFIER: &str = "to.yumi.everything.cli";
+const SIGNING_IDENTIFIER: &str = "to.yumi.vorra.cli";
 
 #[cfg(target_os = "macos")]
 #[derive(Debug)]

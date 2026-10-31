@@ -23,7 +23,7 @@ struct QRScanner: View {
 
 private final class CameraCapture: @unchecked Sendable {
     let session = AVCaptureSession()
-    private let queue = DispatchQueue(label: "ai.everything.ios.camera")
+    private let queue = DispatchQueue(label: "to.yumi.vorra.ios.camera")
 
     func start(delegate: any AVCaptureMetadataOutputObjectsDelegate & Sendable, completion: @escaping @Sendable (Bool) -> Void) {
         queue.async {

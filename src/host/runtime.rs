@@ -218,7 +218,7 @@ impl HostService {
             let preparation_lease = Arc::clone(&prepared_lease);
             let database = prepared_lease.validate_database()?;
             let store =
-                Store::open_validated(prepared_lease.path().join("everything.sqlite3"), database)?;
+                Store::open_validated(prepared_lease.path().join("vorra.sqlite3"), database)?;
             let directory =
                 cap_std::fs::Dir::from_std_file(prepared_lease.directory.file.try_clone()?);
             let identity = crate::devices::load_or_create_identity_in(&directory)?;

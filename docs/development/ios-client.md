@@ -1,6 +1,6 @@
 # Native iOS client
 
-The optional iOS 17+ Swift 6 application is in `apps/Apple/iOS`, with E2EE records and identity handling in `apps/Apple/Shared/Crypto` and relay replication in `apps/Apple/Shared/Relay`. `EverythingIOS` is the iOS scheme in the shared Apple project. The Rust host owns execution independently of this app. This document records the source implementation, the [Simulator protocol walkthrough](#simulator-protocol-walkthrough) and the validation that remains unavailable.
+The optional iOS 17+ Swift 6 application is in `apps/Apple/iOS`, with E2EE records and identity handling in `apps/Apple/Shared/Crypto` and relay replication in `apps/Apple/Shared/Relay`. `VorraIOS` is the iOS scheme in the shared Apple project. The Rust host owns execution independently of this app. This document records the source implementation, the [Simulator protocol walkthrough](#simulator-protocol-walkthrough) and the validation that remains unavailable.
 
 ## Current-main integration and prerequisites
 
@@ -12,7 +12,7 @@ The Apple workflow now selects both actual existing schemes for unsigned SDK bui
 
 ## Boundaries
 
-`EverythingIOSApp` owns one observable, main-actor `AppModel`. SwiftUI views display immutable service snapshots and dispatch actions. `ReplicaService`, `ReplicaStore`, `RelayConnection` and `DeviceIdentity` isolate mutable service state in actors. The same app-owned `NotificationService` is now a MainActor class for its synchronous final foreground admission check. No model provider, agent loop, tool executor, scheduler or external model gateway runs on the phone.
+`VorraIOSApp` owns one observable, main-actor `AppModel`. SwiftUI views display immutable service snapshots and dispatch actions. `ReplicaService`, `ReplicaStore`, `RelayConnection` and `DeviceIdentity` isolate mutable service state in actors. The same app-owned `NotificationService` is now a MainActor class for its synchronous final foreground admission check. No model provider, agent loop, tool executor, scheduler or external model gateway runs on the phone.
 
 The service starts a connection only after the user chooses Connect. It reconnects while the scene remains active and joins its owned socket workers when stopping. A shared stopping task prevents a new connection from racing shutdown. Scene suspension or termination interrupts synchronization. There is no APNS registration, background push entitlement or claimed background execution. This iPhone preferences remain local and independent of the Host connection. The [committed-event notification path](../contracts/ios-notification-delivery.md) uses actual authenticated completions and pending permission requests, fresh saved choices and OS observations while synchronization is enabled in the active app. First catch-up is silent; claims precede OS submission, so lost or skipped attempts are not replayed. The former cursor-based generic activity producer remains removed.
 
@@ -48,7 +48,7 @@ CryptoKit acceptance of weak/noncanonical Ed25519 and X25519 inputs must still b
 
 ## Durable replication
 
-The app stores its replica under Application Support/Everything in a versioned SQLite database. It requests complete iOS file protection and owner-only permissions for the directory, database, WAL and SHM. The directory is excluded from OS backups. There is no backup or restore subsystem. The database wrapper is the sole narrow unchecked-Sendable owner of the SQLite handle; its actor serializes access and SQLite uses FULLMUTEX. Prepared statements bind all data values and finalize on every path. Transactions use `BEGIN IMMEDIATE`, full synchronous WAL and explicit rollback on failure.
+The app stores its replica under Application Support/Vorra in a versioned SQLite database. It requests complete iOS file protection and owner-only permissions for the directory, database, WAL and SHM. The directory is excluded from OS backups. There is no backup or restore subsystem. The database wrapper is the sole narrow unchecked-Sendable owner of the SQLite handle; its actor serializes access and SQLite uses FULLMUTEX. Prepared statements bind all data values and finalize on every path. Transactions use `BEGIN IMMEDIATE`, full synchronous WAL and explicit rollback on failure.
 
 Outgoing user commands persist their original ID, timestamp, complete command and original encrypted envelope in one transaction before becoming sendable. Reconnect sends those exact bytes. Relay acceptance means only that the relay retained ciphertext; the UI says it is awaiting a host result. Completed/rejected command results are a separate durable application outcome. Expired delivery is displayed as an unknown host outcome and does not silently create a replacement command.
 
@@ -99,22 +99,22 @@ The official toolchain archive's detached signature was verified using the publi
 CI and the static checks use the shared project scheme with signing disabled:
 
 ```sh
-xcodebuild -project apps/Apple/Everything.xcodeproj -scheme EverythingIOS -destination 'generic/platform=iOS Simulator' CODE_SIGNING_ALLOWED=NO build
-xcodebuild -project apps/Apple/Everything.xcodeproj -scheme EverythingIOS -destination 'generic/platform=iOS Simulator' CODE_SIGNING_ALLOWED=NO analyze
+xcodebuild -project apps/Apple/Vorra.xcodeproj -scheme VorraIOS -destination 'generic/platform=iOS Simulator' CODE_SIGNING_ALLOWED=NO build
+xcodebuild -project apps/Apple/Vorra.xcodeproj -scheme VorraIOS -destination 'generic/platform=iOS Simulator' CODE_SIGNING_ALLOWED=NO analyze
 ```
 
 An unsigned app has no `application-identifier` entitlement, so the iOS Keychain refuses its identity (`-34018`) and the app shows only the protected-identity error. The iOS target therefore no longer disables signing; Simulator builds are ad-hoc signed. A runnable Simulator app needs a plain build without `CODE_SIGNING_ALLOWED=NO`, for example `-destination 'platform=iOS Simulator,name=…' build`. Both app targets use automatic signing with development team `AN5KM8QGEF`; physical-device and archive builds need an Xcode account or App Store Connect API key for that team.
 
 ### TestFlight distribution
 
-`EverythingIOS` (bundle ID `to.yumi.everything.ios`; the Mac app is `to.yumi.everything.mac`) carries a single 1024-pixel `AppIcon` and the iPad orientations App Store validation requires. `ITSAppUsesNonExemptEncryption` is `NO`: the app's cryptography is CryptoKit and the Security framework plus URLSession TLS, which is encryption within Apple's operating system and exempt, so uploads need no export-compliance answer. `CFBundleVersion` follows `scripts/ios-build-number.sh <major.minor.patch> <build>`, which encodes `major*10000000 + minor*100000 + patch*1000 + build` (0.1.0 build 1 is 100001). Archive and export with the API key, overriding the numbers:
+`VorraIOS` (bundle ID `to.yumi.vorra.ios`; the Mac app is `to.yumi.vorra.mac`) carries a single 1024-pixel `AppIcon` and the iPad orientations App Store validation requires. `ITSAppUsesNonExemptEncryption` is `NO`: the app's cryptography is CryptoKit and the Security framework plus URLSession TLS, which is encryption within Apple's operating system and exempt, so uploads need no export-compliance answer. `CFBundleVersion` follows `scripts/ios-build-number.sh <major.minor.patch> <build>`, which encodes `major*10000000 + minor*100000 + patch*1000 + build` (0.1.0 build 1 is 100001). Archive and export with the API key, overriding the numbers:
 
 ```sh
-xcodebuild archive -project apps/Apple/Everything.xcodeproj -scheme EverythingIOS -configuration Release \
-  -destination 'generic/platform=iOS' -archivePath build/ios/EverythingIOS.xcarchive \
+xcodebuild archive -project apps/Apple/Vorra.xcodeproj -scheme VorraIOS -configuration Release \
+  -destination 'generic/platform=iOS' -archivePath build/ios/VorraIOS.xcarchive \
   -allowProvisioningUpdates -authenticationKeyPath "$KEY" -authenticationKeyID "$ASC_KEY_ID" -authenticationKeyIssuerID "$ASC_ISSUER_ID" \
   MARKETING_VERSION=0.1.0 CURRENT_PROJECT_VERSION=$(scripts/ios-build-number.sh 0.1.0 1)
-xcodebuild -exportArchive -archivePath build/ios/EverythingIOS.xcarchive -exportOptionsPlist apps/Apple/iOS/ExportOptions.plist \
+xcodebuild -exportArchive -archivePath build/ios/VorraIOS.xcarchive -exportOptionsPlist apps/Apple/iOS/ExportOptions.plist \
   -exportPath build/ios/export -allowProvisioningUpdates -authenticationKeyPath "$KEY" -authenticationKeyID "$ASC_KEY_ID" -authenticationKeyIssuerID "$ASC_ISSUER_ID"
 ```
 
@@ -124,7 +124,7 @@ xcodebuild -exportArchive -archivePath build/ios/EverythingIOS.xcarchive -export
 
 On an iOS 27.0 Simulator, a plain Debug build installed, launched and opened its Keychain identity, showing the empty chat screen. A build with `CODE_SIGNING_ALLOWED=NO` showed the `-34018` failure above. Taps were not automated, so the SwiftUI screens, QR camera, approval UI and notifications were not exercised.
 
-Instead, a disposable command-line driver outside the repository compiled the actual `Shared/Crypto`, `Shared/Relay` and `Shared/Settings` sources for the Simulator. It ran inside the booted Simulator with `simctl spawn`, using a Simulator `application-identifier` entitlement, the real Keychain identity, `ReplicaService`, `ReplicaStore` and CryptoKit. It talked to a debug `everything-relay` (the separate relay binary that predates `everything relay serve`) and `everything serve` over `ws://127.0.0.1` with disposable state. The Host conversation's loopback model endpoint was unreachable, so no provider was contacted. Observations:
+Instead, a disposable command-line driver outside the repository compiled the actual `Shared/Crypto`, `Shared/Relay` and `Shared/Settings` sources for the Simulator. It ran inside the booted Simulator with `simctl spawn`, using a Simulator `application-identifier` entitlement, the real Keychain identity, `ReplicaService`, `ReplicaStore` and CryptoKit. It talked to a debug `vorra-relay` (the separate relay binary that predates `vorra relay serve`) and `vorra serve` over `ws://127.0.0.1` with disposable state. The Host conversation's loopback model endpoint was unreachable, so no provider was contacted. Observations:
 
 - **Pairing.** The phone inspected the Host invitation and showed the Host's exact fingerprint. It created a request the Host approved for one selected conversation, then verified the Rust acceptance and pinned the Host. Both public identities were enrolled with the relay separately.
 - **Message roundtrip.** A message sent while the Host's relay session was down reached `relayed`. After the Host reconnected and the phone reconnected, sync applied `conversation_created`, `message_appended` (caused by the phone command), `task_created` and `task_status_changed`. The command became `completed`.
@@ -142,7 +142,7 @@ The Settings tab now links to a standalone This iPhone Form backed by the existi
 
 Explicit tab/navigation/cover and scene/platform events invalidate queued permission gestures before asynchronous work. The original Replica scene start/stop path remains unchanged. A separate resign-active latch prevents a stale scene callback from reopening eligibility. One coalesced local drain retains actual SQLite/OS callbacks; iOS termination supplies no guaranteed drain. See [the local-controls contract](../contracts/apple-local-device-controls.md) for identity, original save inspection, shared revision, visibility and validation limits.
 
-The two local source leaves are registered only in EverythingIOS. Source grammar and independent review do not establish supported SDK, device, permission-dialog, storage/replay or appearance behavior. Fresh integrated build/analyze and later device observations remain separate. The legacy direct permission shortcut and generic cursor-activity producer are removed; saved completion/attention choices do not yet connect to a real category event/dedup producer. Remote Host Settings and restricted chat are described below.
+The two local source leaves are registered only in VorraIOS. Source grammar and independent review do not establish supported SDK, device, permission-dialog, storage/replay or appearance behavior. Fresh integrated build/analyze and later device observations remain separate. The legacy direct permission shortcut and generic cursor-activity producer are removed; saved completion/attention choices do not yet connect to a real category event/dedup producer. Remote Host Settings and restricted chat are described below.
 
 ## Connected Host settings
 

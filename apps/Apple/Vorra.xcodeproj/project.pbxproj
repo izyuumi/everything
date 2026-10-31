@@ -286,7 +286,7 @@
         "AD5EAE1DA3A8E6119F90EB1B" = {
             "isa" = "PBXFileReference";
             "lastKnownFileType" = "sourcecode.swift";
-            "path" = "EverythingMacApp.swift";
+            "path" = "VorraMacApp.swift";
             "sourceTree" = "<group>";
         };
         "3DA6ECFC4D0376F5102DFE70" = {
@@ -584,7 +584,7 @@
             "isa" = "PBXFileReference";
             "explicitFileType" = "wrapper.application";
             "includeInIndex" = "0";
-            "path" = "Everything.app";
+            "path" = "Vorra.app";
             "sourceTree" = "BUILT_PRODUCTS_DIR";
         };
         "0A3E27B8CA818264D75C8D81" = {
@@ -692,9 +692,9 @@
                 "CODE_SIGN_STYLE" = "Automatic";
                 "ENABLE_HARDENED_RUNTIME" = "YES";
                 "ENABLE_APP_SANDBOX" = "NO";
-                "PRODUCT_BUNDLE_IDENTIFIER" = "to.yumi.everything.mac";
+                "PRODUCT_BUNDLE_IDENTIFIER" = "to.yumi.vorra.mac";
                 "DEVELOPMENT_TEAM" = "AN5KM8QGEF";
-                "PRODUCT_NAME" = "Everything";
+                "PRODUCT_NAME" = "Vorra";
                 "INFOPLIST_FILE" = "macOS/Info.plist";
                 "GENERATE_INFOPLIST_FILE" = "NO";
                 "SWIFT_EMIT_LOC_STRINGS" = "NO";
@@ -721,9 +721,9 @@
                 "CODE_SIGN_STYLE" = "Automatic";
                 "ENABLE_HARDENED_RUNTIME" = "YES";
                 "ENABLE_APP_SANDBOX" = "NO";
-                "PRODUCT_BUNDLE_IDENTIFIER" = "to.yumi.everything.mac";
+                "PRODUCT_BUNDLE_IDENTIFIER" = "to.yumi.vorra.mac";
                 "DEVELOPMENT_TEAM" = "AN5KM8QGEF";
-                "PRODUCT_NAME" = "Everything";
+                "PRODUCT_NAME" = "Vorra";
                 "INFOPLIST_FILE" = "macOS/Info.plist";
                 "GENERATE_INFOPLIST_FILE" = "NO";
                 "SWIFT_EMIT_LOC_STRINGS" = "NO";
@@ -759,8 +759,8 @@
             );
             "dependencies" = (
             );
-            "name" = "EverythingMac";
-            "productName" = "Everything";
+            "name" = "VorraMac";
+            "productName" = "Vorra";
             "productReference" = "F54CD7E7026DFD0AE0A9ADAB";
             "productType" = "com.apple.product-type.application";
         };
@@ -796,7 +796,7 @@
         "84D835BB9099B1B5407A8B2F" = {
             "isa" = "PBXFileReference";
             "lastKnownFileType" = "sourcecode.swift";
-            "path" = "EverythingIOSApp.swift";
+            "path" = "VorraIOSApp.swift";
             "sourceTree" = "<group>";
         };
         "5E261835521521EFF9A9B808" = {
@@ -1001,7 +1001,7 @@
             "isa" = "PBXFileReference";
             "explicitFileType" = "wrapper.application";
             "includeInIndex" = "0";
-            "path" = "Everything.app";
+            "path" = "Vorra.app";
             "sourceTree" = "BUILT_PRODUCTS_DIR";
         };
         "21912D85C83755776B86E6B9" = {
@@ -1145,10 +1145,10 @@
                 "TARGETED_DEVICE_FAMILY" = "1,2";
                 "CODE_SIGN_IDENTITY[sdk=iphonesimulator*]" = "-";
                 "CODE_SIGN_STYLE" = "Automatic";
-                "PRODUCT_BUNDLE_IDENTIFIER" = "to.yumi.everything.ios";
+                "PRODUCT_BUNDLE_IDENTIFIER" = "to.yumi.vorra.ios";
                 "DEVELOPMENT_TEAM" = "AN5KM8QGEF";
                 "ASSETCATALOG_COMPILER_APPICON_NAME" = "AppIcon";
-                "PRODUCT_NAME" = "Everything";
+                "PRODUCT_NAME" = "Vorra";
                 "INFOPLIST_FILE" = "iOS/Info.plist";
                 "GENERATE_INFOPLIST_FILE" = "NO";
                 "MARKETING_VERSION" = "0.1.0";
@@ -1176,10 +1176,10 @@
                 "TARGETED_DEVICE_FAMILY" = "1,2";
                 "CODE_SIGN_IDENTITY[sdk=iphonesimulator*]" = "-";
                 "CODE_SIGN_STYLE" = "Automatic";
-                "PRODUCT_BUNDLE_IDENTIFIER" = "to.yumi.everything.ios";
+                "PRODUCT_BUNDLE_IDENTIFIER" = "to.yumi.vorra.ios";
                 "DEVELOPMENT_TEAM" = "AN5KM8QGEF";
                 "ASSETCATALOG_COMPILER_APPICON_NAME" = "AppIcon";
-                "PRODUCT_NAME" = "Everything";
+                "PRODUCT_NAME" = "Vorra";
                 "INFOPLIST_FILE" = "iOS/Info.plist";
                 "GENERATE_INFOPLIST_FILE" = "NO";
                 "MARKETING_VERSION" = "0.1.0";
@@ -1216,8 +1216,8 @@
             );
             "dependencies" = (
             );
-            "name" = "EverythingIOS";
-            "productName" = "Everything";
+            "name" = "VorraIOS";
+            "productName" = "Vorra";
             "productReference" = "D874DC1707B398C8AE095DE4";
             "productType" = "com.apple.product-type.application";
         };

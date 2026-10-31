@@ -1,6 +1,6 @@
 # Local EmbeddingGemma 2 benchmark
 
-Issue [#12](https://github.com/izyuumi/everything/issues/12) includes the standalone `everything-embedding-bench` binary. It performs real local inference through the [EmbeddingGemma 2 ONNX backend](../architecture/embeddinggemma2.md), sharing one loaded model across the 128-, 256-, 512-, and 768-dimensional profiles. It does not download models, start Python, call a model service, create a vector index, or read user documents.
+Issue [#12](https://github.com/izyuumi/everything/issues/12) includes the standalone `vorra-embedding-bench` binary. It performs real local inference through the [EmbeddingGemma 2 ONNX backend](../architecture/embeddinggemma2.md), sharing one loaded model across the 128-, 256-, 512-, and 768-dimensional profiles. It does not download models, start Python, call a model service, create a vector index, or read user documents.
 
 The benchmark intentionally uses the direct native development API. It does not launch the production embedding helper or establish confinement. Its existing macOS workflow remains a genuine performance measurement; ordinary macOS Host embeddings are unavailable and retain FTS until a platform boundary is implemented and verified. See [the production boundary](../architecture/embeddinggemma2.md#production-embedding-boundary) for the separate Linux Host behavior.
 
@@ -11,8 +11,8 @@ Prepare the pinned model bundle and a trusted compatible ONNX Runtime shared lib
 Launch the benchmark with `ORT_DISABLE_TELEMETRY=1` set before process start. The backend rejects missing or other values before runtime access and retains API telemetry suppression. The earlier numerical/performance observations below did not establish network silence; [#72](https://github.com/izyuumi/everything/issues/72) tracks runtime telemetry and verification of the specific supported build. This environment control is not an OS sandbox for an arbitrary native library.
 
 ```sh
-cargo build --release --features local-embeddings --bin everything-embedding-bench
-ORT_DISABLE_TELEMETRY=1 ./target/release/everything-embedding-bench \
+cargo build --release --features local-embeddings --bin vorra-embedding-bench
+ORT_DISABLE_TELEMETRY=1 ./target/release/vorra-embedding-bench \
   --runtime-library /absolute/path/to/libonnxruntime.dylib \
   --model-dir /absolute/path/to/embeddinggemma-2-onnx \
   --threads 2 \
@@ -21,7 +21,7 @@ ORT_DISABLE_TELEMETRY=1 ./target/release/everything-embedding-bench \
   --deadline-seconds 300 > embedding-report.json
 ```
 
-Use the corresponding `.so` library on Linux. Run `everything-embedding-bench --help` for bounds and options. Threads are limited to 1–16, tokens to 8–8192 including backend special tokens, repetitions to 1–10, and warmup iterations to 0–3. The fixed corpus has eight short documents and four queries; each profile performs at most 120 measured inferences and six warmup inferences. All four profiles are always measured. There are no user-supplied text inputs or unbounded batches.
+Use the corresponding `.so` library on Linux. Run `vorra-embedding-bench --help` for bounds and options. Threads are limited to 1–16, tokens to 8–8192 including backend special tokens, repetitions to 1–10, and warmup iterations to 0–3. The fixed corpus has eight short documents and four queries; each profile performs at most 120 measured inferences and six warmup inferences. All four profiles are always measured. There are no user-supplied text inputs or unbounded batches.
 
 Defaults are two inference threads, 2048 tokens, three repetitions, one query/document warmup pair per profile, a 30-second per-inference deadline, a 120-second load deadline, and a 180-second overall deadline. The overall limit can be selected from 1–900 seconds; backend load and inference limits can each be selected from 1–300 seconds. Inputs over the configured token limit fail rather than being silently truncated.
 
@@ -49,7 +49,7 @@ Capture an independent Linux process measurement using the built executable, so 
 
 ```sh
 /usr/bin/time -v -o embedding-process.txt env ORT_DISABLE_TELEMETRY=1 \
-  ./target/release/everything-embedding-bench \
+  ./target/release/vorra-embedding-bench \
   --runtime-library /absolute/path/to/libonnxruntime.so \
   --model-dir /absolute/path/to/embeddinggemma-2-onnx \
   --deadline-seconds 300 > embedding-report.json
@@ -59,7 +59,7 @@ On macOS, collect native process memory with the platform command:
 
 ```sh
 /usr/bin/time -l env ORT_DISABLE_TELEMETRY=1 \
-  ./target/release/everything-embedding-bench \
+  ./target/release/vorra-embedding-bench \
   --runtime-library /absolute/path/to/libonnxruntime.dylib \
   --model-dir /absolute/path/to/embeddinggemma-2-onnx \
   --threads 2 --repetitions 3 --warmup-iterations 1 \

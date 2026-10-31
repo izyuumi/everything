@@ -8,16 +8,16 @@ use std::process::ExitCode;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use clap::Parser;
-use everything::memory::embedding::embeddinggemma2::{
-    EmbeddingGemma2, EmbeddingGemma2Options, EmbeddingRuntime, ONNX_MODEL_REVISION,
-    SOURCE_MODEL_REVISION, SUPPORTED_DIMENSIONS,
-};
-use everything::memory::embedding::{
-    Embedder, EmbeddingError, EmbeddingInput, EmbeddingPurpose, EmbeddingVector,
-};
 use serde::Serialize;
 use thiserror::Error;
 use tokio_util::sync::CancellationToken;
+use vorra::memory::embedding::embeddinggemma2::{
+    EmbeddingGemma2, EmbeddingGemma2Options, EmbeddingRuntime, ONNX_MODEL_REVISION,
+    SOURCE_MODEL_REVISION, SUPPORTED_DIMENSIONS,
+};
+use vorra::memory::embedding::{
+    Embedder, EmbeddingError, EmbeddingInput, EmbeddingPurpose, EmbeddingVector,
+};
 
 const BENCHMARK_ID: &str = "embeddinggemma2-public-retrieval-v1";
 

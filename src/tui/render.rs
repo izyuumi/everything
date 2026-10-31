@@ -233,7 +233,7 @@ fn banner(app: &App, width: usize) -> Vec<Line<'static>> {
         Span::styled("─╯", fg(BORDER)),
     ]));
     lines.push(Line::from(Span::styled(
-        "Welcome to Everything! Type your message or /help for commands.",
+        "Welcome to Vorra! Type your message or /help for commands.",
         fg(DIM),
     )));
     lines
@@ -411,7 +411,7 @@ fn draw_input(frame: &mut Frame, app: &App, area: Rect, layout: &super::input::L
         let placeholder = if app.turn.is_some() {
             "keep typing · messages queue until the reply finishes"
         } else {
-            "Message Everything…"
+            "Message Vorra…"
         };
         vec![Line::from(vec![
             Span::styled("❯ ", bold(ACCENT)),

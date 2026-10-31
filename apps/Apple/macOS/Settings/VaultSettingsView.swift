@@ -339,7 +339,7 @@ struct VaultSettingsView: View {
                     .disabled(!enabled || vault.busy || !opBinary.hasPrefix("/"))
                     disconnect("1password")
                 }
-                Text("Uses the official op CLI with 1Password app integration. The path is pinned as entered; 1Password asks for approval when Everything signs in.")
+                Text("Uses the official op CLI with 1Password app integration. The path is pinned as entered; 1Password asks for approval when Vorra signs in.")
                     .font(.caption).foregroundStyle(.secondary)
             }
             Section("Proton Pass") {
@@ -359,7 +359,7 @@ struct VaultSettingsView: View {
                 }
                 Text("Web login needs a terminal: run")
                     .font(.caption).foregroundStyle(.secondary)
-                Text("everything vault connect protonpass --web").font(.caption.monospaced()).textSelection(.enabled)
+                Text("vorra vault connect protonpass --web").font(.caption.monospaced()).textSelection(.enabled)
                 Text("The token is stored as a local vault item and sent to the Host only over the private owner pipe.")
                     .font(.caption).foregroundStyle(.secondary)
             }

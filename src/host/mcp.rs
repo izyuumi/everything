@@ -108,7 +108,7 @@ impl McpEnvironmentBinding {
     }
 
     pub fn credential_key(&self) -> Result<CredentialKey, CredentialError> {
-        CredentialKey::new("ai.everything.mcp.environment", &self.scope_key()?)
+        CredentialKey::new("to.yumi.vorra.mcp.environment", &self.scope_key()?)
     }
 }
 

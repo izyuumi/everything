@@ -1,6 +1,6 @@
 # 1Password setup
 
-Everything can use items from your own 1Password account through the official 1Password CLI (`op`) and the 1Password desktop app. Everything never holds a 1Password credential; 1Password asks you to approve access. Behaviour and limits are defined in the [vault contract](../contracts/vault.md#1password-provider).
+Vorra can use items from your own 1Password account through the official 1Password CLI (`op`) and the 1Password desktop app. Vorra never holds a 1Password credential; 1Password asks you to approve access. Behaviour and limits are defined in the [vault contract](../contracts/vault.md#1password-provider).
 
 **Status:** implemented in [#220](https://github.com/izyuumi/everything/issues/220) and exercised only against a fake `op`. Real desktop-app integration, Touch ID prompts and real `op` output have not been observed yet; see [implementation status](../status/implementation.md).
 
@@ -10,15 +10,15 @@ Everything can use items from your own 1Password account through the official 1P
 2. With the Host running, connect from a terminal whose `PATH` finds `op`:
 
    ```sh
-   everything vault connect onepassword
+   vorra vault connect onepassword
    ```
 
    The CLI prints the `op` path it pins. Pass `--binary /absolute/path/op` to pin another one, and `--account ACCOUNT_UUID` to skip the account choice. Approve the 1Password prompt that `op whoami` triggers.
-3. Check the connection with `everything vault status`. It shows `1password ready <account-uuid> via <path>`, `locked` after an `op` call reported that you are not signed in, or `unavailable` if the pinned binary is gone.
+3. Check the connection with `vorra vault status`. It shows `1password ready <account-uuid> via <path>`, `locked` after an `op` call reported that you are not signed in, or `unavailable` if the pinned binary is gone.
 
 The Host runs `op` with an empty environment except `HOME`, no stdin, a 10-second limit and the pinned absolute path, never through the model's `shell` tool. `vault_search` runs `op item list` and `vault_use` runs `op read` when a bound shell is about to start, so 1Password may prompt then.
 
-**Acceptance gate (open).** On the Mac mini, with the Host under launchd (no tty), record how often 1Password prompts (each call, or once per app-integration session of up to 10 minutes idle and 12 hours total) and whether the prompt names a stable `everything` process. If it prompts on every call, the planned fallback is one long-lived `op` child.
+**Acceptance gate (open).** On the Mac mini, with the Host under launchd (no tty), record how often 1Password prompts (each call, or once per app-integration session of up to 10 minutes idle and 12 hours total) and whether the prompt names a stable `vorra` process. If it prompts on every call, the planned fallback is one long-lived `op` child.
 
 ## Linux
 
@@ -28,7 +28,7 @@ The Host runs `op` with an empty environment except `HOME`, no stdin, a 10-secon
 ## Disconnect
 
 ```sh
-everything vault disconnect onepassword
+vorra vault disconnect onepassword
 ```
 
 This runs `op signout` for the pinned account and removes the connection from Host settings. If sign-out fails, the Host logs the sanitized reason and removes the connection anyway; an app-integration session also ends when 1Password locks.

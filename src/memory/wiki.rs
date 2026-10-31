@@ -377,7 +377,7 @@ impl Wiki {
         let filename = Path::new(path)
             .file_name()
             .ok_or_else(|| WikiError::InvalidPath(path.to_owned()))?;
-        let temporary_name = format!(".everything-{}.tmp", Uuid::new_v4());
+        let temporary_name = format!(".vorra-{}.tmp", Uuid::new_v4());
         let write_result = (|| {
             let mut options = OpenOptions::new();
             options.write(true).create_new(true);

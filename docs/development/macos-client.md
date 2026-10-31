@@ -3,14 +3,14 @@
 The application requires macOS 14 or newer and Xcode 16 or newer for Swift 6. The Rust headless host and its CLI must be built and installed separately. The app contains no bundled runtime and does not automatically install or start one.
 
 ```sh
-cargo build --release --bin everything --locked
-xcodebuild -project apps/Apple/Everything.xcodeproj -scheme EverythingMac -configuration Debug -destination 'platform=macOS' CODE_SIGNING_ALLOWED=NO build analyze
-xcodebuild -project apps/Apple/Everything.xcodeproj -scheme EverythingMac -configuration Release -destination 'platform=macOS' CODE_SIGNING_ALLOWED=NO build
+cargo build --release --bin vorra --locked
+xcodebuild -project apps/Apple/Vorra.xcodeproj -scheme VorraMac -configuration Debug -destination 'platform=macOS' CODE_SIGNING_ALLOWED=NO build analyze
+xcodebuild -project apps/Apple/Vorra.xcodeproj -scheme VorraMac -configuration Release -destination 'platform=macOS' CODE_SIGNING_ALLOWED=NO build
 ```
 
 The project deliberately uses no Swift package manifest, third-party app framework or test target. Development signing is disabled by those commands; distribution signing is not configured.
 
-Open Everything, choose Settings, select the physical trusted Rust CLI executable and the existing private state directory, then Connect. The CLI's default state directory is `~/.everything`; the owner socket's complete physical path must fit 100 UTF-8 bytes. The app stores only these connection preferences in UserDefaults. Revisioned This Mac preferences use their own SQLite store in `~/Library/Application Support/Everything/DevicePreferences`. It does not store credentials or open the Host database.
+Open Vorra, choose Settings, select the physical trusted Rust CLI executable and the existing private state directory, then Connect. The CLI's default state directory is `~/.vorra`; the owner socket's complete physical path must fit 100 UTF-8 bytes. The app stores only these connection preferences in UserDefaults. Revisioned This Mac preferences use their own SQLite store in `~/Library/Application Support/Vorra/DevicePreferences`. It does not store credentials or open the Host database.
 
 The menu shows host connection/draining state, conversations with a readable transcript, recent tasks and pending approvals across all conversations. Inspect full scope and arguments before allowing an operation. Settings edit future-task defaults with revision comparison. Existing tasks retain their captured authority. Models/Memory/Tool Selection, secure key entry and Devices now have explicit native controls. Provider retry, cleanup attestation and advanced owner operations retain their separate CLI authority; the optional assistant cannot grant them.
 
@@ -36,7 +36,7 @@ The existing CLI can inspect/reconcile without an LLM. These are setup instructi
 umask 077
 EV_SETTINGS_REQUESTS="$(mktemp -d)"
 printf '%s\n' '{"kind":"query","query":{"kind":"settings"}}' > "$EV_SETTINGS_REQUESTS/settings.json"
-everything --state-dir /absolute/private/state owner --request-file "$EV_SETTINGS_REQUESTS/settings.json"
+vorra --state-dir /absolute/private/state owner --request-file "$EV_SETTINGS_REQUESTS/settings.json"
 ```
 
 For original outcome inspection, put this typed query in another private request file and replace the placeholder with the actual retained UUID:
@@ -61,7 +61,7 @@ Settings → General has an optional "Use your ChatGPT plan for OpenAI" card. **
 
 ## Vault
 
-Settings → Vault ([#222](https://github.com/izyuumi/everything/issues/222)) lists local vault items as metadata (label, kind, environment name, service, username, sites, field names and reference) and incomplete rows, with Remove behind a confirmation. Add item opens a sheet for an API secret or a login; label, environment name, service, sites and username are metadata the agent can see, and the masked value goes to the Host only over the private `owner --sensitive-stdin` pipe. The 1Password card takes the pinned `op` path; Find accounts lists the accounts `op` reports, then Connect with the chosen account UUID triggers 1Password's own approval. The Proton Pass card takes the pinned `pass-cli` path and either a personal access token (masked, sent over the same pipe) or, after `everything vault connect protonpass --web` in a terminal, Check web login. Each card shows the Host's status (ready, locked, disconnected or unavailable) and has Disconnect. See the [vault contract](../contracts/vault.md#owner-ipc), [1Password setup](onepassword.md) and [Proton Pass setup](protonpass.md).
+Settings → Vault ([#222](https://github.com/izyuumi/everything/issues/222)) lists local vault items as metadata (label, kind, environment name, service, username, sites, field names and reference) and incomplete rows, with Remove behind a confirmation. Add item opens a sheet for an API secret or a login; label, environment name, service, sites and username are metadata the agent can see, and the masked value goes to the Host only over the private `owner --sensitive-stdin` pipe. The 1Password card takes the pinned `op` path; Find accounts lists the accounts `op` reports, then Connect with the chosen account UUID triggers 1Password's own approval. The Proton Pass card takes the pinned `pass-cli` path and either a personal access token (masked, sent over the same pipe) or, after `vorra vault connect protonpass --web` in a terminal, Check web login. Each card shows the Host's status (ready, locked, disconnected or unavailable) and has Disconnect. See the [vault contract](../contracts/vault.md#owner-ipc), [1Password setup](onepassword.md) and [Proton Pass setup](protonpass.md).
 
 Approvals for `vault_use` show the item label, provider, kind, field, destination, sites and reason, never a value, and offer Deny, Allow once and Allow for this task (a one-hour lease for that task, item and destination; not offered for cards).
 

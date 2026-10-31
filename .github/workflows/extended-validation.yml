@@ -41,8 +41,8 @@ jobs:
         if: ${{ matrix.os == 'ubuntu-latest' && inputs.retain_runtime_artifact }}
         uses: actions/upload-artifact@v4
         with:
-          name: everything-linux-default-${{ github.sha }}
-          path: target/release/everything
+          name: vorra-linux-default-${{ github.sha }}
+          path: target/release/vorra
           retention-days: 3
           if-no-files-found: error
           compression-level: 6
@@ -53,10 +53,10 @@ jobs:
         run: |
           set -euo pipefail
           umask 077
-          cli_startup_root="$(mktemp -d "${RUNNER_TEMP}/everything-cli-startup.XXXXXX")"
+          cli_startup_root="$(mktemp -d "${RUNNER_TEMP}/vorra-cli-startup.XXXXXX")"
           mkdir -p "${cli_startup_root}/home" "${cli_startup_root}/tmp"
-          HOME="${cli_startup_root}/home" TMPDIR="${cli_startup_root}/tmp" target/release/everything --help
-          HOME="${cli_startup_root}/home" TMPDIR="${cli_startup_root}/tmp" target/release/everything --version
+          HOME="${cli_startup_root}/home" TMPDIR="${cli_startup_root}/tmp" target/release/vorra --help
+          HOME="${cli_startup_root}/home" TMPDIR="${cli_startup_root}/tmp" target/release/vorra --version
       - run: cargo build --workspace --release --all-features --locked
   msrv:
     name: Rust 1.88 MSRV

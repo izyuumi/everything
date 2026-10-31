@@ -45,12 +45,12 @@ def write_checkpoint(path, value):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Refresh the authoritative Everything issue backlog")
+    parser = argparse.ArgumentParser(description="Refresh the authoritative Vorra issue backlog")
     parser.add_argument("--coordination", type=Path)
     parser.add_argument("--acknowledge", type=int, nargs="*", default=[])
     arguments = parser.parse_args()
     common = Path(command(["git", "rev-parse", "--path-format=absolute", "--git-common-dir"]).strip())
-    directory = common / "everything-orchestration"
+    directory = common / "vorra-orchestration"
     directory.mkdir(mode=0o700, parents=True, exist_ok=True)
     with (directory / "sync.lock").open("a") as lock:
         fcntl.flock(lock.fileno(), fcntl.LOCK_EX)

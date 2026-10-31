@@ -88,7 +88,7 @@ struct SettingsView: View {
     private var hostSettings: some View {
         Form {
             Section("Owner connection: Connect applies edits") {
-                TextField("Everything executable", text: $model.executable)
+                TextField("Vorra executable", text: $model.executable)
                 Button("Choose executable…") { choose(directory: false) }
                 TextField("Private state directory", text: $model.stateDirectory)
                 Button("Choose state directory…") { choose(directory: true) }
@@ -154,7 +154,7 @@ struct SettingsView: View {
                     Button("Enable at login") { Task { await model.manageService("enable") } }
                     Button("Disable at login") { Task { await model.manageService("disable") } }
                 }
-                Text("These explicit controls manage com.everything.host in your launchd login domain. They do not control a separately started foreground host.")
+                Text("These explicit controls manage to.yumi.vorra.host in your launchd login domain. They do not control a separately started foreground host.")
                     .font(.caption).foregroundStyle(.secondary)
             }.disabled(model.acting || model.closing || model.connection.executable.isEmpty || model.connectionEdited || model.pendingAction != nil)
             if let message = model.message { Text(message).font(.caption).textSelection(.enabled) }
