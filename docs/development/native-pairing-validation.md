@@ -1,6 +1,6 @@
 # Native pairing validation
 
-This dated record covers the actual disposable Linux Host/Replica walkthrough and two separate immutable metadata readers completed on 2026-10-16. It verifies the exercised native backend paths from merged PR #138. Native Apple ceremony controls and full [#112](https://github.com/izyuumi/everything/issues/112) acceptance remain open.
+The [QR pairing walkthrough](#qr-pairing-walkthrough-2026-11-01) at the end covers `vorra pair`. This first dated record covers the actual disposable Linux Host/Replica walkthrough and two separate immutable metadata readers completed on 2026-10-16. It verifies the exercised native backend paths from merged PR #138. Native Apple ceremony controls and full [#112](https://github.com/izyuumi/everything/issues/112) acceptance remain open.
 
 ## Source and artifacts
 
@@ -49,3 +49,25 @@ The producer used disposable private environment/state and bounded process and s
 | Independent review | `c1091d6c000957a0ba95fe39003ac2ab1c8fe7e45d7a4e079af299a40305b72c` |
 
 These receipts identify retained external evidence; private runtime state and scripts are not repository artifacts. See the [device contract](../contracts/device-settings.md), [native routes](../contracts/native-settings-routes.md) and [earlier Settings observations](settings-validation.md) for the implemented boundaries and separately dated evidence.
+
+## QR pairing walkthrough, 2026-11-01
+
+This dated record covers the [`vorra pair` flow](../contracts/device-pairing.md) ([#270](https://github.com/izyuumi/everything/issues/270), [#271](https://github.com/izyuumi/everything/issues/271)) on macOS with a debug build of branch `feat/pairing-ux`. Everything used disposable state: a temporary `HOME` and `VORRA_STATE_DIR`, a throwaway host (`vorra serve`) and its own relay (`vorra relay serve --bind 127.0.0.1:18797 --origin ws://127.0.0.1:18797`) with a temporary database, and a throwaway iPhone 18 Pro simulator (iOS 27.0) running the VorraIOS Debug build, deleted afterwards. The owner's live host, relay, launchd service and tunnel were not touched.
+
+The host was enrolled with `vorra relay enroll --keys HOST.json --pairing-host`. Before that, its first relay authentication failed and the relay pump stopped until the host restarted, which is existing behavior for an unenrolled host. `vorra pair` ran in a pseudo-terminal with its output captured; answers were typed into that terminal.
+
+| Path | Host side | Phone side |
+| --- | --- | --- |
+| QR | An 81-column half-block QR and link were printed. The captured QR, rendered to PNG and decoded with `zbarimg`, equals the printed `vorra://pair#…` link (343 characters). | — |
+| Approve | `<device> wants to pair  code 1249 7932  device 81a0d448-4f654215`, `y`, `paired: vorra-pair-throwaway`, exit 0. The host pinned the device with all-conversation, submit and resolve access; the relay listed it with `sponsor` = the host. | `xcrun simctl openurl` with the scheme link, system "Open in Vorra" confirmed, then "Approve on your Mac" with `1249 7932`, then "Paired with Throwaway Mac". Settings showed the relay origin and Connected through the sponsored enrollment. |
+| Already paired | — | Opening a fresh link on the paired phone: "This iPhone is already paired with Throwaway Mac." |
+| Refresh | With `--lifetime-seconds 30`, five distinct QR/link pairs were printed with "That code expired. Here is a new one." | — |
+| `https://vorra.yumi.to/pair#…` | — | `simctl openurl` opened Safari (domain not live, so no universal link). Pasting the https form into the app's Paste button reached "Approve on your Mac" and the host prompt. |
+| Reject | `n`, `rejected: vorra-pair-throwaway`, `vorra: pairing rejected`, exit 1. | "Pairing was rejected on the Mac." |
+| Timeout | No answer within the 20-second code: the prompt timed out, a new QR was printed and the old code was withdrawn. | "This pairing code has expired or was already used." |
+| Ctrl+C after a timed-out prompt | SIGINT: `vorra: pairing stopped; the code shown is no longer valid`, process exited. The first attempt hung on a blocked stdin read; stdin now uses a detached thread. | — |
+| Relay down | — | "Your Mac could not be reached through its relay." |
+
+A version 1 relay database written by the installed `vorra relay enroll` was migrated to version 2 by the new `enroll --pairing-host` (`user_version` 2, `pairing_host` 1); the old binary then refused it as unsupported.
+
+Not exercised: a real iPhone, the stock Camera app scanning the terminal QR, the universal link (needs the live domain and association file), the in-app camera scanner (the simulator has no camera), two phones racing on one code, `pairing_in_use` and `pairing_unavailable` replies, an older relay without pairing support, TLS relays and cloudflared, the TUI onboarding pairing step, host restart during a pending request, and the Mac app (which still uses its older ceremony, [#272](https://github.com/izyuumi/everything/issues/272)). Screenshots and terminal captures stay outside the repository because the captures contain throwaway invitations. No tests were added; deferred coverage remains [#32](https://github.com/izyuumi/everything/issues/32).

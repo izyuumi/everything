@@ -1156,6 +1156,7 @@
                 "ASSETCATALOG_COMPILER_APPICON_NAME" = "AppIcon";
                 "PRODUCT_NAME" = "Vorra";
                 "INFOPLIST_FILE" = "iOS/Info.plist";
+                "CODE_SIGN_ENTITLEMENTS" = "iOS/VorraIOS.entitlements";
                 "GENERATE_INFOPLIST_FILE" = "NO";
                 "SWIFT_EMIT_LOC_STRINGS" = "NO";
                 "LD_RUNPATH_SEARCH_PATHS" = (
@@ -1185,6 +1186,7 @@
                 "ASSETCATALOG_COMPILER_APPICON_NAME" = "AppIcon";
                 "PRODUCT_NAME" = "Vorra";
                 "INFOPLIST_FILE" = "iOS/Info.plist";
+                "CODE_SIGN_ENTITLEMENTS" = "iOS/VorraIOS.entitlements";
                 "GENERATE_INFOPLIST_FILE" = "NO";
                 "SWIFT_EMIT_LOC_STRINGS" = "NO";
                 "LD_RUNPATH_SEARCH_PATHS" = (

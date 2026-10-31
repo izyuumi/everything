@@ -92,7 +92,11 @@ vorra vault disconnect protonpass
 
 ## Optional relay
 
-`vorra relay on --origin wss://relay.example.com` and `vorra relay off` set or clear this Host's relay origin, offline through the state lease or through a running Host's owner settings (which then needs a restart). `vorra relay serve|enroll|revoke|devices` run or administer the blind relay server on `--database PATH`, defaulting to `relay.sqlite3` in the state directory. `vorra relay status` prints JSON for both the Host connection and that server database. See [relay](../architecture/relay.md).
+`vorra relay on --origin wss://relay.example.com` and `vorra relay off` set or clear this Host's relay origin, offline through the state lease or through a running Host's owner settings (which then needs a restart). `vorra relay serve|enroll|revoke|devices` run or administer the blind relay server (`enroll --pairing-host` lets a host pair phones through it) on `--database PATH`, defaulting to `relay.sqlite3` in the state directory. `vorra relay status` prints JSON for both the Host connection and that server database. See [relay](../architecture/relay.md).
+
+## Pair a phone
+
+`vorra pair` pairs an iPhone with the running host through the host's relay. It prints a QR code (Unicode half blocks) and the same `vorra://pair#…` link, refreshes both shortly before each code expires, and waits. When the phone scans the code it prints `<device> wants to pair  code #### ####  device <short fingerprint>`, says what access approval grants, and asks `Approve? [y/N]`. `y` pins the phone (all conversations, sending messages, answering permission prompts), prints `paired: <device>` and exits 0; anything else rejects it and exits 1. Ctrl+C withdraws the code. `--lifetime-seconds N` (1–600, default 300) sets how long each code lasts; `--name` sets the host name the phone shows (default: this computer's name). The link contains a one-time secret: it is printed to the terminal only and never written to files or logs. Needs a running host with a relay origin, and the relay must allow this host to pair (`vorra relay enroll --keys HOST.json --pairing-host`). See the [pairing contract](../contracts/device-pairing.md).
 
 ## Update
 

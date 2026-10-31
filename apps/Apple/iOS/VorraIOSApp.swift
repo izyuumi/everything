@@ -26,6 +26,7 @@ struct VorraIOSApp: App {
                     model.localApplicationDidBecomeActive()
                 }
                 .task(id: scenePhase) { await model.scene(active: scenePhase == .active) }
+                .onOpenURL { model.openPairingLink($0) }
         }
     }
 

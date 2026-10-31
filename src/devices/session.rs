@@ -324,6 +324,23 @@ impl DeviceEndpoint {
                         }
                     }
                     RelayServerMessage::Pong { .. } => {}
+                    RelayServerMessage::PairingRequest {
+                        request,
+                        device_name,
+                        name_signature,
+                        ..
+                    } => {
+                        let now = UnixMillis::now()?;
+                        self.blocking(move |endpoint| {
+                            endpoint.receive_pairing_request(
+                                request,
+                                device_name,
+                                name_signature,
+                                now,
+                            )
+                        })
+                        .await?;
+                    }
                     _ => return Err(RemoteError::Protocol.into()),
                 },
                 #[cfg(unix)]
@@ -364,6 +381,9 @@ impl DeviceEndpoint {
                     })
                     .await?;
                 heartbeat = tokio::time::Instant::now();
+            }
+            for reply in self.take_pairing_replies()? {
+                connection.send(&reply).await?;
             }
             #[cfg(unix)]
             private

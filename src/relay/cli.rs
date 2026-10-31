@@ -61,6 +61,11 @@ pub enum RelayCommand {
         database: DatabaseArgument,
         #[arg(long, help = "Local JSON file containing public device keys only")]
         keys: PathBuf,
+        #[arg(
+            long,
+            help = "Let this host pair new devices through the relay, which then enrolls each device the host approves"
+        )]
+        pairing_host: bool,
     },
     #[command(about = "Revoke a device on the relay server and drop its queued traffic")]
     Revoke {
@@ -154,7 +159,11 @@ pub async fn run(
             })
             .await?;
         }
-        RelayCommand::Enroll { database, keys } => {
+        RelayCommand::Enroll {
+            database,
+            keys,
+            pairing_host,
+        } => {
             let keys = tokio::task::spawn_blocking(move || read_public_keys(keys))
                 .await
                 .map_err(|error| RelayError::Configuration(error.to_string()))??;
@@ -169,6 +178,10 @@ pub async fn run(
                         "already enrolled with the same keys"
                     }
                 );
+                if pairing_host {
+                    database.set_pairing_host(device_id).await?;
+                    println!("{device_id}: may pair new devices through this relay");
+                }
                 Ok(())
             })
             .await?;

@@ -41,7 +41,7 @@ eventsource-stream = "0.2"
 async-stream = "0.3"
 futures-util = { version = "0.3", features = ["sink"] }
 bytes = "1"
-rustix = { version = "1", features = ["fs", "process"] }
+rustix = { version = "1", features = ["fs", "process", "system"] }
 fs2 = "0.4"
 plist = "1.8"
 tracing = "0.1"
