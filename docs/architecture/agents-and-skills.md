@@ -97,12 +97,12 @@ Rules:
 
 - `id` is a random UUID and never changes. Everything binds to the id. `name` is the handle used in the CLI and in `message_agent`; it can be renamed.
 - `name` matches `^[a-z0-9]+(-[a-z0-9]+)*$`, 1–32 bytes, unique case-insensitively. `description` is 1–1024 bytes and is what other agents see.
-- `persona` is the agent's system instructions, at most 32 KiB. `None` means the Host default instructions.
+- `persona` is the agent's system instructions. `None` means the Host default instructions. The rendered instructions (persona, then the `Agent traits:` block) become `ConversationConfig.instructions`, so save validates the rendered text against the existing 1–32768-byte limit (`MAX_INSTRUCTIONS_BYTES`, `src/agent.rs:45,186`), not the persona alone.
 - `model: None` means the Host's `default_conversation`, or the explicit `--provider/--model` flags. Credentials stay where they are: `HostProviderFactory` resolves the copied `ConversationConfig` exactly as today. An agent stores no credential reference.
 - Characteristics are a small typed set plus free-form traits. Typed: `model`, `temperature`, `max_output_tokens`. Free-form `traits` are at most 16 entries; keys match the name grammar, values are at most 256 bytes. They render as a fixed `Agent traits:` list after the persona, so "tone: terse" or "language: Japanese" work without schema changes. Traits carry no authority.
 - `tools` is a ceiling, never a grant. `AgentTools::Off` is the default for new agents. `ToolRef::McpServer(id)` expands to every tool that MCP server registered, so a server's catalog can change without editing the agent. Unknown tool names are kept and reported by `vorra agents show` as unavailable; they grant nothing.
 - Runtime controls (`spawn_agent`, `send_agent`, `agent_status`, `cancel_agent`, `wait_agents`, `message_agent`) are tools too. An agent must list them, or use `ToolAllow::All`, to use them.
-- `workspace` is an absolute existing directory. `None` means the Host workspace setting. An explicit `--workspace` on a turn still wins; the owner is trusted.
+- `workspace` is an absolute existing directory. `None` means the Host workspace setting. It applies only to turns the owner starts directly with this agent; an explicit `--workspace` on such a turn still wins. A delegated run never uses it ([messaging](#agent-to-agent-messaging)).
 - `memory`: `Shared` is today's global wiki retrieval; `Off` skips retrieval for this agent's tasks. Per-agent wiki subtrees are a later question.
 - `messaging` lists which agents this agent may message. Default `Closed`.
 
@@ -114,7 +114,7 @@ For each turn the Host computes the policy as today from `RequestedRunOptions` o
 tools_enabled = turn.tools_enabled && agent.tools != Off
 mode          = min(turn.mode, agent.max_mode)
 allowed_tools = expand(agent.allow, registry) ∩ registry names
-workspace     = turn.workspace or agent.workspace or settings.workspace_root
+workspace     = turn.workspace or agent.workspace or settings.workspace_root   (owner-started turns only)
 ```
 
 The result fills the existing `ExecutionPolicy.allowed_tools` and `mode`. The Authorizer and Broker enforce it unchanged. An agent can never exceed the turn's mode or reach a tool the turn does not have, and FullHost tools still ask for exact approval. With the defaults (tools off in settings, `Off` on new agents) a chat has no tools, as today.
@@ -127,9 +127,9 @@ One file, `<state>/agents-v1.json`, owned by a new `host::agents::AgentRepositor
 {
   "schema": 1,
   "revision": 4,
-  "default_agent": "6f1c…",
+  "default_agent": "00000000-0000-0000-0000-000000000001",
   "agents": [
-    { "id": "6f1c…", "name": "default", "revision": 1,
+    { "id": "00000000-0000-0000-0000-000000000001", "name": "default", "revision": 1,
       "tools": { "on": { "max_mode": "full_host", "allow": "all" } },
       "memory": "shared", "skills": "none", "messaging": "closed" }
   ]
@@ -144,17 +144,19 @@ Binding:
 - A new conversation records its agent id. Its `ConversationConfig` is filled from the agent at creation (model, endpoint, persona plus traits as `instructions`, temperature, output tokens). Editing the agent later does not change existing conversations, matching today's immutability. `vorra agents show` lists how many conversations use an older agent revision.
 - Tools, mode, workspace, memory and skills are applied per turn. They take effect on the next turn after an edit.
 - `ExecutionPolicy` gains `agent: Option<CapturedAgent { id, revision }>`. Like the rest of the policy it is captured at admission and replays unchanged. A deleted agent never widens a captured policy.
-- `ScheduledTarget` gains `agent: Option<AgentId>` with a serde default. Jobs keep their zero-tool defaults; the agent narrows them further, never widens them. Runtime controls stay stripped for jobs by `capture_policy`.
+- `ScheduledTarget` gains `agent: Option<AgentId>`.
+
+**Serialization rule for captured structs.** Some captured structs are hashed in their serialized form. The terminal evidence digest, for example, hashes `ConversationConfig` and `ExecutionPolicy` through `serde_json` (`src/scheduler/evidence.rs:219-236`). Writing a new field as `null` would change every stored digest. Every new field in `ExecutionPolicy`, `ConversationConfig`, `ScheduledTarget`, `ScheduleDefinition`, the task definition or any other captured or hashed struct therefore uses `#[serde(default, skip_serializing_if = "Option::is_none")]`, or the matching `skip_serializing_if` for an empty collection. A record without the field then serializes exactly as before. The agent id of a conversation lives in the new column, not in `ConversationConfig`. Jobs keep their zero-tool defaults; the agent narrows them further, never widens them. Runtime controls stay stripped for jobs by `capture_policy`.
 
 ## Default agent
 
 The migration is lazy and idempotent:
 
-1. When `<state>/agents-v1.json` is absent, the repository returns a synthesized default: id from a fresh UUID, name `default`, `persona: None`, `model: None`, `tools: On { max_mode: FullHost, allow: All }`, `workspace: None`, `memory: Shared`, `skills: None`, `messaging: Closed`.
-2. The first write (any `vorra agents` mutation) persists that default with its id. Until then nothing is written, so reading never changes the state directory.
+1. When `<state>/agents-v1.json` is absent, the repository returns a synthesized default with the fixed id `DEFAULT_AGENT_ID = 00000000-0000-0000-0000-000000000001`. Every read before the first save returns that same id, so owner IPC, captured policies and audit rows that name it stay valid after the save. No other agent may use this id. The synthesized default also has name `default`, `persona: None`, `model: None`, `tools: On { max_mode: FullHost, allow: All }`, `workspace: None`, `memory: Shared`, `skills: None`, `messaging: Closed`.
+2. The first write (any `vorra agents` mutation) persists that default with the same fixed id. Until then nothing is written, so reading never changes the state directory.
 3. Existing conversations, tasks and jobs keep `agent_id = NULL`, which always resolves to the current default agent. Nothing is rewritten.
 
-The default agent's settings make it a no-op narrowing: the mode ceiling is the highest owner mode and the allowlist is everything, so the effective policy equals today's settings and turn flags. Its model and persona defer to Host settings, so the existing default conversation, `/model`, `/instructions` and `--instructions` behave as before. Skills start as `None` so no prompt changes until the owner opts in. `vorra agents default NAME` points the default at another agent; `NULL` rows then resolve to that agent. Removing the current default agent is refused.
+The default agent's settings make it a no-op narrowing: the mode ceiling is the highest owner mode and the allowlist is everything, so the effective policy equals today's settings and turn flags. Its model and persona defer to Host settings, so the existing default conversation, `/model`, `/instructions` and `--instructions` behave as before. Skills start as `None` so no prompt changes until the owner opts in. `vorra agents default NAME` points the default at another agent; `NULL` rows then resolve to that agent. `NULL` always means "the current default", while `DEFAULT_AGENT_ID` always names the agent created by the migration, even after it is renamed. Removing the current default agent is refused.
 
 ## CRUD
 
@@ -221,8 +223,14 @@ Result: `{ "task_id": "…", "conversation_id": "…", "status": "completed", "r
 
 Execution:
 
-- The target runs as a child task in a new conversation created from the **target's** agent definition: its model, persona, tools, workspace, memory and skills.
-- Its authority is built by a new host-only constructor, `ExecutionAuthority::delegate(root, conversation_id, task_id, workspace, mode, allowed_tools)`. It starts from the root turn's authority (the owner's turn), not the caller's. Mode is `min(root.mode, target.max_mode)` and the allowlist is the target's. The caller's tools never transfer.
+- The target runs as a child task in a new conversation created from the **target's** agent definition: its model, persona, tools, memory and skills. Not its `workspace`.
+- **Workspace.** A delegated target runs in one of two places. The first is the root turn's workspace itself. The second is an isolated strict descendant of it, prepared by the existing `scheduler::workspace::prepare` path (`src/scheduler/workspace.rs:76`), exactly as for subagents. The target's own `workspace` setting is ignored for delegated runs. Delegation therefore never reaches a directory the owner's turn could not reach, and in TrustedWorkspace no approval-free write lands outside the root workspace.
+- **Authority.** A new host-only constructor builds it from the **root** turn's authority, the owner's turn, never the caller's: `ExecutionAuthority::delegate(root, conversation_id, task_id, workspace, mode, allowed_tools)`. It keeps every existing child check:
+  - **Mode.** It narrows relative to the root, as `child_in_conversation` does: the result is `min(root.mode, target.max_mode)`, and a higher mode is rejected (`src/permissions.rs:151`).
+  - **IDs.** The conversation and task IDs must be distinct from the root's.
+  - **Workspace.** It is equal to the root workspace, or it goes through `child_in_workspace`'s canonicalization and strict-physical-descendant rule (`src/permissions.rs:181-210`). Symlinks resolving outside the root are rejected.
+  - **Tools.** The allowlist is the target's expanded tool set, applied through `restrict_tools`. If the root turn already carries an allowlist, the result is the intersection, never wider. `permits_tool` (`src/permissions.rs:251,486`) then checks every call against it.
+  - **Not copied.** The caller's tools, grants and leases never transfer.
 - So a narrow agent can ask a broader agent to act. That is the point, and the owner controls it: the caller's `messaging` must name the target. FullHost tools still need exact owner approval, and approval prompts name the agent.
 - The text is the target's task instruction. The reply returns to the caller as a tool result, marked as data from agent `NAME`, not instructions.
 
@@ -259,7 +267,7 @@ Facts from `skills` 1.7.4 (source at gitHead `a80e4c9`, probed in a temporary `H
   ```
 
   Optional fields `ref`, `pluginName`, `sourceBaseUrl`, `wellKnownDigest`; top-level `dismissed` and `lastSelectedAgents` (source). A version below 3 or a parse error reads as empty and is overwritten on the next CLI write (source).
-- The key is the frontmatter `name`, which can differ from the repository folder: `vercel-composition-patterns` came from `skills/composition-patterns` (probed).
+- The lock key is the raw frontmatter `name`, which can differ from the repository folder: `vercel-composition-patterns` came from `skills/composition-patterns` (probed). The installed directory is `sanitizeName(name)` (`src/installer.ts:66-80`), so `My_Skill.v2` is keyed `My_Skill.v2` and installed as `my_skill.v2`; `ce:review` is installed as `ce-review` (source). `remove` matches requested names, folder names and lock keys all through `sanitizeName`, and deletes the exact lock key it matched (`resolveSkillsToRemove`, `src/remove.ts:39-64`) (source).
 - `skillFolderHash` is the git tree SHA of the skill folder; it equalled `git rev-parse HEAD:skills/composition-patterns` (probed). `update` compares it with the upstream tree, via the GitHub Trees API or a clone (source). An entry whose folder no longer exists upstream is reported as "deleted upstream" and kept (probed).
 - `list -g` scans directories and uses the lock only for labels. A directory written by another tool with a hand-written lock entry is listed with that source; a directory without a lock entry is listed as local (probed / source).
 - `add -g -a claude-code` alone wrote real directories into `~/.claude/skills`, not symlinks, with the lock still in `~/.agents` (probed). For "universal" agents such as `codex` the global install lands in `~/.agents/skills` without links (source).
@@ -271,9 +279,11 @@ Facts from `skills` 1.7.4 (source at gitHead `a80e4c9`, probed in a temporary `H
 
 ```rust
 pub struct SkillName(String);
+pub struct SkillDirName(String);
 
 pub struct SkillRecord {
     pub name: SkillName,
+    pub dir_name: SkillDirName,
     pub description: String,
     pub root: SkillRoot,
     pub dir: PathBuf,
@@ -296,9 +306,15 @@ Roots, in precedence order (first name wins, later duplicates are listed as shad
 
 `HOME` is the Host process's home. Discovery is a bounded synchronous scan on a blocking worker: at most 512 skill directories per root, `SKILL.md` a regular file up to 256 KiB, frontmatter up to 16 KiB. It runs once per turn when the agent has skills assigned; there is no watcher, so a skill installed by `npx` appears on the next turn.
 
-Validation follows the spec. `name` is 1–64 bytes matching `^[a-z0-9]+(-[a-z0-9]+)*$`; `description` 1–1024 bytes; `compatibility` up to 500 bytes; `metadata` string-to-string. A name that does not match its directory, or other spec violations, are kept as `issues`: the skill is listed but not offered to agents. The `npx` CLI is looser than the spec, so this matters in practice.
+Names come in two forms, mirroring `npx skills`:
 
-Frontmatter needs a YAML parser. The repository has none; unit 5 adds one maintained YAML crate (coordinator decision, see [open questions](#decisions-and-open-questions)), parses only after the 16-KiB bound, and rejects anchors and aliases.
+- **`SkillName`** is the raw frontmatter `name`, used as the lock key, in agent assignments and in the catalog. It is validated only for safety: non-empty, at most 64 bytes, no `/`, `\` or NUL, not `.` or `..`, no leading dot. Failing this is a rejection: the skill is listed with the issue and never offered.
+- **`SkillDirName`** is the directory name, `sanitize(name)`, an exact port of the CLI's `sanitizeName`. In order: Unicode lowercase (`str::to_lowercase`, matching JavaScript `toLowerCase`); replace each run of characters outside `[a-z0-9._]` with one `-`; strip leading and trailing runs of `.` and `-`; truncate to 255 bytes (the string is ASCII by then); use `unnamed-skill` if empty. Vorra writes only to `~/.agents/skills/<SkillDirName>`.
+- **Lookup.** CLI arguments and assignments match a skill when `sanitize(argument)` equals `sanitize` of its lock key or its folder name. The lock key wins, as in `npx skills remove`.
+
+Spec validation is reported, not enforced. Spec checks: `name` matches `^[a-z0-9]+(-[a-z0-9]+)*$`; the directory equals the name; `description` is 1–1024 bytes; `compatibility` is at most 500 bytes; `metadata` maps strings to strings. A skill that passes the safety rules but fails a spec check is still listed and offered, with the issue shown. A missing or over-long `description` is the exception: such a skill is not offered, because agents select skills by description. The `npx` CLI is looser than the spec, so these cases are real.
+
+Frontmatter is parsed with **`serde_norway` 0.9.42**, a maintained fork of `serde_yaml` 0.9 (MIT or Apache-2.0, MSRV 1.71, so it fits the repository's Rust 1.88). On 2026-11-01 RustSec had no advisory for it. RustSec does flag the alternatives: `serde_yml` (RUSTSEC-2025-0068, unsound and unmaintained), `serde_yaml` (unmaintained) and `yaml-rust` (RUSTSEC-2024-0320). `serde-saphyr` is pure Rust and more active, but 1.2 and later need Rust 1.89. Switch to it when the repository's MSRV reaches 1.89. Parsing happens only after the 16-KiB frontmatter bound, into a typed struct of strings and one string map. Unit 5 confirms that the fork keeps `serde_yaml`'s recursion and alias-repetition limits. If it does not, unit 5 rejects alias tokens before parsing.
 
 ### `vorra skills`
 
@@ -318,11 +334,22 @@ vorra skills remove NAME... [--yes]
 
 Fetch is native, through the system `git` binary under the existing tokio `process` feature. No GitHub API, no token, no telemetry.
 
-- **add:** `git clone --depth 1 --filter=blob:none [--branch REF]` into a private temp directory with `GIT_TERMINAL_PROMPT=0`, a 5-minute timeout and cancellation. Find `SKILL.md` in the same places the CLI searches (repo root, `skills/`, `skills/.curated`, `.agents/skills`, then up to depth 5). Validate each selected skill, copy it into `~/.agents/skills/.<name>.tmp-<uuid>` with no symlinks followed, rename over the target, then write the lock entry with `skillFolderHash = git rev-parse HEAD:<folder>` and `skillPath` pointing at the `SKILL.md`. A local path source records `sourceType: "local"` and the SHA-256 folder hash the CLI uses.
-- **update:** group lock entries by `sourceUrl`; one blobless shallow clone per source; compare each tree SHA with `skillFolderHash`; replace changed folders the same way and set `updatedAt`. Entries that are local, missing upstream, or of a type Vorra does not fetch are reported and left alone. `--check` only reports.
-- **remove:** delete `~/.agents/skills/<name>` and its lock entry, and delete symlinks in the known agent directories (`~/.claude/skills`, `~/.config/goose/skills`, …) only when they resolve to that removed directory. Skills found in read-only roots are refused with the `npx skills remove` command to use.
+- **add:** `git clone --depth 1 --filter=blob:none [--branch REF]` into a private temp directory with `GIT_TERMINAL_PROMPT=0`, a 5-minute timeout and cancellation. Find `SKILL.md` in the same places the CLI searches (repo root, `skills/`, `skills/.curated`, `.agents/skills`, then up to depth 5). Validate each selected skill, [stage and swap](#staging-and-swap) it into `~/.agents/skills/<SkillDirName>`, then write the lock entry under the raw `SkillName` with `skillFolderHash = git rev-parse HEAD:<folder>` and `skillPath` pointing at the `SKILL.md`. A local path source records `sourceType: "local"` and the SHA-256 folder hash the CLI uses.
+- **update:** group lock entries by `sourceUrl`; one blobless shallow clone per source; compare each tree SHA with `skillFolderHash`; replace changed folders through the same stage-and-swap and set `updatedAt`. Entries that are local, missing upstream, or of a type Vorra does not fetch are reported and left alone. `--check` only reports.
+- **remove:** resolve each argument the way `npx skills remove` does. Every folder name and lock key is indexed by `sanitize`, lock keys winning. `sanitize(argument)` is looked up there. If nothing matches, the argument is treated as an exact lock `source` and every skill from that source is selected. Then delete `~/.agents/skills/<SkillDirName>` (moved to staging first, then removed), and delete the **exact lock key that matched**, so no orphan entry remains even when the key is `My_Skill.v2` and the folder `my_skill.v2`. Finally delete symlinks in the known agent directories (`~/.claude/skills`, `~/.config/goose/skills`, …) only when they resolve to that removed directory. Skills found in read-only roots are refused with the `npx skills remove` command to use.
 - **Lock writes:** read the lock, keep every unknown field and entry as raw JSON, change only the touched entries, write a temp file and rename. Re-read and compare just before the rename; if the file changed, merge again once, then fail with a clear error. `npx` has no lock protocol, so a truly concurrent `npx` write can still be lost; this is documented, not hidden.
 - **No `git`:** the commands fail with the equivalent `npx skills add SOURCE -g -a codex -y` line, which installs into the same canonical directory. Vorra does not invoke `npx` itself.
+
+#### Staging and swap
+
+`rename(2)` cannot replace a non-empty directory (`ENOTEMPTY`). A staging directory inside `~/.agents/skills` is also listed by `npx skills list` (the coordinator observed `.alpha.tmp-0f3e` in its output). So staging lives outside every scanned root, on the same filesystem: `~/.agents/.vorra-staging/<uuid>/`, created owner-only.
+
+1. Copy the validated skill into `staging/<uuid>/new`. No symlinks are followed or copied.
+2. If the target exists, rename it to `staging/<uuid>/old`.
+3. Rename `staging/<uuid>/new` to the target.
+4. Remove `staging/<uuid>`.
+
+If step 3 fails, rename `old` back to the target and report the error. Steps 2–3 leave a short window with no target directory; a concurrent reader sees the skill as missing, never half-written. Every `add`, `update` and `remove` first removes stale `~/.agents/.vorra-staging/*` entries left by an interrupted run. If one of them holds an `old` with no target in place, that `old` is restored before anything is removed. The staging root is a dot-directory directly under `~/.agents`, which the CLI never scans as a skill.
 
 Project-scope writes (`./skills-lock.json`) are out of scope at first; project skills are discovered read-only.
 
@@ -345,7 +372,7 @@ Per-agent assignment is `SkillAssignment` above: `vorra agents edit NAME --skill
 
 - **Skills are untrusted content.** Their text goes only into quoted user-context and tool results, never the provider system field. The catalog line and the `read_skill` wrapper both say so.
 - **Installing grants nothing.** `allowed-tools` is parsed, shown by `list`, `show` and the TUI, and never applied. A skill cannot change an agent, a mode or an allowlist.
-- **Names and paths.** `SkillName` enforces the spec grammar, so `..`, `/`, `\` and hidden names cannot reach a path. `read_skill` paths must be relative, without `..` or hidden components, and are opened with `cap-std` inside the skill directory, the same approach as the wiki (`src/memory/wiki.rs`).
+- **Names and paths.** Only `SkillDirName` ever becomes a path component. It can contain only `[a-z0-9._-]`, never starts or ends with `.` or `-`, and so cannot be `.`, `..` or hidden. `SkillName` additionally rejects `/`, `\`, NUL, `.`, `..` and a leading dot. `read_skill` paths must be relative, without `..` or hidden components, and are opened with `cap-std` inside the skill directory, the same approach as the wiki (`src/memory/wiki.rs`).
 - **Symlinks.** A skill directory that is a symlink is followed only when its target is a directory owned by the Host user and not group- or world-writable; this covers `npx` links into `~/.agents/skills`. Inside a skill, symlinks are not followed for reads, and `add` copies refuse them.
 - **Fetching.** Clones run in private temp directories that are removed on success, failure and cancellation. `GIT_TERMINAL_PROMPT=0`; no credential helper is configured by Vorra. A clone carries no hooks from the remote, and Vorra passes `-c core.hooksPath=/dev/null` so a global hooks path cannot run either.
 - **Agents.** Agent definitions are owner data. Model output cannot create or edit agents; there is no agent-management tool. `message_agent` requires the owner's `messaging` allowlist, cannot widen the root turn's mode, and FullHost operations still need exact approval per operation.
@@ -361,19 +388,19 @@ Each unit is one focused PR with fmt, strict Clippy (default and `--all-features
 | 2 | Per-agent tool ceilings at execution | `src/host/commands.rs`; `src/scheduler/types.rs`; `src/scheduling/attempts.rs`; `src/scheduling/mod.rs` | `RequestedRunOptions.agent`, `Initialize.agent` (additive) | 1 |
 | 3 | Agents CLI and TUI | `src/ipc.rs`; `src/host/owner*`; new `src/agents_cli.rs`; `src/main.rs`; `src/tui/app.rs`, `render.rs` | Owner queries/operations (additive) | 1, 2 |
 | 4 | Agent-to-agent messaging | `src/scheduler/tools.rs`, `actor.rs`, `types.rs`; `src/permissions.rs` (`delegate`); `src/scheduling/attempts.rs` | `AgentLog` query (additive) | 2, 3 |
-| 5 | Skills discovery, list and show | new `src/skills/{mod,discover,frontmatter,lock}.rs`; `src/main.rs`; `src/host/settings.rs` (`skills.extra_roots`) | No | — (parallel with 1–4) |
+| 5 | Skills discovery, list and show | new `src/skills/{mod,discover,frontmatter,lock}.rs`; `src/main.rs`; `src/host/settings.rs` (`skills.extra_roots`); `serde_norway` in `Cargo.toml` (coordinator) | No | — (parallel with 1–4) |
 | 6 | Skills add, update, remove | `src/skills/{fetch,install}.rs` | No | 5 |
 | 7 | Skills in the agent loop and TUI | `src/host/composition.rs`; `src/context.rs` input; new `read_skill` in `src/skills/tool.rs`; `src/host/runtime.rs`; `src/tui/app.rs` | `OwnerQuery::Skills` (additive) | 3, 5 |
 | 8 | Apple client agents and skills UI (follow-up) | `apps/Apple/Shared/OwnerIPC/OwnerWire.swift`; macOS views | Swift allowlist | 3, 7 |
 
 Manual verification per unit:
 
-1. Fresh state: `agents list` shows a synthesized `default` and the state directory gains no file. First `agents edit default --trait tone=terse` writes `agents-v1.json` with mode 0600; reopen keeps the id. Existing conversations still list and continue with `agent_id` NULL.
+1. Fresh state: `agents list` shows a synthesized `default` with id `00000000-0000-0000-0000-000000000001` on every read, and the state directory gains no file. A persona whose rendered instructions with traits exceed 32768 bytes is rejected at save. The terminal evidence digest of a pre-existing task is unchanged after upgrade. First `agents edit default --trait tone=terse` writes `agents-v1.json` with mode 0600; reopen keeps the id. Existing conversations still list and continue with `agent_id` NULL.
 2. Agent with `--tools read-only --allow-tool read_file`: a `--tools --execution-mode full-host` turn can call `read_file` but gets a permission-denied result for `write_file` and `shell`. Default agent behaves exactly as before for the same turns. A scheduled job bound to an agent never gains tools beyond its own allowlist.
 3. Create, show, edit with `--expect-revision` (stale revision rejected), rename, set default, remove (current default refused). Same through a running Host and offline. TUI `/agents` starts a conversation whose banner shows the agent.
-4. Agent `lead` may message `researcher`; `researcher` may message `lead`. A message chain `lead → researcher → lead` is rejected as a loop; depth 4 rejected; a message to a non-allowed agent rejected. The target uses its own tools (a `shell` call from a read-only caller's target asks for approval naming the target). `agents log` shows each hop. Host restart during a child wait recovers like subagents.
+4. Agent `lead` may message `researcher`; `researcher` may message `lead`. A message chain `lead → researcher → lead` is rejected as a loop; depth 4 rejected; a message to a non-allowed agent rejected. The target uses its own tools (a `shell` call from a read-only caller's target asks for approval naming the target). A target whose own `workspace` is `/other` runs in the root workspace `/proj` or an isolated descendant: in TrustedWorkspace a `write_file` to `/other/x` is denied and no file appears there. `agents log` shows each hop. Host restart during a child wait recovers like subagents.
 5. Temporary `HOME`: `npx skills add vercel-labs/agent-skills -g -a codex -y` then `vorra skills list --json` lists the same names, paths and sources. A hand-made skill without a lock entry lists as local; one with a bad name lists with an issue. A skill in `~/.claude/skills` lists under its extra root.
-6. Temporary `HOME`: `vorra skills add vercel-labs/agent-skills --skill web-design-guidelines`, then `npx skills list -g --json` shows it with the github source and `npx skills update -g -y` reports it up to date. Edit the lock hash, `vorra skills update` refreshes it. `vorra skills remove` then `npx skills list -g` no longer shows it. With `git` off `PATH`, the error prints the `npx` command.
+6. Temporary `HOME`: `vorra skills add vercel-labs/agent-skills --skill web-design-guidelines`, then `npx skills list -g --json` shows it with the github source and `npx skills update -g -y` reports it up to date. Edit the lock hash, `vorra skills update` refreshes it. `vorra skills remove` then `npx skills list -g` no longer shows it. A local skill named `My_Skill.v2` installs to `my_skill.v2` with lock key `My_Skill.v2`; `vorra skills remove my_skill.v2` leaves no lock entry. Updating an existing skill replaces it, and `npx skills list` never shows a staging path. Killing `vorra skills update` between swap steps, then running any skills command, restores the old folder. With `git` off `PATH`, the error prints the `npx` command.
 7. With `--skills all` on an agent and tools on, a turn's request log shows the catalog message and no bodies; a `read_skill` call returns the fenced body; `allowed-tools` changes nothing. With tools off no catalog appears. TUI `/skills` lists and toggles assignment.
 8. Apple build/analyze plus a macOS walkthrough listing agents and skills.
 
@@ -387,6 +414,12 @@ Decisions:
 - **`NULL` agent id means default.** Migration rewrites nothing and cannot half-fail.
 - **The default agent narrows nothing.** Existing chats, jobs and flags behave as before; new agents start with tools off.
 - **The target of a message uses its own tools, bounded by the root turn.** The owner's `messaging` allowlist is the trust decision. Without it, delegation would either leak the caller's tools or be useless.
+- **A delegated target stays inside the root turn's workspace.** It gets the root workspace or an isolated strict descendant. Its own `workspace` setting applies only to turns the owner starts directly with that agent.
+- **Fixed default agent id `00000000-0000-0000-0000-000000000001`.** Reads before the first save return a stable id. `NULL` still means "the current default".
+- **New captured fields are skipped when absent.** Stored digests and replay identities stay byte-identical.
+- **Two skill name forms.** Raw `SkillName` is the lock key; `SkillDirName` is the CLI's `sanitizeName`. Spec violations are reported, not rejected, because `npx` accepts them.
+- **Stage outside scanned roots and swap with a backup.** Directory rename cannot overwrite, and staging inside the root is visible to `npx`.
+- **`serde_norway` for frontmatter.** It is maintained, has no advisory and fits MSRV 1.88. Revisit `serde-saphyr` when the MSRV reaches 1.89.
 - **Typed characteristics plus bounded free-form traits.** Enough for "tone" or "language" without a schema for every idea.
 - **Skills on the filesystem, no Host required.** `npx skills` writes the same directories, so a Host-owned registry could not be the single source of truth anyway.
 - **Native fetch through `git`, no `npx` fallback at runtime.** Avoids a Node dependency and the CLI's telemetry; the hash is the same git tree SHA.
@@ -395,7 +428,6 @@ Decisions:
 
 Open questions:
 
-- Which YAML crate. Needed for real frontmatter (folded `>` scalars, `metadata` maps). Coordinator owns `Cargo.toml`.
 - Per-agent memory scopes (a wiki subtree per agent) instead of `Shared | Off`.
 - Project-scope `vorra skills add` writing `./skills-lock.json` v1.
 - Whether `$XDG_STATE_HOME` should also move Vorra's own reading of the lock. This design follows the CLI's rule exactly.
