@@ -73,6 +73,8 @@ Signature policy (macOS): it reads `codesign -dv --verbose=4` (`Identifier`, `Te
 
 Keychain items written by a binary signed with one certificate (for example Apple Development) are not readable by a binary signed with another (Developer ID), even with the same identifier, because the item trusts the writer's designated requirement. Use one kind consistently: a host installed from a release (Developer ID) cannot read the ChatGPT sign-in a locally Apple Development–signed build saved, and the reverse; sign in again after switching.
 
+Identifier change: binaries up to and including commit `d102e43` were signed as `ai.everything.cli`; later ones are signed as `to.yumi.everything.cli`. Release notes for the first release with the new identifier must say that `everything update` on an older client refuses it, so install it once manually (`install.sh`, or `everything update --allow-unsigned`), then run `everything chatgpt sign-in` again, because keychain items written under the old identifier are no longer readable.
+
 In `release.yml` the macOS build jobs import the identity into a temporary keychain from these repository secrets, by name: `DEVELOPER_ID_P12` (base64 Developer ID Application `.p12`), `DEVELOPER_ID_PASSWORD`, and for notarization `ASC_KEY_ID`, `ASC_ISSUER_ID`, `ASC_KEY_P8` (base64 App Store Connect API key). Absent secrets produce a visible workflow warning and unsigned or unnotarized binaries; the release still publishes.
 
 ## Install
