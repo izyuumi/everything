@@ -5,6 +5,7 @@ use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
+use crate::credentials::CredentialSecret;
 use crate::host::credentials::{CredentialOperation, CredentialVault, SecretTransfer};
 use crate::host::mcp::McpSettings;
 use crate::host::settings::CredentialStorage;
@@ -15,8 +16,8 @@ use crate::tools::{
 };
 
 use super::task::{
-    MAX_TASK_SECRETS, VAULT_REQUEST, VAULT_SEARCH, VAULT_USE, VaultDestination, VaultTasks,
-    VaultUse, env_bindings,
+    MAX_TASK_SECRETS, MIN_BOUND_VALUE_CHARS, VAULT_REQUEST, VAULT_SEARCH, VAULT_USE,
+    VaultDestination, VaultTasks, VaultUse, env_bindings, too_short,
 };
 use super::{VaultItemKind, VaultItemMetadata, VaultItemSummary};
 
@@ -94,7 +95,7 @@ fn descriptor(access: VaultAccess) -> ToolDescriptor {
         ),
         VaultAccess::Use => (
             VAULT_USE,
-            "After owner approval, bind one vault field reference (vault://<provider>/<id>#<field>) to a destination. env {name}: later shell commands in this task receive NAME=<value>; refer to it as $NAME and never print it. mcp_env {server, variable}: stores the value as that configured MCP server variable's native credential for its next start. http_header and form_fill are reserved and rejected. The value is never returned, and tool output containing it is redacted.",
+            "After owner approval, bind one vault field reference (vault://<provider>/<id>#<field>) to a destination. env {name}: later shell commands in this task receive NAME=<value>; refer to it as $NAME and never print it. mcp_env {server, variable}: stores the value as that configured MCP server variable's native credential for its next start. http_header and form_fill are reserved and rejected. Values shorter than 8 characters are refused. The value is never returned, and tool output containing it is redacted.",
             json!({"type":"object","properties":{"ref":{"type":"string","minLength":1,"maxLength":512},"destination":{"type":"object","properties":{"kind":{"type":"string","enum":["env","mcp_env","http_header","form_fill"]},"name":{"type":"string","minLength":1,"maxLength":128},"server":{"type":"string","minLength":1,"maxLength":20},"variable":{"type":"string","minLength":1,"maxLength":128}},"required":["kind"],"additionalProperties":false},"reason":{"type":"string","minLength":1,"maxLength":512}},"required":["ref","destination","reason"],"additionalProperties":false}),
             false,
         ),
@@ -240,6 +241,7 @@ impl VaultTool {
                 {
                     return Err(self.refused("a task can bind at most 16 vault env names"));
                 }
+                drop(self.resolve(runtime, context, &parsed, &item).await?);
                 format!(
                     "later shell commands in this task receive ${name}; refer to it by name and never print it"
                 )
@@ -260,12 +262,7 @@ impl VaultTool {
                         "session-storage MCP variables are supplied only at Host startup; configure the variable with native storage",
                     ));
                 }
-                let secret = runtime
-                    .tasks
-                    .service()
-                    .resolve(&parsed.reference, context.cancellation().child_token())
-                    .await
-                    .map_err(|error| self.refused(error.to_string()))?;
+                let secret = self.resolve(runtime, context, &parsed, &item).await?;
                 let transfer = String::from_utf8(secret.expose().to_vec())
                     .ok()
                     .and_then(|value| SecretTransfer::new(value).ok())
@@ -304,6 +301,28 @@ impl VaultTool {
             }),
             is_error: false,
         })
+    }
+
+    async fn resolve(
+        &self,
+        runtime: &VaultRuntime,
+        context: &ToolExecutionContext,
+        parsed: &VaultUse,
+        item: &VaultItemSummary,
+    ) -> Result<CredentialSecret, ToolError> {
+        let secret = runtime
+            .tasks
+            .service()
+            .resolve(&parsed.reference, context.cancellation().child_token())
+            .await
+            .map_err(|error| self.refused(error.to_string()))?;
+        if too_short(&secret) {
+            return Err(self.refused(format!(
+                "vault item \"{}\" is shorter than {MIN_BOUND_VALUE_CHARS} characters; env and mcp_env values must be at least {MIN_BOUND_VALUE_CHARS} characters so tool output can be masked without revealing them",
+                item.label
+            )));
+        }
+        Ok(secret)
     }
 
     async fn item(
