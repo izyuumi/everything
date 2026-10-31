@@ -382,16 +382,16 @@ Per-agent assignment is `SkillAssignment` above: `vorra agents edit NAME --skill
 
 Each unit is one focused PR with fmt, strict Clippy (default and `--all-features`) and manual checks on a disposable `--state-dir` and a temporary `HOME`. No new automated tests at this stage; deferred coverage goes to [#32](https://github.com/izyuumi/everything/issues/32). The coordinator owns `Cargo.toml`, `src/lib.rs` and migrations registration.
 
-| # | Unit | Main files | Protocol change | Depends on |
-| --- | --- | --- | --- | --- |
-| 1 | Agent model, storage, default agent | new `src/host/agents.rs`; `migrations/0018_agents.sql`; `src/storage.rs`; `src/agent.rs` (conversation agent id) | No (internal only) | — |
-| 2 | Per-agent tool ceilings at execution | `src/host/commands.rs`; `src/scheduler/types.rs`; `src/scheduling/attempts.rs`; `src/scheduling/mod.rs` | `RequestedRunOptions.agent`, `Initialize.agent` (additive) | 1 |
-| 3 | Agents CLI and TUI | `src/ipc.rs`; `src/host/owner*`; new `src/agents_cli.rs`; `src/main.rs`; `src/tui/app.rs`, `render.rs` | Owner queries/operations (additive) | 1, 2 |
-| 4 | Agent-to-agent messaging | `src/scheduler/tools.rs`, `actor.rs`, `types.rs`; `src/permissions.rs` (`delegate`); `src/scheduling/attempts.rs` | `AgentLog` query (additive) | 2, 3 |
-| 5 | Skills discovery, list and show | new `src/skills/{mod,discover,frontmatter,lock}.rs`; `src/main.rs`; `src/host/settings.rs` (`skills.extra_roots`); `serde_norway` in `Cargo.toml` (coordinator) | No | — (parallel with 1–4) |
-| 6 | Skills add, update, remove | `src/skills/{fetch,install}.rs` | No | 5 |
-| 7 | Skills in the agent loop and TUI | `src/host/composition.rs`; `src/context.rs` input; new `read_skill` in `src/skills/tool.rs`; `src/host/runtime.rs`; `src/tui/app.rs` | `OwnerQuery::Skills` (additive) | 3, 5 |
-| 8 | Apple client agents and skills UI (follow-up) | `apps/Apple/Shared/OwnerIPC/OwnerWire.swift`; macOS views | Swift allowlist | 3, 7 |
+| # | Issue | Unit | Main files | Protocol change | Depends on |
+| --- | --- | --- | --- | --- | --- |
+| 1 | [#276](https://github.com/izyuumi/everything/issues/276) | Agent model, storage, default agent | new `src/host/agents.rs`; `migrations/0018_agents.sql`; `src/storage.rs`; `src/agent.rs` (conversation agent id) | No (internal only) | — |
+| 2 | [#277](https://github.com/izyuumi/everything/issues/277) | Per-agent tool ceilings at execution | `src/host/commands.rs`; `src/scheduler/types.rs`; `src/scheduling/attempts.rs`; `src/scheduling/mod.rs` | `RequestedRunOptions.agent`, `Initialize.agent` (additive) | #276 |
+| 3 | [#278](https://github.com/izyuumi/everything/issues/278) | Agents CLI and TUI | `src/ipc.rs`; `src/host/owner*`; new `src/agents_cli.rs`; `src/main.rs`; `src/tui/app.rs`, `render.rs` | Owner queries/operations (additive) | #276, #277 |
+| 4 | [#280](https://github.com/izyuumi/everything/issues/280) | Agent-to-agent messaging | `src/scheduler/tools.rs`, `actor.rs`, `types.rs`; `src/permissions.rs` (`delegate`); `src/scheduling/attempts.rs` | `AgentLog` query (additive) | #277, #278 |
+| 5 | [#281](https://github.com/izyuumi/everything/issues/281) | Skills discovery, list and show | new `src/skills/{mod,discover,frontmatter,lock}.rs`; `src/main.rs`; `src/host/settings.rs` (`skills.extra_roots`); `serde_norway` in `Cargo.toml` (coordinator) | No | — (parallel with #276–#280) |
+| 6 | [#282](https://github.com/izyuumi/everything/issues/282) | Skills add, update, remove | `src/skills/{fetch,install}.rs` | No | #281 |
+| 7 | [#283](https://github.com/izyuumi/everything/issues/283) | Skills in the agent loop and TUI | `src/host/composition.rs`; `src/context.rs` input; new `read_skill` in `src/skills/tool.rs`; `src/host/runtime.rs`; `src/tui/app.rs` | `OwnerQuery::Skills` (additive) | #278, #281 |
+| 8 | [#284](https://github.com/izyuumi/everything/issues/284) | Apple client agents and skills UI (follow-up) | `apps/Apple/Shared/OwnerIPC/OwnerWire.swift`; macOS views | Swift allowlist | #278, #283 |
 
 Manual verification per unit:
 
