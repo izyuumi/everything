@@ -35,6 +35,8 @@ pub enum EngineError {
     Native(#[from] SchedulerError),
     #[error(transparent)]
     Agent(#[from] crate::agent::AgentError),
+    #[error(transparent)]
+    Agents(#[from] crate::host::agents::AgentsError),
     #[error("schedule engine operation cancelled")]
     Cancelled,
     #[error("schedule engine worker failed")]
@@ -349,8 +351,11 @@ impl Actor {
             None => {
                 let registry = Arc::clone(&self.registry);
                 let captured = run.clone();
+                let agents = crate::host::agents::AgentRepository::for_agent(&self.agent)?;
                 self.work(move |repository, _| {
-                    let policy = capture_policy(&captured, &registry)?;
+                    let agents = agents.snapshot()?;
+                    let agent = agents.resolve(captured.definition.target.agent)?;
+                    let policy = capture_policy(&captured, &registry, agent)?;
                     Ok(repository.reserve_first_attempt(occurrence, &policy)?)
                 })
                 .await?

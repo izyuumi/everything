@@ -319,6 +319,7 @@ impl WorkerCoordinator {
                 allowed_tools: Some(request.allowed_tools.clone()),
                 budget: request.budget.clone(),
                 limits: request.limits.clone(),
+                agent: None,
             }
             .capture(&host.registry)?;
             if execution.workspace_root != request.workspace_root

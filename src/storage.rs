@@ -493,6 +493,21 @@ impl Store {
             .optional()?)
     }
 
+    pub fn conversation_agent(&self, id: &str) -> StorageResult<Option<String>> {
+        validate_id(id)?;
+        self.connection()?
+            .query_row(
+                "SELECT agent_id FROM conversations WHERE id = ?1",
+                [id],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .optional()?
+            .ok_or_else(|| StorageError::NotFound {
+                entity: "conversation",
+                id: id.to_owned(),
+            })
+    }
+
     pub fn conversation_state(
         &self,
         conversation_id: &str,

@@ -571,14 +571,35 @@ impl HostInner {
 
     async fn bind_agent(
         self: &Arc<Self>,
+        requested: Option<super::agents::AgentId>,
         configuration: ConversationConfig,
     ) -> Result<(super::agents::AgentId, ConversationConfig), HostError> {
         self.blocking(move |host| {
             let agents = host.agents.snapshot()?;
-            let agent = agents.resolve(None)?;
+            let agent = agents.resolve(requested)?;
             Ok((agent.id, agent.configure(configuration)?))
         })
         .await
+    }
+
+    fn turn_agent(
+        &self,
+        conversation_id: ConversationId,
+        requested: Option<super::agents::AgentId>,
+    ) -> Result<super::agents::AgentDefinition, HostError> {
+        let stored = self
+            .agent
+            .store()
+            .conversation_agent(&conversation_id.to_string())?
+            .map(|id| id.parse::<super::agents::AgentId>())
+            .transpose()?;
+        let agent = self.agents.snapshot()?.resolve(stored)?.clone();
+        if requested.is_some_and(|requested| requested != agent.id) {
+            return Err(HostError::Invalid(
+                "the conversation is bound to a different agent",
+            ));
+        }
+        Ok(agent)
     }
 
     pub(super) async fn capture_command(
@@ -589,9 +610,10 @@ impl HostInner {
             InboxInput::Owner(OwnerCommand::Initialize {
                 configuration,
                 title,
+                agent,
                 ..
             }) => {
-                let (agent, configuration) = self.bind_agent(configuration.clone()).await?;
+                let (agent, configuration) = self.bind_agent(*agent, configuration.clone()).await?;
                 Ok(EffectiveCommand::Initialize {
                     configuration,
                     title: title.clone(),
@@ -608,7 +630,7 @@ impl HostInner {
                 let Command::CreateConversation { title } = &command.payload else {
                     return Err(HostError::Invalid("invalid conversation creation"));
                 };
-                let (agent, configuration) = self.bind_agent(configuration).await?;
+                let (agent, configuration) = self.bind_agent(None, configuration).await?;
                 Ok(EffectiveCommand::Initialize {
                     configuration,
                     title: title.clone().unwrap_or_else(|| "New conversation".into()),
@@ -690,8 +712,12 @@ impl HostInner {
                     "an existing native turn requires its original setup and no option overrides",
                 ));
             }
+            let requested = options.agent;
             return self
                 .blocking(move |host| {
+                    if requested.is_some() {
+                        host.turn_agent(conversation_id, requested)?;
+                    }
                     let authority = crate::permissions::ExecutionAuthority::new(
                         conversation_id.to_string(),
                         run.task_id.to_string(),
@@ -719,6 +745,7 @@ impl HostInner {
                             ),
                             budget: setup.budget,
                             limits: setup.limits,
+                            agent: None,
                         },
                     })
                 })
@@ -734,6 +761,7 @@ impl HostInner {
         let options = options.clone();
         let output = conversation.config.max_output_tokens;
         self.blocking(move |host| {
+            let agent = host.turn_agent(conversation_id, options.agent)?;
             let settings = host.settings.snapshot()?;
             let mut limits = settings.loop_limits;
             if let Some(value) = options.max_model_attempts {
@@ -751,7 +779,10 @@ impl HostInner {
                     .ok_or(HostError::Invalid("duration exceeds the supported range"))?;
             }
             let policy = ExecutionPolicy {
-                workspace_root: options.workspace.unwrap_or(settings.workspace_root),
+                workspace_root: options
+                    .workspace
+                    .or_else(|| agent.workspace.clone())
+                    .unwrap_or(settings.workspace_root),
                 mode: options.execution_mode.unwrap_or(settings.execution_mode),
                 tools_enabled: options.tools.unwrap_or(settings.tools_enabled),
                 allowed_tools: None,
@@ -763,8 +794,11 @@ impl HostInner {
                     max_compaction_bytes: 16 * 1024,
                 },
                 limits,
-            }
-            .capture(&host.registry)?;
+                agent: None,
+            };
+            let policy = agent
+                .narrow(policy, &host.registry)
+                .capture(&host.registry)?;
             Ok(EffectiveCommand::Turn { execution: policy })
         })
         .await
