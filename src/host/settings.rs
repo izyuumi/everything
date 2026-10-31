@@ -205,6 +205,89 @@ pub struct HostSettings {
     pub preference_overrides: HostPreferenceOverrides,
     #[serde(default, skip_serializing_if = "crate::vault::VaultSettings::is_empty")]
     pub vault: crate::vault::VaultSettings,
+    #[serde(default, skip_serializing_if = "SkillsSettings::is_default")]
+    pub skills: SkillsSettings,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct SkillsSettings {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub extra_roots: Option<Vec<PathBuf>>,
+}
+
+impl SkillsSettings {
+    pub fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
+
+    pub fn validate(&self) -> Result<(), SettingsError> {
+        let Some(roots) = &self.extra_roots else {
+            return Ok(());
+        };
+        if roots.len() > crate::skills::MAX_EXTRA_ROOTS {
+            return Err(SettingsError::Invalid(
+                "at most eight extra skill roots are allowed",
+            ));
+        }
+        if roots
+            .iter()
+            .any(|root| !root.is_absolute() || root.to_str().is_none_or(|path| path.len() > 4096))
+        {
+            return Err(SettingsError::Invalid(
+                "extra skill roots must be absolute UTF-8 paths",
+            ));
+        }
+        Ok(())
+    }
+}
+
+pub fn read_skills_settings(state_dir: &std::path::Path) -> Result<SkillsSettings, SettingsError> {
+    #[derive(Deserialize)]
+    struct Partial {
+        #[serde(default)]
+        skills: SkillsSettings,
+    }
+    let path = state_dir.join(SETTINGS_FILE);
+    let descriptor = match rustix::fs::open(
+        &path,
+        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC | OFlags::NONBLOCK,
+        Mode::empty(),
+    ) {
+        Ok(descriptor) => descriptor,
+        Err(rustix::io::Errno::NOENT) => return Ok(SkillsSettings::default()),
+        Err(error) => return Err(error.into()),
+    };
+    let metadata = rustix::fs::fstat(&descriptor)?;
+    if FileType::from_raw_mode(metadata.st_mode) != FileType::RegularFile
+        || metadata.st_uid != rustix::process::geteuid().as_raw()
+        || metadata.st_mode & 0o077 != 0
+        || metadata.st_nlink != 1
+    {
+        return Err(SettingsError::Invalid(
+            "settings must be an owner-only single-link regular file",
+        ));
+    }
+    let mut bytes = Vec::new();
+    File::from(descriptor)
+        .take((MAX_SETTINGS_BYTES + 1) as u64)
+        .read_to_end(&mut bytes)?;
+    if bytes.len() > MAX_SETTINGS_BYTES {
+        return Err(SettingsError::Invalid("settings exceed 64 KiB"));
+    }
+    let partial: Partial = serde_json::from_slice(&bytes).map_err(|error| {
+        SettingsError::Io(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "{}: skills settings malformed at line {} column {}",
+                path.display(),
+                error.line(),
+                error.column()
+            ),
+        ))
+    })?;
+    partial.skills.validate()?;
+    Ok(partial.skills)
 }
 
 impl HostSettings {
@@ -281,6 +364,7 @@ impl HostSettings {
         self.vault
             .validate()
             .map_err(|_| SettingsError::Invalid("invalid vault configuration"))?;
+        self.skills.validate()?;
         let encoded = serde_json::to_vec(self)
             .map_err(|_| SettingsError::Invalid("settings could not be encoded"))?;
         if encoded.len() > MAX_SETTINGS_BYTES {
@@ -329,6 +413,7 @@ impl SettingsRepository {
                     selection: Default::default(),
                     preference_overrides: Default::default(),
                     vault: Default::default(),
+                    skills: Default::default(),
                 };
                 settings.validate()?;
                 write_settings(&lease, &settings)?;

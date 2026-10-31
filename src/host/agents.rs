@@ -12,6 +12,7 @@ use uuid::Uuid;
 use crate::agent::{ConversationConfig, MAX_INSTRUCTIONS_BYTES, ProviderEndpoint, ProviderKind};
 use crate::permissions::ExecutionMode;
 use crate::service::{ServiceError, StateLease};
+pub use crate::skills::SkillName;
 
 pub const DEFAULT_AGENT_ID: AgentId = AgentId(Uuid::from_u128(1));
 pub const AGENTS_SCHEMA: u64 = 1;
@@ -158,38 +159,6 @@ impl TryFrom<String> for TraitKey {
 
 impl From<TraitKey> for String {
     fn from(value: TraitKey) -> Self {
-        value.0
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-#[serde(try_from = "String", into = "String")]
-pub struct SkillName(String);
-
-impl SkillName {
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-}
-
-impl TryFrom<String> for SkillName {
-    type Error = AgentsError;
-
-    fn try_from(value: String) -> Result<Self, Self::Error> {
-        if value.is_empty()
-            || value.len() > MAX_REFERENCE_BYTES
-            || value.starts_with('.')
-            || value.contains(['/', '\\', '\0'])
-            || value.chars().any(char::is_control)
-        {
-            return Err(AgentsError::Invalid("invalid skill name"));
-        }
-        Ok(Self(value))
-    }
-}
-
-impl From<SkillName> for String {
-    fn from(value: SkillName) -> Self {
         value.0
     }
 }

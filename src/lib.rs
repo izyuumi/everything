@@ -17,6 +17,8 @@ pub mod scheduler;
 pub mod scheduling;
 pub mod selector;
 pub mod service;
+#[cfg(unix)]
+pub mod skills;
 pub mod storage;
 pub mod tools;
 pub mod transport;

@@ -71,6 +71,7 @@ enum Command {
     Schedules(queries::ListArguments),
     Memory(queries::MemoryArguments),
     Vault(vault_cli::VaultArguments),
+    Skills(vorra::skills::cli::SkillsArguments),
     Completions {
         shell: clap_complete::Shell,
     },
@@ -545,6 +546,8 @@ enum CliError {
     Model(#[from] vorra::model::ModelError),
     #[error(transparent)]
     Io(#[from] io::Error),
+    #[error(transparent)]
+    Skills(#[from] vorra::skills::cli::SkillsCliError),
     #[error("{0} is required when creating a conversation")]
     Required(&'static str),
     #[error("{0} must contain a valid provider credential; accepted messages remain pending")]
@@ -647,6 +650,10 @@ async fn run_cli(arguments: Arguments) -> ExitCode {
             eprintln!("vorra: {error}");
             if matches!(error, CliError::Detached)
                 || matches!(error, CliError::Agent(ref error) if error.is_cancelled())
+                || matches!(
+                    error,
+                    CliError::Skills(vorra::skills::cli::SkillsCliError::Cancelled)
+                )
             {
                 ExitCode::from(130)
             } else {
@@ -741,6 +748,15 @@ async fn execute(arguments: Arguments, cancellation: CancellationToken) -> Resul
         Command::Vault(arguments) => {
             let client = vorra::host::client::HostClient::new(state_dir)?;
             return vault_cli::run(&client, arguments, cancellation).await;
+        }
+        Command::Skills(arguments) => {
+            let token = cancellation.clone();
+            return tokio::task::spawn_blocking(move || {
+                vorra::skills::cli::run(arguments, &state_dir, &token)
+            })
+            .await
+            .map_err(|_| CliError::Worker)?
+            .map_err(CliError::from);
         }
         Command::Tui(arguments) => {
             return vorra::tui::run(
