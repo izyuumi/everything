@@ -932,6 +932,29 @@ fn prepare_definition(
     Ok(definition)
 }
 
+pub(crate) fn native_charged(
+    store: &Store,
+    conversation_id: ConversationId,
+    task_id: TaskId,
+) -> Result<Option<u64>, AgentError> {
+    let Some(state) = store.conversation_state(&conversation_id.to_string())? else {
+        return Ok(None);
+    };
+    let checkpoint = decode_checkpoint(state.payload)?;
+    Ok(checkpoint
+        .native
+        .as_ref()
+        .and_then(|native| {
+            native
+                .turn
+                .as_ref()
+                .map(run_info)
+                .or_else(|| native.last_run.clone())
+        })
+        .filter(|run| run.task_id == task_id)
+        .map(|run| run.charged_tokens))
+}
+
 fn delegated_spend(store: &Store, task_id: TaskId) -> Result<(u64, Vec<TaskId>), AgentError> {
     crate::scheduler::delegated_spend(store, task_id).map_err(|error| match error {
         crate::scheduler::SchedulerError::Agent(error) => error,
@@ -1625,7 +1648,11 @@ impl Agent {
                 turn.status = LoopStatus::Completed;
             } else {
                 turn.round = Some(Round { assistant_message_id: message.id, calls });
-                turn.status = if turn.charged_tokens.checked_add(delegated_spend(&owner.store, task_id)?.0).is_none_or(|total| total > turn.definition.limits.max_charged_tokens) {
+                let over = match delegated_spend(&owner.store, task_id) {
+                    Ok((delegated, _)) => turn.charged_tokens.checked_add(delegated).is_none_or(|total| total > turn.definition.limits.max_charged_tokens),
+                    Err(error) => { tracing::warn!(%error, %task_id, "delegated token spend is unavailable after a response; pausing at the token limit"); true }
+                };
+                turn.status = if over {
                     LoopStatus::Paused { reason: PauseReason::TokenLimit }
                 } else { LoopStatus::ExecutingTools };
             }

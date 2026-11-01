@@ -727,17 +727,27 @@ pub(super) fn subtree_spend(
     store: &Store,
     caller: TaskId,
 ) -> Result<(u64, Vec<TaskId>), SchedulerError> {
-    let mut pending = child_ids(store, caller, false)?;
-    if pending.is_empty() {
+    let mut children = child_ids(store, caller, false)?;
+    if children.is_empty() {
         return Ok((0, Vec::new()));
     }
-    if !in_delegation(store, caller)? {
-        pending = child_ids(store, caller, true)?;
+    let chain = lineage(store, caller)?;
+    if !chain
+        .iter()
+        .any(|task| task.definition.delegation.is_some())
+    {
+        children = child_ids(store, caller, true)?;
     }
+    let active = chain
+        .first()
+        .ok_or(SchedulerError::NotFound(caller))?
+        .checkpoint
+        .active_command;
+    let mut pending: Vec<(TaskId, bool)> = children.into_iter().map(|id| (id, true)).collect();
     let mut visited = 0_usize;
     let mut total = 0_u64;
     let mut unfinished = Vec::new();
-    while let Some(id) = pending.pop() {
+    while let Some((id, top)) = pending.pop() {
         visited += 1;
         if visited > 4096 {
             return Err(SchedulerError::Capacity("delegated descendants"));
@@ -746,6 +756,14 @@ pub(super) fn subtree_spend(
         let grant = task.definition.execution.limits.max_charged_tokens;
         let followups = grant.saturating_mul(u64::from(task.checkpoint.followups));
         total = total.saturating_add(followups);
+        if top
+            && task
+                .definition
+                .admitting_command
+                .is_some_and(|command| command != active)
+        {
+            continue;
+        }
         if !task.checkpoint.task.status.is_terminal() {
             total = total.saturating_add(grant);
             if unfinished.len() < 32 {
@@ -753,12 +771,14 @@ pub(super) fn subtree_spend(
             }
             continue;
         }
-        let conversation =
-            crate::agent::load_conversation(store, task.definition.initial.conversation_id)?;
-        if let Some(run) = conversation.native_run().filter(|run| run.task_id == id) {
-            total = total.saturating_add(run.charged_tokens);
-        }
-        pending.extend(child_ids(store, id, false)?);
+        let charged =
+            crate::agent::native_charged(store, task.definition.initial.conversation_id, id)?;
+        total = total.saturating_add(charged.unwrap_or(0));
+        pending.extend(
+            child_ids(store, id, false)?
+                .into_iter()
+                .map(|child| (child, false)),
+        );
     }
     Ok((total, unfinished))
 }

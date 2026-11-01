@@ -76,7 +76,7 @@ pub(super) fn adopt(
     for child in &state.outstanding_children {
         repository::authorize_target(store, task.definition.initial.id, *child, false)?;
     }
-    task.checkpoint.child_wait = Some(ChildWaitSet {
+    let wait = ChildWaitSet {
         wait_id,
         active_command_id: task.checkpoint.active_command,
         accepted_at: event.occurred_at,
@@ -88,14 +88,13 @@ pub(super) fn adopt(
                 delivery: None,
             })
             .collect(),
-    });
-    validate_wait(
-        task.checkpoint
-            .child_wait
-            .as_ref()
-            .ok_or(SchedulerError::Invalid("child wait disappeared"))?,
-    )?;
-    repository::encode_checkpoint(&task.checkpoint)?;
+    };
+    validate_wait(&wait)?;
+    let previous = task.checkpoint.child_wait.replace(wait);
+    if let Err(error) = repository::encode_checkpoint(&task.checkpoint) {
+        task.checkpoint.child_wait = previous;
+        return Err(error);
+    }
     Ok(())
 }
 

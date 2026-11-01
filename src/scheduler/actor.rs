@@ -883,7 +883,10 @@ impl Actor {
                     self.queue(id);
                 }
                 Some(reason) => {
+                    let note = task.checkpoint.diagnostic.clone();
+                    let (reason, note) = self.adopt_native_wait(&mut task, reason, note).await;
                     task.checkpoint.waiting = Some(reason);
+                    task.checkpoint.diagnostic = note;
                     save_waiting(&self.store(), &mut task)?;
                 }
                 None => {
@@ -2000,7 +2003,8 @@ impl Actor {
                 now,
             );
             initial.id = id;
-            let task = initial_task(initial, parent.definition.configuration, policy);
+            let mut task = initial_task(initial, parent.definition.configuration, policy);
+            task.definition.admitting_command = Some(parent.checkpoint.active_command);
             repository::insert(&self.store(), &task, self.limits.max_pending_tasks)?;
             self.services
                 .agent
@@ -2222,6 +2226,7 @@ impl Actor {
             initial.id = ids.task;
             let mut task = initial_task(initial, configuration, policy);
             task.definition.delegation = Some(delegation);
+            task.definition.admitting_command = Some(parent.checkpoint.active_command);
             repository::insert(&self.store(), &task, self.limits.max_pending_tasks)?;
             self.services
                 .agent
@@ -2236,6 +2241,46 @@ impl Actor {
         }
         .await;
         admitted.map_err(mutation_uncertain)
+    }
+
+    async fn adopt_native_wait(
+        &self,
+        task: &mut StoredTask,
+        reason: WaitingReason,
+        note: Option<String>,
+    ) -> (WaitingReason, Option<String>) {
+        let WaitingReason::Children { wait_id } = reason else {
+            return (reason, note);
+        };
+        if task
+            .checkpoint
+            .child_wait
+            .as_ref()
+            .is_some_and(|wait| wait.wait_id == wait_id)
+        {
+            return (reason, note);
+        }
+        let adopted = match self
+            .services
+            .agent
+            .conversation(task.definition.initial.conversation_id)
+            .await
+        {
+            Ok(conversation) => super::inputs::adopt(&self.store(), task, &conversation, wait_id),
+            Err(error) => Err(error.into()),
+        };
+        match adopted {
+            Ok(()) => (reason, note),
+            Err(error) => {
+                tracing::warn!(task_id=%task.definition.initial.id, %error, "budget child wait was not adopted; owner inspection is required");
+                (
+                    WaitingReason::Interrupted,
+                    Some(diagnostic(&format!(
+                        "budget child wait was not adopted: {error}"
+                    ))),
+                )
+            }
+        }
     }
 
     fn in_delegation(&self, id: TaskId) -> Result<bool, SchedulerError> {
@@ -2262,7 +2307,13 @@ impl Actor {
             .limits
             .max_charged_tokens
             .saturating_sub(run.charged_tokens)
-            .saturating_sub(repository::subtree_spend(&self.store(), id)?.0);
+            .saturating_sub({
+                let store = self.store();
+                tokio::task::spawn_blocking(move || repository::subtree_spend(&store, id))
+                    .await
+                    .map_err(|_| SchedulerError::Agent(crate::agent::AgentError::Worker))??
+                    .0
+            });
         let floor = u64::from(caller.definition.execution.budget.reserved_output_tokens);
         if remaining <= floor {
             return Err(SchedulerError::Capacity("caller token budget"));
@@ -3039,20 +3090,8 @@ impl Actor {
                         return Ok(());
                     }
                 }
-                if let WaitingReason::Children { wait_id } = reason
-                    && task
-                        .checkpoint
-                        .child_wait
-                        .as_ref()
-                        .is_none_or(|wait| wait.wait_id != wait_id)
-                {
-                    let conversation = self
-                        .services
-                        .agent
-                        .conversation(task.definition.initial.conversation_id)
-                        .await?;
-                    super::inputs::adopt(&self.store(), &mut task, &conversation, wait_id)?;
-                }
+                let (reason, diagnostic) =
+                    self.adopt_native_wait(&mut task, reason, diagnostic).await;
                 if matches!(reason, WaitingReason::Children { .. })
                     && !self.stopping
                     && !task.checkpoint.cancel_requested
@@ -3172,6 +3211,7 @@ fn initial_task(
             execution,
             remote: None,
             delegation: None,
+            admitting_command: None,
         },
         checkpoint: TaskCheckpoint {
             scheduler_version: 1,

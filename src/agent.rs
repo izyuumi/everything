@@ -7,6 +7,7 @@ pub(crate) mod settings;
 mod steering;
 
 pub use control_events::{PermissionPublicationReceipt, TaskPublicationReceipt};
+pub(crate) use native::native_charged;
 pub use native::{
     LoopLimits, LoopStatus, MemoryUse, NativeRunInfo, PauseReason, ProviderResume, ToolRunSetup,
 };
@@ -753,10 +754,7 @@ impl Agent {
     }
 }
 
-pub(crate) fn load_conversation(
-    store: &Store,
-    id: ConversationId,
-) -> Result<Conversation, AgentError> {
+fn load_conversation(store: &Store, id: ConversationId) -> Result<Conversation, AgentError> {
     let mut page_size = 64;
     let snapshot = loop {
         match store.conversation_snapshot(&id.to_string(), 0, page_size) {
