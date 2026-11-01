@@ -2161,7 +2161,7 @@ impl Actor {
                 .limits
                 .max_charged_tokens
                 .saturating_sub(run.charged_tokens)
-                .saturating_sub(repository::active_delegated_grants(&self.store(), caller)?);
+                .saturating_sub(self.delegated_spend(caller).await?);
             if remaining == 0 {
                 return Err(SchedulerError::Capacity("caller token budget"));
             }
@@ -2243,6 +2243,34 @@ impl Actor {
         }
         .await;
         admitted.map_err(mutation_uncertain)
+    }
+
+    async fn delegated_spend(&self, caller: TaskId) -> Result<u64, SchedulerError> {
+        let store = self.store();
+        let mut pending = repository::child_ids(&store, caller, true)?;
+        let mut visited = 0_usize;
+        let mut total = 0_u64;
+        while let Some(id) = pending.pop() {
+            visited += 1;
+            if visited > 4096 {
+                return Err(SchedulerError::Capacity("delegated descendants"));
+            }
+            let task = repository::load(&store, id)?;
+            if !task.checkpoint.task.status.is_terminal() {
+                total = total.saturating_add(task.definition.execution.limits.max_charged_tokens);
+                continue;
+            }
+            let conversation = self
+                .services
+                .agent
+                .conversation(task.definition.initial.conversation_id)
+                .await?;
+            if let Some(run) = conversation.native_run().filter(|run| run.task_id == id) {
+                total = total.saturating_add(run.charged_tokens);
+            }
+            pending.extend(repository::child_ids(&store, id, false)?);
+        }
+        Ok(total)
     }
 
     async fn send(

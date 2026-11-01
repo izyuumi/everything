@@ -697,16 +697,24 @@ pub(super) fn delegated_children(store: &Store, caller: TaskId) -> Result<usize,
     usize::try_from(count).map_err(|_| SchedulerError::Invalid("negative task count"))
 }
 
-pub(super) fn active_delegated_grants(
+pub(super) fn child_ids(
     store: &Store,
-    caller: TaskId,
-) -> Result<u64, SchedulerError> {
-    let total: i64 = store.connection()?.query_row(
-        "SELECT coalesce(sum(json_extract(input,'$.execution.limits.max_charged_tokens')),0) FROM tasks WHERE parent_task_id=?1 AND json_type(input,'$.delegation')='object' AND coalesce(json_extract(checkpoint,'$.task.status'),'') NOT IN ('completed','failed','cancelled')",
-        [caller.to_string()],
-        |row| row.get(0),
+    parent: TaskId,
+    delegated_only: bool,
+) -> Result<Vec<TaskId>, SchedulerError> {
+    let connection = store.connection()?;
+    let mut statement = connection.prepare(
+        "SELECT id FROM tasks WHERE parent_task_id=?1 AND (?2=0 OR json_type(input,'$.delegation')='object') ORDER BY created_at, id LIMIT 4096",
     )?;
-    u64::try_from(total).map_err(|_| SchedulerError::Invalid("negative delegated token grants"))
+    let ids = statement
+        .query_map(
+            params![parent.to_string(), i64::from(delegated_only)],
+            |row| row.get::<_, String>(0),
+        )?
+        .collect::<Result<Vec<_>, _>>()?;
+    ids.iter()
+        .map(|id| id.parse().map_err(SchedulerError::from))
+        .collect()
 }
 
 pub(super) fn agent_log(
