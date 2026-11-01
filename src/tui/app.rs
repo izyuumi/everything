@@ -186,6 +186,8 @@ pub struct App {
     pub tools: Option<Tools>,
     selected_agent: Option<AgentDefinition>,
     skills: Vec<crate::skills::SkillSummary>,
+    skills_update: Option<SkillsUpdate>,
+    skill_confirm: Option<(AgentId, u64, String)>,
     base_route: (ProviderKind, Option<String>, ProviderEndpoint),
     pub agent_label: String,
     pub entries: Vec<Entry>,
@@ -237,6 +239,9 @@ fn push_secret(value: &mut String, overflow: &mut bool, character: char) {
     }
 }
 
+type SkillsUpdate =
+    JoinHandle<Result<std::io::Result<std::process::Output>, tokio::time::error::Elapsed>>;
+
 fn skill_assigned(skill: &crate::skills::SkillSummary, assignment: &SkillAssignment) -> bool {
     let wanted = |name: &str| crate::skills::SkillName::parse(name).map(|name| name.dir_name());
     match assignment {
@@ -245,17 +250,21 @@ fn skill_assigned(skill: &crate::skills::SkillSummary, assignment: &SkillAssignm
         SkillAssignment::Only(names) => {
             skill.offered
                 && wanted(&skill.name).is_ok_and(|own| {
-                    names.iter().any(|name| {
-                        name.dir_name() == own
-                            || skill
-                                .path
-                                .as_ref()
-                                .and_then(|path| path.file_name())
-                                .is_some_and(|folder| {
-                                    crate::skills::SkillDirName::sanitize(&folder.to_string_lossy())
-                                        == name.dir_name()
-                                })
-                    })
+                    names
+                        .iter()
+                        .filter(|name| name.issue().is_none())
+                        .any(|name| {
+                            name.dir_name() == own
+                                || skill
+                                    .path
+                                    .as_ref()
+                                    .and_then(|path| path.file_name())
+                                    .is_some_and(|folder| {
+                                        crate::skills::SkillDirName::sanitize(
+                                            &folder.to_string_lossy(),
+                                        ) == name.dir_name()
+                                    })
+                        })
                 })
         }
     }
@@ -313,6 +322,8 @@ impl App {
             tools: None,
             selected_agent: None,
             skills: Vec::new(),
+            skills_update: None,
+            skill_confirm: None,
             base_route: (ProviderKind::OpenAi, None, ProviderEndpoint::Official),
             agent_label: String::new(),
             entries: vec![Entry::Banner],
@@ -606,7 +617,11 @@ impl App {
     async fn pick_skill(&mut self, selected: usize) {
         let loaded = async {
             let agent = self.skills_agent().await?;
-            let workspace = self.tools.as_ref().map(|tools| tools.workspace.clone());
+            let workspace = self
+                .tools
+                .as_ref()
+                .map(|tools| tools.workspace.clone())
+                .or_else(|| agent.workspace.clone());
             let (skills, warnings) = self.host.skills(workspace).await?;
             Ok::<_, TuiError>((agent, skills, warnings))
         };
@@ -748,6 +763,30 @@ impl App {
         let Ok(name) = crate::skills::SkillName::parse(&skill.name) else {
             return;
         };
+        let confirm = (agent.id, agent.revision, skill.name.clone());
+        if agent.skills == SkillAssignment::All
+            && self.skill_confirm.take() != Some(confirm.clone())
+        {
+            let keep: Vec<String> = self
+                .skills
+                .iter()
+                .filter(|other| other.offered && other.name != skill.name)
+                .map(|other| crate::skills::escaped(&other.name, false).into_owned())
+                .collect();
+            self.note(
+                NoteKind::Warn,
+                format!(
+                    "agent {} has all skills · removing {} changes it to only: {} · {} and every skill not in this list (project skills of other workspaces, skills installed later) will stop being assigned · press a again to confirm, any other key cancels",
+                    agent.name.as_str(),
+                    crate::skills::escaped(&skill.name, false),
+                    if keep.is_empty() { "none".to_owned() } else { keep.join(", ") },
+                    crate::skills::escaped(&skill.name, false)
+                ),
+            );
+            self.skill_confirm = Some(confirm);
+            self.pick_skill(selected).await;
+            return;
+        }
         let wanted = name.dir_name();
         let assigned = skill_assigned(&skill, &agent.skills);
         let mut names = match &agent.skills {
@@ -799,7 +838,14 @@ impl App {
         self.pick_skill(selected).await;
     }
 
-    async fn check_skill_updates(&mut self) {
+    fn check_skill_updates(&mut self) {
+        if self.skills_update.is_some() {
+            self.note(
+                NoteKind::Info,
+                "a skill update check is already running · Esc stops waiting",
+            );
+            return;
+        }
         let executable = match std::env::current_exe() {
             Ok(executable) => executable,
             Err(error) => {
@@ -814,8 +860,28 @@ impl App {
             .args(["skills", "update", "--check"])
             .stdin(std::process::Stdio::null())
             .kill_on_drop(true);
-        match tokio::time::timeout(Duration::from_secs(600), command.output()).await {
-            Ok(Ok(output)) => {
+        self.skills_update = Some(tokio::spawn(async move {
+            tokio::time::timeout(Duration::from_secs(600), command.output()).await
+        }));
+        self.note(
+            NoteKind::Info,
+            "checking skill updates in the background · Esc stops waiting",
+        );
+    }
+
+    pub async fn poll_background(&mut self) {
+        if !self
+            .skills_update
+            .as_ref()
+            .is_some_and(JoinHandle::is_finished)
+        {
+            return;
+        }
+        let Some(handle) = self.skills_update.take() else {
+            return;
+        };
+        match handle.await {
+            Ok(Ok(Ok(output))) => {
                 let mut text = String::from_utf8_lossy(&output.stdout).into_owned();
                 text.push_str(&String::from_utf8_lossy(&output.stderr));
                 let text: String = text.chars().take(8192).collect();
@@ -828,13 +894,17 @@ impl App {
                     crate::skills::escaped(text.trim_end(), true).into_owned(),
                 );
             }
-            Ok(Err(error)) => self.note(
+            Ok(Ok(Err(error))) => self.note(
                 NoteKind::Error,
                 format!("skills update check failed: {error}"),
             ),
-            Err(_) => self.note(
+            Ok(Err(_)) => self.note(
                 NoteKind::Error,
                 "skills update check timed out after 10 minutes",
+            ),
+            Err(error) => self.note(
+                NoteKind::Error,
+                format!("skills update check failed: {error}"),
             ),
         }
     }
@@ -903,6 +973,16 @@ impl App {
     async fn on_key(&mut self, key: KeyEvent) {
         if self.overlay.is_some() {
             self.on_overlay_key(key).await;
+            return;
+        }
+        if key.code == KeyCode::Esc
+            && let Some(handle) = self.skills_update.take()
+        {
+            handle.abort();
+            self.note(
+                NoteKind::Info,
+                "stopped waiting for the skill update check · the vorra child is killed, but git processes it already started may run until they finish",
+            );
             return;
         }
         let control = key.modifiers.contains(KeyModifiers::CONTROL);
@@ -1079,6 +1159,9 @@ impl App {
     }
 
     async fn on_overlay_key(&mut self, key: KeyEvent) {
+        if key.code != KeyCode::Char('a') {
+            self.skill_confirm = None;
+        }
         let control_c =
             key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c');
         match self.overlay.take() {
@@ -1877,7 +1960,7 @@ impl App {
             },
             "/skills" => match arguments.as_slice() {
                 [] => self.pick_skill(0).await,
-                ["update"] => self.check_skill_updates().await,
+                ["update"] => self.check_skill_updates(),
                 _ => self.note(NoteKind::Warn, "usage: /skills [update]"),
             },
             "/agent" => match arguments.first() {

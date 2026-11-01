@@ -572,6 +572,18 @@ impl AgentsFile {
         expected_revision: Option<u64>,
         definition: AgentDefinition,
     ) -> Result<(), AgentsError> {
+        if let SkillAssignment::Only(names) = &definition.skills
+            && names.iter().any(|name| {
+                name.issue().is_some()
+                    && !self.get(definition.id).is_some_and(|agent| {
+                        matches!(&agent.skills, SkillAssignment::Only(stored) if stored.contains(name))
+                    })
+            })
+        {
+            return Err(AgentsError::Invalid(
+                "skill names cannot contain bidirectional or invisible format characters",
+            ));
+        }
         let current = self
             .agents
             .iter_mut()

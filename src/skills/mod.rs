@@ -37,7 +37,12 @@ pub const MAX_COMPATIBILITY_BYTES: usize = 500;
 pub fn is_format_character(character: char) -> bool {
     matches!(
         character,
-        '\u{200B}'..='\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}' | '\u{FEFF}'
+        '\u{061C}'
+            | '\u{200B}'..='\u{200F}'
+            | '\u{202A}'..='\u{202E}'
+            | '\u{2066}'..='\u{2069}'
+            | '\u{FEFF}'
+            | '\u{E0000}'..='\u{E007F}'
     )
 }
 
@@ -68,7 +73,7 @@ impl TryFrom<String> for SkillName {
     type Error = SkillIssue;
 
     fn try_from(value: String) -> Result<Self, Self::Error> {
-        Self::parse(&value)
+        Self::parse_stored(&value)
     }
 }
 
@@ -80,6 +85,14 @@ impl From<SkillName> for String {
 
 impl SkillName {
     pub fn parse(raw: &str) -> Result<Self, SkillIssue> {
+        let name = Self::parse_stored(raw)?;
+        match name.issue() {
+            Some(issue) => Err(issue),
+            None => Ok(name),
+        }
+    }
+
+    pub fn parse_stored(raw: &str) -> Result<Self, SkillIssue> {
         let reason = if raw.is_empty() {
             Some("empty")
         } else if raw.len() > MAX_NAME_BYTES {
@@ -88,8 +101,6 @@ impl SkillName {
             Some("contains a path separator or NUL")
         } else if raw.chars().any(char::is_control) {
             Some("contains a control character")
-        } else if raw.chars().any(is_format_character) {
-            Some("contains a bidirectional or invisible format character")
         } else if raw.starts_with('.') {
             Some("is a dot name or starts with a dot")
         } else {
@@ -102,6 +113,16 @@ impl SkillName {
             }),
             None => Ok(Self(raw.to_owned())),
         }
+    }
+
+    pub fn issue(&self) -> Option<SkillIssue> {
+        self.0
+            .chars()
+            .any(is_format_character)
+            .then(|| SkillIssue::UnsafeName {
+                name: self.0.clone(),
+                reason: "contains a bidirectional or invisible format character",
+            })
     }
 
     pub fn as_str(&self) -> &str {

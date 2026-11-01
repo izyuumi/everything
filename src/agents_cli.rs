@@ -752,11 +752,19 @@ fn print_agent(agents: &AgentsFile, agent: &AgentDefinition, unavailable: Option
             SkillAssignment::All => "all".to_owned(),
             SkillAssignment::Only(names) => names
                 .iter()
-                .map(SkillName::as_str)
+                .map(|name| vorra::skills::escaped(name.as_str(), false).into_owned())
                 .collect::<Vec<_>>()
                 .join(", "),
         }
     );
+    if let SkillAssignment::Only(names) = &agent.skills {
+        for issue in names.iter().filter_map(SkillName::issue) {
+            println!(
+                "  ! skill {}",
+                vorra::skills::escaped(&issue.to_string(), false)
+            );
+        }
+    }
     println!(
         "messaging: {}",
         match &agent.messaging {

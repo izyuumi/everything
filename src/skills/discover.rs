@@ -483,10 +483,45 @@ pub(super) fn trusted_status(status: &rustix::fs::Stat) -> Result<(), &'static s
     if status.st_uid != rustix::process::geteuid().as_raw() {
         return Err("not owned by the current user");
     }
-    if status.st_mode & 0o022 != 0 {
-        return Err("group- or world-writable");
+    if status.st_mode & 0o002 != 0 {
+        return Err("world-writable");
+    }
+    if status.st_mode & 0o020 != 0 && !private_group(status.st_gid) {
+        return Err("group-writable by a group other than the user's private group");
     }
     Ok(())
+}
+
+fn private_group(gid: u32) -> bool {
+    static PRIVATE: std::sync::OnceLock<Option<u32>> = std::sync::OnceLock::new();
+    *PRIVATE.get_or_init(user_private_gid) == Some(gid)
+}
+
+fn user_private_gid() -> Option<u32> {
+    let bounded = |path: &str| {
+        let mut text = String::new();
+        File::open(path)
+            .ok()?
+            .take(4 * 1024 * 1024)
+            .read_to_string(&mut text)
+            .ok()?;
+        Some(text)
+    };
+    let uid = rustix::process::geteuid().as_raw();
+    let passwd = bounded("/etc/passwd")?;
+    let (name, gid) = passwd.lines().find_map(|line| {
+        let fields: Vec<&str> = line.split(':').collect();
+        (fields.len() >= 4 && fields[2].parse::<u32>().ok() == Some(uid))
+            .then(|| (fields[0].to_owned(), fields[3].parse::<u32>().ok()))
+    })?;
+    let gid = gid?;
+    bounded("/etc/group")?
+        .lines()
+        .any(|line| {
+            let fields: Vec<&str> = line.split(':').collect();
+            fields.len() >= 3 && fields[0] == name && fields[2].parse::<u32>().ok() == Some(gid)
+        })
+        .then_some(gid)
 }
 
 pub(super) fn open_skill_dir(

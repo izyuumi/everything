@@ -44,10 +44,15 @@ fn assigned(record: &SkillRecord, assignment: &SkillAssignment) -> bool {
     match assignment {
         SkillAssignment::None => false,
         SkillAssignment::All => true,
-        SkillAssignment::Only(names) => names.iter().any(|name| {
-            let wanted = name.dir_name();
-            record.name.dir_name() == wanted || folder(&record.dir) == wanted
-        }),
+        SkillAssignment::Only(names) => {
+            names
+                .iter()
+                .filter(|name| name.issue().is_none())
+                .any(|name| {
+                    let wanted = name.dir_name();
+                    record.name.dir_name() == wanted || folder(&record.dir) == wanted
+                })
+        }
     }
 }
 
