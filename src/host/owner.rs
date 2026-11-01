@@ -108,6 +108,7 @@ impl HostInner {
                         waiting: snapshot.waiting,
                         diagnostic: snapshot.diagnostic,
                         live_text: self.scheduler.live_text(task_id),
+                        agent_id: snapshot.agent_id,
                     },
                 }),
                 Err(SchedulerError::NotOwned(_)) => {
@@ -284,6 +285,29 @@ impl HostInner {
             OwnerQuery::VaultList { limit } => Ok(OwnerQueryResult::VaultList {
                 listing: self.vault.list(limit, cancellation).await?,
             }),
+            OwnerQuery::Agents => {
+                self.blocking(|host| {
+                    Ok(OwnerQueryResult::Agents {
+                        agents: Box::new(host.agents.snapshot()?),
+                    })
+                })
+                .await
+            }
+            OwnerQuery::Agent { id } => {
+                self.blocking(move |host| {
+                    let agents = host.agents.snapshot()?;
+                    let agent = agents
+                        .get(id)
+                        .ok_or(super::agents::AgentsError::NotFound)?
+                        .clone();
+                    Ok(OwnerQueryResult::Agent {
+                        default: agents.default_agent == id,
+                        unavailable_tools: Some(agent.unavailable_tools(&host.registry)),
+                        agent: Box::new(agent),
+                    })
+                })
+                .await
+            }
             OwnerQuery::Command { command_id } => {
                 self.blocking(move |host| {
                     Ok(OwnerQueryResult::Command {
@@ -546,6 +570,45 @@ impl HostInner {
                 })
                 .await?;
                 Ok(OwnerOperationResult::Applied)
+            }
+            OwnerOperation::AgentPut {
+                expected_revision,
+                definition,
+            } => {
+                let _mutation = self.mutation.lock().await;
+                self.ensure_accepting()?;
+                self.blocking(move |host| {
+                    Ok(OwnerOperationResult::Agents {
+                        agents: Box::new(host.agents.put(expected_revision, *definition)?),
+                    })
+                })
+                .await
+            }
+            OwnerOperation::AgentRemove {
+                id,
+                expected_revision,
+            } => {
+                let _mutation = self.mutation.lock().await;
+                self.ensure_accepting()?;
+                self.blocking(move |host| {
+                    Ok(OwnerOperationResult::Agents {
+                        agents: Box::new(host.agents.remove(id, expected_revision)?),
+                    })
+                })
+                .await
+            }
+            OwnerOperation::AgentSetDefault {
+                id,
+                expected_revision,
+            } => {
+                let _mutation = self.mutation.lock().await;
+                self.ensure_accepting()?;
+                self.blocking(move |host| {
+                    Ok(OwnerOperationResult::Agents {
+                        agents: Box::new(host.agents.set_default(id, expected_revision)?),
+                    })
+                })
+                .await
             }
             OwnerOperation::ChatGpt { operation } => Ok(OwnerOperationResult::ChatGpt {
                 status: Box::new(self.chatgpt.operate(operation, cancellation).await?),

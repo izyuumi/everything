@@ -103,6 +103,7 @@ pub struct ConversationRow {
     pub created_at: i64,
     pub updated_at: i64,
     pub last_sequence: u64,
+    pub agent_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -473,6 +474,7 @@ impl Store {
             created_at,
             updated_at: created_at,
             last_sequence: 0,
+            agent_id: agent_id.map(str::to_owned),
         };
         self.connection()?.execute(
             "INSERT INTO conversations(id, title, created_at, updated_at, agent_id) VALUES (?1, ?2, ?3, ?3, ?4)",
@@ -486,7 +488,7 @@ impl Store {
         Ok(self
             .connection()?
             .query_row(
-                "SELECT id, title, created_at, updated_at, last_sequence FROM conversations WHERE id = ?1",
+                "SELECT id, title, created_at, updated_at, last_sequence, agent_id FROM conversations WHERE id = ?1",
                 [id],
                 conversation_row,
             )
@@ -532,7 +534,7 @@ impl Store {
         let mut connection = self.connection()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Deferred)?;
         let conversation = transaction.query_row(
-            "SELECT id, title, created_at, updated_at, last_sequence FROM conversations WHERE id = ?1",
+            "SELECT id, title, created_at, updated_at, last_sequence, agent_id FROM conversations WHERE id = ?1",
             [conversation_id], conversation_row,
         ).optional()?.ok_or_else(|| missing("conversation", conversation_id))?;
         let state = transaction.query_row(
@@ -573,7 +575,7 @@ impl Store {
         validate_limit(limit)?;
         let connection = self.connection()?;
         let mut statement = connection.prepare(
-            "SELECT id, title, created_at, updated_at, last_sequence FROM conversations ORDER BY updated_at DESC, id LIMIT ?1",
+            "SELECT id, title, created_at, updated_at, last_sequence, agent_id FROM conversations ORDER BY updated_at DESC, id LIMIT ?1",
         )?;
         collect_rows(statement.query_map([limit as i64], conversation_row)?)
     }
@@ -1467,6 +1469,7 @@ fn conversation_row(row: &Row<'_>) -> rusqlite::Result<ConversationRow> {
         created_at: row.get(2)?,
         updated_at: row.get(3)?,
         last_sequence: row.get(4)?,
+        agent_id: row.get(5)?,
     })
 }
 

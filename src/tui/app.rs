@@ -8,9 +8,12 @@ use tokio::sync::mpsc::UnboundedSender;
 use tokio::task::JoinHandle;
 use zeroize::Zeroizing;
 
-use super::host::{Host, HostEvent, Readiness, Tools, TurnEvent, TurnStart, message_text};
+use super::host::{
+    Host, HostEvent, Readiness, Tools, TuiError, TurnEvent, TurnStart, message_text,
+};
 use super::input::Input;
 use crate::agent::{ConversationConfig, ProviderEndpoint, ProviderKind};
+use crate::host::agents::{AgentDefinition, AgentId};
 use crate::host::credentials::SecretTransfer;
 use crate::ipc::{ConversationSummary, OwnerOperation, OwnerOperationResult};
 use crate::permissions::{ApprovalRequest, ExecutionMode};
@@ -19,11 +22,16 @@ use crate::vault::{ProviderStatus, VaultItemMetadata, VaultPutRequest, VaultRefe
 
 const MAX_SECRET: usize = 8_192;
 
-pub const COMMANDS: [(&str, &str); 20] = [
+pub const COMMANDS: [(&str, &str); 22] = [
     ("/help", "Show commands and keys"),
     ("/new", "New conversation  [title]"),
     ("/sessions", "List conversations and switch"),
     ("/resume", "Switch conversation  <n|id-prefix>"),
+    (
+        "/agents",
+        "Pick an agent for a new conversation  [edit NAME]",
+    ),
+    ("/agent", "Start a new conversation with an agent  <name>"),
     ("/model", "Pick a model for a new conversation  [model]"),
     (
         "/provider",
@@ -119,6 +127,7 @@ pub struct Turn {
 pub enum PickerKind {
     Session,
     Model,
+    Agent,
 }
 
 pub struct PickerItem {
@@ -153,6 +162,7 @@ pub struct Options {
     pub resume_latest: bool,
     pub provider: Option<ProviderKind>,
     pub model: Option<String>,
+    pub agent: Option<String>,
     pub endpoint: Option<ProviderEndpoint>,
     pub default_instructions: &'static str,
 }
@@ -168,6 +178,8 @@ pub struct App {
     instructions: Option<String>,
     default_instructions: &'static str,
     pub tools: Option<Tools>,
+    selected_agent: Option<AgentDefinition>,
+    pub agent_label: String,
     pub entries: Vec<Entry>,
     pub input: Input,
     history: Vec<String>,
@@ -232,7 +244,7 @@ impl App {
         state_directory: PathBuf,
         options: Options,
         conversations: Vec<ConversationSummary>,
-    ) -> Self {
+    ) -> Result<Self, TuiError> {
         let latest = conversations.first();
         let mut app = Self {
             host,
@@ -255,6 +267,8 @@ impl App {
             instructions: None,
             default_instructions: options.default_instructions,
             tools: None,
+            selected_agent: None,
+            agent_label: String::new(),
             entries: vec![Entry::Banner],
             input: Input::default(),
             history: Vec::new(),
@@ -285,13 +299,146 @@ impl App {
                 .then(|| latest.map(|info| info.id))
                 .flatten()
         });
+        if let Some(name) = &options.agent {
+            let agents = app.host.agents().await?;
+            let definition = agents
+                .by_name(name)
+                .ok_or_else(|| {
+                    TuiError::Setup(format!("no agent named {name}; see `vorra agents list`"))
+                })?
+                .clone();
+            if let Some(conversation_id) = target {
+                let bound = match conversations.iter().find(|info| info.id == conversation_id) {
+                    Some(info) => info.agent_id,
+                    None => app.host.conversation(conversation_id).await?.0.agent_id,
+                };
+                let bound = bound.unwrap_or(agents.default_agent);
+                if bound != definition.id {
+                    let label = agents
+                        .get(bound)
+                        .map_or_else(|| bound.to_string(), |agent| agent.name.as_str().to_owned());
+                    return Err(TuiError::Setup(format!(
+                        "conversation {conversation_id} is bound to agent {label}; omit --agent {name} or start a new conversation"
+                    )));
+                }
+            }
+            app.adopt_agent(definition);
+        }
         if let Some(conversation_id) = target {
             app.switch(conversation_id).await;
+        } else {
+            app.refresh_agent_label().await;
         }
         if app.model.is_none() {
             app.note(NoteKind::Warn, "no model yet · choose one with /model");
         }
-        app
+        Ok(app)
+    }
+
+    fn adopt_agent(&mut self, definition: AgentDefinition) {
+        if let Some(model) = &definition.model {
+            self.provider = model.provider;
+            self.model = Some(model.model.clone());
+            self.endpoint = model.endpoint.clone();
+        }
+        self.agent_label = definition.name.as_str().to_owned();
+        self.selected_agent = Some(definition);
+    }
+
+    async fn refresh_agent_label(&mut self) {
+        let id = match &self.conversation {
+            Some(info) => info.agent_id,
+            None => self.selected_agent.as_ref().map(|agent| agent.id),
+        };
+        match self.host.agents().await {
+            Ok(agents) => {
+                self.agent_label = agents.resolve(id).map_or_else(
+                    |_| "missing agent".to_owned(),
+                    |agent| agent.name.as_str().to_owned(),
+                );
+            }
+            Err(error) => self.note(NoteKind::Error, format!("cannot read agents: {error}")),
+        }
+        self.dirty = true;
+    }
+
+    async fn use_agent(&mut self, choice: &str) {
+        if self.turn.is_some() {
+            self.note(
+                NoteKind::Warn,
+                "wait for the current reply first (or Ctrl+C twice to cancel it)",
+            );
+            return;
+        }
+        let agents = match self.host.agents().await {
+            Ok(agents) => agents,
+            Err(error) => {
+                self.note(NoteKind::Error, error.to_string());
+                return;
+            }
+        };
+        let found = choice
+            .parse::<AgentId>()
+            .ok()
+            .and_then(|id| agents.get(id))
+            .or_else(|| agents.by_name(choice))
+            .cloned();
+        match found {
+            Some(definition) => {
+                self.adopt_agent(definition);
+                self.new_conversation(None).await;
+            }
+            None => self.note(
+                NoteKind::Warn,
+                format!("no agent named {choice} · /agents to list them"),
+            ),
+        }
+    }
+
+    async fn pick_agent(&mut self) {
+        let agents = match self.host.agents().await {
+            Ok(agents) => agents,
+            Err(error) => {
+                self.note(NoteKind::Error, error.to_string());
+                return;
+            }
+        };
+        let current = self
+            .selected_agent
+            .as_ref()
+            .map_or(agents.default_agent, |agent| agent.id);
+        let selected = agents
+            .agents
+            .iter()
+            .position(|agent| agent.id == current)
+            .unwrap_or(0);
+        let items = agents
+            .agents
+            .iter()
+            .map(|agent| PickerItem {
+                label: if agent.id == agents.default_agent {
+                    format!("{} (default)", agent.name.as_str())
+                } else {
+                    agent.name.as_str().to_owned()
+                },
+                detail: format!(
+                    "{} · {} · {}",
+                    agent.description,
+                    agent.model.as_ref().map_or_else(
+                        || "host default model".to_owned(),
+                        |model| format!("{}/{}", provider_label(model.provider), model.model)
+                    ),
+                    agent.tools
+                ),
+                value: agent.id.to_string(),
+                current: agent.id == current,
+            })
+            .collect();
+        self.overlay = Some(Overlay::Picker {
+            kind: PickerKind::Agent,
+            items,
+            selected,
+        });
     }
 
     fn note(&mut self, kind: NoteKind, text: impl Into<String>) {
@@ -601,6 +748,7 @@ impl App {
                                 }
                             }
                             PickerKind::Model => self.choose_model(value).await,
+                            PickerKind::Agent => self.use_agent(&value).await,
                         }
                     }
                 }
@@ -1077,7 +1225,8 @@ impl App {
                 .chars()
                 .take(60)
                 .collect();
-            match self.host.initialize(title, configuration).await {
+            let agent = self.selected_agent.as_ref().map(|agent| agent.id);
+            match self.host.initialize(title, configuration, agent).await {
                 Ok(info) => self.conversation = Some(info),
                 Err(error) => {
                     self.note(NoteKind::Error, error.to_string());
@@ -1120,19 +1269,24 @@ impl App {
         self.dirty = true;
         self.scroll = 0;
         if let Some(title) = title {
+            let agent = self.selected_agent.as_ref().map(|agent| agent.id);
             match self.configuration() {
-                Ok(configuration) => match self.host.initialize(title, configuration).await {
-                    Ok(info) => self.conversation = Some(info),
-                    Err(error) => self.note(NoteKind::Error, error.to_string()),
-                },
+                Ok(configuration) => {
+                    match self.host.initialize(title, configuration, agent).await {
+                        Ok(info) => self.conversation = Some(info),
+                        Err(error) => self.note(NoteKind::Error, error.to_string()),
+                    }
+                }
                 Err(error) => self.note(NoteKind::Error, error),
             }
         }
+        self.refresh_agent_label().await;
         let model = self.model.clone().unwrap_or_else(|| "no model".into());
         self.note(
             NoteKind::Ok,
             format!(
-                "new conversation · {}/{model}",
+                "new conversation · agent {} · {}/{model}",
+                self.agent_label,
                 provider_label(self.provider)
             ),
         );
@@ -1161,6 +1315,7 @@ impl App {
         self.endpoint = info.endpoint.clone();
         self.conversation = Some(info.clone());
         self.stopped = false;
+        self.refresh_agent_label().await;
         self.load_transcript().await;
         match self.host.readiness(&info).await {
             Ok(Readiness::Stopped) => {
@@ -1287,6 +1442,21 @@ impl App {
                     .await;
             }
             "/sessions" | "/switch" => self.open_sessions().await,
+            "/agents" => match arguments.as_slice() {
+                [] => self.pick_agent().await,
+                ["edit", name] => self.note(
+                    NoteKind::Info,
+                    format!("edit agents in a shell: vorra agents edit {name} [flags] · vorra agents edit --help"),
+                ),
+                _ => self.note(NoteKind::Warn, "usage: /agents [edit NAME]"),
+            },
+            "/agent" => match arguments.first() {
+                Some(name) => self.use_agent(name).await,
+                None => self.note(
+                    NoteKind::Info,
+                    format!("agent: {} · /agent NAME or /agents to switch", self.agent_label),
+                ),
+            },
             "/resume" => match arguments.first() {
                 None => self.open_sessions().await,
                 Some(choice) => self.resume(choice).await,
