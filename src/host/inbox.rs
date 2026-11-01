@@ -673,12 +673,27 @@ fn validate_namespace(connection: &Connection, input: &InboxInput) -> Result<(),
                     }]
         }
         (
-            OwnerCommand::Initialize { title, .. },
+            OwnerCommand::Initialize { title, agent, .. },
             ConversationEvent::ConversationCreated {
                 title: Some(original),
-                ..
+                agent_id,
             },
-        ) => *title == original,
+        ) => {
+            let recorded = match agent_id {
+                Some(recorded) => Some(recorded.to_string()),
+                None => connection
+                    .query_row(
+                        "SELECT agent_id FROM conversations WHERE id=?1",
+                        [append.conversation_id.as_str()],
+                        |row| row.get::<_, Option<String>>(0),
+                    )
+                    .optional()?
+                    .flatten(),
+            };
+            *title == original
+                && recorded
+                    .is_none_or(|recorded| agent.is_none_or(|agent| agent.to_string() == recorded))
+        }
         _ => false,
     };
     if matches {

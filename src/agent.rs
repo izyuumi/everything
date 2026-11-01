@@ -441,16 +441,35 @@ impl Agent {
             let _write = write;
             config.validate()?;
             if title.trim().is_empty() || title.len() > 4_096 || title.contains('\0') {
-                return Err(AgentError::InvalidData("title requires 1 to 4096 bytes without NUL"));
+                return Err(AgentError::InvalidData(
+                    "title requires 1 to 4096 bytes without NUL",
+                ));
             }
             if let Some(original) = store.command_request(&command_id.to_string())? {
                 if original.conversation_id != id.to_string() || original.events.len() != 1 {
                     return Err(AgentError::CommandConflict(command_id));
                 }
-                let event: EventEnvelope = serde_json::from_value(original.events[0].payload.clone())
-                    .map_err(|_| AgentError::CommandConflict(command_id))?;
+                let event: EventEnvelope =
+                    serde_json::from_value(original.events[0].payload.clone())
+                        .map_err(|_| AgentError::CommandConflict(command_id))?;
+                let ConversationEvent::ConversationCreated {
+                    title: Some(original),
+                    agent_id: recorded,
+                } = event.payload
+                else {
+                    return Err(AgentError::CommandConflict(command_id));
+                };
+                let recorded = match recorded {
+                    Some(recorded) => Some(recorded.to_string()),
+                    None => store
+                        .conversation(&id.to_string())?
+                        .and_then(|row| row.agent_id),
+                };
                 if event.causation_id != Some(command_id)
-                    || !matches!(event.payload, ConversationEvent::ConversationCreated { title: Some(ref original), .. } if *original == title)
+                    || original != title
+                    || recorded.is_some_and(|recorded| {
+                        Some(recorded) != agent_id.map(|agent| agent.to_string())
+                    })
                 {
                     return Err(AgentError::CommandConflict(command_id));
                 }
@@ -462,23 +481,66 @@ impl Agent {
             }
             let now = UnixMillis::now()?;
             match store.conversation(&id.to_string())? {
-                Some(existing) if existing.last_sequence == 0 && existing.title == title
-                    && existing.agent_id == agent_id.map(|agent| agent.to_string())
-                    && store.conversation_state(&id.to_string())?.is_none() => {}
+                Some(existing)
+                    if existing.last_sequence == 0
+                        && existing.title == title
+                        && existing.agent_id == agent_id.map(|agent| agent.to_string())
+                        && store.conversation_state(&id.to_string())?.is_none() => {}
+                Some(existing)
+                    if existing.last_sequence == 0
+                        && existing.title == title
+                        && store.conversation_state(&id.to_string())?.is_none() =>
+                {
+                    return Err(AgentError::InvalidData(
+                        "the conversation is bound to a different agent",
+                    ));
+                }
                 Some(_) => return Err(AgentError::InvalidData("conversation ID already exists")),
-                None => { store.create_conversation(&id.to_string(), &title, timestamp(now)?, agent_id.map(|agent| agent.to_string()).as_deref())?; }
+                None => {
+                    store.create_conversation(
+                        &id.to_string(),
+                        &title,
+                        timestamp(now)?,
+                        agent_id.map(|agent| agent.to_string()).as_deref(),
+                    )?;
+                }
             }
             let checkpoint = Checkpoint {
-                version: CHECKPOINT_VERSION, config, message_head: 0, message_count: 0,
-                pending: None, continuation: None, last_turn: None, native: None, inputs: Default::default(),
+                version: CHECKPOINT_VERSION,
+                config,
+                message_head: 0,
+                message_count: 0,
+                pending: None,
+                continuation: None,
+                last_turn: None,
+                native: None,
+                inputs: Default::default(),
             };
-            let event = event_input(id, 1, command_id, now, ConversationEvent::ConversationCreated { title: Some(title), agent_id: agent_id.map(|agent| *agent.as_uuid()) })?;
+            let event = event_input(
+                id,
+                1,
+                command_id,
+                now,
+                ConversationEvent::ConversationCreated {
+                    title: Some(title),
+                    agent_id: agent_id.map(|agent| *agent.as_uuid()),
+                },
+            )?;
             store.append_with_state(
-                &AppendRequest { conversation_id: id.to_string(), command_id: command_id.to_string(), expected_sequence: 0, events: vec![event] },
-                &ConversationStateUpdate { expected_revision: 0, payload: checkpoint_payload(&checkpoint)? },
+                &AppendRequest {
+                    conversation_id: id.to_string(),
+                    command_id: command_id.to_string(),
+                    expected_sequence: 0,
+                    events: vec![event],
+                },
+                &ConversationStateUpdate {
+                    expected_revision: 0,
+                    payload: checkpoint_payload(&checkpoint)?,
+                },
             )?;
             load_conversation(&store, id)
-        }).await
+        })
+        .await
     }
 
     pub async fn conversation(&self, id: ConversationId) -> Result<Conversation, AgentError> {
