@@ -771,12 +771,19 @@ pub(super) fn update(
         } else if !present(&skills_root(home).join(dir_name.as_str())) {
             match agent_dirs
                 .iter()
-                .find(|dir| present(&dir.join(dir_name.as_str())))
+                .find(|dir| dir.join(dir_name.as_str()).is_dir())
             {
                 Some(dir) => Some(format!(
                     "agent-only npx install in {}, not managed by Vorra; run {NPX_UPDATE} {}",
                     dir.display(),
-                    dir_name.as_str()
+                    if key
+                        .chars()
+                        .all(|c| c.is_ascii_alphanumeric() || "._-".contains(c))
+                    {
+                        key.clone()
+                    } else {
+                        format!("'{}'", key.replace('\'', r"'\''"))
+                    }
                 )),
                 None => {
                     Some("not installed on disk; reinstall it with vorra skills add".to_owned())
