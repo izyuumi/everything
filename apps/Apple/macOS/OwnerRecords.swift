@@ -31,9 +31,11 @@ struct HostConversation: Identifiable, Sendable {
     let model: String
     let lastSequence: UInt64
     let messageCount: UInt64
+    let agentID: OwnerID?
 
     init(_ value: JSONValue) throws {
         id = try OwnerID(value.requiringString("id", maximum: 36))
+        agentID = value["agent_id"] == .null ? nil : try OwnerID(value.requiringString("agent_id", maximum: 36))
         title = try value.requiringString("title", maximum: 4096)
         provider = try value.requiringString("provider", maximum: 32)
         model = try value.requiringString("model", maximum: 256)
@@ -380,5 +382,141 @@ struct HostScheduleHistory: Sendable {
                   try ScheduleFields.timestamp(next["claimed_at"]) == last.claimedAt,
                   try OwnerID(next.requiringString("occurrence_id", maximum: 36)) == last.id else { throw OwnerClientError.invalidResponse }
         }
+    }
+}
+
+enum DisplayText {
+    static func escaped(_ value: String, multiline: Bool = false) -> String {
+        var result = ""
+        for scalar in value.unicodeScalars {
+            let format = scalar.value == 0x061C || (0x200B...0x200F).contains(scalar.value) || (0x202A...0x202E).contains(scalar.value)
+                || (0x2066...0x2069).contains(scalar.value) || scalar.value == 0xFEFF || (0xE0000...0xE007F).contains(scalar.value)
+            let control = CharacterSet.controlCharacters.contains(scalar) && !(multiline && (scalar == "\n" || scalar == "\t"))
+            if format || control { result += "\\u{" + String(scalar.value, radix: 16) + "}" }
+            else { result.unicodeScalars.append(scalar) }
+        }
+        return result
+    }
+}
+
+struct HostAgent: Identifiable, Sendable, Equatable {
+    let id: OwnerID
+    let name: String
+    let description: String
+    let persona: String?
+    let revision: UInt64
+    let model: String?
+    let toolMode: String
+    let tools: String
+    let memory: String
+    let skills: String
+    let definition: JSONValue
+
+    static let modes = ["off", "read_only", "trusted_workspace", "full_host"]
+
+    init(_ value: JSONValue) throws {
+        id = try OwnerID(value.requiringString("id", maximum: 36))
+        name = try value.requiringString("name", maximum: 32)
+        description = try value.requiringString("description", maximum: 1024)
+        persona = try ScheduleFields.optionalText(value["persona"], maximum: 32768)
+        guard !name.isEmpty, let revision = value["revision"].unsigned, revision > 0, revision <= UInt64(Int64.max),
+              let memory = value["memory"].string, ["shared", "off"].contains(memory) else { throw OwnerClientError.invalidResponse }
+        self.revision = revision
+        self.memory = memory
+        let model = value["model"]
+        self.model = model == .null ? nil : try model.requiringString("provider", maximum: 32) + " · " + model.requiringString("model", maximum: 256)
+        if value["tools"] == .string("off") {
+            toolMode = "off"
+            tools = "Tools off"
+        } else {
+            let on = value["tools"]["on"]
+            toolMode = try on.requiringString("max_mode", maximum: 32)
+            guard HostAgent.modes.dropFirst().contains(toolMode) else { throw OwnerClientError.invalidResponse }
+            let ceiling = JSONSummary.label(toolMode)
+            if on["allow"] == .string("all") { tools = ceiling + " · all tools" }
+            else if let only = on["allow"]["only"].array, only.count <= 256 {
+                let names = try only.map { reference -> String in
+                    if let tool = reference["tool"].string, tool.utf8.count <= 256 { return tool }
+                    if let server = reference["mcp_server"].string, server.utf8.count <= 256 { return "mcp:" + server }
+                    throw OwnerClientError.invalidResponse
+                }
+                tools = ceiling + (names.isEmpty ? " · no tools" : " · only " + names.joined(separator: ", "))
+            } else { throw OwnerClientError.invalidResponse }
+        }
+        switch value["skills"] {
+        case .string("none"): skills = "No skills"
+        case .string("all"): skills = "All skills"
+        default:
+            guard let only = value["skills"]["only"].array, only.count <= 256 else { throw OwnerClientError.invalidResponse }
+            skills = "Only " + (try only.map { guard let name = $0.string, name.utf8.count <= 256 else { throw OwnerClientError.invalidResponse }; return name }).joined(separator: ", ")
+        }
+        definition = value
+    }
+}
+
+struct HostAgents: Sendable, Equatable {
+    let revision: UInt64
+    let defaultID: OwnerID
+    let agents: [HostAgent]
+
+    init(_ response: JSONValue) throws {
+        let file = response["agents"]
+        guard response["kind"].string == "agents", file["schema"].unsigned == 1, let revision = file["revision"].unsigned,
+              let rows = file["agents"].array, rows.count <= 64 else { throw OwnerClientError.invalidResponse }
+        self.revision = revision
+        defaultID = try OwnerID(file.requiringString("default_agent", maximum: 36))
+        agents = try rows.map(HostAgent.init)
+        guard Set(agents.map(\.id)).count == agents.count, agents.contains(where: { $0.id == defaultID }) else { throw OwnerClientError.invalidResponse }
+    }
+
+    func name(_ id: OwnerID?) -> String? { agents.first { $0.id == (id ?? defaultID) }?.name }
+}
+
+struct HostSkill: Identifiable, Sendable {
+    let id: Int
+    let name: String
+    let status: String
+    let root: String?
+    let description: String?
+    let source: String?
+    let path: String?
+    let allowedTools: String?
+    let preview: String
+    let offered: Bool
+    let shadowed: Bool
+    let issues: [String]
+
+    init(_ value: JSONValue, index: Int) throws {
+        id = index
+        name = try value.requiringString("name", maximum: 1024)
+        status = try value.requiringString("status", maximum: 16)
+        guard ["tracked", "untracked", "rejected", "missing"].contains(status),
+              let offered = value["offered"].bool, let shadowed = value["shadowed"].bool else { throw OwnerClientError.invalidResponse }
+        self.offered = offered
+        self.shadowed = shadowed
+        root = try ScheduleFields.optionalText(value["root"], maximum: 16)
+        description = try ScheduleFields.optionalText(value["description"], maximum: 4096)
+        source = try ScheduleFields.optionalText(value["source"], maximum: 4096)
+        path = try ScheduleFields.optionalText(value["path"], maximum: 4096)
+        allowedTools = try ScheduleFields.optionalText(value["allowed_tools"], maximum: 4096)
+        preview = try ScheduleFields.optionalText(value["preview"], maximum: 1024) ?? ""
+        guard value["issues"] == .null || value["issues"].array != nil, (value["issues"].array?.count ?? 0) <= 64 else { throw OwnerClientError.invalidResponse }
+        issues = try (value["issues"].array ?? []).map { guard let issue = $0.string, issue.utf8.count <= 4096 else { throw OwnerClientError.invalidResponse }; return issue }
+    }
+}
+
+struct HostSkills: Sendable {
+    let skills: [HostSkill]
+    let warnings: [String]
+    let omitted: UInt64
+
+    init(_ response: JSONValue) throws {
+        guard response["kind"].string == "skills", let rows = response["skills"].array, rows.count <= 8192,
+              response["warnings"] == .null || response["warnings"].array != nil,
+              (response["warnings"].array?.count ?? 0) <= 64,
+              response["omitted"] == .null || response["omitted"].unsigned != nil else { throw OwnerClientError.invalidResponse }
+        skills = try rows.enumerated().map { try HostSkill($1, index: $0) }
+        warnings = try (response["warnings"].array ?? []).map { guard let text = $0.string, text.utf8.count <= 1024 else { throw OwnerClientError.invalidResponse }; return text }
+        omitted = response["omitted"].unsigned ?? 0
     }
 }

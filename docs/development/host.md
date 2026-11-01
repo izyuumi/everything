@@ -58,6 +58,12 @@ The same owner input can submit an existing domain command and wait for its dura
 {"kind":"command","command":{"schema_version":1,"command_id":"UNIQUE_COMMAND_UUID","conversation_id":"CONVERSATION_UUID","issuing_device_id":null,"issued_at":1792091546149,"payload":{"kind":"cancel_task","task_id":"TASK_UUID"}}}
 ```
 
+An owner command (the typed form `vorra chat` uses) goes in `{"kind":"owner_command","command":…}`. The Mac app uses it to create a conversation bound to an agent; the receipt has the same shape as above:
+
+```json
+{"kind":"owner_command","command":{"kind":"initialize","conversation_id":"NEW_CONVERSATION_UUID","command_id":"UNIQUE_COMMAND_UUID","title":"New conversation","configuration":{"provider":"anthropic","model":"MODEL","instructions":"You are Vorra, a helpful assistant.","endpoint":{"kind":"official"},"max_output_tokens":4096,"temperature":null},"agent":"AGENT_UUID"}}
+```
+
 Steering a running or waiting task uses the same envelope with `"payload":{"kind":"steer_task","task_id":"TASK_UUID","instruction":"..."}`. Its Completed receipt means durable delivery into the task's native input queue; the kernel applies it at the next safe checkpoint, as described in the [steering contract](../contracts/steering.md).
 
 Preserve the complete envelope and its command ID after an ambiguous response. This CLI variant accepts only the complete current typed representation, including nullable fields, and explicitly rejects unknown fields at any envelope/payload/message level. It never silently drops additive metadata before host identity comparison. Domain IPC itself retains its broader additive-field contract. A Completed receipt establishes command application, not completion of the target task or proof of tool cleanup. A disposable Rust 1.88 release walkthrough used the actual headless host and CLI to resolve a real shell authorization request, replay its exact receipt, cancel a managed task, and reject changed decisions, unknown envelope/payload fields and an omitted nullable field. It did not execute the shell or make a successful model request.

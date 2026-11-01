@@ -291,6 +291,9 @@ enum OwnerInput {
     Command {
         command: serde_json::Value,
     },
+    OwnerCommand {
+        command: vorra::ipc::OwnerCommand,
+    },
     Operation {
         operation: Box<vorra::ipc::OwnerOperation>,
         request_id: Option<CommandId>,
@@ -1064,6 +1067,9 @@ async fn owner_cli(
                 return Err(CliError::OwnerInput);
             }
             write_json(client.submit_domain(typed, cancellation).await?).await
+        }
+        OwnerInput::OwnerCommand { command } => {
+            write_json(client.submit(command, cancellation).await?).await
         }
         OwnerInput::Operation {
             operation,

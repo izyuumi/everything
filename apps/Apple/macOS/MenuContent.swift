@@ -45,7 +45,7 @@ struct MenuContent: View {
                     HStack {
                         Button("Repeat exact action") { Task { await model.repeatPending() } }
                             .disabled(model.acting || !model.connected || model.draining)
-                        if model.pendingAction?.body["kind"].string == "command" {
+                        if model.pendingAction?.isCommand == true {
                             Button("Inspect result") { Task { await model.inspectPendingCommand() } }
                                 .disabled(model.acting || !model.connected)
                         }
@@ -56,6 +56,8 @@ struct MenuContent: View {
             }
             TabView {
                 ConversationsView(model: model).tabItem { Label("Conversations", systemImage: "bubble.left.and.bubble.right") }
+                AgentsView(model: model).tabItem { Label("Agents", systemImage: "person.2") }
+                SkillsView(model: model).tabItem { Label("Skills", systemImage: "book.closed") }
                 TasksView(model: model).tabItem { Label("Tasks", systemImage: "list.bullet") }
                 SchedulesView(model: model).tabItem { Label("Schedules", systemImage: "calendar") }
                 PermissionsView(model: model).tabItem { Label(model.approvals.isEmpty ? "Approvals" : "Approvals (\(model.approvals.count))", systemImage: "hand.raised") }
@@ -84,6 +86,8 @@ struct MenuContent: View {
         }
         .sheet(item: $model.selectedTask) { task in TaskDetailsView(model: model, task: task) }
         .sheet(item: $model.selectedApproval) { approval in ApprovalDetailsView(model: model, approval: approval) }
+        .sheet(item: $model.editingAgent) { agent in AgentEditorView(model: model, agent: agent) }
+        .sheet(isPresented: $model.creatingAgent) { AgentEditorView(model: model, agent: nil) }
         .sheet(item: $model.openConversation) { conversation in ConversationTranscriptView(model: model, conversation: conversation) }
     }
 }
