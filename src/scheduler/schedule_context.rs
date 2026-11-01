@@ -13,6 +13,7 @@ pub struct ScheduleCallerContext {
     operation_id: CommandId,
     tool_name: String,
     cancellation: CancellationToken,
+    agent: Option<crate::host::agents::AgentId>,
 }
 
 impl ScheduleCallerContext {
@@ -23,6 +24,7 @@ impl ScheduleCallerContext {
         operation_id: CommandId,
         tool_name: String,
         cancellation: CancellationToken,
+        agent: Option<crate::host::agents::AgentId>,
     ) -> Self {
         Self {
             configuration,
@@ -31,7 +33,12 @@ impl ScheduleCallerContext {
             operation_id,
             tool_name,
             cancellation,
+            agent,
         }
+    }
+
+    pub fn agent(&self) -> Option<crate::host::agents::AgentId> {
+        self.agent
     }
 
     pub fn configuration(&self) -> &ConversationConfig {

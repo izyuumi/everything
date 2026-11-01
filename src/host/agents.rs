@@ -11,8 +11,10 @@ use uuid::Uuid;
 
 use crate::agent::{ConversationConfig, MAX_INSTRUCTIONS_BYTES, ProviderEndpoint, ProviderKind};
 use crate::permissions::ExecutionMode;
+use crate::scheduler::ExecutionPolicy;
 use crate::service::{ServiceError, StateLease};
 pub use crate::skills::SkillName;
+use crate::tools::ToolRegistry;
 
 pub const DEFAULT_AGENT_ID: AgentId = AgentId(Uuid::from_u128(1));
 pub const AGENTS_SCHEMA: u64 = 1;
@@ -221,6 +223,14 @@ pub enum Messaging {
     May(BTreeSet<AgentId>),
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CapturedAgent {
+    pub id: AgentId,
+    pub revision: u64,
+    pub memory: MemoryAccess,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AgentDefinition {
@@ -390,6 +400,59 @@ impl AgentDefinition {
             return Err(AgentsError::Invalid("invalid messaging allowlist"));
         }
         Ok(())
+    }
+
+    pub fn captured(&self) -> CapturedAgent {
+        CapturedAgent {
+            id: self.id,
+            revision: self.revision,
+            memory: self.memory,
+        }
+    }
+
+    pub fn tool_ceiling(
+        &self,
+        mode: ExecutionMode,
+        registry: &ToolRegistry,
+    ) -> Option<(ExecutionMode, Option<BTreeSet<String>>)> {
+        let AgentTools::On { max_mode, allow } = &self.tools else {
+            return None;
+        };
+        let allowed = match allow {
+            ToolAllow::All => None,
+            ToolAllow::Only(references) => Some(
+                registry
+                    .descriptors()
+                    .filter(|tool| {
+                        references.iter().any(|reference| match reference {
+                            ToolRef::Tool(name) => *name == tool.name,
+                            ToolRef::McpServer(server) => {
+                                crate::tools::mcp::server_of(tool) == Some(server.as_str())
+                            }
+                        })
+                    })
+                    .map(|tool| tool.name.clone())
+                    .collect(),
+            ),
+        };
+        Some((mode.min(*max_mode), allowed))
+    }
+
+    pub fn narrow(&self, mut policy: ExecutionPolicy, registry: &ToolRegistry) -> ExecutionPolicy {
+        match self.tool_ceiling(policy.mode, registry) {
+            None => policy.tools_enabled = false,
+            Some((mode, allowed)) => {
+                policy.mode = mode;
+                if let Some(allowed) = allowed {
+                    policy.allowed_tools = Some(match policy.allowed_tools {
+                        Some(current) => current.intersection(&allowed).cloned().collect(),
+                        None => allowed,
+                    });
+                }
+            }
+        }
+        policy.agent = Some(self.captured());
+        policy
     }
 
     fn same_content(&self, other: &Self) -> bool {

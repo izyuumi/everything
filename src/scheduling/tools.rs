@@ -416,6 +416,7 @@ fn job_draft(
                 permissions: arguments.permissions,
                 budget: arguments.budget,
                 delivery,
+                agent: caller.agent(),
             },
             policies: arguments.policies,
         },

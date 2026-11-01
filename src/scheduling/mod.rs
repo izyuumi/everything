@@ -293,6 +293,8 @@ pub struct ScheduledTarget {
     pub permissions: ScheduledPermissions,
     pub budget: RunBudget,
     pub delivery: ResultDelivery,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<crate::host::agents::AgentId>,
 }
 
 impl ScheduledTarget {

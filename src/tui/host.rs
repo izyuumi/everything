@@ -143,6 +143,7 @@ impl Host {
                     command_id: CommandId::new(),
                     title,
                     configuration,
+                    agent: None,
                 },
                 self.cancellation.clone(),
             )

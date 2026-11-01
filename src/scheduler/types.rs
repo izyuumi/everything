@@ -80,6 +80,8 @@ pub struct ExecutionPolicy {
     pub allowed_tools: Option<BTreeSet<String>>,
     pub budget: ContextBudget,
     pub limits: LoopLimits,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<crate::host::agents::CapturedAgent>,
 }
 
 impl ExecutionPolicy {

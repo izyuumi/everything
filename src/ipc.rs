@@ -25,6 +25,8 @@ pub struct RequestedRunOptions {
     pub max_charged_tokens: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_duration_seconds: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agent: Option<crate::host::agents::AgentId>,
 }
 
 impl RequestedRunOptions {
@@ -62,6 +64,8 @@ pub enum OwnerCommand {
         command_id: CommandId,
         title: String,
         configuration: ConversationConfig,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        agent: Option<crate::host::agents::AgentId>,
     },
 }
 
