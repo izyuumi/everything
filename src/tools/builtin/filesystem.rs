@@ -36,30 +36,42 @@ pub(super) struct Protected {
     path: PathBuf,
     dev: u64,
     ino: u64,
+    workspace: PathBuf,
 }
 
 impl Protected {
     pub(super) fn open(path: &Path) -> io::Result<Arc<Self>> {
         let path = std::fs::canonicalize(path)?;
         let metadata = std::fs::metadata(&path)?;
+        let workspace = path.join("workspace");
         Ok(Arc::new(Self {
             dev: std::os::unix::fs::MetadataExt::dev(&metadata),
             ino: std::os::unix::fs::MetadataExt::ino(&metadata),
+            workspace: std::fs::canonicalize(&workspace).unwrap_or(workspace),
             path,
         }))
     }
 
     fn contains(&self, path: &Path) -> bool {
-        std::fs::canonicalize(path)
-            .ok()
-            .or_else(|| {
-                Some(
-                    std::fs::canonicalize(path.parent()?)
-                        .ok()?
-                        .join(path.file_name()?),
-                )
-            })
-            .is_some_and(|path| path.starts_with(&self.path))
+        let resolved = match std::fs::canonicalize(path) {
+            Ok(path) => path,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                let (Some(parent), Some(name)) = (path.parent(), path.file_name()) else {
+                    return true;
+                };
+                match std::fs::canonicalize(parent) {
+                    Ok(parent) => parent.join(name),
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => return false,
+                    Err(_) => return true,
+                }
+            }
+            Err(_) => return true,
+        };
+        resolved.starts_with(&self.path) && !self.exempt(&resolved)
+    }
+
+    fn exempt(&self, path: &Path) -> bool {
+        path.starts_with(&self.workspace)
     }
 
     fn is(&self, metadata: &Metadata) -> bool {
@@ -196,9 +208,12 @@ impl Tool for FilesystemTool {
             let protected = protected.as_deref();
             if let Some(guard) = protected
                 && let Some(path) = arguments.get("path").and_then(Value::as_str)
-                && guard.contains(&root.join(path))
             {
-                return Err(no_effect(&worker_name, PROTECTED));
+                let path =
+                    relative_path(&worker_name, path, matches!(operation, Operation::Search))?;
+                if guard.contains(&root.join(path)) {
+                    return Err(no_effect(&worker_name, PROTECTED));
+                }
             }
             let directory = open_root(&root, protected)
                 .map_err(|error| no_effect(&worker_name, redactor.error(error)))?;
@@ -305,6 +320,8 @@ fn open_root(root: &Path, protected: Option<&Protected>) -> io::Result<Dir> {
     if !root.is_absolute() {
         return Err(io::Error::other("workspace root is not absolute"));
     }
+    let protected = protected
+        .filter(|guard| !std::fs::canonicalize(root).is_ok_and(|root| guard.exempt(&root)));
     let mut directory = Dir::open_ambient_dir("/", ambient_authority())?;
     for part in root.components() {
         match part {
