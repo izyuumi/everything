@@ -630,7 +630,10 @@ impl Finder<'_> {
     }
 
     fn try_add(&mut self, dir: &Path) -> Result<bool, SkillsCliError> {
-        let label = || shown(dir.strip_prefix(self.base).unwrap_or(dir).display());
+        let label = || match dir.strip_prefix(self.base) {
+            Ok(relative) if !relative.as_os_str().is_empty() => shown(relative.display()),
+            _ => shown(dir.display()),
+        };
         let contents = match read_skill_file(dir) {
             Ok(Some(contents)) => contents,
             Ok(None) => return Ok(false),
@@ -654,11 +657,11 @@ impl Finder<'_> {
                 return Ok(true);
             }
         };
-        if fields
-            .issues
-            .iter()
-            .any(|issue| matches!(issue, SkillIssue::MetadataValueNotString { key } if key == "internal"))
-        {
+        if fields.internal {
+            self.warnings.push(format!(
+                "skipped {}: metadata.internal is true (internal skill)",
+                label()
+            ));
             return Ok(true);
         }
         let (Some(name), Some(description)) = (fields.name, fields.description) else {

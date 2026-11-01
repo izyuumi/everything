@@ -166,8 +166,14 @@ impl Staging {
 }
 
 pub(super) enum Expected<'a> {
-    Hash { key: &'a str, hash: &'a str },
-    Absent { key: &'a str },
+    Hash {
+        key: &'a str,
+        hash: &'a str,
+        updated_at: &'a str,
+    },
+    Absent {
+        key: &'a str,
+    },
 }
 
 fn swap(
@@ -185,7 +191,11 @@ fn swap(
     let recorded = stage.join("target");
     fs::write(&recorded, folder).map_err(at(&recorded))?;
     let expectation = match expected {
-        Expected::Hash { key, hash } => json!({ "key": key, "hash": hash }),
+        Expected::Hash {
+            key,
+            hash,
+            updated_at,
+        } => json!({ "key": key, "hash": hash, "updatedAt": updated_at }),
         Expected::Absent { key } => json!({ "key": key }),
     };
     let expect_path = stage.join("expect");
@@ -237,10 +247,16 @@ fn committed(stage: &Path, home: &Path) -> io::Result<bool> {
     let entry = skills.get(key);
     Ok(match expectation.get("hash").and_then(Value::as_str) {
         Some(hash) => {
-            entry
-                .and_then(|entry| entry.get("skillFolderHash"))
-                .and_then(Value::as_str)
-                == Some(hash)
+            let field = |name: &str| {
+                entry
+                    .and_then(|entry| entry.get(name))
+                    .and_then(Value::as_str)
+            };
+            field("skillFolderHash") == Some(hash)
+                && expectation
+                    .get("updatedAt")
+                    .and_then(Value::as_str)
+                    .is_some_and(|updated_at| field("updatedAt") == Some(updated_at))
         }
         None => entry.is_none(),
     })
@@ -567,6 +583,7 @@ pub(super) fn add(
         let expected = Expected::Hash {
             key: &key,
             hash: &hash,
+            updated_at: &now,
         };
         let target = staging.replace(
             skill.name.dir_name().as_str(),
@@ -907,7 +924,11 @@ fn update_one(
         )));
     }
     let now = timestamp();
-    let expected = Expected::Hash { key, hash: &hash };
+    let expected = Expected::Hash {
+        key,
+        hash: &hash,
+        updated_at: &now,
+    };
     staging.replace(
         skill.name.dir_name().as_str(),
         Some(&skill.dir),
