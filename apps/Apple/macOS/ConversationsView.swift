@@ -96,6 +96,33 @@ struct AgentEditorView: View {
         var value: String
     }
 
+    struct ToolPick: Hashable {
+        let server: Bool
+        let name: String
+
+        var label: String {
+            if server { return "mcp:" + name }
+            if name.hasPrefix("mcp:") { return "tool \"" + name + "\"" }
+            return name
+        }
+
+        var reference: JSONValue {
+            let key = server ? "mcp_server" : "tool"
+            return .object([key: .string(name)])
+        }
+
+        static func typed(_ text: String) -> ToolPick {
+            if text.hasPrefix("mcp:") { return ToolPick(server: true, name: String(text.dropFirst(4))) }
+            return ToolPick(server: false, name: text)
+        }
+
+        static func stored(_ value: JSONValue) -> ToolPick? {
+            if let name = value["tool"].string { return ToolPick(server: false, name: name) }
+            if let name = value["mcp_server"].string { return ToolPick(server: true, name: name) }
+            return nil
+        }
+    }
+
     @Bindable var model: HostModel
     let agent: HostAgent?
     @Environment(\.dismiss) private var dismiss
@@ -108,8 +135,8 @@ struct AgentEditorView: View {
     @State private var endpoint = ""
     @State private var toolMode = "off"
     @State private var allTools = true
-    @State private var toolNames: [String] = []
-    @State private var allowedTools: Set<String> = []
+    @State private var toolNames: [ToolPick] = []
+    @State private var allowedTools: Set<ToolPick> = []
     @State private var newTool = ""
     @State private var traits: [Trait] = []
     @State private var workspace = ""
@@ -145,17 +172,43 @@ struct AgentEditorView: View {
         return allowedTools.count > 256 ? "At most 256 tools can be allowed." : nil
     }
     private var newToolValid: Bool {
-        let name = newTool.hasPrefix("mcp:") ? String(newTool.dropFirst(4)) : newTool
-        return HostAgent.identifier(name) && !toolNames.contains(newTool)
+        let typed = ToolPick.typed(newTool)
+        return HostAgent.identifier(typed.name) && !toolNames.contains(typed)
     }
     private var renderedBytes: Int {
-        persona.utf8.count + (traits.isEmpty ? 0 : "\n\nAgent traits:".utf8.count + traits.reduce(0) { $0 + "\n- ".utf8.count + $1.key.utf8.count + ": ".utf8.count + $1.value.utf8.count })
+        let personaBytes: Int = persona.utf8.count
+        guard !traits.isEmpty else { return personaBytes }
+        var rows: Int = 0
+        for item in traits {
+            rows += 5
+            rows += item.key.utf8.count
+            rows += item.value.utf8.count
+        }
+        return personaBytes + 15 + rows
+    }
+    private func invalidTraitValue(_ value: String) -> Bool {
+        if value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { return true }
+        if value.utf8.count > 256 { return true }
+        return value.unicodeScalars.contains { $0.properties.generalCategory == .control }
+    }
+    private var resolvedWorkspace: String? {
+        guard workspace.hasPrefix("/"), workspace.utf8.count <= 4096, !workspace.utf8.contains(0),
+              let resolved = realpath(workspace, nil) else { return nil }
+        defer { free(resolved) }
+        let path = String(cString: resolved)
+        var directory: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: path, isDirectory: &directory), directory.boolValue, path.utf8.count <= 4096 else { return nil }
+        return path
+    }
+    private func targetLabel(_ target: OwnerID) -> String {
+        guard let agent = model.agents?.agents.first(where: { $0.id == target }) else { return "Unknown agent " + target.string }
+        return DisplayText.escaped(agent.name)
     }
     private var traitIssue: String? {
         if traits.count > 16 { return "At most sixteen traits are allowed." }
         if traits.contains(where: { !HostAgent.handle($0.key) }) { return "Trait keys are 1 to 32 lowercase letters, digits and single hyphens." }
         if Set(traits.map(\.key)).count != traits.count { return "Each trait key can appear once." }
-        if traits.contains(where: { $0.value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || $0.value.utf8.count > 256 || $0.value.unicodeScalars.contains { $0.properties.generalCategory == .control } }) {
+        if traits.contains(where: { invalidTraitValue($0.value) }) {
             return "Trait values are 1 to 256 bytes without control characters."
         }
         if renderedBytes > 32768 { return "The persona and traits together exceed 32768 bytes." }
@@ -163,11 +216,18 @@ struct AgentEditorView: View {
     }
     private var workspaceIssue: String? {
         guard !workspace.isEmpty else { return nil }
-        return workspace.hasPrefix("/") && workspace.utf8.count <= 4096 && !workspace.utf8.contains(0) ? nil : "The workspace must be an absolute path."
+        guard workspace.hasPrefix("/") else { return "The workspace must be an absolute path." }
+        guard resolvedWorkspace != nil else { return "The workspace must be an existing directory on this Mac." }
+        return nil
+    }
+    private var workspaceNote: String? {
+        guard let resolved = resolvedWorkspace, resolved != workspace else { return nil }
+        return "Saved as " + resolved
     }
     private var messageTargets: [OwnerID] {
-        let others = (model.agents?.agents ?? []).map(\.id).filter { $0 != ownID }
-        return others + messaging.filter { !others.contains($0) }.sorted { $0.string < $1.string }
+        let others: [OwnerID] = (model.agents?.agents ?? []).map(\.id).filter { $0 != ownID }
+        let unknown: [OwnerID] = messaging.filter { !others.contains($0) }.sorted { $0.string < $1.string }
+        return others + unknown
     }
     private var toolsNote: String? {
         let hadAllowlist = agent?.definition["tools"]["on"]["allow"]["only"].array != nil
@@ -231,17 +291,11 @@ struct AgentEditorView: View {
                         }
                         if !allTools {
                             ForEach(toolNames, id: \.self) { tool in
-                                Toggle(DisplayText.escaped(tool), isOn: Binding(
-                                    get: { allowedTools.contains(tool) },
-                                    set: { if $0 { allowedTools.insert(tool) } else { allowedTools.remove(tool) } }))
+                                Toggle(DisplayText.escaped(tool.label), isOn: toolBinding(tool))
                             }
                             HStack {
                                 TextField("Add tool", text: $newTool, prompt: Text("tool_name or mcp:server-id"))
-                                Button("Add") {
-                                    toolNames.append(newTool)
-                                    allowedTools.insert(newTool)
-                                    newTool = ""
-                                }
+                                Button("Add", action: addTool)
                                 .disabled(!newToolValid)
                             }
                             Text(allowedTools.isEmpty ? "No tools are allowed." : "The Host does not list its tools here; add names exactly as the Host registers them.")
@@ -265,15 +319,14 @@ struct AgentEditorView: View {
                 Section("Workspace") {
                     TextField("Workspace", text: $workspace, prompt: Text("None (Host workspace)"))
                     if let workspaceIssue { Text(workspaceIssue).font(.caption).foregroundStyle(.red) }
+                    else if let workspaceNote { Text(workspaceNote).font(.caption).foregroundStyle(.secondary) }
                 }
                 Section("Messaging") {
                     if messageTargets.isEmpty {
                         Text("No other agents.").font(.caption).foregroundStyle(.secondary)
                     }
                     ForEach(messageTargets) { target in
-                        Toggle(model.agents?.agents.first { $0.id == target }.map { DisplayText.escaped($0.name) } ?? "Unknown agent " + target.string, isOn: Binding(
-                            get: { messaging.contains(target) },
-                            set: { if $0 { messaging.insert(target) } else { messaging.remove(target) } }))
+                        Toggle(targetLabel(target), isOn: targetBinding(target))
                     }
                     Text(messaging.isEmpty ? "Messaging is closed." : "This agent may message the selected agents.").font(.caption).foregroundStyle(.secondary)
                 }
@@ -312,8 +365,7 @@ struct AgentEditorView: View {
                 Button("Cancel") { dismiss() }.keyboardShortcut(.cancelAction)
                 Button("Save") { Task { await model.saveAgent(definition, expectedRevision: agent?.revision) } }
                     .keyboardShortcut(.defaultAction)
-                    .disabled(!model.canMutate || !validName || nameTaken || !validDescription || !validPersona
-                        || modelIssue != nil || toolIssue != nil || traitIssue != nil || workspaceIssue != nil)
+                    .disabled(!canSave)
             }
         }
         .padding(20).frame(width: 560)
@@ -323,6 +375,30 @@ struct AgentEditorView: View {
         } message: {
             Text("Conversations bound to it cannot start new turns.")
         }
+    }
+
+    private var canSave: Bool {
+        guard model.canMutate, validName, !nameTaken, validDescription, validPersona else { return false }
+        return modelIssue == nil && toolIssue == nil && traitIssue == nil && workspaceIssue == nil
+    }
+
+    private func toolBinding(_ tool: ToolPick) -> Binding<Bool> {
+        Binding(get: { allowedTools.contains(tool) }, set: { on in
+            if on { allowedTools.insert(tool) } else { allowedTools.remove(tool) }
+        })
+    }
+
+    private func targetBinding(_ target: OwnerID) -> Binding<Bool> {
+        Binding(get: { messaging.contains(target) }, set: { on in
+            if on { messaging.insert(target) } else { messaging.remove(target) }
+        })
+    }
+
+    private func addTool() {
+        let typed = ToolPick.typed(newTool)
+        toolNames.append(typed)
+        allowedTools.insert(typed)
+        newTool = ""
     }
 
     private func load() {
@@ -337,7 +413,7 @@ struct AgentEditorView: View {
         toolMode = agent.toolMode
         let only = value["tools"]["on"]["allow"]["only"].array
         allTools = only == nil
-        toolNames = (only ?? []).compactMap { $0["tool"].string ?? $0["mcp_server"].string.map { "mcp:" + $0 } }
+        toolNames = (only ?? []).compactMap(ToolPick.stored)
         allowedTools = Set(toolNames)
         if case .object(let stored) = value["traits"] {
             traits = stored.keys.sorted().map { Trait(key: $0, value: stored[$0]?.string ?? "") }
@@ -365,12 +441,15 @@ struct AgentEditorView: View {
             value["model"] = .object(stored)
         }
         value["traits"] = traits.isEmpty ? nil : .object(Dictionary(traits.map { ($0.key, JSONValue.string($0.value)) }, uniquingKeysWith: { first, _ in first }))
-        let kept = toolNames.filter(allowedTools.contains)
-        let references: [JSONValue] = HostModel.sortedSet(kept.filter { !$0.hasPrefix("mcp:") }).map { .object(["tool": .string($0)]) }
-            + HostModel.sortedSet(kept.filter { $0.hasPrefix("mcp:") }.map { String($0.dropFirst(4)) }).map { .object(["mcp_server": .string($0)]) }
+        let kept: [ToolPick] = toolNames.filter(allowedTools.contains)
+        let tools: [String] = HostModel.sortedSet(kept.filter { !$0.server }.map(\.name))
+        let servers: [String] = HostModel.sortedSet(kept.filter(\.server).map(\.name))
+        var references: [JSONValue] = tools.map { ToolPick(server: false, name: $0).reference }
+        references += servers.map { ToolPick(server: true, name: $0).reference }
         let allow: JSONValue = allTools ? .string("all") : .object(["only": .array(references)])
-        value["tools"] = toolMode == "off" ? .string("off") : .object(["on": .object(["max_mode": .string(toolMode), "allow": allow])])
-        value["workspace"] = workspace.isEmpty ? .null : .string(workspace)
+        let on: JSONValue = .object(["max_mode": .string(toolMode), "allow": allow])
+        value["tools"] = toolMode == "off" ? .string("off") : .object(["on": on])
+        value["workspace"] = resolvedWorkspace.map(JSONValue.string) ?? .null
         let targets = messaging.filter { $0 != ownID }.map(\.string).sorted()
         value["messaging"] = targets.isEmpty ? .string("closed") : .object(["may": .array(targets.map(JSONValue.string))])
         value["memory"] = .string(memory)
@@ -393,6 +472,27 @@ struct SkillsView: View {
     private func keptSkills(_ removal: Removal) -> String {
         let kept = (model.skills?.skills ?? []).compactMap(\.assignableName).filter { !removal.skill.matches($0) }
         return kept.isEmpty ? "none" : HostModel.sortedSet(kept).map { DisplayText.escaped($0) }.joined(separator: ", ")
+    }
+
+    private func removalMessage(_ removal: Removal) -> String {
+        let agent: String = DisplayText.escaped(removal.agent.name)
+        let skill: String = DisplayText.escaped(removal.skill.name)
+        let kept: String = keptSkills(removal)
+        return "Agent \(agent) has all skills. Removing \(skill) changes it to only: \(kept). This skill and every skill not in this list, including project skills of other workspaces and skills installed later, stop being assigned."
+    }
+
+    private func assignment(_ skill: HostSkill, _ agent: HostAgent) -> Binding<Bool> {
+        Binding(get: { agent.skillAssigned(skill) }, set: { assign in
+            if !assign && agent.definition["skills"] == .string("all") {
+                removal = Removal(skill: skill, agent: agent)
+            } else {
+                Task { await model.assignSkill(skill, to: agent, assign: assign) }
+            }
+        })
+    }
+
+    private var removalShown: Binding<Bool> {
+        Binding(get: { removal != nil }, set: { shown in if !shown { removal = nil } })
     }
 
     var body: some View {
@@ -432,10 +532,7 @@ struct SkillsView: View {
                             if skill.assignableName != nil, let agents = model.agents {
                                 Menu("Assign to…") {
                                     ForEach(agents.agents) { agent in
-                                        Toggle(DisplayText.escaped(agent.name), isOn: Binding(get: { agent.skillAssigned(skill) }, set: { assign in
-                                            if !assign && agent.definition["skills"] == .string("all") { removal = Removal(skill: skill, agent: agent) }
-                                            else { Task { await model.assignSkill(skill, to: agent, assign: assign) } }
-                                        }))
+                                        Toggle(DisplayText.escaped(agent.name), isOn: assignment(skill, agent))
                                     }
                                 }
                                 .fixedSize()
@@ -455,11 +552,10 @@ struct SkillsView: View {
                 .font(.caption2).foregroundStyle(.secondary)
         }
         .padding(.top, 8)
-        .confirmationDialog("Change this agent to a skill list?", isPresented: Binding(get: { removal != nil }, set: { if !$0 { removal = nil } }), titleVisibility: .visible, presenting: removal) { removal in
+        .confirmationDialog("Change this agent to a skill list?", isPresented: removalShown, titleVisibility: .visible, presenting: removal) { removal in
             Button("Use only the listed skills", role: .destructive) { Task { await model.assignSkill(removal.skill, to: removal.agent, assign: false) } }
         } message: { removal in
-            Text("Agent " + DisplayText.escaped(removal.agent.name) + " has all skills. Removing " + DisplayText.escaped(removal.skill.name)
-                + " changes it to only: " + keptSkills(removal) + ". This skill and every skill not in this list, including project skills of other workspaces and skills installed later, stop being assigned.")
+            Text(removalMessage(removal))
         }
         .task(id: model.connectionKey) { if model.skills == nil { await model.loadSkills() } }
     }

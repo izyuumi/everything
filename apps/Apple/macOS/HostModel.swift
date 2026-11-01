@@ -440,7 +440,9 @@ final class HostModel {
         if assign { names.append(name) } else { names.removeAll(where: skill.matches) }
         let sorted = HostModel.sortedSet(names)
         definition["skills"] = sorted.isEmpty ? .string("none") : .object(["only": .array(sorted.map(JSONValue.string))])
-        let label = (assign ? "Skill " : "Skill removal ") + DisplayText.escaped(name) + (assign ? " for " : " from ") + DisplayText.escaped(agent.name)
+        let skillName: String = DisplayText.escaped(name)
+        let agentName: String = DisplayText.escaped(agent.name)
+        let label: String = assign ? "Skill \(skillName) for \(agentName)" : "Skill removal \(skillName) from \(agentName)"
         await saveAgent(.object(definition), expectedRevision: agent.revision, label: label)
     }
 
