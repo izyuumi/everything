@@ -1068,9 +1068,10 @@ async fn owner_cli(
             }
             write_json(client.submit_domain(typed, cancellation).await?).await
         }
-        OwnerInput::OwnerCommand { command } => {
-            write_json(client.submit(command, cancellation).await?).await
-        }
+        OwnerInput::OwnerCommand {
+            command: command @ vorra::ipc::OwnerCommand::Initialize { .. },
+        } => write_json(client.submit(command, cancellation).await?).await,
+        OwnerInput::OwnerCommand { .. } => Err(CliError::OwnerInput),
         OwnerInput::Operation {
             operation,
             request_id,

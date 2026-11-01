@@ -18,7 +18,7 @@ struct ConversationsView: View {
                     .help("Agent for the next new conversation")
                 }
                 Button("New Conversation", systemImage: "square.and.pencil") { Task { await model.newConversation() } }
-                    .disabled(!model.canMutate)
+                    .disabled(!model.canMutate && model.pendingAction == nil)
             }
             if model.conversations.isEmpty {
                 ContentUnavailableView("No conversations loaded", systemImage: "bubble.left.and.bubble.right", description: Text("Connect to the headless host to read its conversations, or start a new one."))
@@ -170,7 +170,7 @@ struct AgentEditorView: View {
             HStack {
                 if let agent {
                     Button("New Chat") { Task { dismiss(); await model.newConversation(agent: agent) } }
-                        .disabled(!model.canMutate)
+                        .disabled(!model.canMutate && model.pendingAction == nil)
                     Button("Make Default") { Task { await model.setDefaultAgent(agent) } }
                         .disabled(!model.canMutate || isDefault)
                     Button("Remove…", role: .destructive) { removing = true }

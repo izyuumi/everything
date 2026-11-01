@@ -435,6 +435,7 @@ final class HostModel {
     }
 
     func newConversation(agent: HostAgent) async {
+        guard pendingAction == nil else { message = "Resolve the pending action first."; return }
         guard canMutate else { return }
         let original = connection
         let id = OwnerID()
@@ -468,7 +469,7 @@ final class HostModel {
         } catch { if !Task.isCancelled { message = error.localizedDescription } }
     }
 
-    func reconcileAgentOperation(_ request: OwnerRequest) async {
+    func reconcileAgentOperation(_ request: OwnerRequest, note: String? = nil) async {
         guard !acting, !closing, pendingAction?.id == request.id else { return }
         acting = true
         defer { acting = false }
@@ -483,20 +484,23 @@ final class HostModel {
             switch operation["kind"].string {
             case "agent_put":
                 let keys = ["name", "description", "persona", "model", "traits", "tools", "workspace", "memory", "skills", "messaging"]
-                applied = agent.map { agent in keys.allSatisfy { operation["definition"][$0] == agent.definition[$0] } } ?? false
+                applied = agent.map { agent in
+                    agent.revision > (operation["expected_revision"].unsigned ?? 0) && keys.allSatisfy { operation["definition"][$0] == agent.definition[$0] }
+                } ?? false
             case "agent_remove": applied = agent == nil
             case "agent_set_default": applied = current.defaultID.string == id
             default: applied = false
             }
             agents = current
             pendingAction = nil
-            message = applied
+            message = (note.map { $0 + " " } ?? "") + (applied
                 ? pendingActionLabel + " is applied in the current Host state."
-                : pendingActionLabel + " is not reflected in the current Host state. Review the agent and try again."
+                : pendingActionLabel + " is not reflected in the current Host state. Review the agent and try again.")
         } catch { if !Task.isCancelled { message = error.localizedDescription } }
     }
 
     func newConversation() async {
+        guard pendingAction == nil else { message = "Resolve the pending action first."; return }
         if let selected = newChatAgent {
             if let agent = agents?.agents.first(where: { $0.id == selected }) { await newConversation(agent: agent) }
             else { message = "The selected agent is no longer available." }
@@ -561,6 +565,7 @@ final class HostModel {
         pendingActionLabel = label
         defer { acting = false }
         let original = connection
+        var rejected = false
         do {
             let result = try await client.request(request, connection: original)
             guard original == connection, !closing, !Task.isCancelled else { return }
@@ -578,11 +583,14 @@ final class HostModel {
             }
             if settled { pendingAction = nil }
             await refresh()
-        } catch OwnerClientError.hostRejected(let reason) where request.isAgentOperation {
-            pendingAction = nil
+        } catch OwnerClientError.hostRejected(let reason) where request.isAgentOperation || request.isCommand {
             message = label + " was rejected: " + DisplayText.escaped(reason)
-            await refresh()
+            rejected = true
         } catch { message = error.localizedDescription }
+        guard rejected, original == connection, !closing, !Task.isCancelled else { return }
+        acting = false
+        if request.isAgentOperation { await reconcileAgentOperation(request, note: message) }
+        else { await inspectPendingCommand(note: message) }
     }
 
     private func adoptSettingsReceipt(_ result: JSONValue, request: OwnerRequest) throws -> Bool {
@@ -678,7 +686,7 @@ final class HostModel {
         await apply(request, label: pendingActionLabel, expectedKind: kind)
     }
 
-    func inspectPendingCommand() async {
+    func inspectPendingCommand(note: String? = nil) async {
         guard let request = pendingAction, request.isCommand, !acting, !closing else { return }
         acting = true
         defer { acting = false }
@@ -696,7 +704,7 @@ final class HostModel {
                   receipt["conversation_id"] == request.body["command"]["conversation_id"],
                   let phase = receipt["phase"].string,
                   ["accepted", "applied", "completed", "rejected"].contains(phase) else { throw OwnerClientError.invalidResponse }
-            message = "Command state: " + phase + ". " + receipt["result"].formatted
+            message = (note.map { $0 + " " } ?? "") + "Command state: " + phase + ". " + receipt["result"].formatted
             if ["completed", "rejected"].contains(phase) { pendingAction = nil }
             await refresh()
         } catch { if !Task.isCancelled { message = error.localizedDescription } }
