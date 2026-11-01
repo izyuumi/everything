@@ -518,7 +518,7 @@ enum RemoteSettingsReadWire {
                 _ = try object(selection, ["kind"])
                 return .toolSelection(selection: .local)
             case "system_one":
-                let selected = try object(selection, ["kind", "model"])
+                let selected = try selection.object(keys: ["kind", "provider", "model"], required: ["kind", "model"])
                 return .toolSelection(selection: .systemOne(model: try modelText(selected.required("model"))))
             default: throw WireError.invalid
             }

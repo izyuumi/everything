@@ -8,7 +8,7 @@ use crate::credentials::CredentialError;
 use crate::host::credentials::{CredentialVault, SecretTransfer};
 use crate::host::selection::SelectionSettings;
 use crate::protocol::UnixMillis;
-use crate::selector::system_one::SelectionConfig;
+use crate::selector::system_one::{SelectionConfig, SystemOneProvider};
 
 use super::{ServiceCore, SettingsService, SettingsServiceError};
 use crate::host::settings::actions::{
@@ -142,9 +142,13 @@ impl ServiceCore {
                 endpoint,
                 reference,
             } => {
-                let requested =
-                    SelectionConfig::system_one(endpoint, "credential-binding", Some(*reference))
-                        .map_err(|_| SettingsServiceError::Conflict)?;
+                let requested = SelectionConfig::system_one(
+                    SystemOneProvider::Typesafe,
+                    endpoint,
+                    "credential-binding",
+                    Some(*reference),
+                )
+                .map_err(|_| SettingsServiceError::Conflict)?;
                 match (
                     &settings.selection,
                     settings.selection.configuration(),

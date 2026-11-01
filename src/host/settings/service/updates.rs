@@ -1,7 +1,7 @@
 use crate::agent::ConversationConfig;
 use crate::host::selection::SelectionSettings;
 use crate::memory::embedding::EmbeddingProfile;
-use crate::selector::system_one::SelectionConfig;
+use crate::selector::system_one::{ConfigurationError, SelectionConfig};
 
 use super::super::contract::{
     ModelSelection, SettingKey, SettingValue, SettingsPatch, ToolSelectionPreference,
@@ -48,11 +48,22 @@ pub(super) fn patch_candidate(
                     ToolSelectionPreference::Local => {
                         candidate.preference_overrides.system_one_enabled = Some(false);
                     }
-                    ToolSelectionPreference::SystemOne { endpoint, model } => {
-                        let SelectionConfig::SystemOne(selected) =
-                            SelectionConfig::system_one(endpoint, model, None).map_err(|_| {
-                                SettingsServiceError::Invalid("System One selection")
-                            })?
+                    ToolSelectionPreference::SystemOne {
+                        provider,
+                        endpoint,
+                        model,
+                    } => {
+                        let SelectionConfig::SystemOne(selected) = SelectionConfig::system_one(
+                            *provider, endpoint, model, None,
+                        )
+                        .map_err(|error| {
+                            SettingsServiceError::Invalid(match error {
+                                ConfigurationError::ProviderEndpoint => {
+                                    "System One provider endpoint"
+                                }
+                                _ => "System One selection",
+                            })
+                        })?
                         else {
                             return Err(SettingsServiceError::Invalid("System One selection"));
                         };
@@ -61,7 +72,8 @@ pub(super) fn patch_candidate(
                                 SettingsServiceError::Invalid("configured System One selection")
                             })? {
                                 SelectionConfig::SystemOne(original)
-                                    if original.endpoint() == selected.endpoint() =>
+                                    if original.endpoint() == selected.endpoint()
+                                        && original.provider() == selected.provider() =>
                                 {
                                     match &current.selection {
                                         SelectionSettings::SystemOne {
@@ -74,6 +86,7 @@ pub(super) fn patch_candidate(
                                 _ => None,
                             };
                         candidate.selection = SelectionSettings::SystemOne {
+                            provider: selected.provider(),
                             endpoint: selected.endpoint().into(),
                             model: selected.model().into(),
                             credential_reference,
@@ -144,6 +157,7 @@ pub(super) fn tool_selection(
     {
         SelectionConfig::Local => Ok(ToolSelectionPreference::Local),
         SelectionConfig::SystemOne(settings) => Ok(ToolSelectionPreference::SystemOne {
+            provider: settings.provider(),
             endpoint: settings.endpoint().into(),
             model: settings.model().into(),
         }),
@@ -238,6 +252,7 @@ fn configured_selection(
     {
         SelectionConfig::Local => Ok(ToolSelectionPreference::Local),
         SelectionConfig::SystemOne(settings) => Ok(ToolSelectionPreference::SystemOne {
+            provider: settings.provider(),
             endpoint: settings.endpoint().into(),
             model: settings.model().into(),
         }),

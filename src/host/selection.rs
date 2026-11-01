@@ -17,7 +17,7 @@ use crate::permissions::{ExecutionAuthority, ExecutionMode};
 use crate::protocol::{CommandId, ConversationId, TaskId};
 use crate::selector::system_one::{
     ConfigurationError, PreparedSelection, SelectionConfig, SystemOneDisclosure, SystemOneError,
-    SystemOneSelector,
+    SystemOneProvider, SystemOneSelector,
 };
 use crate::selector::{SEARCH_TOOLS_NAME, SelectionMethod, ToolSelection, ToolSelector};
 use crate::tools::RetainedToolOwner;
@@ -36,6 +36,8 @@ pub enum SelectionSettings {
     #[default]
     Local,
     SystemOne {
+        #[serde(default, skip_serializing_if = "SystemOneProvider::is_typesafe")]
+        provider: SystemOneProvider,
         endpoint: String,
         model: String,
         credential_reference: Option<Uuid>,
@@ -47,6 +49,7 @@ impl SelectionSettings {
         match self {
             Self::Local => Ok(SelectionConfig::Local),
             Self::SystemOne {
+                provider,
                 endpoint,
                 model,
                 credential_reference,
@@ -54,23 +57,9 @@ impl SelectionSettings {
                 if credential_reference.is_some_and(|reference| reference.is_nil()) {
                     return Err(ConfigurationError::InvalidCredentialReference);
                 }
-                SelectionConfig::system_one(endpoint, model, *credential_reference)
+                SelectionConfig::system_one(*provider, endpoint, model, *credential_reference)
             }
         }
-    }
-
-    pub fn typesafe(credential_reference: Option<Uuid>) -> Result<Self, ConfigurationError> {
-        let SelectionConfig::SystemOne(settings) = SelectionConfig::typesafe(credential_reference)?
-        else {
-            return Err(ConfigurationError::MissingConfiguration);
-        };
-        let value = Self::SystemOne {
-            endpoint: settings.endpoint().into(),
-            model: settings.model().into(),
-            credential_reference,
-        };
-        value.configuration()?;
-        Ok(value)
     }
 }
 
@@ -179,6 +168,8 @@ impl From<&ExecutionAuthority> for SelectionAuthority {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SelectionDisclosure {
+    #[serde(default)]
+    pub provider: SystemOneProvider,
     pub destination: String,
     pub model: String,
     pub payload: Value,
@@ -566,7 +557,8 @@ impl SelectionPreflight {
                         return Err(SelectionPreflightError::Capacity);
                     }
                     let value = SelectionDisclosure {
-                        destination: disclosure.destination().into(),
+                        provider: disclosure.provider(),
+                        destination: disclosure.destination(),
                         model: disclosure.model().into(),
                         payload: disclosure.payload().clone(),
                         fingerprint: disclosure.fingerprint().into(),

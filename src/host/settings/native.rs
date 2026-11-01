@@ -240,9 +240,12 @@ impl NativeSettingsOperation {
                 return Err("invalid native settings change page");
             }
             Self::Update { patch, .. } => {
-                patch
-                    .validate()
-                    .map_err(|_| "invalid native settings patch")?;
+                patch.validate().map_err(|error| match error {
+                    super::contract::SettingsContractError::Invalid(
+                        "System One provider endpoint",
+                    ) => "invalid native settings patch: System One provider endpoint",
+                    _ => "invalid native settings patch",
+                })?;
             }
             Self::PairDevice { request, .. }
                 if !matches!(&request.action, SettingsDeviceAction::Pair) =>

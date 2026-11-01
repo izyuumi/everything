@@ -105,7 +105,7 @@ enum NativeSettingsText {
             }
             return selection.provider.rawValue + " · " + selection.model + " · " + endpoint
         case .toolSelection(.local): return "Local discovery"
-        case .toolSelection(.systemOne(let endpoint, let model)): return "System One · " + model + " · " + endpoint
+        case .toolSelection(.systemOne(let endpoint, let model, let provider)): return "System One · " + (provider ?? "typesafe") + " · " + model + " · " + endpoint
         case .boolean(let enabled): return enabled ? "Enabled" : "Disabled"
         case .dimensions(let dimensions): return dimensions.map { String($0) } ?? "Model default"
         case .embeddingModel(let model): return model ?? "Unavailable"

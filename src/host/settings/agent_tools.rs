@@ -516,7 +516,7 @@ fn change_schema() -> Value {
     }});
     let selection = json!({"oneOf":[
         {"type":"object","additionalProperties":false,"required":["kind"],"properties":{"kind":{"const":"local"}}},
-        {"type":"object","additionalProperties":false,"required":["kind","endpoint","model"],"properties":{"kind":{"const":"system_one"},"endpoint":{"type":"string","minLength":1,"maxLength":4096},"model":{"type":"string","minLength":1,"maxLength":256}}}
+        {"type":"object","additionalProperties":false,"required":["kind","endpoint","model"],"properties":{"kind":{"const":"system_one"},"provider":{"type":"string","enum":["typesafe","openrouter","openai_compatible","local_model"]},"endpoint":{"type":"string","minLength":1,"maxLength":4096},"model":{"type":"string","minLength":1,"maxLength":256}}}
     ]});
     json!({"oneOf":[
         {"type":"object","additionalProperties":false,"required":["key","value"],"properties":{
