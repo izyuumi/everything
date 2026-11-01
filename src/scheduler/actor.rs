@@ -2239,9 +2239,7 @@ impl Actor {
     }
 
     fn in_delegation(&self, id: TaskId) -> Result<bool, SchedulerError> {
-        Ok(repository::lineage(&self.store(), id)?
-            .iter()
-            .any(|task| task.definition.delegation.is_some()))
+        repository::in_delegation(&self.store(), id)
     }
 
     async fn carved_budget(
@@ -2258,54 +2256,18 @@ impl Actor {
             .native_run()
             .filter(|run| run.task_id == id)
             .ok_or(SchedulerError::Capacity("caller token budget"))?;
-        let all_children = self.in_delegation(id)?;
         let remaining = caller
             .definition
             .execution
             .limits
             .max_charged_tokens
             .saturating_sub(run.charged_tokens)
-            .saturating_sub(self.subtree_spend(id, all_children).await?);
+            .saturating_sub(repository::subtree_spend(&self.store(), id)?);
         let floor = u64::from(caller.definition.execution.budget.reserved_output_tokens);
         if remaining <= floor {
             return Err(SchedulerError::Capacity("caller token budget"));
         }
         Ok((remaining, UnixMillis::try_from(run.deadline_ms)?))
-    }
-
-    async fn subtree_spend(
-        &self,
-        caller: TaskId,
-        all_children: bool,
-    ) -> Result<u64, SchedulerError> {
-        let store = self.store();
-        let mut pending = repository::child_ids(&store, caller, !all_children)?;
-        let mut visited = 0_usize;
-        let mut total = 0_u64;
-        while let Some(id) = pending.pop() {
-            visited += 1;
-            if visited > 4096 {
-                return Err(SchedulerError::Capacity("delegated descendants"));
-            }
-            let task = repository::load(&store, id)?;
-            let grant = task.definition.execution.limits.max_charged_tokens;
-            let followups = grant.saturating_mul(u64::from(task.checkpoint.followups));
-            total = total.saturating_add(followups);
-            if !task.checkpoint.task.status.is_terminal() {
-                total = total.saturating_add(grant);
-                continue;
-            }
-            let conversation = self
-                .services
-                .agent
-                .conversation(task.definition.initial.conversation_id)
-                .await?;
-            if let Some(run) = conversation.native_run().filter(|run| run.task_id == id) {
-                total = total.saturating_add(run.charged_tokens);
-            }
-            pending.extend(repository::child_ids(&store, id, false)?);
-        }
-        Ok(total)
     }
 
     async fn send(

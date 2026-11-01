@@ -620,15 +620,17 @@ impl Agent {
                 }
                 let prepared = if let Some(setup) = &setup {
                     let preparation = Arc::clone(setup); let owner = agent.clone();
-                    let (captured, built, request) = blocking(move || {
+                    let (captured, built, request, delegated) = blocking(move || {
                         let retained_agent = owner;
                         ensure_task(&retained_agent.store, preparation.broker.authority().task_id(), preparation.broker.authority().conversation_id())?;
+                        let delegated = crate::scheduler::delegated_spend(&retained_agent.store, preparation.broker.authority().task_id().parse()?)
+                            .map_err(|_| AgentError::InvalidData("delegated token spend is unavailable"))?;
                         let built = build_context(&conversation, &preparation)?;
                         let request = built.request.clone();
-                        Ok((conversation, built, request))
+                        Ok((conversation, built, request, delegated))
                     }).await?;
                     conversation = captured;
-                    if let Some(reason) = next_attempt_limit(&conversation, &built, stream_deadline)? {
+                    if let Some(reason) = next_attempt_limit(&conversation, &built, stream_deadline, delegated)? {
                         let mut checkpoint = conversation.checkpoint.clone(); turn_mut(&mut checkpoint)?.status = LoopStatus::Paused { reason: reason.clone() };
                         agent.save_native(&mut conversation, checkpoint, Vec::new(), Arc::clone(&admission)).await?;
                         yield TurnEvent::Paused { reason }; break;
@@ -1153,6 +1155,7 @@ fn next_attempt_limit(
     conversation: &Conversation,
     built: &BuiltContext,
     stream_deadline: Instant,
+    delegated: u64,
 ) -> Result<Option<PauseReason>, AgentError> {
     let turn = native(conversation)?
         .turn
@@ -1174,6 +1177,7 @@ fn next_attempt_limit(
         || turn
             .charged_tokens
             .checked_add(reservation(built))
+            .and_then(|total| total.checked_add(delegated))
             .is_none_or(|total| total > turn.definition.limits.max_charged_tokens)
     {
         Some(PauseReason::TokenLimit)

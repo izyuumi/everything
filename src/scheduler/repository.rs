@@ -717,6 +717,45 @@ pub(super) fn child_ids(
         .collect()
 }
 
+pub(super) fn in_delegation(store: &Store, id: TaskId) -> Result<bool, SchedulerError> {
+    Ok(lineage(store, id)?
+        .iter()
+        .any(|task| task.definition.delegation.is_some()))
+}
+
+pub(super) fn subtree_spend(store: &Store, caller: TaskId) -> Result<u64, SchedulerError> {
+    let mut pending = child_ids(store, caller, false)?;
+    if pending.is_empty() {
+        return Ok(0);
+    }
+    if !in_delegation(store, caller)? {
+        pending = child_ids(store, caller, true)?;
+    }
+    let mut visited = 0_usize;
+    let mut total = 0_u64;
+    while let Some(id) = pending.pop() {
+        visited += 1;
+        if visited > 4096 {
+            return Err(SchedulerError::Capacity("delegated descendants"));
+        }
+        let task = load(store, id)?;
+        let grant = task.definition.execution.limits.max_charged_tokens;
+        let followups = grant.saturating_mul(u64::from(task.checkpoint.followups));
+        total = total.saturating_add(followups);
+        if !task.checkpoint.task.status.is_terminal() {
+            total = total.saturating_add(grant);
+            continue;
+        }
+        let conversation =
+            crate::agent::load_conversation(store, task.definition.initial.conversation_id)?;
+        if let Some(run) = conversation.native_run().filter(|run| run.task_id == id) {
+            total = total.saturating_add(run.charged_tokens);
+        }
+        pending.extend(child_ids(store, id, false)?);
+    }
+    Ok(total)
+}
+
 pub(super) fn agent_log(
     store: &Store,
     agent: Option<crate::host::agents::AgentId>,

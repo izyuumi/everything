@@ -753,7 +753,10 @@ impl Agent {
     }
 }
 
-fn load_conversation(store: &Store, id: ConversationId) -> Result<Conversation, AgentError> {
+pub(crate) fn load_conversation(
+    store: &Store,
+    id: ConversationId,
+) -> Result<Conversation, AgentError> {
     let mut page_size = 64;
     let snapshot = loop {
         match store.conversation_snapshot(&id.to_string(), 0, page_size) {
