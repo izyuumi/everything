@@ -697,6 +697,18 @@ pub(super) fn delegated_children(store: &Store, caller: TaskId) -> Result<usize,
     usize::try_from(count).map_err(|_| SchedulerError::Invalid("negative task count"))
 }
 
+pub(super) fn active_delegated_grants(
+    store: &Store,
+    caller: TaskId,
+) -> Result<u64, SchedulerError> {
+    let total: i64 = store.connection()?.query_row(
+        "SELECT coalesce(sum(json_extract(input,'$.execution.limits.max_charged_tokens')),0) FROM tasks WHERE parent_task_id=?1 AND json_type(input,'$.delegation')='object' AND coalesce(json_extract(checkpoint,'$.task.status'),'') NOT IN ('completed','failed','cancelled')",
+        [caller.to_string()],
+        |row| row.get(0),
+    )?;
+    u64::try_from(total).map_err(|_| SchedulerError::Invalid("negative delegated token grants"))
+}
+
 pub(super) fn agent_log(
     store: &Store,
     agent: Option<crate::host::agents::AgentId>,

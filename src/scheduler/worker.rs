@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::fmt::Write as _;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -473,10 +474,11 @@ pub(super) fn completed(conversation: &Conversation, command_id: CommandId) -> E
     if output.len() > MAX_OUTPUT_BYTES {
         let total = output.len();
         output = bounded(&output, MAX_OUTPUT_BYTES - 96);
-        output.push_str(&format!(
-            "\n[report truncated: first {} of {total} bytes]",
-            output.len()
-        ));
+        let kept = output.len();
+        let _ = write!(
+            output,
+            "\n[report truncated: first {kept} of {total} bytes]"
+        );
     }
     ExecutionStop::Completed { output }
 }

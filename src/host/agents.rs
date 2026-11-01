@@ -29,7 +29,7 @@ const MAX_HANDLE_BYTES: usize = 32;
 const MAX_SET_ENTRIES: usize = 256;
 const MAX_REFERENCE_BYTES: usize = 256;
 const AGENTS_FILE: &str = "agents-v1.json";
-const MESSAGE_AGENT_TOOL: &str = "message_agent";
+use crate::scheduler::MESSAGE_AGENT as MESSAGE_AGENT_TOOL;
 
 #[derive(Debug, Error)]
 pub enum AgentsError {

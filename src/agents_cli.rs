@@ -281,13 +281,16 @@ pub async fn run(
                 },
                 Backend::Offline(repository) => {
                     drop(repository);
-                    let store = vorra::agent::Agent::open(&state).await?.store();
-                    tokio::task::spawn_blocking(move || {
+                    let leased = vorra::agent::Agent::open(&state).await?;
+                    let store = leased.store();
+                    let hops = tokio::task::spawn_blocking(move || {
                         vorra::scheduler::agent_log(&store, agent, conversation, limit)
                     })
                     .await
                     .map_err(|_| CliError::Worker)?
-                    .map_err(|error| invalid(error.to_string()))?
+                    .map_err(|error| invalid(error.to_string()))?;
+                    drop(leased);
+                    hops
                 }
             };
             if json {
@@ -315,7 +318,7 @@ pub async fn run(
                         .and_then(|value| value.as_str().map(str::to_owned))
                         .unwrap_or_default(),
                     hop.conversation_id,
-                    hop.text
+                    vorra::skills::cli::printable(&hop.text, false)
                 );
             }
             Ok(())

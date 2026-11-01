@@ -2072,7 +2072,10 @@ impl Actor {
         let refuse = |code, message| SchedulerError::Delegation { code, message };
         let agents = crate::host::agents::AgentRepository::for_agent(&self.services.agent)
             .and_then(|repository| repository.snapshot())
-            .map_err(|_| refuse("agents_unavailable", "the agents file cannot be read"))?;
+            .map_err(|error| {
+                tracing::warn!(%error, "agent messaging could not read the agents file");
+                refuse("agents_unavailable", "the agents file cannot be read")
+            })?;
         let caller_agent = parent
             .definition
             .execution
@@ -2157,7 +2160,8 @@ impl Actor {
                 .execution
                 .limits
                 .max_charged_tokens
-                .saturating_sub(run.charged_tokens);
+                .saturating_sub(run.charged_tokens)
+                .saturating_sub(repository::active_delegated_grants(&self.store(), caller)?);
             if remaining == 0 {
                 return Err(SchedulerError::Capacity("caller token budget"));
             }
@@ -2171,8 +2175,9 @@ impl Actor {
             );
         }
         let mut base = parent.definition.configuration.clone();
-        base.instructions = crate::host::agents::DEFAULT_INSTRUCTIONS.to_owned();
-        let configuration = target.configure(base).map_err(|_| {
+        crate::host::agents::DEFAULT_INSTRUCTIONS.clone_into(&mut base.instructions);
+        let configuration = target.configure(base).map_err(|error| {
+            tracing::warn!(%error, target = %target.id, "agent message target configuration is invalid");
             refuse(
                 "agent_configuration",
                 "the target agent produces an invalid conversation configuration",

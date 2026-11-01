@@ -22,8 +22,10 @@ pub const SCHEDULER_TOOL_NAMES: &[&str] = &[
     "agent_status",
     "cancel_agent",
     "wait_agents",
-    "message_agent",
+    MESSAGE_AGENT,
 ];
+
+pub const MESSAGE_AGENT: &str = "message_agent";
 
 const MAX_INSTRUCTION_BYTES: usize = 32_768;
 const MAX_PREVIEW_BYTES: usize = 8_192;
@@ -348,7 +350,7 @@ fn descriptor(operation: ControlOperation) -> ToolDescriptor {
             json!({"type":"object","properties":{"task_id":target},"required":["task_id"],"additionalProperties":false}),
         ),
         ControlOperation::Message => (
-            "message_agent",
+            MESSAGE_AGENT,
             "Send a task to another named agent the owner allows this agent to message; it runs with its own tools inside this turn's workspace bounds and returns only its final report as data. wait defaults to true",
             json!({"type":"object","properties":{"to":{"type":"string","minLength":1,"maxLength":32,"pattern":"^[a-z0-9]+(-[a-z0-9]+)*$"},"text":instruction,"wait":{"type":"boolean"}},"required":["to","text"],"additionalProperties":false}),
         ),

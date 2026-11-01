@@ -17,7 +17,7 @@ pub use remote::{
     RemoteTaskSubmission,
 };
 pub use schedule_context::ScheduleCallerContext;
-pub use tools::{SCHEDULER_TOOL_NAMES, SchedulerToolBinding, SchedulerTools};
+pub use tools::{MESSAGE_AGENT, SCHEDULER_TOOL_NAMES, SchedulerToolBinding, SchedulerTools};
 pub use types::{
     AgentHop, DelegationCeiling, DiscoveryServices, ExecutionPolicy, LiveText, PreparedTaskInputs,
     SchedulerError, SchedulerLimits, SchedulerServices, TaskPreparation, TaskPreparationRequest,

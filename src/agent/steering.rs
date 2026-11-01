@@ -350,7 +350,7 @@ impl InputInbox {
                     }
                     if blocked {
                         result["blocked"] = true.into();
-                        result["blocker"] = "The child needed an owner approval it cannot request. Act on its report or pass the blocker up.".into();
+                        result["blocker"] = "At least one of the child's calls needed an owner approval it cannot request. Check its report before acting, or pass the blocker up.".into();
                     }
                     Some(serde_json::to_string(&result).map_err(|_| AgentError::Worker)?)
                 }
