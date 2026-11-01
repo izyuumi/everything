@@ -358,8 +358,13 @@ pub async fn run(
                         "--remove-tool needs an agent that lists its tools; use --tools off or --allow-tool instead",
                     ));
                 };
-                let removed = references.remove(&ToolRef::Tool(tool.clone()))
-                    | references.remove(&ToolRef::McpServer(tool.clone()));
+                let removed = match tool.strip_prefix("mcp:") {
+                    Some(server) => references.remove(&ToolRef::McpServer(server.to_owned())),
+                    None => {
+                        references.remove(&ToolRef::Tool(tool.clone()))
+                            | references.remove(&ToolRef::McpServer(tool.clone()))
+                    }
+                };
                 if !removed {
                     return Err(invalid(format!("agent does not list tool {tool}")));
                 }
@@ -384,7 +389,12 @@ pub async fn run(
                     "{name} is the default agent; choose another with `vorra agents default NAME` first"
                 )));
             }
-            if !yes && !confirm(&format!("remove agent {}? [y/N] ", agent.name.as_str()))? {
+            if !yes
+                && !confirm(&format!(
+                    "remove agent {name}? conversations bound to it will stop accepting turns [y/N] ",
+                    name = agent.name.as_str()
+                ))?
+            {
                 return Err(invalid("not removed; pass --yes to remove without asking"));
             }
             backend
@@ -603,9 +613,14 @@ async fn read_persona(path: PathBuf) -> Result<String, CliError> {
     .await
     .map_err(|_| CliError::Worker)?
     .map_err(|error| invalid(format!("persona file {display}: {error}")))?;
+    if result.as_deref().is_some_and(|text| text.contains('\r')) {
+        return Err(invalid(format!(
+            "persona file {display} contains carriage returns; save it with LF line endings"
+        )));
+    }
     result.ok_or_else(|| {
         invalid(format!(
-            "persona file {display} must be a regular UTF-8 file of at most 32768 bytes"
+            "persona file {display} must be a regular UTF-8 file of at most {MAX_PERSONA_BYTES} bytes"
         ))
     })
 }

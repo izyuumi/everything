@@ -356,8 +356,17 @@ struct ModelArguments {
 impl ModelArguments {
     fn create(
         self,
-        fallback: Option<&vorra::host::agents::AgentModel>,
+        agent: Option<&vorra::host::agents::AgentDefinition>,
     ) -> Result<ConversationConfig, CliError> {
+        let fallback = agent.and_then(|agent| agent.model.as_ref());
+        if let Some(agent) = agent.filter(|_| fallback.is_some())
+            && (self.provider.is_some() || self.model.is_some() || self.loopback_endpoint.is_some())
+        {
+            return Err(CliError::AgentInput(format!(
+                "agent {} sets its own model; omit --provider, --model and --loopback-endpoint or use another agent",
+                agent.name.as_str()
+            )));
+        }
         let provider = self
             .provider
             .map(ProviderKind::from)
@@ -520,7 +529,7 @@ fn bind_agent(
         Some(name) => agents_cli::find(&agents, name)?,
         None => agents.resolve(None)?,
     };
-    let configuration = model.create(definition.model.as_ref())?;
+    let configuration = model.create(Some(definition))?;
     Ok((definition.id, definition.configure(configuration)?))
 }
 
@@ -809,6 +818,7 @@ async fn execute(arguments: Arguments, cancellation: CancellationToken) -> Resul
                 vorra::tui::Options {
                     conversation: arguments.conversation,
                     resume_latest: arguments.resume_latest,
+                    explicit_route: arguments.provider.is_some() || arguments.model.is_some(),
                     provider: arguments.provider.map(Into::into),
                     model: arguments.model,
                     agent: arguments.agent,
@@ -1458,6 +1468,19 @@ async fn chatgpt_sign_in(
     }
 }
 
+async fn host_agents(
+    client: &vorra::host::client::HostClient,
+    cancellation: CancellationToken,
+) -> Result<vorra::host::agents::AgentsFile, CliError> {
+    match client
+        .query(vorra::ipc::OwnerQuery::Agents, cancellation)
+        .await?
+    {
+        vorra::ipc::OwnerQueryResult::Agents { agents } => Ok(*agents),
+        _ => Err(CliError::OwnerInput),
+    }
+}
+
 async fn proxy_cli(
     state: PathBuf,
     command: AgentCommand,
@@ -1469,6 +1492,8 @@ async fn proxy_cli(
         AgentCommand::Init(arguments) => {
             let conversation_id = arguments.conversation.unwrap_or_default();
             let command_id = arguments.command_id.unwrap_or_default();
+            let agents = host_agents(&client, cancellation.clone()).await?;
+            let configuration = arguments.model.create(Some(agents.resolve(None)?))?;
             eprintln!("conversation {conversation_id} initialization command {command_id}");
             client
                 .submit(
@@ -1476,7 +1501,7 @@ async fn proxy_cli(
                         conversation_id,
                         command_id,
                         title: arguments.title,
-                        configuration: arguments.model.create(None)?,
+                        configuration,
                         agent: None,
                     },
                     cancellation.clone(),
@@ -1606,16 +1631,19 @@ async fn proxy_chat(
         (None, Some(path)) => Some(read_message(path).await?),
         _ => None,
     };
-    let OwnerQueryResult::Agents { agents } = client
-        .query(OwnerQuery::Agents, cancellation.clone())
-        .await?
-    else {
-        return Err(CliError::OwnerInput);
+    let agents = if arguments.agent.is_some() || arguments.conversation.is_none() {
+        Some(host_agents(client, cancellation.clone()).await?)
+    } else {
+        None
     };
-    let requested = match arguments.agent.as_deref() {
-        Some(name) => agents_cli::find(&agents, name)?,
-        None => agents.resolve(None)?,
+    let requested = match (&agents, arguments.agent.as_deref()) {
+        (Some(agents), Some(name)) => Some(agents_cli::find(agents, name)?),
+        (Some(agents), None) => Some(agents.resolve(None)?),
+        (None, _) => None,
     };
+    let requested_agent = requested
+        .filter(|_| arguments.agent.is_some())
+        .map(|agent| agent.id);
     let (conversation_id, information) = match arguments.conversation {
         Some(conversation_id) => match client
             .query(
@@ -1629,7 +1657,9 @@ async fn proxy_chat(
                 configuration,
             } => {
                 arguments.model.check(&configuration)?;
-                check_bound_agent(&agents, arguments.agent.as_deref(), information.agent_id)?;
+                if let Some(agents) = &agents {
+                    check_bound_agent(agents, arguments.agent.as_deref(), information.agent_id)?;
+                }
                 (conversation_id, information)
             }
             _ => return Err(CliError::OwnerInput),
@@ -1650,8 +1680,8 @@ async fn proxy_chat(
                                 .take(80)
                                 .collect()
                         }),
-                        configuration: arguments.model.create(requested.model.as_ref())?,
-                        agent: Some(requested.id),
+                        configuration: arguments.model.create(requested)?,
+                        agent: requested_agent,
                     },
                     cancellation.clone(),
                 )
@@ -1789,7 +1819,7 @@ async fn proxy_chat(
                         max_tool_calls: arguments.tools.max_tool_calls,
                         max_charged_tokens: arguments.tools.max_charged_tokens,
                         max_duration_seconds: arguments.tools.max_duration_seconds,
-                        agent: arguments.agent.is_some().then_some(requested.id),
+                        agent: requested_agent,
                     },
                 },
                 cancellation.clone(),
