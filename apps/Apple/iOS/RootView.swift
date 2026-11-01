@@ -1,7 +1,7 @@
 import SwiftUI
 
 private enum ClientSheet: String, Identifiable {
-    case pairing, conversation
+    case pairing
     var id: String { rawValue }
 }
 
@@ -21,10 +21,13 @@ struct RootView: View {
                             ContentUnavailableView {
                                 Label("Choose a conversation", systemImage: "bubble.left.and.bubble.right")
                             } description: {
-                                Text("Pair with your host, then add a conversation ID that the host explicitly authorized.")
+                                Text(state.snapshot.host == nil ? "Pair with your Mac, then start a new conversation." : "Start a new conversation on your host.")
                             } actions: {
-                                Button("Pair with Mac") { showSheet(.pairing) }
-                                Button("Add conversation") { showSheet(.conversation) }
+                                if state.snapshot.host == nil {
+                                    Button("Pair with Mac") { showSheet(.pairing) }
+                                } else {
+                                    Button("New conversation") { Task { await model.newConversation() } }.disabled(model.busy)
+                                }
                             }
                         } else {
                             ChatView(model: model)
@@ -36,11 +39,8 @@ struct RootView: View {
                 .navigationTitle("Vorra")
                 .toolbar {
                     ToolbarItem(placement: .topBarTrailing) {
-                        Menu {
-                            Button("Add conversation", systemImage: "plus.bubble") { showSheet(.conversation) }
-                            Button("Pair with Mac", systemImage: "qrcode") { showSheet(.pairing) }
-                        } label: { Image(systemName: "plus") }
-                        .accessibilityLabel("Conversation and pairing actions")
+                        Button("New conversation", systemImage: "square.and.pencil") { Task { await model.newConversation() } }
+                            .disabled(model.busy || model.state?.snapshot.host == nil || model.state?.snapshot.revoked != false)
                     }
                 }
             }
@@ -51,22 +51,6 @@ struct RootView: View {
                 .tag(ClientTab.approvals)
             NavigationStack(path: Binding(get: { model.settingsPath }, set: { model.localSettingsPathChanged($0) })) {
                 SettingsView(model: model, pair: { showSheet(.pairing) })
-                    .navigationDestination(for: ClientSettingsDestination.self) { destination in
-                        switch destination {
-                        case .thisDevice:
-                            if let owner = model.localSettings {
-                                ThisDeviceSettingsView(store: owner, onPresentationChange: { covered in
-                                    model.localCoverChanged(.localConfirmation, presented: covered)
-                                })
-                                .onAppear { model.localDestinationChanged(presented: true) }
-                                .onDisappear { model.localDestinationChanged(presented: false) }
-                            } else {
-                                ContentUnavailableView("Local preferences unavailable", systemImage: "lock", description: Text(model.localSettingsIssue ?? "Unlock this iPhone and reopen Vorra to access its existing protected identity."))
-                            }
-                        case .hostAssistant:
-                            HostSettingsAssistantView(model: model)
-                        }
-                    }
             }
             .tabItem { Label("Settings", systemImage: "gearshape") }
             .tag(ClientTab.settings)
@@ -78,8 +62,7 @@ struct RootView: View {
             if sheet == nil { model.localCoverChanged(.rootSheet, presented: false); link = nil }
         }) { item in
             switch item {
-            case .pairing: NavigationStack { PairingView(model: model, link: link) }.modifier(InactivePrivacyCover())
-            case .conversation: NavigationStack { AddConversationView(model: model) }.modifier(InactivePrivacyCover())
+            case .pairing: NavigationStack { PairingView(model: model, link: link) }.modifier(InactivePrivacyCover(enabled: model.privacyCoverEnabled))
             }
         }
         .onDisappear { model.localDestinationChanged(presented: false) }
@@ -100,28 +83,6 @@ struct RootView: View {
         guard sheet == nil else { return }
         model.localCoverChanged(.rootSheet, presented: true)
         sheet = value
-    }
-}
-
-private struct AddConversationView: View {
-    let model: AppModel
-    @Environment(\.dismiss) private var dismiss
-    @State private var identifier = ""
-    @State private var title = ""
-
-    var body: some View {
-        Form {
-            Section("Authorized conversation") {
-                TextField("Conversation UUID", text: $identifier).textInputAutocapitalization(.never).autocorrectionDisabled()
-                TextField("Local title", text: $title)
-                Text("Obtain the ID from your host. Adding an ID does not grant access or create a host conversation.").font(.footnote)
-            }
-            Button("Add") {
-                Task { if await model.addConversation(identifier, title: title) { dismiss() } }
-            }.disabled(model.busy || identifier.isEmpty)
-        }
-        .navigationTitle("Add conversation")
-        .toolbar { ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } } }
     }
 }
 

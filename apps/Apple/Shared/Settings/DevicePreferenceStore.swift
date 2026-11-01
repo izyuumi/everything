@@ -153,10 +153,11 @@ private struct PreferenceState {
     let revision: UInt64
     let completion: Bool
     let attention: Bool
+    let privacyCover: Bool
     let appearance: DeviceAppearance
 
     var notifications: DevicePreferenceSnapshot {
-        DevicePreferenceSnapshot(deviceID: deviceID, revision: revision, completion: completion, attention: attention)
+        DevicePreferenceSnapshot(deviceID: deviceID, revision: revision, completion: completion, attention: attention, privacyCover: privacyCover)
     }
 
     var appearanceSnapshot: DeviceAppearanceSnapshot {
@@ -283,16 +284,16 @@ actor DevicePreferenceStore {
                 case .local: deviceID = UUID()
                 }
                 guard deviceID != zeroID else { throw DevicePreferenceError.storage }
-                try database.execute("INSERT INTO preferences(id,device,revision,completion,attention,appearance) VALUES(1,?,1,0,0,'system')", [.text(deviceID.uuidString.lowercased())])
-                try database.execute("PRAGMA user_version=2")
-                try validateSchema(database, version: 2)
+                try database.execute("INSERT INTO preferences(id,device,revision,completion,attention,appearance,privacy) VALUES(1,?,1,0,0,'system',0)", [.text(deviceID.uuidString.lowercased())])
+                try database.execute("PRAGMA user_version=3")
+                try validateSchema(database, version: 3)
                 _ = try readState(database: database, deviceID: deviceID)
                 return deviceID
             }
             try validateSchema(database, version: version)
             let deviceID = try existingIdentity(database, expected: identity)
             let currentRevision: UInt64
-            if version == 1 {
+            if version < 3 {
                 currentRevision = try readLegacySnapshot(database: database, deviceID: deviceID).revision
             } else {
                 currentRevision = try readState(database: database, deviceID: deviceID).revision
@@ -303,6 +304,11 @@ actor DevicePreferenceStore {
                 try database.execute("ALTER TABLE requests ADD COLUMN kind TEXT NOT NULL DEFAULT 'notifications' CHECK(kind IN ('notifications','appearance'))")
                 try database.execute("PRAGMA user_version=2")
                 try validateSchema(database, version: 2)
+            }
+            if version < 3 {
+                try database.execute("ALTER TABLE preferences ADD COLUMN privacy INTEGER NOT NULL DEFAULT 0 CHECK(privacy IN (0,1))")
+                try database.execute("PRAGMA user_version=3")
+                try validateSchema(database, version: 3)
                 _ = try readState(database: database, deviceID: deviceID)
             }
             return deviceID
@@ -377,13 +383,15 @@ actor DevicePreferenceStore {
                 case .notifications(let patch):
                     var completion = current.completion
                     var attention = current.attention
+                    var privacyCover = current.privacyCover
                     for change in patch.changes {
                         switch change.key {
                         case .completion: completion = change.value
                         case .attention: attention = change.value
+                        case .privacyCover: privacyCover = change.value
                         }
                     }
-                    try database.execute("UPDATE preferences SET revision=?,completion=?,attention=? WHERE id=1 AND revision=?", [.integer(Int64(revision)), .integer(completion ? 1 : 0), .integer(attention ? 1 : 0), .integer(Int64(current.revision))])
+                    try database.execute("UPDATE preferences SET revision=?,completion=?,attention=?,privacy=? WHERE id=1 AND revision=?", [.integer(Int64(revision)), .integer(completion ? 1 : 0), .integer(attention ? 1 : 0), .integer(privacyCover ? 1 : 0), .integer(Int64(current.revision))])
                 case .appearance(let patch):
                     try database.execute("UPDATE preferences SET revision=?,appearance=? WHERE id=1 AND revision=?", [.integer(Int64(revision)), .text(patch.appearance.rawValue), .integer(Int64(current.revision))])
                 }
@@ -413,11 +421,11 @@ actor DevicePreferenceStore {
 
     private static func validateVersion(_ database: PreferenceDatabase) throws {
         let version = try integer(database, "PRAGMA user_version")
-        guard (0...2).contains(version) else { throw DevicePreferenceError.unsupportedVersion }
+        guard (0...3).contains(version) else { throw DevicePreferenceError.unsupportedVersion }
     }
 
     private static func createSchema(_ database: PreferenceDatabase) throws {
-        try database.execute("CREATE TABLE preferences(id INTEGER PRIMARY KEY CHECK(id=1),device TEXT NOT NULL,revision INTEGER NOT NULL CHECK(revision>0),completion INTEGER NOT NULL CHECK(completion IN (0,1)),attention INTEGER NOT NULL CHECK(attention IN (0,1)),appearance TEXT NOT NULL DEFAULT 'system' CHECK(appearance IN ('system','light','dark')))")
+        try database.execute("CREATE TABLE preferences(id INTEGER PRIMARY KEY CHECK(id=1),device TEXT NOT NULL,revision INTEGER NOT NULL CHECK(revision>0),completion INTEGER NOT NULL CHECK(completion IN (0,1)),attention INTEGER NOT NULL CHECK(attention IN (0,1)),appearance TEXT NOT NULL DEFAULT 'system' CHECK(appearance IN ('system','light','dark')),privacy INTEGER NOT NULL DEFAULT 0 CHECK(privacy IN (0,1)))")
         try database.execute("CREATE TABLE requests(id TEXT PRIMARY KEY,original BLOB NOT NULL,outcome TEXT NOT NULL CHECK(outcome IN ('applied','conflict')),revision INTEGER NOT NULL CHECK(revision>0),kind TEXT NOT NULL DEFAULT 'notifications' CHECK(kind IN ('notifications','appearance')))")
     }
 
@@ -440,9 +448,12 @@ actor DevicePreferenceStore {
             PreferenceColumn(name: "outcome", type: "TEXT", required: true, defaultValue: nil, primaryKey: false),
             PreferenceColumn(name: "revision", type: "INTEGER", required: true, defaultValue: nil, primaryKey: false)
         ]
-        if version == 2 {
+        if version >= 2 {
             preferences.append(PreferenceColumn(name: "appearance", type: "TEXT", required: true, defaultValue: "'system'", primaryKey: false))
             requests.append(PreferenceColumn(name: "kind", type: "TEXT", required: true, defaultValue: "'notifications'", primaryKey: false))
+        }
+        if version >= 3 {
+            preferences.append(PreferenceColumn(name: "privacy", type: "INTEGER", required: true, defaultValue: "0", primaryKey: false))
         }
         for (table, expected) in [("preferences", preferences), ("requests", requests)] {
             let columns = try database.rows("PRAGMA table_xinfo(\(table))") { row in
@@ -474,13 +485,15 @@ actor DevicePreferenceStore {
     }
 
     private static func readState(database: PreferenceDatabase, deviceID: UUID) throws -> PreferenceState {
-        let snapshots = try database.rows("SELECT id,device,revision,completion,attention,appearance FROM preferences LIMIT 2") { row in
+        let snapshots = try database.rows("SELECT id,device,revision,completion,attention,appearance,privacy FROM preferences LIMIT 2") { row in
             let snapshot = try readNotificationColumns(row, deviceID: deviceID)
-            guard let appearance = DeviceAppearance(rawValue: try PreferenceDatabase.text(row, 5, maximumBytes: 6)) else {
+            let privacy = sqlite3_column_int64(row, 6)
+            guard let appearance = DeviceAppearance(rawValue: try PreferenceDatabase.text(row, 5, maximumBytes: 6)),
+                  sqlite3_column_type(row, 6) == SQLITE_INTEGER, [0, 1].contains(privacy) else {
                 throw DevicePreferenceError.storage
             }
             return PreferenceState(deviceID: deviceID, revision: snapshot.revision, completion: snapshot.completion,
-                                   attention: snapshot.attention, appearance: appearance)
+                                   attention: snapshot.attention, privacyCover: privacy == 1, appearance: appearance)
         }
         guard snapshots.count == 1, let snapshot = snapshots.first else { throw DevicePreferenceError.storage }
         return snapshot
@@ -504,7 +517,7 @@ actor DevicePreferenceStore {
               sqlite3_column_type(row, 3) == SQLITE_INTEGER,
               sqlite3_column_type(row, 4) == SQLITE_INTEGER,
               [0, 1].contains(completion), [0, 1].contains(attention) else { throw DevicePreferenceError.storage }
-        return DevicePreferenceSnapshot(deviceID: deviceID, revision: UInt64(revision), completion: completion == 1, attention: attention == 1)
+        return DevicePreferenceSnapshot(deviceID: deviceID, revision: UInt64(revision), completion: completion == 1, attention: attention == 1, privacyCover: false)
     }
 
     private static func canonicalID(_ row: OpaquePointer, _ column: Int32) throws -> UUID {

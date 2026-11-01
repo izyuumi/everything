@@ -3,13 +3,15 @@ import SwiftUI
 @MainActor
 struct ThisDeviceSettingsView: View {
     let store: ThisDeviceSettingsStore
+    let issue: String?
+    let deliveryStatus: String?
     let onPresentationChange: (Bool) -> Void
     @State private var confirmingReload = false
     @State private var confirmingAppearanceReload = false
 
     var body: some View {
         Form {
-            Section("Appearance on this iPhone") {
+            Section("Appearance") {
                 if let draft = store.appearanceDraft {
                     Picker("Appearance", selection: Binding(get: { store.appearanceDraft?.appearance ?? draft.appearance }, set: { value in store.setAppearance(value) })) {
                         ForEach(DeviceAppearance.allCases, id: \.self) { value in
@@ -55,7 +57,7 @@ struct ThisDeviceSettingsView: View {
             }
             .disabled(store.isClosed)
 
-            Section("Preferences on this iPhone") {
+            Section("Notifications") {
                 if store.isOpening { ProgressView("Opening local preferences…") }
                 if let draft = store.draft {
                     Toggle("Completion notifications", isOn: Binding(get: { store.draft?.completion ?? draft.completion }, set: { value in store.setCompletion(value) }))
@@ -93,7 +95,7 @@ struct ThisDeviceSettingsView: View {
             }
             .disabled(store.isClosed)
 
-            Section("iOS notification permission") {
+            Section("Notification Permission") {
                 if let observation = store.notificationObservation {
                     LabeledContent("Authorization", value: authorizationLabel(observation.authorization))
                     LabeledContent("Alerts", value: featureLabel(observation.alerts))
@@ -124,8 +126,17 @@ struct ThisDeviceSettingsView: View {
                     .foregroundStyle(.secondary)
             }
             .disabled(store.isClosed)
+
+            Section {
+                if let issue { Text(issue).foregroundStyle(.red) }
+                if let deliveryStatus { Text(deliveryStatus).foregroundStyle(.secondary) }
+            } footer: {
+                Text("Local preferences remain available while the Host is offline. Notifications use your saved choices and system permission while Vorra is active and synchronization is enabled. Your first sync stays quiet.")
+            }
         }
-        .navigationTitle("This iPhone")
+        .formStyle(.grouped)
+        .navigationTitle("General")
+        .navigationBarTitleDisplayMode(.inline)
         .onAppear { onPresentationChange(confirmingReload || confirmingAppearanceReload) }
         .confirmationDialog("Discard unsaved notification preferences?", isPresented: Binding(get: { confirmingReload }, set: { setNotificationReload($0) }), titleVisibility: .visible) {
             Button("Reload saved preferences", role: .destructive) { store.reload() }
