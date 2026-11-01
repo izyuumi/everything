@@ -223,7 +223,7 @@ struct AgentEditorView: View {
     }
     private var workspaceNote: String? {
         guard !workspaceUnchanged, let resolved = resolvedWorkspace, resolved != workspace else { return nil }
-        return "Saved as " + resolved
+        return "Saved as " + DisplayText.escaped(resolved)
     }
     private var messageTargets: [OwnerID] {
         let others: [OwnerID] = (model.agents?.agents ?? []).map(\.id).filter { $0 != ownID }
