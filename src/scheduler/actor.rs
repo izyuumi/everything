@@ -2254,7 +2254,8 @@ impl Actor {
             .max_charged_tokens
             .saturating_sub(run.charged_tokens)
             .saturating_sub(self.subtree_spend(id, all_children).await?);
-        if remaining == 0 {
+        let floor = u64::from(caller.definition.execution.budget.reserved_output_tokens);
+        if remaining <= floor {
             return Err(SchedulerError::Capacity("caller token budget"));
         }
         Ok((remaining, UnixMillis::try_from(run.deadline_ms)?))
@@ -2338,6 +2339,9 @@ impl Actor {
             return Err(SchedulerError::Capacity("queued task messages"));
         }
         if self.in_delegation(target)? {
+            if task.definition.initial.parent_task_id != Some(caller) {
+                return Err(SchedulerError::OutsideScope);
+            }
             let sender = repository::load(&self.store(), caller)?;
             let (remaining, _) = self.carved_budget(&sender).await?;
             if remaining < task.definition.execution.limits.max_charged_tokens {
