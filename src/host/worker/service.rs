@@ -320,6 +320,7 @@ impl WorkerCoordinator {
                 budget: request.budget.clone(),
                 limits: request.limits.clone(),
                 agent: None,
+                delegation_ceiling: None,
             }
             .capture(&host.registry)?;
             if execution.workspace_root != request.workspace_root

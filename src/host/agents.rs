@@ -17,6 +17,7 @@ pub use crate::skills::SkillName;
 use crate::tools::ToolRegistry;
 
 pub const DEFAULT_AGENT_ID: AgentId = AgentId(Uuid::from_u128(1));
+pub const DEFAULT_INSTRUCTIONS: &str = "You are Vorra, a helpful assistant.";
 pub const AGENTS_SCHEMA: u64 = 1;
 pub const MAX_AGENTS: usize = 64;
 pub const MAX_AGENTS_FILE_BYTES: usize = 512 * 1024;
@@ -28,6 +29,7 @@ const MAX_HANDLE_BYTES: usize = 32;
 const MAX_SET_ENTRIES: usize = 256;
 const MAX_REFERENCE_BYTES: usize = 256;
 const AGENTS_FILE: &str = "agents-v1.json";
+use crate::scheduler::MESSAGE_AGENT as MESSAGE_AGENT_TOOL;
 
 #[derive(Debug, Error)]
 pub enum AgentsError {
@@ -485,6 +487,10 @@ impl AgentDefinition {
     }
 
     pub fn narrow(&self, mut policy: ExecutionPolicy, registry: &ToolRegistry) -> ExecutionPolicy {
+        let ceiling = crate::scheduler::DelegationCeiling {
+            mode: policy.mode,
+            allowed_tools: policy.allowed_tools.clone(),
+        };
         match self.tool_ceiling(policy.mode, registry) {
             None => policy.tools_enabled = false,
             Some((mode, allowed)) => {
@@ -498,6 +504,17 @@ impl AgentDefinition {
             }
         }
         policy.agent = Some(self.captured());
+        if policy.tools_enabled
+            && matches!(&self.messaging, Messaging::May(targets) if !targets.is_empty())
+            && registry.descriptor(MESSAGE_AGENT_TOOL).is_ok()
+            && policy
+                .allowed_tools
+                .as_ref()
+                .is_none_or(|names| names.contains(MESSAGE_AGENT_TOOL))
+            && policy.delegation_ceiling.is_none()
+        {
+            policy.delegation_ceiling = Some(ceiling);
+        }
         policy
     }
 

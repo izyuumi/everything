@@ -168,7 +168,7 @@ pub fn run(
     }
 }
 
-fn printable(text: &str, keep_lines: bool) -> Cow<'_, str> {
+pub fn printable(text: &str, keep_lines: bool) -> Cow<'_, str> {
     super::escaped(text, keep_lines)
 }
 

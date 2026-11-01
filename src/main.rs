@@ -36,8 +36,8 @@ mod pair_cli;
 mod queries;
 mod vault_cli;
 
-const DEFAULT_INSTRUCTIONS: &str = "You are Vorra, a helpful assistant.";
 use vorra::VERSION;
+use vorra::host::agents::DEFAULT_INSTRUCTIONS;
 
 #[derive(Parser)]
 #[command(version = VERSION, about = "Local-first native AI conversations")]

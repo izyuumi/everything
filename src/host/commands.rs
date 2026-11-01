@@ -746,6 +746,7 @@ impl HostInner {
                             budget: setup.budget,
                             limits: setup.limits,
                             agent: None,
+                            delegation_ceiling: None,
                         },
                     })
                 })
@@ -795,6 +796,7 @@ impl HostInner {
                 },
                 limits,
                 agent: None,
+                delegation_ceiling: None,
             };
             let policy = agent
                 .narrow(policy, &host.registry)

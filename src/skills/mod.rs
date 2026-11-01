@@ -20,7 +20,8 @@ pub use discover::{
 };
 pub use lock::LockEntry;
 pub use tool::{
-    MAX_CATALOG_BYTES, MAX_CATALOG_SKILLS, READ_SKILL_NAME, ReadSkillTool, SkillSummary,
+    MAX_CATALOG_BYTES, MAX_CATALOG_SKILLS, MAX_SUMMARY_BYTES, MAX_SUMMARY_ROWS,
+    MAX_SUMMARY_WARNINGS, READ_SKILL_NAME, ReadSkillTool, SkillSummary, bounded_summaries,
     offered_catalog, read_skill_descriptor, summaries,
 };
 

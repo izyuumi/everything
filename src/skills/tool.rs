@@ -128,6 +128,39 @@ pub struct SkillSummary {
     pub issues: Vec<String>,
 }
 
+pub const MAX_SUMMARY_ROWS: usize = 8192;
+pub const MAX_SUMMARY_BYTES: usize = 1024 * 1024;
+pub const MAX_SUMMARY_WARNINGS: usize = 64;
+
+pub fn bounded_summaries(catalog: &Catalog) -> (Vec<SkillSummary>, Vec<String>, usize) {
+    let mut rows = summaries(catalog);
+    let mut used = 0_usize;
+    let mut kept = 0;
+    for row in &rows {
+        let size = serde_json::to_vec(row).map_or(usize::MAX, |bytes| bytes.len() + 1);
+        if kept == MAX_SUMMARY_ROWS || used.saturating_add(size) > MAX_SUMMARY_BYTES {
+            break;
+        }
+        used += size;
+        kept += 1;
+    }
+    let omitted = rows.len() - kept;
+    rows.truncate(kept);
+    let warnings = catalog
+        .warnings
+        .iter()
+        .take(MAX_SUMMARY_WARNINGS)
+        .map(|warning| {
+            let mut end = warning.len().min(1024);
+            while !warning.is_char_boundary(end) {
+                end -= 1;
+            }
+            warning[..end].to_owned()
+        })
+        .collect();
+    (rows, warnings, omitted)
+}
+
 pub fn summaries(catalog: &Catalog) -> Vec<SkillSummary> {
     let empty = |name: &str, status: &str| SkillSummary {
         name: name.to_owned(),
@@ -254,9 +287,14 @@ fn read(
 ) -> Result<String, ToolError> {
     let task: TaskId = task_id
         .parse()
-        .map_err(|_| failed("read_skill runs only inside a Host task"))?;
-    let execution = crate::scheduler::task_execution(store, task)
-        .map_err(|_| failed("the task's captured policy could not be read"))?;
+        .map_err(|error| failed(format!("read_skill runs only inside a Host task: {error}")))?;
+    let execution = crate::scheduler::task_execution(store, task).map_err(|error| {
+        eprintln!(
+            "vorra: warning: read_skill: task {task} captured policy could not be read: {}",
+            escaped(&error.to_string(), false)
+        );
+        failed("the task's captured policy could not be read; the Host log has the cause")
+    })?;
     let assignment = execution
         .agent
         .map(|agent| agent.skills)
@@ -270,8 +308,8 @@ fn read(
         .filter(|home| home.is_absolute())
         .ok_or_else(|| failed("HOME is unavailable"))?;
     let roots = SkillRoots::new(home, Some(workspace), extra_roots);
-    let catalog =
-        discover(&roots, cancellation).map_err(|_| failed("skill discovery was cancelled"))?;
+    let catalog = discover(&roots, cancellation)
+        .map_err(|crate::skills::Cancelled| failed("skill discovery was cancelled"))?;
     let wanted = SkillDirName::sanitize(&arguments.name);
     let record = offered(&catalog, &assignment)
         .find(|record| record.name.dir_name() == wanted)
@@ -296,8 +334,12 @@ fn read(
                     OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
                     Mode::empty(),
                 )
-                .map_err(|_| {
-                    failed("path is not a directory inside the skill; symlinks are not followed")
+                .map_err(|error| {
+                    failed(format!(
+                        "{} is not a readable directory inside the skill ({}); symlinks are not followed",
+                        escaped(part, false),
+                        std::io::Error::from(error)
+                    ))
                 })?;
             }
             *last

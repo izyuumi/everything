@@ -498,30 +498,57 @@ fn private_group(gid: u32) -> bool {
 }
 
 fn user_private_gid() -> Option<u32> {
+    const LIMIT: u64 = 4 * 1024 * 1024;
     let bounded = |path: &str| {
         let mut text = String::new();
         File::open(path)
             .ok()?
-            .take(4 * 1024 * 1024)
+            .take(LIMIT + 1)
             .read_to_string(&mut text)
             .ok()?;
-        Some(text)
+        (text.len() as u64 <= LIMIT).then_some(text)
     };
     let uid = rustix::process::geteuid().as_raw();
     let passwd = bounded("/etc/passwd")?;
-    let (name, gid) = passwd.lines().find_map(|line| {
-        let fields: Vec<&str> = line.split(':').collect();
-        (fields.len() >= 4 && fields[2].parse::<u32>().ok() == Some(uid))
-            .then(|| (fields[0].to_owned(), fields[3].parse::<u32>().ok()))
-    })?;
-    let gid = gid?;
-    bounded("/etc/group")?
+    let entries: Vec<Vec<&str>> = passwd
         .lines()
-        .any(|line| {
-            let fields: Vec<&str> = line.split(':').collect();
-            fields.len() >= 3 && fields[0] == name && fields[2].parse::<u32>().ok() == Some(gid)
-        })
-        .then_some(gid)
+        .filter(|line| !line.trim().is_empty() && !line.starts_with('#'))
+        .map(|line| line.split(':').collect())
+        .collect();
+    let mut own = entries
+        .iter()
+        .filter(|fields| fields.len() >= 4 && fields[2].parse::<u32>().ok() == Some(uid));
+    let user = own.next()?;
+    if own.next().is_some() {
+        return None;
+    }
+    let name = user[0];
+    let gid = user[3].parse::<u32>().ok()?;
+    if entries
+        .iter()
+        .filter(|fields| fields.len() < 4 || fields[3].parse::<u32>().ok() == Some(gid))
+        .count()
+        != 1
+    {
+        return None;
+    }
+    let groups = bounded("/etc/group")?;
+    let mut matching = groups
+        .lines()
+        .filter(|line| !line.trim().is_empty() && !line.starts_with('#'))
+        .map(|line| line.split(':').collect::<Vec<&str>>())
+        .filter(|fields| fields.len() < 3 || fields[2].parse::<u32>().ok() == Some(gid));
+    let group = matching.next()?;
+    if matching.next().is_some()
+        || group.len() < 4
+        || group[0] != name
+        || !group[3]
+            .split(',')
+            .all(|member| member.is_empty() || member == name)
+    {
+        return None;
+    }
+    Some(gid)
 }
 
 pub(super) fn open_skill_dir(

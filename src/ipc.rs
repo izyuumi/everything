@@ -167,6 +167,13 @@ pub enum OwnerQuery {
     Agent {
         id: crate::host::agents::AgentId,
     },
+    AgentLog {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        agent: Option<crate::host::agents::AgentId>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        conversation_id: Option<ConversationId>,
+        limit: usize,
+    },
     Skills {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         workspace: Option<std::path::PathBuf>,
@@ -190,7 +197,7 @@ impl OwnerQuery {
         }
         if matches!(
             self,
-            Self::Conversations { limit } | Self::Tasks { limit, .. } | Self::Devices { limit } | Self::Approvals { limit, .. } | Self::VaultList { limit }
+            Self::Conversations { limit } | Self::Tasks { limit, .. } | Self::Devices { limit } | Self::Approvals { limit, .. } | Self::VaultList { limit } | Self::AgentLog { limit, .. }
                 if !(1..=100).contains(limit)
         ) {
             return Err("query limit must be between one and one hundred");
@@ -785,10 +792,15 @@ pub enum OwnerQueryResult {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         unavailable_tools: Option<Vec<String>>,
     },
+    AgentLog {
+        hops: Vec<crate::scheduler::AgentHop>,
+    },
     Skills {
         skills: Vec<crate::skills::SkillSummary>,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         warnings: Vec<String>,
+        #[serde(default, skip_serializing_if = "is_zero")]
+        omitted: usize,
     },
 }
 
@@ -973,8 +985,31 @@ impl OwnerQueryResult {
                     && agents.get(agents.default_agent).is_some()
             }
             (OwnerQuery::Agent { id }, Self::Agent { agent, .. }) => agent.id == *id,
-            (OwnerQuery::Skills { .. }, Self::Skills { skills, warnings }) => {
-                skills.len() <= 16_384 && warnings.len() <= 1024
+            (
+                OwnerQuery::AgentLog {
+                    agent,
+                    conversation_id,
+                    limit,
+                },
+                Self::AgentLog { hops },
+            ) => {
+                hops.len() <= *limit
+                    && hops.iter().all(|hop| {
+                        agent.is_none_or(|agent| hop.from == agent || hop.to == agent)
+                            && conversation_id.is_none_or(|conversation| {
+                                hop.conversation_id == conversation
+                                    || hop.caller_conversation_id == conversation
+                            })
+                    })
+            }
+            (
+                OwnerQuery::Skills { .. },
+                Self::Skills {
+                    skills, warnings, ..
+                },
+            ) => {
+                skills.len() <= crate::skills::MAX_SUMMARY_ROWS
+                    && warnings.len() <= crate::skills::MAX_SUMMARY_WARNINGS
             }
             (OwnerQuery::Command { command_id }, Self::Command { receipt }) => receipt
                 .as_ref()
@@ -1523,4 +1558,8 @@ fn schedule_mutation_matches(
         }
         _ => false,
     }
+}
+
+fn is_zero(value: &usize) -> bool {
+    *value == 0
 }

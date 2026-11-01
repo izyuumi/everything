@@ -293,6 +293,23 @@ impl HostInner {
                 })
                 .await
             }
+            OwnerQuery::AgentLog {
+                agent,
+                conversation_id,
+                limit,
+            } => {
+                self.blocking(move |host| {
+                    Ok(OwnerQueryResult::AgentLog {
+                        hops: crate::scheduler::agent_log(
+                            &host.agent.store(),
+                            agent,
+                            conversation_id,
+                            limit,
+                        )?,
+                    })
+                })
+                .await
+            }
             OwnerQuery::Skills { workspace } => {
                 if workspace.as_ref().is_some_and(|path| !path.is_absolute()) {
                     return Err(HostError::Invalid(
@@ -314,9 +331,11 @@ impl HostInner {
                     let roots = crate::skills::SkillRoots::new(home, Some(workspace), extra_roots);
                     let catalog = crate::skills::discover(&roots, &cancellation)
                         .map_err(|_| HostError::Invalid("skill discovery was cancelled"))?;
+                    let (skills, warnings, omitted) = crate::skills::bounded_summaries(&catalog);
                     Ok(OwnerQueryResult::Skills {
-                        skills: crate::skills::summaries(&catalog),
-                        warnings: catalog.warnings,
+                        skills,
+                        warnings,
+                        omitted,
                     })
                 })
                 .await
