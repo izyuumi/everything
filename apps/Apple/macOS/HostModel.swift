@@ -42,6 +42,7 @@ final class HostModel {
     var newChatAgent: OwnerID?
     var editingAgent: HostAgent?
     var creatingAgent = false
+    @ObservationIgnored private var agentOperationApplied: Bool?
     var skills: HostSkills?
     var skillsError: String?
     var skillsLoading = false
@@ -420,13 +421,13 @@ final class HostModel {
         guard canMutate else { return }
         let label = "Agent " + DisplayText.escaped(definition["name"].string ?? "")
         await apply(.operation("agent_put", fields: ["expected_revision": expectedRevision.map(JSONValue.unsigned) ?? .null, "definition": definition]), label: label, expectedKind: "agents")
-        if pendingAction == nil { editingAgent = nil; creatingAgent = false }
+        if pendingAction == nil && agentOperationApplied != false { editingAgent = nil; creatingAgent = false }
     }
 
     func removeAgent(_ agent: HostAgent) async {
         guard canMutate else { return }
         await apply(.operation("agent_remove", fields: ["id": .string(agent.id.string), "expected_revision": .unsigned(agent.revision)]), label: "Agent removal", expectedKind: "agents")
-        if pendingAction == nil { editingAgent = nil }
+        if pendingAction == nil && agentOperationApplied != false { editingAgent = nil }
     }
 
     func setDefaultAgent(_ agent: HostAgent) async {
@@ -434,14 +435,15 @@ final class HostModel {
         await apply(.operation("agent_set_default", fields: ["id": .string(agent.id.string), "expected_revision": .unsigned(agent.revision)]), label: "Default agent", expectedKind: "agents")
     }
 
-    func newConversation(agent: HostAgent) async {
+    func newConversation(agent: HostAgent, asDefault: Bool = false) async {
         guard pendingAction == nil else { message = "Resolve the pending action first."; return }
         guard canMutate else { return }
         let original = connection
         let id = OwnerID()
         do {
             let current = try await client.request(.query("agent", fields: ["id": .string(agent.id.string)]), connection: original)
-            guard current["kind"].string == "agent", try HostAgent(current["agent"]) == agent else {
+            guard current["kind"].string == "agent", try HostAgent(current["agent"]) == agent,
+                  !asDefault || current["default"] == .bool(true) else {
                 message = "Agent " + DisplayText.escaped(agent.name) + " changed or was removed. Review it and try again."
                 await refresh()
                 return
@@ -492,6 +494,8 @@ final class HostModel {
             default: applied = false
             }
             agents = current
+            agentOperationApplied = applied
+            if !applied, let editing = editingAgent, let fresh = current.agents.first(where: { $0.id == editing.id }) { editingAgent = fresh }
             pendingAction = nil
             message = (note.map { $0 + " " } ?? "") + (applied
                 ? pendingActionLabel + " is applied in the current Host state."
@@ -507,7 +511,7 @@ final class HostModel {
             return
         }
         if let agents, let agent = agents.agents.first(where: { $0.id == agents.defaultID }) {
-            await newConversation(agent: agent)
+            await newConversation(agent: agent, asDefault: true)
             return
         }
         let id = OwnerID()
@@ -563,6 +567,7 @@ final class HostModel {
         acting = true
         pendingAction = request
         pendingActionLabel = label
+        agentOperationApplied = nil
         defer { acting = false }
         let original = connection
         var rejected = false

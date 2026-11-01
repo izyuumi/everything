@@ -167,6 +167,9 @@ struct AgentEditorView: View {
             }
             Text("Edit the model, tool allowlist, traits, workspace and messaging with vorra agents edit.")
                 .font(.caption).foregroundStyle(.secondary)
+            if let message = model.message {
+                Text(message).font(.caption).foregroundStyle(.secondary).textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
+            }
             HStack {
                 if let agent {
                     Button("New Chat") { Task { dismiss(); await model.newConversation(agent: agent) } }

@@ -1070,8 +1070,17 @@ async fn owner_cli(
         }
         OwnerInput::OwnerCommand {
             command: command @ vorra::ipc::OwnerCommand::Initialize { .. },
-        } => write_json(client.submit(command, cancellation).await?).await,
-        OwnerInput::OwnerCommand { .. } => Err(CliError::OwnerInput),
+        } => {
+            eprintln!(
+                "conversation {} initialization command {}",
+                command.conversation_id(),
+                command.command_id()
+            );
+            write_json(client.submit(command, cancellation).await?).await
+        }
+        OwnerInput::OwnerCommand { .. } => Err(CliError::OwnerJson(
+            "command: only an initialize owner command is accepted".into(),
+        )),
         OwnerInput::Operation {
             operation,
             request_id,
