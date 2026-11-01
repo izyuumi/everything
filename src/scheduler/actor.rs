@@ -1948,6 +1948,11 @@ impl Actor {
             id.to_string(),
             mode.unwrap_or(parent.definition.execution.mode),
         )?;
+        let budget = if self.in_delegation(caller)? {
+            Some(self.carved_budget(&parent).await?)
+        } else {
+            None
+        };
         let root =
             workspace::prepare(&workspace_root, caller, id).map_err(|error| match error {
                 SchedulerError::Capacity(_) => error,
@@ -1955,6 +1960,9 @@ impl Actor {
             })?;
         let admitted = async {
             let mut policy = parent.definition.execution.clone();
+            if let Some(budget) = budget {
+                apply_budget(&mut policy, budget);
+            }
             policy.workspace_root = root;
             policy.mode = mode.unwrap_or(policy.mode);
             let authority = parent_authority.child_in_workspace(
@@ -2146,34 +2154,7 @@ impl Actor {
         policy.tools_enabled = true;
         let mut policy = target.narrow(policy, &self.services.registry);
         policy.delegation_ceiling = None;
-        let conversation = self
-            .services
-            .agent
-            .conversation(parent.definition.initial.conversation_id)
-            .await?;
-        if let Some(run) = conversation
-            .native_run()
-            .filter(|run| run.task_id == caller)
-        {
-            let remaining = parent
-                .definition
-                .execution
-                .limits
-                .max_charged_tokens
-                .saturating_sub(run.charged_tokens)
-                .saturating_sub(self.delegated_spend(caller).await?);
-            if remaining == 0 {
-                return Err(SchedulerError::Capacity("caller token budget"));
-            }
-            policy.limits.max_charged_tokens = remaining;
-            let deadline = UnixMillis::try_from(run.deadline_ms)?;
-            policy.limits.absolute_deadline = Some(
-                policy
-                    .limits
-                    .absolute_deadline
-                    .map_or(deadline, |current| current.min(deadline)),
-            );
-        }
+        apply_budget(&mut policy, self.carved_budget(&parent).await?);
         let mut base = parent.definition.configuration.clone();
         crate::host::agents::DEFAULT_INSTRUCTIONS.clone_into(&mut base.instructions);
         let configuration = target.configure(base).map_err(|error| {
@@ -2245,9 +2226,47 @@ impl Actor {
         admitted.map_err(mutation_uncertain)
     }
 
-    async fn delegated_spend(&self, caller: TaskId) -> Result<u64, SchedulerError> {
+    fn in_delegation(&self, id: TaskId) -> Result<bool, SchedulerError> {
+        Ok(repository::lineage(&self.store(), id)?
+            .iter()
+            .any(|task| task.definition.delegation.is_some()))
+    }
+
+    async fn carved_budget(
+        &self,
+        caller: &StoredTask,
+    ) -> Result<(u64, UnixMillis), SchedulerError> {
+        let id = caller.definition.initial.id;
+        let conversation = self
+            .services
+            .agent
+            .conversation(caller.definition.initial.conversation_id)
+            .await?;
+        let run = conversation
+            .native_run()
+            .filter(|run| run.task_id == id)
+            .ok_or(SchedulerError::Capacity("caller token budget"))?;
+        let all_children = self.in_delegation(id)?;
+        let remaining = caller
+            .definition
+            .execution
+            .limits
+            .max_charged_tokens
+            .saturating_sub(run.charged_tokens)
+            .saturating_sub(self.subtree_spend(id, all_children).await?);
+        if remaining == 0 {
+            return Err(SchedulerError::Capacity("caller token budget"));
+        }
+        Ok((remaining, UnixMillis::try_from(run.deadline_ms)?))
+    }
+
+    async fn subtree_spend(
+        &self,
+        caller: TaskId,
+        all_children: bool,
+    ) -> Result<u64, SchedulerError> {
         let store = self.store();
-        let mut pending = repository::child_ids(&store, caller, true)?;
+        let mut pending = repository::child_ids(&store, caller, !all_children)?;
         let mut visited = 0_usize;
         let mut total = 0_u64;
         while let Some(id) = pending.pop() {
@@ -2256,8 +2275,11 @@ impl Actor {
                 return Err(SchedulerError::Capacity("delegated descendants"));
             }
             let task = repository::load(&store, id)?;
+            let grant = task.definition.execution.limits.max_charged_tokens;
+            let followups = grant.saturating_mul(u64::from(task.checkpoint.followups));
+            total = total.saturating_add(followups);
             if !task.checkpoint.task.status.is_terminal() {
-                total = total.saturating_add(task.definition.execution.limits.max_charged_tokens);
+                total = total.saturating_add(grant);
                 continue;
             }
             let conversation = self
@@ -2314,6 +2336,14 @@ impl Actor {
         }
         if task.checkpoint.queued.len() >= 32 {
             return Err(SchedulerError::Capacity("queued task messages"));
+        }
+        if self.in_delegation(target)? {
+            let sender = repository::load(&self.store(), caller)?;
+            let (remaining, _) = self.carved_budget(&sender).await?;
+            if remaining < task.definition.execution.limits.max_charged_tokens {
+                return Err(SchedulerError::Capacity("caller token budget"));
+            }
+            task.checkpoint.followups = task.checkpoint.followups.saturating_add(1);
         }
         task.checkpoint.queued.push(QueuedMessage {
             command_id,
@@ -3120,6 +3150,16 @@ fn repair_handoff(
     Ok(())
 }
 
+fn apply_budget(policy: &mut ExecutionPolicy, (remaining, deadline): (u64, UnixMillis)) {
+    policy.limits.max_charged_tokens = remaining;
+    policy.limits.absolute_deadline = Some(
+        policy
+            .limits
+            .absolute_deadline
+            .map_or(deadline, |current| current.min(deadline)),
+    );
+}
+
 struct MessageIds {
     task: TaskId,
     conversation: ConversationId,
@@ -3155,6 +3195,7 @@ fn initial_task(
             provider_retirement: None,
             terminal_evidence: None,
             remote: None,
+            followups: 0,
         },
         state: crate::storage::TaskState::Queued,
     }

@@ -436,6 +436,12 @@ pub(super) struct TaskCheckpoint {
     pub terminal_evidence: Option<super::evidence::TerminalTaskEvidence>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub remote: Option<super::remote::RemoteCheckpoint>,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub followups: u32,
+}
+
+fn is_zero(value: &u32) -> bool {
+    *value == 0
 }
 
 #[derive(Clone, Serialize, Deserialize)]

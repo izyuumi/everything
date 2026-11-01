@@ -295,10 +295,10 @@ async fn terminal_delivery(
         )
     );
     let blocked: bool = store.connection()?.query_row(
-        "SELECT EXISTS(SELECT 1 FROM tool_calls WHERE task_id=?1 AND state='denied' AND instr(result, ?2) > 0)",
+        "SELECT EXISTS(SELECT 1 FROM tool_calls WHERE task_id=?1 AND state='denied' AND json_extract(result,'$.result.code')=?2)",
         [
             task.definition.initial.id.to_string(),
-            crate::permissions::CHILD_APPROVAL_UNAVAILABLE.to_owned(),
+            crate::permissions::CHILD_APPROVAL_CODE.to_owned(),
         ],
         |row| row.get(0),
     )?;
