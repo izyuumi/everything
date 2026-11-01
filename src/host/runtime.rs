@@ -1547,7 +1547,8 @@ pub(super) fn public_failure(error: &HostError) -> LocalFailure {
             error @ (super::agents::AgentsError::Invalid(_)
             | super::agents::AgentsError::Configuration(_)
             | super::agents::AgentsError::NotFound
-            | super::agents::AgentsError::Conflict),
+            | super::agents::AgentsError::Conflict
+            | super::agents::AgentsError::StaleRevision(_)),
         ) => {
             return LocalFailure {
                 code: LocalFailureCode::InvalidRequest,

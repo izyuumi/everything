@@ -192,6 +192,7 @@ fn banner(app: &App, width: usize) -> Vec<Line<'static>> {
         .map(|path| path.display().to_string())
         .unwrap_or_default();
     let rows = [
+        ("agent", app.agent_label.clone()),
         ("model", model),
         ("conversation", conversation),
         ("tools", tools),
@@ -473,6 +474,8 @@ fn draw_status(frame: &mut Frame, app: &App, area: Rect) {
         ),
         separator.clone(),
         Span::styled(provider, bar.fg(TEXT)),
+        separator.clone(),
+        Span::styled(format!("agent {}", app.agent_label), bar.fg(TEXT)),
     ];
     if width >= 60 {
         spans.push(separator.clone());
@@ -707,6 +710,7 @@ fn draw_picker(frame: &mut Frame, app: &App, area: Rect) {
     let title = match kind {
         PickerKind::Session => " ◈ conversations ",
         PickerKind::Model => " ◈ models · starts a new conversation ",
+        PickerKind::Agent => " ◈ agents · starts a new conversation ",
     };
     let width = area.width.saturating_sub(4).min(100);
     let visible = (area.height.saturating_sub(6) as usize)

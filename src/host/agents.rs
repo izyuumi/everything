@@ -49,6 +49,8 @@ pub enum AgentsError {
     Configuration(#[source] crate::agent::AgentError),
     #[error("agents changed; reload before saving")]
     Conflict,
+    #[error("agent is at revision {0}, not the expected revision")]
+    StaleRevision(u64),
     #[error("agent was not found")]
     NotFound,
     #[error("agents state lock was poisoned")]
@@ -187,6 +189,39 @@ pub enum AgentTools {
     },
 }
 
+impl std::fmt::Display for AgentTools {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let AgentTools::On { max_mode, allow } = self else {
+            return formatter.write_str("tools off");
+        };
+        formatter.write_str(match max_mode {
+            ExecutionMode::ReadOnly => "read-only",
+            ExecutionMode::TrustedWorkspace => "trusted-workspace",
+            ExecutionMode::FullHost => "full-host",
+            ExecutionMode::SettingsRestricted => "settings-restricted",
+        })?;
+        match allow {
+            ToolAllow::All => formatter.write_str(" · all tools"),
+            ToolAllow::Only(references) if references.is_empty() => {
+                formatter.write_str(" · no tools")
+            }
+            ToolAllow::Only(references) => {
+                formatter.write_str(" · only ")?;
+                for (index, reference) in references.iter().enumerate() {
+                    if index > 0 {
+                        formatter.write_str(", ")?;
+                    }
+                    match reference {
+                        ToolRef::Tool(name) => formatter.write_str(name)?,
+                        ToolRef::McpServer(server) => write!(formatter, "mcp:{server}")?,
+                    }
+                }
+                Ok(())
+            }
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum ToolAllow {
@@ -249,6 +284,7 @@ pub struct AgentDefinition {
     pub memory: MemoryAccess,
     pub skills: SkillAssignment,
     pub messaging: Messaging,
+    #[serde(default)]
     pub revision: u64,
 }
 
@@ -455,6 +491,31 @@ impl AgentDefinition {
         policy
     }
 
+    pub fn unavailable_tools(&self, registry: &ToolRegistry) -> Vec<String> {
+        let AgentTools::On {
+            allow: ToolAllow::Only(references),
+            ..
+        } = &self.tools
+        else {
+            return Vec::new();
+        };
+        references
+            .iter()
+            .filter(|reference| {
+                !registry.descriptors().any(|tool| match reference {
+                    ToolRef::Tool(name) => *name == tool.name,
+                    ToolRef::McpServer(server) => {
+                        crate::tools::mcp::server_of(tool) == Some(server.as_str())
+                    }
+                })
+            })
+            .map(|reference| match reference {
+                ToolRef::Tool(name) => name.clone(),
+                ToolRef::McpServer(server) => format!("mcp:{server}"),
+            })
+            .collect()
+    }
+
     fn same_content(&self, other: &Self) -> bool {
         let mut left = self.clone();
         left.revision = other.revision;
@@ -494,6 +555,52 @@ impl AgentsFile {
     pub fn resolve(&self, id: Option<AgentId>) -> Result<&AgentDefinition, AgentsError> {
         self.get(id.unwrap_or(self.default_agent))
             .ok_or(AgentsError::NotFound)
+    }
+
+    fn put(
+        &mut self,
+        expected_revision: Option<u64>,
+        definition: AgentDefinition,
+    ) -> Result<(), AgentsError> {
+        let current = self
+            .agents
+            .iter_mut()
+            .find(|agent| agent.id == definition.id);
+        match (expected_revision, current) {
+            (None, None) => self.agents.push(definition),
+            (None, Some(_)) => return Err(AgentsError::Invalid("agent id already exists")),
+            (Some(_), None) => return Err(AgentsError::NotFound),
+            (Some(expected), Some(agent)) if agent.revision != expected => {
+                return Err(AgentsError::StaleRevision(agent.revision));
+            }
+            (Some(_), Some(agent)) => *agent = definition,
+        }
+        Ok(())
+    }
+
+    fn checked(&self, id: AgentId, expected_revision: u64) -> Result<(), AgentsError> {
+        let agent = self.get(id).ok_or(AgentsError::NotFound)?;
+        if agent.revision != expected_revision {
+            return Err(AgentsError::StaleRevision(agent.revision));
+        }
+        Ok(())
+    }
+
+    fn remove(&mut self, id: AgentId, expected_revision: u64) -> Result<(), AgentsError> {
+        self.checked(id, expected_revision)?;
+        if self.default_agent == id {
+            return Err(AgentsError::Invalid(
+                "the current default agent cannot be removed; choose another default first",
+            ));
+        }
+        self.agents.retain(|agent| agent.id != id);
+        Ok(())
+    }
+
+    fn set_default(&mut self, id: AgentId, expected_revision: u64) -> Result<(), AgentsError> {
+        self.checked(id, expected_revision)?;
+        self.default_agent = id;
+        Ok(())
     }
 
     fn validate(&self) -> Result<(), AgentsError> {
@@ -607,6 +714,29 @@ impl AgentRepository {
         let bytes = next.encode()?;
         self.write_file(&bytes, previous_bytes.as_deref())?;
         Ok(next)
+    }
+
+    pub fn put(
+        &self,
+        expected_revision: Option<u64>,
+        definition: AgentDefinition,
+    ) -> Result<AgentsFile, AgentsError> {
+        let revision = self.snapshot()?.revision;
+        self.update(revision, |file| file.put(expected_revision, definition))
+    }
+
+    pub fn remove(&self, id: AgentId, expected_revision: u64) -> Result<AgentsFile, AgentsError> {
+        let revision = self.snapshot()?.revision;
+        self.update(revision, |file| file.remove(id, expected_revision))
+    }
+
+    pub fn set_default(
+        &self,
+        id: AgentId,
+        expected_revision: u64,
+    ) -> Result<AgentsFile, AgentsError> {
+        let revision = self.snapshot()?.revision;
+        self.update(revision, |file| file.set_default(id, expected_revision))
     }
 
     fn open_existing(&self) -> Result<Option<rustix::fd::OwnedFd>, AgentsError> {

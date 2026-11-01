@@ -24,6 +24,20 @@ The `task` query's scheduler-owned `execution` metadata carries an optional addi
 
 Live text is a best-effort, non-durable, process-local view. The scheduler worker appends each provider delta to one bounded in-memory entry per running task, capped at the 128 KiB chat text limit, and removes that entry when the worker returns. Recording a delta is a short synchronous update and the existing change hint; clients poll it through ordinary owner queries and `wait`. There is no per-client buffer or subscription, so a slow, stalled or disconnected client cannot delay, block or fail the provider turn, and a client can miss intermediate snapshots. No conversation event is appended, no checkpoint changes and nothing is replayed after a restart. The committed assistant message remains the only source of truth: clients replace live text with that saved message rather than concatenating them. Live text contains only provider-visible assistant output that the saved message would also contain, never credentials or private continuation state. It is not part of encrypted synchronization batches, so the relay and paired devices do not receive it.
 
+## Agents
+
+Agent definitions are owner data ([agents and skills](../architecture/agents-and-skills.md#unit-3-as-built)). All variants below are additive; existing clients keep working.
+
+- `agents` returns `agents { agents }`, the whole `agents-v1.json` view (`schema`, file `revision`, `default_agent`, at most 64 `agents`). Before the first save it is the synthesized default at file revision 0.
+- `agent { id }` returns `agent { agent, default, unavailable_tools }`. `unavailable_tools` lists `only` references that match nothing in the Host's tool registry (`mcp:SERVER` for an MCP server with no registered tools). An unknown id is `invalid_request` ("agent was not found").
+- `agent_put { expected_revision, definition }` creates (`expected_revision: null`, a fresh random `definition.id`) or replaces (`expected_revision` equal to the agent's current `revision`) one agent. `definition.revision` may be omitted and is ignored; the Host assigns revisions. A stale revision is rejected with "agent is at revision N, not the expected revision", an existing id on create with "agent id already exists", and every save runs the full repository validation (names unique case-insensitively, `DEFAULT_AGENT_ID` reserved, persona and rendered instructions limits).
+- `agent_remove { id, expected_revision }` removes one agent; removing the current default is refused.
+- `agent_set_default { id, expected_revision }` points `default_agent` at that agent; conversations and jobs with a `NULL` agent follow it.
+
+The three operations return `agents { agents }` with the saved file and run under the Host mutation lock while it accepts work. Results are checked against the request (the put agent exists with the requested name, a removed id is absent, the default equals the requested id). Repository errors map as in the [unit 1 notes](../architecture/agents-and-skills.md#unit-1-as-built): invalid input, configuration, not found, conflict and stale revision are `invalid_request` with the error text. These are not protected Settings and are not reachable through paired-device ingress.
+
+`conversation` and `conversations` summaries carry an optional `agent_id`, omitted when the conversation row is `NULL` (the current default agent). The `task` query's `execution` metadata carries an optional `agent_id` from the task's captured execution policy.
+
 ## Memory use
 
 The `conversation` query's `information` carries an optional additive `memory_use { command_id, excerpts }` for the active or most recent native turn: `excerpts` is the number of retrieved Wiki memory excerpts saved into that turn's definition and supplied to context building. It is derived from the native checkpoint, so it is durable and survives restart; a turn whose context budget omits some excerpts still reports the saved count. Serialization omits an absent value and deserialization defaults it, so an older host reports no memory use and older clients ignore it. Clients compare `command_id` with their own command before showing it.

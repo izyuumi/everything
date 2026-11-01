@@ -6,6 +6,7 @@ use tokio::sync::mpsc::UnboundedSender;
 use tokio_util::sync::CancellationToken;
 
 use crate::agent::{ConversationConfig, RecordedMessage, TextCommand};
+use crate::host::agents::{AgentId, AgentsFile};
 use crate::host::chatgpt::{ChatGptOperation, ChatGptStatus};
 use crate::host::client::{HostClient, HostClientError};
 use crate::host::settings::{HostSettings, ModelCredentialReference, ModelCredentialSource};
@@ -130,10 +131,18 @@ impl Host {
         }
     }
 
+    pub async fn agents(&self) -> Result<AgentsFile, TuiError> {
+        match self.query(OwnerQuery::Agents).await? {
+            OwnerQueryResult::Agents { agents } => Ok(*agents),
+            _ => Err(TuiError::Invalid("unexpected agents response")),
+        }
+    }
+
     pub async fn initialize(
         &self,
         title: String,
         configuration: ConversationConfig,
+        agent: Option<AgentId>,
     ) -> Result<ConversationSummary, TuiError> {
         let conversation_id = ConversationId::new();
         self.client
@@ -143,7 +152,7 @@ impl Host {
                     command_id: CommandId::new(),
                     title,
                     configuration,
-                    agent: None,
+                    agent,
                 },
                 self.cancellation.clone(),
             )

@@ -1788,6 +1788,21 @@
             "help": null
           },
           {
+            "id": "agent",
+            "long": "agent",
+            "short": null,
+            "positional": false,
+            "required": false,
+            "takes_value": true,
+            "value_names": [
+              "NAME"
+            ],
+            "possible_values": [],
+            "default_values": [],
+            "env": null,
+            "help": null
+          },
+          {
             "id": "no_wait",
             "long": "no-wait",
             "short": null,
@@ -2524,6 +2539,21 @@
             "takes_value": true,
             "value_names": [
               "MODEL"
+            ],
+            "possible_values": [],
+            "default_values": [],
+            "env": null,
+            "help": null
+          },
+          {
+            "id": "agent",
+            "long": "agent",
+            "short": null,
+            "positional": false,
+            "required": false,
+            "takes_value": true,
+            "value_names": [
+              "NAME"
             ],
             "possible_values": [],
             "default_values": [],
@@ -3847,6 +3877,881 @@
                 "takes_value": true,
                 "value_names": [
                   "PATH"
+                ],
+                "possible_values": [],
+                "default_values": [],
+                "env": null,
+                "help": null
+              }
+            ],
+            "subcommands": []
+          }
+        ]
+      },
+      {
+        "name": "agents",
+        "about": "Create, inspect, edit, remove and choose agents",
+        "arguments": [],
+        "subcommands": [
+          {
+            "name": "list",
+            "about": "List agents; * marks the default",
+            "arguments": [
+              {
+                "id": "json",
+                "long": "json",
+                "short": null,
+                "positional": false,
+                "required": false,
+                "takes_value": false,
+                "value_names": [
+                  "JSON"
+                ],
+                "possible_values": [],
+                "default_values": [
+                  "false"
+                ],
+                "env": null,
+                "help": null
+              }
+            ],
+            "subcommands": []
+          },
+          {
+            "name": "show",
+            "about": "Show one agent",
+            "arguments": [
+              {
+                "id": "name",
+                "long": null,
+                "short": null,
+                "positional": true,
+                "required": true,
+                "takes_value": true,
+                "value_names": [
+                  "NAME"
+                ],
+                "possible_values": [],
+                "default_values": [],
+                "env": null,
+                "help": null
+              },
+              {
+                "id": "json",
+                "long": "json",
+                "short": null,
+                "positional": false,
+                "required": false,
+                "takes_value": false,
+                "value_names": [
+                  "JSON"
+                ],
+                "possible_values": [],
+                "default_values": [
+                  "false"
+                ],
+                "env": null,
+                "help": null
+              }
+            ],
+            "subcommands": []
+          },
+          {
+            "name": "create",
+            "about": "Create an agent; new agents start with tools off",
+            "arguments": [
+              {
+                "id": "name",
+                "long": null,
+                "short": null,
+                "positional": true,
+                "required": true,
+                "takes_value": true,
+                "value_names": [
+                  "NAME"
+                ],
+                "possible_values": [],
+                "default_values": [],
+                "env": null,
+                "help": null
+              },
+              {
+                "id": "description",
+                "long": "description",
+                "short": null,
+                "positional": false,
+                "required": false,
+                "takes_value": true,
+                "value_names": [
+                  "DESCRIPTION"
+                ],
+                "possible_values": [],
+                "default_values": [],
+                "env": null,
+                "help": null
+              },
+              {
+                "id": "persona",
+                "long": "persona",
+                "short": null,
+                "positional": false,
+                "required": false,
+                "takes_value": true,
+                "value_names": [
+                  "PERSONA"
+                ],
+                "possible_values": [],
+                "default_values": [],
+                "env": null,
+                "help": null
+              },
+              {
+                "id": "persona_file",
+                "long": "persona-file",
+                "short": null,
+                "positional": false,
+                "required": false,
+                "takes_value": true,
+                "value_names": [
+                  "PATH"
+                ],
+                "possible_values": [],
+                "default_values": [],
+                "env": null,
+                "help": null
+              },
+              {
+                "id": "provider",
+                "long": "provider",
+                "short": null,
+                "positional": false,
+                "required": false,
+                "takes_value": true,
+                "value_names": [
+                  "PROVIDER"
+                ],
+                "possible_values": [
+                  "anthropic",
+                  "openai"
+                ],
+                "default_values": [],
+                "env": null,
+                "help": null
+              },
+              {
+                "id": "model",
+                "long": "model",
+                "short": null,
+                "positional": false,
+                "required": false,
+                "takes_value": true,
+                "value_names": [
+                  "MODEL"
+                ],
+                "possible_values": [],
+                "default_values": [],
+                "env": null,
+                "help": null
+              },
+              {
+                "id": "loopback_endpoint",
+                "long": "loopback-endpoint",
+                "short": null,
+                "positional": false,
+                "required": false,
+                "takes_value": true,
+                "value_names": [
+                  "URL"
+                ],
+                "possible_values": [],
+                "default_values": [],
+                "env": null,
+                "help": null
+              },
+              {
+                "id": "temperature",
+                "long": "temperature",
+                "short": null,
+                "positional": false,
+                "required": false,
+                "takes_value": true,
+                "value_names": [
+                  "TEMPERATURE"
+                ],
+                "possible_values": [],
+                "default_values": [],
+                "env": null,
+                "help": null
+              },
+              {
+                "id": "max_output_tokens",
+                "long": "max-output-tokens",
+                "short": null,
+                "positional": false,
+                "required": false,
+                "takes_value": true,
+                "value_names": [
+                  "MAX_OUTPUT_TOKENS"
+                ],
+                "possible_values": [],
+                "default_values": [],
+                "env": null,
+                "help": null
+              },
+              {
+                "id": "traits",
+                "long": "trait",
+                "short": null,
+                "positional": false,
+                "required": false,
+                "takes_value": true,
+                "value_names": [
+                  "KEY=VALUE"
+                ],
+                "possible_values": [],
+                "default_values": [],
+                "env": null,
+                "help": null
+              },
+              {
+                "id": "tools",
+                "long": "tools",
+                "short": null,
+                "positional": false,
+                "required": false,
+                "takes_value": true,
+                "value_names": [
+                  "TOOLS"
+                ],
+                "possible_values": [
+                  "off",
+                  "read-only",
+                  "trusted-workspace",
+                  "full-host"
+                ],
+                "default_values": [],
+                "env": null,
+                "help": null
+              },
+              {
+                "id": "allow_tools",
+                "long": "allow-tool",
+                "short": null,
+                "positional": false,
+                "required": false,
+                "takes_value": true,
+                "value_names": [
+                  "NAME"
+                ],
+                "possible_values": [],
+                "default_values": [],
+                "env": null,
+                "help": null
+              },
+              {
+                "id": "allow_mcp",
+                "long": "allow-mcp",
+                "short": null,
+                "positional": false,
+                "required": false,
+                "takes_value": true,
+                "value_names": [
+                  "SERVER_ID"
+                ],
+                "possible_values": [],
+                "default_values": [],
+                "env": null,
+                "help": null
+              },
+              {
+                "id": "allow_all_tools",
+                "long": "allow-all-tools",
+                "short": null,
+                "positional": false,
+                "required": false,
+                "takes_value": false,
+                "value_names": [
+                  "ALLOW_ALL_TOOLS"
+                ],
+                "possible_values": [],
+                "default_values": [
+                  "false"
+                ],
+                "env": null,
+                "help": null
+              },
+              {
+                "id": "workspace",
+                "long": "workspace",
+                "short": null,
+                "positional": false,
+                "required": false,
+                "takes_value": true,
+                "value_names": [
+                  "PATH"
+                ],
+                "possible_values": [],
+                "default_values": [],
+                "env": null,
+                "help": null
+              },
+              {
+                "id": "memory",
+                "long": "memory",
+                "short": null,
+                "positional": false,
+                "required": false,
+                "takes_value": true,
+                "value_names": [
+                  "MEMORY"
+                ],
+                "possible_values": [
+                  "shared",
+                  "off"
+                ],
+                "default_values": [],
+                "env": null,
+                "help": null
+              },
+              {
+                "id": "skills",
+                "long": "skills",
+                "short": null,
+                "positional": false,
+                "required": false,
+                "takes_value": true,
+                "value_names": [
+                  "SKILLS"
+                ],
+                "possible_values": [
+                  "none",
+                  "all"
+                ],
+                "default_values": [],
+                "env": null,
+                "help": null
+              },
+              {
+                "id": "skill",
+                "long": "skill",
+                "short": null,
+                "positional": false,
+                "required": false,
+                "takes_value": true,
+                "value_names": [
+                  "NAME"
+                ],
+                "possible_values": [],
+                "default_values": [],
+                "env": null,
+                "help": null
+              },
+              {
+                "id": "may_message",
+                "long": "may-message",
+                "short": null,
+                "positional": false,
+                "required": false,
+                "takes_value": true,
+                "value_names": [
+                  "NAME"
+                ],
+                "possible_values": [],
+                "default_values": [],
+                "env": null,
+                "help": null
+              }
+            ],
+            "subcommands": []
+          },
+          {
+            "name": "edit",
+            "about": "Edit an agent; existing conversations keep their model and persona",
+            "arguments": [
+              {
+                "id": "name",
+                "long": null,
+                "short": null,
+                "positional": true,
+                "required": true,
+                "takes_value": true,
+                "value_names": [
+                  "NAME"
+                ],
+                "possible_values": [],
+                "default_values": [],
+                "env": null,
+                "help": null
+              },
+              {
+                "id": "description",
+                "long": "description",
+                "short": null,
+                "positional": false,
+                "required": false,
+                "takes_value": true,
+                "value_names": [
+                  "DESCRIPTION"
+                ],
+                "possible_values": [],
+                "default_values": [],
+                "env": null,
+                "help": null
+              },
+              {
+                "id": "persona",
+                "long": "persona",
+                "short": null,
+                "positional": false,
+                "required": false,
+                "takes_value": true,
+                "value_names": [
+                  "PERSONA"
+                ],
+                "possible_values": [],
+                "default_values": [],
+                "env": null,
+                "help": null
+              },
+              {
+                "id": "persona_file",
+                "long": "persona-file",
+                "short": null,
+                "positional": false,
+                "required": false,
+                "takes_value": true,
+                "value_names": [
+                  "PATH"
+                ],
+                "possible_values": [],
+                "default_values": [],
+                "env": null,
+                "help": null
+              },
+              {
+                "id": "provider",
+                "long": "provider",
+                "short": null,
+                "positional": false,
+                "required": false,
+                "takes_value": true,
+                "value_names": [
+                  "PROVIDER"
+                ],
+                "possible_values": [
+                  "anthropic",
+                  "openai"
+                ],
+                "default_values": [],
+                "env": null,
+                "help": null
+              },
+              {
+                "id": "model",
+                "long": "model",
+                "short": null,
+                "positional": false,
+                "required": false,
+                "takes_value": true,
+                "value_names": [
+                  "MODEL"
+                ],
+                "possible_values": [],
+                "default_values": [],
+                "env": null,
+                "help": null
+              },
+              {
+                "id": "loopback_endpoint",
+                "long": "loopback-endpoint",
+                "short": null,
+                "positional": false,
+                "required": false,
+                "takes_value": true,
+                "value_names": [
+                  "URL"
+                ],
+                "possible_values": [],
+                "default_values": [],
+                "env": null,
+                "help": null
+              },
+              {
+                "id": "temperature",
+                "long": "temperature",
+                "short": null,
+                "positional": false,
+                "required": false,
+                "takes_value": true,
+                "value_names": [
+                  "TEMPERATURE"
+                ],
+                "possible_values": [],
+                "default_values": [],
+                "env": null,
+                "help": null
+              },
+              {
+                "id": "max_output_tokens",
+                "long": "max-output-tokens",
+                "short": null,
+                "positional": false,
+                "required": false,
+                "takes_value": true,
+                "value_names": [
+                  "MAX_OUTPUT_TOKENS"
+                ],
+                "possible_values": [],
+                "default_values": [],
+                "env": null,
+                "help": null
+              },
+              {
+                "id": "traits",
+                "long": "trait",
+                "short": null,
+                "positional": false,
+                "required": false,
+                "takes_value": true,
+                "value_names": [
+                  "KEY=VALUE"
+                ],
+                "possible_values": [],
+                "default_values": [],
+                "env": null,
+                "help": null
+              },
+              {
+                "id": "tools",
+                "long": "tools",
+                "short": null,
+                "positional": false,
+                "required": false,
+                "takes_value": true,
+                "value_names": [
+                  "TOOLS"
+                ],
+                "possible_values": [
+                  "off",
+                  "read-only",
+                  "trusted-workspace",
+                  "full-host"
+                ],
+                "default_values": [],
+                "env": null,
+                "help": null
+              },
+              {
+                "id": "allow_tools",
+                "long": "allow-tool",
+                "short": null,
+                "positional": false,
+                "required": false,
+                "takes_value": true,
+                "value_names": [
+                  "NAME"
+                ],
+                "possible_values": [],
+                "default_values": [],
+                "env": null,
+                "help": null
+              },
+              {
+                "id": "allow_mcp",
+                "long": "allow-mcp",
+                "short": null,
+                "positional": false,
+                "required": false,
+                "takes_value": true,
+                "value_names": [
+                  "SERVER_ID"
+                ],
+                "possible_values": [],
+                "default_values": [],
+                "env": null,
+                "help": null
+              },
+              {
+                "id": "allow_all_tools",
+                "long": "allow-all-tools",
+                "short": null,
+                "positional": false,
+                "required": false,
+                "takes_value": false,
+                "value_names": [
+                  "ALLOW_ALL_TOOLS"
+                ],
+                "possible_values": [],
+                "default_values": [
+                  "false"
+                ],
+                "env": null,
+                "help": null
+              },
+              {
+                "id": "workspace",
+                "long": "workspace",
+                "short": null,
+                "positional": false,
+                "required": false,
+                "takes_value": true,
+                "value_names": [
+                  "PATH"
+                ],
+                "possible_values": [],
+                "default_values": [],
+                "env": null,
+                "help": null
+              },
+              {
+                "id": "memory",
+                "long": "memory",
+                "short": null,
+                "positional": false,
+                "required": false,
+                "takes_value": true,
+                "value_names": [
+                  "MEMORY"
+                ],
+                "possible_values": [
+                  "shared",
+                  "off"
+                ],
+                "default_values": [],
+                "env": null,
+                "help": null
+              },
+              {
+                "id": "skills",
+                "long": "skills",
+                "short": null,
+                "positional": false,
+                "required": false,
+                "takes_value": true,
+                "value_names": [
+                  "SKILLS"
+                ],
+                "possible_values": [
+                  "none",
+                  "all"
+                ],
+                "default_values": [],
+                "env": null,
+                "help": null
+              },
+              {
+                "id": "skill",
+                "long": "skill",
+                "short": null,
+                "positional": false,
+                "required": false,
+                "takes_value": true,
+                "value_names": [
+                  "NAME"
+                ],
+                "possible_values": [],
+                "default_values": [],
+                "env": null,
+                "help": null
+              },
+              {
+                "id": "may_message",
+                "long": "may-message",
+                "short": null,
+                "positional": false,
+                "required": false,
+                "takes_value": true,
+                "value_names": [
+                  "NAME"
+                ],
+                "possible_values": [],
+                "default_values": [],
+                "env": null,
+                "help": null
+              },
+              {
+                "id": "rename",
+                "long": "rename",
+                "short": null,
+                "positional": false,
+                "required": false,
+                "takes_value": true,
+                "value_names": [
+                  "NEW"
+                ],
+                "possible_values": [],
+                "default_values": [],
+                "env": null,
+                "help": null
+              },
+              {
+                "id": "clear_persona",
+                "long": "clear-persona",
+                "short": null,
+                "positional": false,
+                "required": false,
+                "takes_value": false,
+                "value_names": [
+                  "CLEAR_PERSONA"
+                ],
+                "possible_values": [],
+                "default_values": [
+                  "false"
+                ],
+                "env": null,
+                "help": null
+              },
+              {
+                "id": "clear_model",
+                "long": "clear-model",
+                "short": null,
+                "positional": false,
+                "required": false,
+                "takes_value": false,
+                "value_names": [
+                  "CLEAR_MODEL"
+                ],
+                "possible_values": [],
+                "default_values": [
+                  "false"
+                ],
+                "env": null,
+                "help": null
+              },
+              {
+                "id": "clear_workspace",
+                "long": "clear-workspace",
+                "short": null,
+                "positional": false,
+                "required": false,
+                "takes_value": false,
+                "value_names": [
+                  "CLEAR_WORKSPACE"
+                ],
+                "possible_values": [],
+                "default_values": [
+                  "false"
+                ],
+                "env": null,
+                "help": null
+              },
+              {
+                "id": "remove_tools",
+                "long": "remove-tool",
+                "short": null,
+                "positional": false,
+                "required": false,
+                "takes_value": true,
+                "value_names": [
+                  "NAME"
+                ],
+                "possible_values": [],
+                "default_values": [],
+                "env": null,
+                "help": null
+              },
+              {
+                "id": "remove_traits",
+                "long": "remove-trait",
+                "short": null,
+                "positional": false,
+                "required": false,
+                "takes_value": true,
+                "value_names": [
+                  "KEY"
+                ],
+                "possible_values": [],
+                "default_values": [],
+                "env": null,
+                "help": null
+              },
+              {
+                "id": "no_messaging",
+                "long": "no-messaging",
+                "short": null,
+                "positional": false,
+                "required": false,
+                "takes_value": false,
+                "value_names": [
+                  "NO_MESSAGING"
+                ],
+                "possible_values": [],
+                "default_values": [
+                  "false"
+                ],
+                "env": null,
+                "help": null
+              },
+              {
+                "id": "expect_revision",
+                "long": "expect-revision",
+                "short": null,
+                "positional": false,
+                "required": false,
+                "takes_value": true,
+                "value_names": [
+                  "N"
+                ],
+                "possible_values": [],
+                "default_values": [],
+                "env": null,
+                "help": null
+              }
+            ],
+            "subcommands": []
+          },
+          {
+            "name": "remove",
+            "about": "Remove an agent; the current default cannot be removed",
+            "arguments": [
+              {
+                "id": "name",
+                "long": null,
+                "short": null,
+                "positional": true,
+                "required": true,
+                "takes_value": true,
+                "value_names": [
+                  "NAME"
+                ],
+                "possible_values": [],
+                "default_values": [],
+                "env": null,
+                "help": null
+              },
+              {
+                "id": "yes",
+                "long": "yes",
+                "short": null,
+                "positional": false,
+                "required": false,
+                "takes_value": false,
+                "value_names": [
+                  "YES"
+                ],
+                "possible_values": [],
+                "default_values": [
+                  "false"
+                ],
+                "env": null,
+                "help": null
+              }
+            ],
+            "subcommands": []
+          },
+          {
+            "name": "default",
+            "about": "Show the default agent, or make NAME the default",
+            "arguments": [
+              {
+                "id": "name",
+                "long": null,
+                "short": null,
+                "positional": true,
+                "required": false,
+                "takes_value": true,
+                "value_names": [
+                  "NAME"
                 ],
                 "possible_values": [],
                 "default_values": [],

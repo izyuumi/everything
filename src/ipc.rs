@@ -163,6 +163,10 @@ pub enum OwnerQuery {
     VaultList {
         limit: usize,
     },
+    Agents,
+    Agent {
+        id: crate::host::agents::AgentId,
+    },
 }
 
 impl OwnerQuery {
@@ -511,6 +515,18 @@ pub enum OwnerOperation {
     RevokeGrant {
         grant_id: String,
     },
+    AgentPut {
+        expected_revision: Option<u64>,
+        definition: Box<crate::host::agents::AgentDefinition>,
+    },
+    AgentRemove {
+        id: crate::host::agents::AgentId,
+        expected_revision: u64,
+    },
+    AgentSetDefault {
+        id: crate::host::agents::AgentId,
+        expected_revision: u64,
+    },
 }
 
 impl OwnerOperation {
@@ -756,6 +772,15 @@ pub enum OwnerQueryResult {
     VaultList {
         listing: crate::vault::VaultListing,
     },
+    Agents {
+        agents: Box<crate::host::agents::AgentsFile>,
+    },
+    Agent {
+        agent: Box<crate::host::agents::AgentDefinition>,
+        default: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        unavailable_tools: Option<Vec<String>>,
+    },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -772,6 +797,8 @@ pub struct ConversationSummary {
     pub native_status: Option<crate::agent::LoopStatus>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub memory_use: Option<crate::agent::MemoryUse>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_id: Option<crate::host::agents::AgentId>,
 }
 
 impl From<crate::agent::ConversationInfo> for ConversationSummary {
@@ -788,6 +815,7 @@ impl From<crate::agent::ConversationInfo> for ConversationSummary {
             pending_command_id: information.pending_command_id,
             native_status: information.native_status,
             memory_use: information.memory_use,
+            agent_id: information.agent_id,
         }
     }
 }
@@ -931,6 +959,11 @@ impl OwnerQueryResult {
             (OwnerQuery::VaultList { limit }, Self::VaultList { listing }) => {
                 listing.validate_for(*limit).is_ok()
             }
+            (OwnerQuery::Agents, Self::Agents { agents }) => {
+                agents.agents.len() <= crate::host::agents::MAX_AGENTS
+                    && agents.get(agents.default_agent).is_some()
+            }
+            (OwnerQuery::Agent { id }, Self::Agent { agent, .. }) => agent.id == *id,
             (OwnerQuery::Command { command_id }, Self::Command { receipt }) => receipt
                 .as_ref()
                 .is_none_or(|receipt| receipt.command_id == *command_id),
@@ -995,6 +1028,8 @@ pub struct TaskExecutionMetadata {
     pub diagnostic: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub live_text: Option<crate::scheduler::LiveText>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_id: Option<crate::host::agents::AgentId>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -1081,6 +1116,9 @@ pub enum OwnerOperationResult {
     ChatGptModels {
         binding: crate::host::settings::ModelCredentialReference,
         models: Vec<crate::host::chatgpt::ChatGptModel>,
+    },
+    Agents {
+        agents: Box<crate::host::agents::AgentsFile>,
     },
 }
 
@@ -1335,6 +1373,15 @@ impl OwnerOperationResult {
                     models,
                 },
             ) => returned == binding && models.len() <= 1_024,
+            (OwnerOperation::AgentPut { definition, .. }, Self::Agents { agents }) => agents
+                .get(definition.id)
+                .is_some_and(|agent| agent.name == definition.name),
+            (OwnerOperation::AgentRemove { id, .. }, Self::Agents { agents }) => {
+                agents.get(*id).is_none()
+            }
+            (OwnerOperation::AgentSetDefault { id, .. }, Self::Agents { agents }) => {
+                agents.default_agent == *id
+            }
             _ => false,
         };
         if !valid {

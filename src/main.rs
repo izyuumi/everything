@@ -31,6 +31,7 @@ use vorra::tools::{
 };
 use zeroize::Zeroizing;
 
+mod agents_cli;
 mod pair_cli;
 mod queries;
 mod vault_cli;
@@ -72,6 +73,7 @@ enum Command {
     Memory(queries::MemoryArguments),
     Vault(vault_cli::VaultArguments),
     Skills(vorra::skills::cli::SkillsArguments),
+    Agents(agents_cli::AgentsArguments),
     Completions {
         shell: clap_complete::Shell,
     },
@@ -181,6 +183,8 @@ struct TuiArguments {
     provider: Option<ProviderArgument>,
     #[arg(long)]
     model: Option<String>,
+    #[arg(long, value_name = "NAME")]
+    agent: Option<String>,
 }
 
 #[derive(Args)]
@@ -254,7 +258,7 @@ impl From<StorageArgument> for vorra::host::settings::CredentialStorage {
 
 enum AgentCommand {
     Init(InitArguments),
-    Chat(ChatArguments),
+    Chat(Box<ChatArguments>),
     Status(StatusArguments),
 }
 
@@ -350,12 +354,32 @@ struct ModelArguments {
 }
 
 impl ModelArguments {
-    fn create(self) -> Result<ConversationConfig, CliError> {
+    fn create(
+        self,
+        agent: Option<&vorra::host::agents::AgentDefinition>,
+    ) -> Result<ConversationConfig, CliError> {
+        let fallback = agent.and_then(|agent| agent.model.as_ref());
+        if let Some(agent) = agent.filter(|_| fallback.is_some())
+            && (self.provider.is_some()
+                || self.model.is_some()
+                || self.loopback_endpoint.is_some()
+                || self.temperature.is_some()
+                || self.max_output_tokens.is_some())
+        {
+            return Err(CliError::AgentInput(format!(
+                "agent {} sets its own model; omit --provider, --model, --loopback-endpoint, --temperature and --max-output-tokens or use another agent",
+                agent.name.as_str()
+            )));
+        }
         let provider = self
             .provider
-            .ok_or(CliError::Required("--provider"))?
-            .into();
-        let model = self.model.ok_or(CliError::Required("--model"))?;
+            .map(ProviderKind::from)
+            .or(fallback.map(|model| model.provider))
+            .ok_or(CliError::Required("--provider"))?;
+        let model = self
+            .model
+            .or_else(|| fallback.map(|model| model.model.clone()))
+            .ok_or(CliError::Required("--model"))?;
         let endpoint = match self.loopback_endpoint {
             Some(endpoint) => ProviderEndpoint::loopback(&endpoint)?,
             None => ProviderEndpoint::Official,
@@ -434,6 +458,8 @@ struct ChatArguments {
     resume: bool,
     #[arg(long, conflicts_with = "conversation")]
     title: Option<String>,
+    #[arg(long, value_name = "NAME")]
+    agent: Option<String>,
     #[arg(long)]
     no_wait: bool,
     #[command(flatten)]
@@ -499,11 +525,38 @@ struct StatusArguments {
 
 fn bind_agent(
     agent: &Agent,
-    configuration: ConversationConfig,
+    requested: Option<&str>,
+    model: ModelArguments,
 ) -> Result<(vorra::host::agents::AgentId, ConversationConfig), CliError> {
     let agents = vorra::host::agents::AgentRepository::for_agent(agent)?.snapshot()?;
-    let definition = agents.resolve(None)?;
+    let definition = match requested {
+        Some(name) => agents_cli::find(&agents, name)?,
+        None => agents.resolve(None)?,
+    };
+    let configuration = model.create(Some(definition))?;
     Ok((definition.id, definition.configure(configuration)?))
+}
+
+fn check_bound_agent(
+    agents: &vorra::host::agents::AgentsFile,
+    requested: Option<&str>,
+    bound: Option<vorra::host::agents::AgentId>,
+) -> Result<(), CliError> {
+    let Some(requested) = requested else {
+        return Ok(());
+    };
+    let wanted = agents_cli::find(agents, requested)?;
+    let actual = bound.unwrap_or(agents.default_agent);
+    if wanted.id != actual {
+        let name = agents.get(actual).map_or_else(
+            || actual.to_string(),
+            |agent| agent.name.as_str().to_owned(),
+        );
+        return Err(CliError::AgentInput(format!(
+            "this conversation is bound to agent {name}; omit --agent {requested} or start a new conversation"
+        )));
+    }
+    Ok(())
 }
 
 #[derive(Debug, Error)]
@@ -548,6 +601,8 @@ enum CliError {
     Io(#[from] io::Error),
     #[error(transparent)]
     Skills(#[from] vorra::skills::cli::SkillsCliError),
+    #[error("{0}")]
+    AgentInput(String),
     #[error("{0} is required when creating a conversation")]
     Required(&'static str),
     #[error("{0} must contain a valid provider credential; accepted messages remain pending")]
@@ -758,14 +813,19 @@ async fn execute(arguments: Arguments, cancellation: CancellationToken) -> Resul
             .map_err(|_| CliError::Worker)?
             .map_err(CliError::from);
         }
+        Command::Agents(arguments) => {
+            return agents_cli::run(state_dir, arguments, cancellation).await;
+        }
         Command::Tui(arguments) => {
             return vorra::tui::run(
                 state_dir,
                 vorra::tui::Options {
                     conversation: arguments.conversation,
                     resume_latest: arguments.resume_latest,
+                    explicit_route: arguments.provider.is_some() || arguments.model.is_some(),
                     provider: arguments.provider.map(Into::into),
                     model: arguments.model,
+                    agent: arguments.agent,
                     endpoint: None,
                     default_instructions: DEFAULT_INSTRUCTIONS,
                 },
@@ -797,7 +857,7 @@ async fn execute(arguments: Arguments, cancellation: CancellationToken) -> Resul
         Command::HelpManifest => return write_json(help_manifest()).await,
         Command::Init(arguments) => AgentCommand::Init(arguments),
         Command::Status(arguments) => AgentCommand::Status(arguments),
-        Command::Chat(arguments) => AgentCommand::Chat(arguments),
+        Command::Chat(arguments) => AgentCommand::Chat(Box::new(arguments)),
     };
     let agent = match Agent::open(&state_dir).await {
         Ok(agent) => agent,
@@ -808,7 +868,7 @@ async fn execute(arguments: Arguments, cancellation: CancellationToken) -> Resul
     };
     match command {
         AgentCommand::Init(arguments) => {
-            let (agent_id, configuration) = bind_agent(&agent, arguments.model.create()?)?;
+            let (agent_id, configuration) = bind_agent(&agent, None, arguments.model)?;
             let conversation = agent
                 .create_conversation_as(
                     arguments.conversation.unwrap_or_default(),
@@ -840,7 +900,7 @@ async fn execute(arguments: Arguments, cancellation: CancellationToken) -> Resul
             }
             None => write_json(agent.conversations(arguments.limit).await?).await,
         },
-        AgentCommand::Chat(arguments) => chat(agent, arguments, cancellation).await,
+        AgentCommand::Chat(arguments) => chat(agent, *arguments, cancellation).await,
     }
 }
 
@@ -1412,6 +1472,19 @@ async fn chatgpt_sign_in(
     }
 }
 
+async fn host_agents(
+    client: &vorra::host::client::HostClient,
+    cancellation: CancellationToken,
+) -> Result<vorra::host::agents::AgentsFile, CliError> {
+    match client
+        .query(vorra::ipc::OwnerQuery::Agents, cancellation)
+        .await?
+    {
+        vorra::ipc::OwnerQueryResult::Agents { agents } => Ok(*agents),
+        _ => Err(CliError::OwnerInput),
+    }
+}
+
 async fn proxy_cli(
     state: PathBuf,
     command: AgentCommand,
@@ -1423,6 +1496,9 @@ async fn proxy_cli(
         AgentCommand::Init(arguments) => {
             let conversation_id = arguments.conversation.unwrap_or_default();
             let command_id = arguments.command_id.unwrap_or_default();
+            let agents = host_agents(&client, cancellation.clone()).await?;
+            let default = agents.resolve(None)?;
+            let configuration = arguments.model.create(Some(default))?;
             eprintln!("conversation {conversation_id} initialization command {command_id}");
             client
                 .submit(
@@ -1430,8 +1506,8 @@ async fn proxy_cli(
                         conversation_id,
                         command_id,
                         title: arguments.title,
-                        configuration: arguments.model.create()?,
-                        agent: None,
+                        configuration,
+                        agent: Some(default.id),
                     },
                     cancellation.clone(),
                 )
@@ -1484,7 +1560,7 @@ async fn proxy_cli(
                 }
             }
         },
-        AgentCommand::Chat(arguments) => proxy_chat(&client, arguments, cancellation).await,
+        AgentCommand::Chat(arguments) => proxy_chat(&client, *arguments, cancellation).await,
     }
 }
 
@@ -1560,6 +1636,19 @@ async fn proxy_chat(
         (None, Some(path)) => Some(read_message(path).await?),
         _ => None,
     };
+    let agents = if arguments.agent.is_some() || arguments.conversation.is_none() {
+        Some(host_agents(client, cancellation.clone()).await?)
+    } else {
+        None
+    };
+    let requested = match (&agents, arguments.agent.as_deref()) {
+        (Some(agents), Some(name)) => Some(agents_cli::find(agents, name)?),
+        (Some(agents), None) => Some(agents.resolve(None)?),
+        (None, _) => None,
+    };
+    let requested_agent = requested
+        .filter(|_| arguments.agent.is_some())
+        .map(|agent| agent.id);
     let (conversation_id, information) = match arguments.conversation {
         Some(conversation_id) => match client
             .query(
@@ -1573,11 +1662,15 @@ async fn proxy_chat(
                 configuration,
             } => {
                 arguments.model.check(&configuration)?;
+                if let Some(agents) = &agents {
+                    check_bound_agent(agents, arguments.agent.as_deref(), information.agent_id)?;
+                }
                 (conversation_id, information)
             }
             _ => return Err(CliError::OwnerInput),
         },
         None => {
+            let configuration = arguments.model.create(requested)?;
             let conversation_id = ConversationId::new();
             let command_id = CommandId::new();
             eprintln!("conversation {conversation_id} initialization command {command_id}");
@@ -1593,8 +1686,8 @@ async fn proxy_chat(
                                 .take(80)
                                 .collect()
                         }),
-                        configuration: arguments.model.create()?,
-                        agent: None,
+                        configuration,
+                        agent: requested.map(|agent| agent.id),
                     },
                     cancellation.clone(),
                 )
@@ -1732,7 +1825,7 @@ async fn proxy_chat(
                         max_tool_calls: arguments.tools.max_tool_calls,
                         max_charged_tokens: arguments.tools.max_charged_tokens,
                         max_duration_seconds: arguments.tools.max_duration_seconds,
-                        agent: None,
+                        agent: requested_agent,
                     },
                 },
                 cancellation.clone(),
@@ -2306,6 +2399,14 @@ async fn chat(
         Some(id) => {
             let conversation = agent.conversation(id).await?;
             arguments.model.check(&conversation.config)?;
+            if arguments.agent.is_some() {
+                let agents = vorra::host::agents::AgentRepository::for_agent(&agent)?.snapshot()?;
+                check_bound_agent(
+                    &agents,
+                    arguments.agent.as_deref(),
+                    conversation.info.agent_id,
+                )?;
+            }
             conversation
         }
         None => {
@@ -2316,7 +2417,8 @@ async fn chat(
                     .take(80)
                     .collect()
             });
-            let (agent_id, configuration) = bind_agent(&agent, arguments.model.create()?)?;
+            let (agent_id, configuration) =
+                bind_agent(&agent, arguments.agent.as_deref(), arguments.model)?;
             agent
                 .create_conversation_as(
                     ConversationId::new(),

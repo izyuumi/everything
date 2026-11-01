@@ -27,7 +27,7 @@ vorra --state-dir /absolute/private/path chat --conversation CONVERSATION_UUID -
 vorra --state-dir /absolute/private/path chat --conversation CONVERSATION_UUID --message-file /absolute/message.txt
 ```
 
-Each invocation performs one text turn; invoke `chat` again with the same UUID to continue its persisted history. A first `chat` can omit `--conversation` if it supplies `--provider` and `--model`; it creates a conversation and prints the conversation and command UUIDs to standard error. `--title` applies to that new conversation. Streaming text goes to standard output. It is provisional until standard error reports `saved message`. If the authoritative completed text differs from streamed deltas, the CLI prints the saved text separately.
+Each invocation performs one text turn; invoke `chat` again with the same UUID to continue its persisted history. A first `chat` can omit `--conversation` if it supplies `--provider` and `--model` (or `--agent NAME` for an agent with a model, see [agents](#agents)); it creates a conversation and prints the conversation and command UUIDs to standard error. `--title` applies to that new conversation. Streaming text goes to standard output. It is provisional until standard error reports `saved message`. If the authoritative completed text differs from streamed deltas, the CLI prints the saved text separately.
 
 Message files must be regular UTF-8 files at most 128 KiB. Input text must be nonempty, contain no NUL, and fit the same bound. There is no implicit stdin read or interactive prompt. Tool execution is explicit through `--tools`; ordinary text invocations retain the text-only path.
 
@@ -62,6 +62,31 @@ Limits default to 20 and the host accepts 1–100. `tasks` uses the owner query'
 `cancel` submits the existing `cancel_task` domain command for the task's conversation, then polls the task for up to five seconds and prints whether it ended (`cancelled`, or `failed` with the reason) or is still stopping. An already finished task is reported without submitting anything. Cancelling during a provider request leaves the task `failed` with an uncertain outcome that cannot be retried, as the [scheduler contract](../contracts/scheduler.md#cancellation-shutdown-and-recovery) describes.
 
 In host-proxied `chat`, the first Ctrl-C after the turn is admitted (while text streams, while waiting, or at the in-place approval prompt) cancels the task the same way and prints the outcome, exiting 130. A second Ctrl-C while that cancellation is pending detaches instead, printing the usual `closing this CLI leaves admitted work in the host` line. Ctrl-C before admission still just stops the CLI.
+
+## Agents
+
+`vorra agents` creates, inspects, edits, removes and chooses [agents](../architecture/agents-and-skills.md). With a running Host it uses the owner IPC agent queries and operations; without one it takes the offline state lease and edits `<state>/agents-v1.json` directly, like `vorra relay on`.
+
+```sh
+vorra agents list [--json]                 # * marks the default; name, model, tool ceiling, description
+vorra agents show NAME [--json]
+vorra agents create NAME --description TEXT [--persona TEXT | --persona-file PATH]
+    [--provider anthropic|openai --model ID [--loopback-endpoint URL]]
+    [--temperature F] [--max-output-tokens N] [--trait KEY=VALUE]...
+    [--tools off|read-only|trusted-workspace|full-host]
+    [--allow-tool NAME]... [--allow-mcp SERVER_ID]... [--allow-all-tools]
+    [--workspace PATH] [--memory shared|off]
+    [--skills none|all | --skill NAME...] [--may-message NAME]...
+vorra agents edit NAME [same flags] [--rename NEW] [--clear-persona] [--clear-model]
+    [--clear-workspace] [--remove-tool NAME]... [--remove-trait KEY]... [--no-messaging]
+    [--expect-revision N]
+vorra agents remove NAME [--yes]
+vorra agents default [NAME]
+```
+
+New agents start with tools off, shared memory, all skills and closed messaging. `--tools MODE` sets the mode ceiling and keeps the agent's tool list (all tools when it had none); `--allow-tool` and `--allow-mcp` add to the list, turning an all-tools agent into one limited to the listed names; `--allow-all-tools` lifts the list; `--remove-tool` drops a tool or MCP server reference (`mcp:SERVER`, as `show` prints it, names only the server). A tool list needs a mode, so `--allow-*` on an agent whose tools are off requires `--tools`. `--skill` replaces the assignment with exactly the named skills. `--may-message` adds existing agents by name. `--temperature`, `--max-output-tokens` and `--loopback-endpoint` change the agent's model, so they need one (`--provider` and `--model`). `--workspace` must be an existing directory and is stored canonicalized. Persona files follow the message-file rules: a regular UTF-8 file of at most 32 KiB, with LF line endings (a carriage return is rejected). `edit` sends the agent revision it read, or `--expect-revision N`; a stale revision is rejected and nothing is written. Create and edit print the saved agent. `show` lists tools that match nothing in the Host's registry as unavailable; without a running Host that check is skipped and says so. `remove` asks on a terminal (conversations bound to the agent stop accepting turns) and otherwise needs `--yes`; the current default cannot be removed. `default` without a name prints the default agent.
+
+`chat --agent NAME` creates its new conversation with that agent. An agent with a model always uses it: `--provider`, `--model`, `--loopback-endpoint`, `--temperature` and `--max-output-tokens` are then rejected, through the Host and offline (even when the agent's model leaves temperature or output tokens unset). A model-less agent needs them as before. `init` and `chat` without `--agent` apply the same rule to the current default agent. `chat --conversation UUID` without `--agent` does not read the agents file. `chat --conversation UUID --agent NAME` is rejected unless the conversation is already bound to that agent (a conversation created before agents existed is bound to the current default). Editing an agent never changes the model or persona of an existing conversation; tool ceilings, workspace and memory apply from the next turn.
 
 ## Credential vault
 

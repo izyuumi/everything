@@ -86,7 +86,7 @@ pub async fn run(
         }
     }
     let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
-    let mut app = app::App::new(host, sender, state_directory, options, conversations).await;
+    let mut app = app::App::new(host, sender, state_directory, options, conversations).await?;
     execute!(stdout(), EnableMouseCapture)?;
     let mut tick = tokio::time::interval(Duration::from_millis(100));
     while !app.should_quit {
