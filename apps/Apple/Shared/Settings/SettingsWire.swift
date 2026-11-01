@@ -843,3 +843,113 @@ extension SettingsSnapshot {
         try fields.encode(entries, forKey: SettingsWireKey("entries"))
     }
 }
+
+enum SystemOneChoice: String, CaseIterable, Identifiable, Sendable {
+    case local
+    case typesafe
+    case openrouter
+    case openaiCompatible = "openai_compatible"
+    case localModel = "local_model"
+
+    static let typesafeEndpoint = "https://api.typesafe.ai/v1/systemone"
+    static let typesafeModel = "jev-latest"
+    static let openrouterEndpoint = "https://openrouter.ai/api/v1"
+    static let endpointRule = "Use an HTTPS URL, or HTTP to a literal loopback IP such as 127.0.0.1, without user info, a fragment or credential query fields."
+    private static let credentialQueryKeys: Set<String> = [
+        "key", "apikey", "token", "accesstoken", "auth", "authorization", "password", "secret", "clientsecret", "credential",
+        "bearer", "apitoken", "refreshtoken", "idtoken", "sessiontoken", "passwd", "pwd", "apisecret", "credentials", "accesskey",
+        "secretaccesskey", "awsaccesskeyid", "awssecretaccesskey", "awssessiontoken", "xapikey", "xamzcredential", "xamzsignature",
+        "xamzsecuritytoken", "signature", "sig"
+    ]
+
+    var id: Self { self }
+
+    init?(provider: String?) {
+        guard let provider else { self = .typesafe; return }
+        guard let choice = Self(rawValue: provider), choice != .local else { return nil }
+        self = choice
+    }
+
+    static func title(provider: String?) -> String {
+        Self(provider: provider)?.title ?? provider ?? Self.typesafe.title
+    }
+
+    var title: String {
+        switch self {
+        case .local: "Local"
+        case .typesafe: "TypeSafe"
+        case .openrouter: "OpenRouter"
+        case .openaiCompatible: "OpenAI-compatible"
+        case .localModel: "Local model"
+        }
+    }
+
+    var wireProvider: String? {
+        switch self {
+        case .local, .typesafe: nil
+        default: rawValue
+        }
+    }
+
+    var defaultEndpoint: String {
+        switch self {
+        case .typesafe: Self.typesafeEndpoint
+        case .openrouter: Self.openrouterEndpoint
+        default: ""
+        }
+    }
+
+    var defaultModel: String { self == .typesafe ? Self.typesafeModel : "" }
+
+    var usesKey: Bool { self == .typesafe || self == .openrouter || self == .openaiCompatible }
+
+    func issue(endpoint: String, model: String) -> String? {
+        guard self != .local else { return nil }
+        if let issue = endpointIssue(endpoint) { return issue }
+        if model.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || model.utf8.count > 256
+            || model.unicodeScalars.contains(where: CharacterSet.controlCharacters.contains) {
+            return "Enter a model ID of 1 to 256 bytes without control characters."
+        }
+        return nil
+    }
+
+    func endpointIssue(_ endpoint: String) -> String? {
+        guard !endpoint.isEmpty, endpoint.utf8.count <= 4096,
+              !endpoint.unicodeScalars.contains(where: CharacterSet.controlCharacters.contains),
+              let components = URLComponents(string: endpoint), let scheme = components.scheme?.lowercased(),
+              let separator = endpoint.range(of: "://") else { return Self.endpointRule }
+        let authority = String(endpoint[separator.upperBound...].prefix { !"/?#".contains($0) })
+        let rawHost = authority.hasPrefix("[")
+            ? String(authority.dropFirst().prefix { $0 != "]" })
+            : String(authority.prefix { $0 != ":" })
+        guard !authority.isEmpty, !authority.contains("@"), components.user == nil, components.password == nil,
+              components.fragment == nil, (components.percentEncodedQuery?.utf8.count ?? 0) <= 1024,
+              (scheme == "https" && !(components.host ?? "").isEmpty) || (scheme == "http" && Self.isLoopback(rawHost)) else {
+            return Self.endpointRule
+        }
+        let pairs = components.queryItems ?? []
+        let credentialQuery = pairs.contains { item in
+            Self.credentialQueryKeys.contains(String(String.UnicodeScalarView(item.name.unicodeScalars.filter {
+                $0.isASCII && CharacterSet.alphanumerics.contains($0)
+            })).lowercased())
+        }
+        if pairs.count > 32 || credentialQuery { return Self.endpointRule }
+        guard self != .typesafe else { return nil }
+        var path = components.path
+        while path.hasSuffix("/") { path.removeLast() }
+        if path.lowercased().hasSuffix("/chat/completions") { return "Enter the base URL, not the /chat/completions URL." }
+        if self == .openrouter, (endpoint.hasSuffix("/") ? String(endpoint.dropLast()) : endpoint) != Self.openrouterEndpoint {
+            return "OpenRouter uses exactly " + Self.openrouterEndpoint + "."
+        }
+        if self == .localModel, !Self.isLoopback(rawHost) { return "A local model needs a literal loopback IP, such as http://127.0.0.1:11434/v1." }
+        return nil
+    }
+
+    private static func isLoopback(_ host: String) -> Bool {
+        var v4 = in_addr()
+        if inet_pton(AF_INET, host, &v4) == 1 { return UInt32(bigEndian: v4.s_addr) >> 24 == 127 }
+        var v6 = in6_addr()
+        if inet_pton(AF_INET6, host, &v6) == 1 { return withUnsafeBytes(of: &v6) { Array($0) } == Array(repeating: 0, count: 15) + [1] }
+        return false
+    }
+}

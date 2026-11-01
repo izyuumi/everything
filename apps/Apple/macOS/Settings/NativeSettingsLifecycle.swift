@@ -12,6 +12,7 @@ enum NativeSettingsSessionError: Error, Equatable, LocalizedError, Sendable {
     case openUncertain
     case operationUncertain
     case invalidResponse
+    case systemOneProviderEndpoint
 
     var errorDescription: String? {
         switch self {
@@ -25,6 +26,7 @@ enum NativeSettingsSessionError: Error, Equatable, LocalizedError, Sendable {
         case .openUncertain: "The native Settings session could not be opened reliably. It will not be opened again automatically."
         case .operationUncertain: "The original Settings operation must be inspected before another effect is attempted."
         case .invalidResponse: "The Host returned an invalid native Settings response."
+        case .systemOneProviderEndpoint: "The Host rejected this change: System One provider endpoint. Check the provider's base URL, inspect this operation, then save again."
         }
     }
 }

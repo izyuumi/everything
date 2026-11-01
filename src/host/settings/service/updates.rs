@@ -4,7 +4,8 @@ use crate::memory::embedding::EmbeddingProfile;
 use crate::selector::system_one::{ConfigurationError, SelectionConfig};
 
 use super::super::contract::{
-    ModelSelection, SettingKey, SettingValue, SettingsPatch, ToolSelectionPreference,
+    ModelSelection, SYSTEM_ONE_PROVIDER_ENDPOINT, SettingKey, SettingValue, SettingsPatch,
+    ToolSelectionPreference,
 };
 use super::super::{EmbeddingDimensionsOverride, HostSettings};
 use super::SettingsServiceError;
@@ -59,7 +60,7 @@ pub(super) fn patch_candidate(
                         .map_err(|error| {
                             SettingsServiceError::Invalid(match error {
                                 ConfigurationError::ProviderEndpoint => {
-                                    "System One provider endpoint"
+                                    SYSTEM_ONE_PROVIDER_ENDPOINT
                                 }
                                 _ => "System One selection",
                             })

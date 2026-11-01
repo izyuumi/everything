@@ -30,6 +30,7 @@ const MAX_CANDIDATES: usize = 254;
 const MAX_APPROVAL: Duration = Duration::from_secs(300);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 const OPENROUTER_ENDPOINT: &str = "https://openrouter.ai/api/v1";
+const CHAT_COMPLETIONS_SUFFIX: &[u8] = b"/chat/completions";
 const INSTRUCTIONS: &str = "Which tool is most relevant to the task? Rank only by relevance; execution requires independent permission.";
 const CHAT_INSTRUCTIONS: &str = "Which tool is most relevant to the task? Rank only by relevance; execution requires independent permission. The user message is JSON with the task and the options keyed by option ID. Answer with only a JSON object {\"choice\": ID} where ID is exactly one option key, or \"none\" if no option is relevant.";
 
@@ -40,7 +41,7 @@ pub enum ConfigurationError {
     #[error("invalid selection TOML or unsupported field; credentials belong in the native store")]
     InvalidDocument,
     #[error(
-        "selection provider must be local, system-one, typesafe, openrouter, openai-compatible or local-model and fallback must be local"
+        "selection provider must be local, system-one, typesafe, openrouter, openai-compatible or openai_compatible, local-model or local_model and fallback must be local"
     )]
     InvalidProvider,
     #[error("system-one requires an endpoint and model")]
@@ -117,8 +118,10 @@ impl SelectionConfig {
                 let provider = match name {
                     "system-one" | "typesafe" => SystemOneProvider::Typesafe,
                     "openrouter" => SystemOneProvider::Openrouter,
-                    "openai-compatible" => SystemOneProvider::OpenaiCompatible,
-                    "local-model" => SystemOneProvider::LocalModel,
+                    "openai-compatible" | "openai_compatible" => {
+                        SystemOneProvider::OpenaiCompatible
+                    }
+                    "local-model" | "local_model" => SystemOneProvider::LocalModel,
                     _ => return Err(ConfigurationError::InvalidProvider),
                 };
                 let endpoint = raw
@@ -152,10 +155,14 @@ impl SelectionConfig {
         };
         match provider {
             SystemOneProvider::Typesafe => {}
-            _ if endpoint
-                .path()
-                .trim_end_matches('/')
-                .ends_with("/chat/completions") =>
+            _ if {
+                let path = endpoint.path().trim_end_matches('/').as_bytes();
+                path.len()
+                    .checked_sub(CHAT_COMPLETIONS_SUFFIX.len())
+                    .is_some_and(|start| {
+                        path[start..].eq_ignore_ascii_case(CHAT_COMPLETIONS_SUFFIX)
+                    })
+            } =>
             {
                 return Err(ConfigurationError::ProviderEndpoint);
             }
