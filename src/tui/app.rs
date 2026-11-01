@@ -333,18 +333,21 @@ impl App {
             }
             app.adopt_agent(definition);
         } else {
-            let agents = app.host.agents().await?;
-            let default = agents
-                .resolve(None)
-                .map_err(|error| TuiError::Setup(error.to_string()))?;
-            if default.model.is_some() {
-                if options.explicit_route {
-                    return Err(TuiError::Setup(format!(
-                        "default agent {} sets its own model; omit --provider and --model or use another agent",
-                        default.name.as_str()
-                    )));
+            match app.host.agents().await {
+                Ok(agents) => {
+                    if let Ok(default) = agents.resolve(None)
+                        && default.model.is_some()
+                    {
+                        if options.explicit_route {
+                            return Err(TuiError::Setup(format!(
+                                "default agent {} sets its own model; omit --provider and --model or use another agent",
+                                default.name.as_str()
+                            )));
+                        }
+                        app.adopt_agent(default.clone());
+                    }
                 }
-                app.adopt_agent(default.clone());
+                Err(error) => app.note(NoteKind::Error, format!("cannot read agents: {error}")),
             }
         }
         if let Some(conversation_id) = target {
@@ -369,6 +372,45 @@ impl App {
         };
         self.agent_label = definition.name.as_str().to_owned();
         self.selected_agent = Some(definition);
+    }
+
+    async fn validated_agent(&mut self) -> Option<AgentId> {
+        let agents = match self.host.agents().await {
+            Ok(agents) => agents,
+            Err(error) => {
+                self.note(
+                    NoteKind::Error,
+                    format!("cannot read agents: {error} · nothing sent"),
+                );
+                return None;
+            }
+        };
+        let wanted = self.selected_agent.as_ref().map(|agent| agent.id);
+        let Ok(fresh) = agents.resolve(wanted).cloned() else {
+            self.note(
+                NoteKind::Error,
+                "the selected agent no longer exists · /agents to choose another · nothing sent",
+            );
+            return None;
+        };
+        let shown = (self.provider, self.model.clone(), self.endpoint.clone());
+        let id = fresh.id;
+        if fresh.model.is_some() || self.selected_agent.is_some() {
+            self.adopt_agent(fresh);
+        }
+        if (self.provider, self.model.clone(), self.endpoint.clone()) != shown {
+            self.note(
+                NoteKind::Warn,
+                format!(
+                    "agent {} now uses {}/{} · nothing sent · press Enter to send with it",
+                    self.agent_label,
+                    provider_label(self.provider),
+                    self.model.as_deref().unwrap_or("no model")
+                ),
+            );
+            return None;
+        }
+        Some(id)
     }
 
     fn locked_agent(&self) -> Option<String> {
@@ -405,7 +447,10 @@ impl App {
                     |agent| agent.name.as_str().to_owned(),
                 );
             }
-            Err(error) => self.note(NoteKind::Error, format!("cannot read agents: {error}")),
+            Err(error) => {
+                "unavailable".clone_into(&mut self.agent_label);
+                self.note(NoteKind::Error, format!("cannot read agents: {error}"));
+            }
         }
         self.dirty = true;
     }
@@ -1258,9 +1303,10 @@ impl App {
             return;
         }
         if self.conversation.is_none() {
-            if let Some(definition) = self.selected_agent.clone() {
-                self.adopt_agent(definition);
-            }
+            let Some(agent) = self.validated_agent().await else {
+                self.input.set(text);
+                return;
+            };
             let configuration = match self.configuration() {
                 Ok(configuration) => configuration,
                 Err(error) => {
@@ -1276,8 +1322,11 @@ impl App {
                 .chars()
                 .take(60)
                 .collect();
-            let agent = self.selected_agent.as_ref().map(|agent| agent.id);
-            match self.host.initialize(title, configuration, agent).await {
+            match self
+                .host
+                .initialize(title, configuration, Some(agent))
+                .await
+            {
                 Ok(info) => self.conversation = Some(info),
                 Err(error) => {
                     self.note(NoteKind::Error, error.to_string());
@@ -1314,19 +1363,25 @@ impl App {
             );
             return;
         }
-        if let Some(definition) = self.selected_agent.clone() {
-            self.adopt_agent(definition);
+        match self.selected_agent.clone() {
+            Some(definition) => self.adopt_agent(definition),
+            None => (self.provider, self.model, self.endpoint) = self.base_route.clone(),
         }
         self.conversation = None;
         self.stopped = false;
         self.entries = vec![Entry::Banner];
         self.dirty = true;
         self.scroll = 0;
-        if let Some(title) = title {
-            let agent = self.selected_agent.as_ref().map(|agent| agent.id);
+        if let Some(title) = title
+            && let Some(agent) = self.validated_agent().await
+        {
             match self.configuration() {
                 Ok(configuration) => {
-                    match self.host.initialize(title, configuration, agent).await {
+                    match self
+                        .host
+                        .initialize(title, configuration, Some(agent))
+                        .await
+                    {
                         Ok(info) => self.conversation = Some(info),
                         Err(error) => self.note(NoteKind::Error, error.to_string()),
                     }
@@ -1369,8 +1424,8 @@ impl App {
         self.endpoint = info.endpoint.clone();
         self.conversation = Some(info.clone());
         self.stopped = false;
-        self.refresh_agent_label().await;
         self.load_transcript().await;
+        self.refresh_agent_label().await;
         match self.host.readiness(&info).await {
             Ok(Readiness::Stopped) => {
                 self.stopped = true;
