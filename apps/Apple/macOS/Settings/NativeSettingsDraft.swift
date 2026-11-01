@@ -16,6 +16,7 @@ struct NativeSettingsDraft: Equatable, Sendable {
     var systemOneEnabled: Bool
     var systemOneEndpoint: String
     var systemOneModel: String
+    var systemOneProvider: String?
     var embeddingsEnabled: Bool
     var dimensions: UInt32?
 
@@ -43,10 +44,12 @@ struct NativeSettingsDraft: Equatable, Sendable {
             systemOneEnabled = false
             systemOneEndpoint = systemOne?.endpoint ?? "https://api.typesafe.ai/v1/systemone"
             systemOneModel = systemOne?.model ?? "jev-latest"
-        case .systemOne(let endpoint, let model):
+            systemOneProvider = systemOne?.provider
+        case .systemOne(let endpoint, let model, let provider):
             systemOneEnabled = true
             systemOneEndpoint = endpoint
             systemOneModel = model
+            systemOneProvider = provider
         }
         embeddingsEnabled = enabled
         self.dimensions = dimensions
@@ -84,7 +87,7 @@ struct NativeSettingsDraft: Equatable, Sendable {
     }
 
     private var toolsChanged: Bool {
-        let value: ToolSelectionPreference = systemOneEnabled ? .systemOne(endpoint: systemOneEndpoint, model: systemOneModel) : .local
+        let value: ToolSelectionPreference = systemOneEnabled ? .systemOne(endpoint: systemOneEndpoint, model: systemOneModel, provider: systemOneProvider) : .local
         return baseline.entry(.toolSelection)?.desired != .toolSelection(selection: value)
     }
 
@@ -96,7 +99,7 @@ struct NativeSettingsDraft: Equatable, Sendable {
             changes.append(SettingChange(key: .modelSelection, value: .model(selection: selection)))
         }
         if toolsChanged {
-            let selection: ToolSelectionPreference = systemOneEnabled ? .systemOne(endpoint: systemOneEndpoint, model: systemOneModel) : .local
+            let selection: ToolSelectionPreference = systemOneEnabled ? .systemOne(endpoint: systemOneEndpoint, model: systemOneModel, provider: systemOneProvider) : .local
             changes.append(SettingChange(key: .toolSelection, value: .toolSelection(selection: selection)))
         }
         if baseline.entry(.embeddingsEnabled)?.desired != .boolean(value: embeddingsEnabled) {

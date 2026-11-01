@@ -4,7 +4,7 @@ The macOS-only `NativeSettingsWire`, `NativeSettingsSession` and `NativeSettings
 
 ## App-owned composition
 
-`HostModel` constructs one actual OwnerIPCClient and injects that same instance, its applied immutable OwnerConnection and its connection-incarnation UUID into the app-owned observable `NativeSettingsStore`. Connection edits remain drafts in General. Connect synchronously retires the old native owner before assigning the new connection and UUID. The app-owned This Mac SQLite store and stable Settings-window callback identity are not replaced by a Host change.
+`HostModel` constructs one actual OwnerIPCClient and injects that same instance, its applied immutable OwnerConnection and its connection-incarnation UUID into the app-owned observable `NativeSettingsStore`. Connection edits remain drafts in the Host tab. Connect synchronously retires the old native owner before assigning the new connection and UUID. The app-owned This Mac SQLite store and stable Settings-window callback identity are not replaced by a Host change.
 
 The pane's Open button calls `store.open()` synchronously. That method constructs one lifecycle for the applied connection, supplies the latest real window/activity state, captures `prepareOpen()` before scheduling one retained task, and calls the actual Open, Describe and host-scoped Get RPCs. Duplicate Open handlers coalesce into the original owner; a failed or lost Open is never automatically repeated. A new explicit Open requires closing the old owner first. Refresh calls Describe and Get on the same original proof and never renews it. No ordinary scene appearance, foreground return, connection change or timer opens a session or replays an effect.
 

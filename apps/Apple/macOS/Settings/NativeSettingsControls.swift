@@ -81,7 +81,7 @@ struct NativeSettingsControls: View {
             }
             if store.isOpening || store.isRefreshing { ProgressView("Reading the original Host session…") }
             if let issue = store.issue { NativeSettingsNotice(issue.errorDescription ?? "Host settings are unavailable.") }
-            if connectionEdited { Text("Apply connection edits with Connect in General before accessing Host settings.").foregroundStyle(.secondary) }
+            if connectionEdited { Text("Apply connection edits with Connect in Host before accessing Host settings.").foregroundStyle(.secondary) }
             if let snapshot = store.snapshot {
                 LabeledContent("Observed revision", value: String(snapshot.revision))
                 if store.snapshotIsStale { Text("Offline or stale observation. Saving is disabled until the active original session reads fresh Host settings.").foregroundStyle(.secondary) }
@@ -171,6 +171,7 @@ struct NativeSettingsControls: View {
                     store.edit { draft in
                         draft.systemOneEndpoint = "https://api.typesafe.ai/v1/systemone"
                         draft.systemOneModel = "jev-latest"
+                        draft.systemOneProvider = nil
                     }
                 }
                 Text("The selection model ID is opaque. The Host validates endpoint policy. Changing a configured endpoint does not transfer its credential reference to another recipient.")

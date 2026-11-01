@@ -11,7 +11,7 @@ struct VorraIOSApp: App {
     var body: some Scene {
         WindowGroup {
             RootView(model: model)
-                .modifier(InactivePrivacyCover())
+                .modifier(InactivePrivacyCover(enabled: model.privacyCoverEnabled))
                 .preferredColorScheme(colorScheme)
                 .onChange(of: model.localSettings?.savedAppearance, initial: true) { _, saved in
                     if let saved { appliedAppearance = saved }
@@ -40,11 +40,12 @@ struct VorraIOSApp: App {
 }
 
 struct InactivePrivacyCover: ViewModifier {
+    let enabled: Bool
     @Environment(\.scenePhase) private var scenePhase
 
     func body(content: Content) -> some View {
-        content.privacySensitive().overlay {
-            if scenePhase != .active {
+        content.privacySensitive(enabled).overlay {
+            if enabled && scenePhase != .active {
                 Rectangle().fill(.background).ignoresSafeArea().overlay { Label("Vorra", systemImage: "lock.fill").font(.title) }
             }
         }
