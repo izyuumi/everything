@@ -7,6 +7,7 @@ pub(crate) mod settings;
 mod steering;
 
 pub use control_events::{PermissionPublicationReceipt, TaskPublicationReceipt};
+pub(crate) use native::native_charged;
 pub use native::{
     LoopLimits, LoopStatus, MemoryUse, NativeRunInfo, PauseReason, ProviderResume, ToolRunSetup,
 };

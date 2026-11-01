@@ -620,15 +620,23 @@ impl Agent {
                 }
                 let prepared = if let Some(setup) = &setup {
                     let preparation = Arc::clone(setup); let owner = agent.clone();
-                    let (captured, built, request) = blocking(move || {
+                    let (captured, built, request, delegated) = blocking(move || {
                         let retained_agent = owner;
                         ensure_task(&retained_agent.store, preparation.broker.authority().task_id(), preparation.broker.authority().conversation_id())?;
+                        let delegated = delegated_spend(&retained_agent.store, preparation.broker.authority().task_id().parse()?)?;
                         let built = build_context(&conversation, &preparation)?;
                         let request = built.request.clone();
-                        Ok((conversation, built, request))
+                        Ok((conversation, built, request, delegated))
                     }).await?;
                     conversation = captured;
-                    if let Some(reason) = next_attempt_limit(&conversation, &built, stream_deadline)? {
+                    let (delegated, unfinished) = delegated;
+                    if let Some(reason) = next_attempt_limit(&conversation, &built, stream_deadline, delegated)? {
+                        if matches!(reason, PauseReason::TokenLimit) && !unfinished.is_empty() && next_attempt_limit(&conversation, &built, stream_deadline, 0)?.is_none() {
+                            let turn = native(&conversation)?.turn.as_ref().ok_or(AgentError::NoPendingTurn)?;
+                            agent.accept_task_input(TaskInputCommand { conversation_id: conversation.info.id, task_id: turn.definition.task_id, active_command_id: turn.command_id,
+                                delivery_id: CommandId::new(), accepted_at: UnixMillis::now()?, input: TaskInput::WaitForChildren { children: unfinished } }).await?;
+                            continue;
+                        }
                         let mut checkpoint = conversation.checkpoint.clone(); turn_mut(&mut checkpoint)?.status = LoopStatus::Paused { reason: reason.clone() };
                         agent.save_native(&mut conversation, checkpoint, Vec::new(), Arc::clone(&admission)).await?;
                         yield TurnEvent::Paused { reason }; break;
@@ -924,6 +932,40 @@ fn prepare_definition(
     Ok(definition)
 }
 
+pub(crate) fn native_charged(
+    store: &Store,
+    conversation_id: ConversationId,
+    task_id: TaskId,
+) -> Result<Option<u64>, AgentError> {
+    let Some(state) = store.conversation_state(&conversation_id.to_string())? else {
+        return Ok(None);
+    };
+    let checkpoint = decode_checkpoint(state.payload)?;
+    Ok(checkpoint
+        .native
+        .as_ref()
+        .and_then(|native| {
+            native
+                .turn
+                .as_ref()
+                .map(run_info)
+                .or_else(|| native.last_run.clone())
+        })
+        .filter(|run| run.task_id == task_id)
+        .map(|run| run.charged_tokens))
+}
+
+fn delegated_spend(store: &Store, task_id: TaskId) -> Result<(u64, Vec<TaskId>), AgentError> {
+    crate::scheduler::delegated_spend(store, task_id).map_err(|error| match error {
+        crate::scheduler::SchedulerError::Agent(error) => error,
+        crate::scheduler::SchedulerError::Storage(error) => AgentError::Storage(error),
+        error => {
+            tracing::warn!(%error, %task_id, "delegated token spend is unavailable");
+            AgentError::ResourceLimit("delegated token spend")
+        }
+    })
+}
+
 fn ensure_task(store: &Store, task_id: &str, conversation_id: &str) -> Result<(), AgentError> {
     let task = store
         .task(task_id)?
@@ -1153,6 +1195,7 @@ fn next_attempt_limit(
     conversation: &Conversation,
     built: &BuiltContext,
     stream_deadline: Instant,
+    delegated: u64,
 ) -> Result<Option<PauseReason>, AgentError> {
     let turn = native(conversation)?
         .turn
@@ -1174,6 +1217,7 @@ fn next_attempt_limit(
         || turn
             .charged_tokens
             .checked_add(reservation(built))
+            .and_then(|total| total.checked_add(delegated))
             .is_none_or(|total| total > turn.definition.limits.max_charged_tokens)
     {
         Some(PauseReason::TokenLimit)
@@ -1521,7 +1565,7 @@ impl Agent {
         let mapping_admission = Arc::clone(&admission);
         let restricted = self.settings_profile.clone();
         let (captured, checkpoint, payloads, events) = blocking(move || {
-            let _owner = owner; let _mapping_admission = mapping_admission;
+            let owner = owner; let _mapping_admission = mapping_admission;
             let captured = conversation;
             if let Err(error) = response.validate() {
                 if let Some(profile) = &restricted { profile.note_provider_stop(SettingsProviderStop::ResponseShape)?; }
@@ -1604,7 +1648,11 @@ impl Agent {
                 turn.status = LoopStatus::Completed;
             } else {
                 turn.round = Some(Round { assistant_message_id: message.id, calls });
-                turn.status = if turn.charged_tokens > turn.definition.limits.max_charged_tokens {
+                let over = match delegated_spend(&owner.store, task_id) {
+                    Ok((delegated, _)) => turn.charged_tokens.checked_add(delegated).is_none_or(|total| total > turn.definition.limits.max_charged_tokens),
+                    Err(error) => { tracing::warn!(%error, %task_id, "delegated token spend is unavailable after a response; pausing at the token limit"); true }
+                };
+                turn.status = if over {
                     LoopStatus::Paused { reason: PauseReason::TokenLimit }
                 } else { LoopStatus::ExecutingTools };
             }
