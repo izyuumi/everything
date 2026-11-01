@@ -36,7 +36,7 @@ impl BuiltinTools {
             .map_err(|error| ToolError::InvalidContext {
                 message: format!("Host state directory cannot be protected: {error}"),
             })?;
-        let mut registrations = filesystem::registrations(redactor.clone(), protected);
+        let mut registrations = filesystem::registrations(redactor.clone(), protected.as_ref());
         registrations.push((
             Arc::new(shell::ShellTool::new(redactor)),
             ToolScopeRule::Host {

@@ -36,7 +36,7 @@ pub(super) struct Protected {
     path: PathBuf,
     dev: u64,
     ino: u64,
-    workspace: PathBuf,
+    workspace: Option<PathBuf>,
 }
 
 impl Protected {
@@ -44,34 +44,39 @@ impl Protected {
         let path = std::fs::canonicalize(path)?;
         let metadata = std::fs::metadata(&path)?;
         let workspace = path.join("workspace");
+        let workspace = std::fs::symlink_metadata(&workspace)
+            .is_ok_and(|metadata| metadata.is_dir())
+            .then_some(workspace);
         Ok(Arc::new(Self {
             dev: std::os::unix::fs::MetadataExt::dev(&metadata),
             ino: std::os::unix::fs::MetadataExt::ino(&metadata),
-            workspace: std::fs::canonicalize(&workspace).unwrap_or(workspace),
+            workspace,
             path,
         }))
     }
 
-    fn contains(&self, path: &Path) -> bool {
+    fn contains(&self, path: &Path) -> io::Result<bool> {
         let resolved = match std::fs::canonicalize(path) {
             Ok(path) => path,
             Err(error) if error.kind() == io::ErrorKind::NotFound => {
                 let (Some(parent), Some(name)) = (path.parent(), path.file_name()) else {
-                    return true;
+                    return Ok(true);
                 };
                 match std::fs::canonicalize(parent) {
                     Ok(parent) => parent.join(name),
-                    Err(error) if error.kind() == io::ErrorKind::NotFound => return false,
-                    Err(_) => return true,
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+                    Err(error) => return Err(error),
                 }
             }
-            Err(_) => return true,
+            Err(error) => return Err(error),
         };
-        resolved.starts_with(&self.path) && !self.exempt(&resolved)
+        Ok(resolved.starts_with(&self.path) && !self.exempt(&resolved))
     }
 
     fn exempt(&self, path: &Path) -> bool {
-        path.starts_with(&self.workspace)
+        self.workspace
+            .as_ref()
+            .is_some_and(|workspace| path.starts_with(workspace))
     }
 
     fn is(&self, metadata: &Metadata) -> bool {
@@ -104,7 +109,7 @@ struct FilesystemTool {
 
 pub(super) fn registrations(
     redactor: Redactor,
-    protected: Option<Arc<Protected>>,
+    protected: Option<&Arc<Protected>>,
 ) -> Vec<(Arc<dyn Tool>, ToolScopeRule)> {
     let path = json!({"type":"string","minLength":1,"maxLength":1024});
     [
@@ -150,7 +155,7 @@ pub(super) fn registrations(
                 },
                 operation,
                 redactor: redactor.clone(),
-                protected: protected.clone(),
+                protected: protected.cloned(),
             }) as Arc<dyn Tool>,
             ToolScopeRule::Filesystem {
                 path_pointers: vec!["/path".into()],
@@ -211,7 +216,10 @@ impl Tool for FilesystemTool {
             {
                 let path =
                     relative_path(&worker_name, path, matches!(operation, Operation::Search))?;
-                if guard.contains(&root.join(path)) {
+                if guard
+                    .contains(&root.join(path))
+                    .map_err(|error| no_effect(&worker_name, redactor.error(error)))?
+                {
                     return Err(no_effect(&worker_name, PROTECTED));
                 }
             }
