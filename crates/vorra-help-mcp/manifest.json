@@ -3706,6 +3706,185 @@
               }
             ],
             "subcommands": []
+          },
+          {
+            "name": "add",
+            "about": "Install skills from GitHub, a git URL or a local directory into ~/.agents/skills",
+            "arguments": [
+              {
+                "id": "source",
+                "long": null,
+                "short": null,
+                "positional": true,
+                "required": true,
+                "takes_value": true,
+                "value_names": [
+                  "SOURCE"
+                ],
+                "possible_values": [],
+                "default_values": [],
+                "env": null,
+                "help": "owner/repo[/path], owner/repo@skill, github:owner/repo, a GitHub tree URL, an https or ssh .git URL, or an absolute path"
+              },
+              {
+                "id": "skills",
+                "long": "skill",
+                "short": null,
+                "positional": false,
+                "required": false,
+                "takes_value": true,
+                "value_names": [
+                  "NAME"
+                ],
+                "possible_values": [],
+                "default_values": [],
+                "env": null,
+                "help": null
+              },
+              {
+                "id": "all",
+                "long": "all",
+                "short": null,
+                "positional": false,
+                "required": false,
+                "takes_value": false,
+                "value_names": [
+                  "ALL"
+                ],
+                "possible_values": [],
+                "default_values": [
+                  "false"
+                ],
+                "env": null,
+                "help": null
+              },
+              {
+                "id": "reference",
+                "long": "ref",
+                "short": null,
+                "positional": false,
+                "required": false,
+                "takes_value": true,
+                "value_names": [
+                  "REF"
+                ],
+                "possible_values": [],
+                "default_values": [],
+                "env": null,
+                "help": null
+              },
+              {
+                "id": "yes",
+                "long": "yes",
+                "short": "y",
+                "positional": false,
+                "required": false,
+                "takes_value": false,
+                "value_names": [
+                  "YES"
+                ],
+                "possible_values": [],
+                "default_values": [
+                  "false"
+                ],
+                "env": null,
+                "help": "Replace an existing directory not installed from this source"
+              }
+            ],
+            "subcommands": []
+          },
+          {
+            "name": "update",
+            "about": "Update git-installed global skills whose upstream folder changed",
+            "arguments": [
+              {
+                "id": "names",
+                "long": null,
+                "short": null,
+                "positional": true,
+                "required": false,
+                "takes_value": true,
+                "value_names": [
+                  "NAMES"
+                ],
+                "possible_values": [],
+                "default_values": [],
+                "env": null,
+                "help": null
+              },
+              {
+                "id": "check",
+                "long": "check",
+                "short": null,
+                "positional": false,
+                "required": false,
+                "takes_value": false,
+                "value_names": [
+                  "CHECK"
+                ],
+                "possible_values": [],
+                "default_values": [
+                  "false"
+                ],
+                "env": null,
+                "help": "Only report which skills have upstream changes"
+              }
+            ],
+            "subcommands": []
+          },
+          {
+            "name": "remove",
+            "about": "Remove global skills, their lock entries and agent links to them",
+            "arguments": [
+              {
+                "id": "names",
+                "long": null,
+                "short": null,
+                "positional": true,
+                "required": true,
+                "takes_value": true,
+                "value_names": [
+                  "NAMES"
+                ],
+                "possible_values": [],
+                "default_values": [],
+                "env": null,
+                "help": null
+              },
+              {
+                "id": "yes",
+                "long": "yes",
+                "short": "y",
+                "positional": false,
+                "required": false,
+                "takes_value": false,
+                "value_names": [
+                  "YES"
+                ],
+                "possible_values": [],
+                "default_values": [
+                  "false"
+                ],
+                "env": null,
+                "help": null
+              },
+              {
+                "id": "workspace",
+                "long": "workspace",
+                "short": null,
+                "positional": false,
+                "required": false,
+                "takes_value": true,
+                "value_names": [
+                  "PATH"
+                ],
+                "possible_values": [],
+                "default_values": [],
+                "env": null,
+                "help": null
+              }
+            ],
+            "subcommands": []
           }
         ]
       },

@@ -5,13 +5,13 @@ use std::time::{Duration, Instant};
 
 use futures_util::StreamExt;
 use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, HeaderValue};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio_util::sync::CancellationToken;
-use url::Url;
+use url::{Host, Url};
 use uuid::Uuid;
 use zeroize::Zeroizing;
 
@@ -29,6 +29,9 @@ const MAX_RESPONSE_BYTES: usize = 64 * 1_024;
 const MAX_CANDIDATES: usize = 254;
 const MAX_APPROVAL: Duration = Duration::from_secs(300);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
+const OPENROUTER_ENDPOINT: &str = "https://openrouter.ai/api/v1";
+const INSTRUCTIONS: &str = "Which tool is most relevant to the task? Rank only by relevance; execution requires independent permission.";
+const CHAT_INSTRUCTIONS: &str = "Which tool is most relevant to the task? Rank only by relevance; execution requires independent permission. The user message is JSON with the task and the options keyed by option ID. Answer with only a JSON object {\"choice\": ID} where ID is exactly one option key, or \"none\" if no option is relevant.";
 
 #[derive(Debug, Error, Clone, Copy, PartialEq, Eq)]
 pub enum ConfigurationError {
@@ -36,7 +39,9 @@ pub enum ConfigurationError {
     TooLarge,
     #[error("invalid selection TOML or unsupported field; credentials belong in the native store")]
     InvalidDocument,
-    #[error("selection provider must be local or system-one and fallback must be local")]
+    #[error(
+        "selection provider must be local, system-one, typesafe, openrouter, openai-compatible or local-model and fallback must be local"
+    )]
     InvalidProvider,
     #[error("system-one requires an endpoint and model")]
     MissingConfiguration,
@@ -50,6 +55,26 @@ pub enum ConfigurationError {
     InvalidModel,
     #[error("credential reference must be a UUID, never a secret")]
     InvalidCredentialReference,
+    #[error(
+        "chat-completions providers take a base URL, not the completions URL; OpenRouter requires https://openrouter.ai/api/v1 and local-model requires a literal-loopback endpoint"
+    )]
+    ProviderEndpoint,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SystemOneProvider {
+    #[default]
+    Typesafe,
+    Openrouter,
+    OpenaiCompatible,
+    LocalModel,
+}
+
+impl SystemOneProvider {
+    pub fn is_typesafe(&self) -> bool {
+        matches!(self, Self::Typesafe)
+    }
 }
 
 #[derive(Clone, Default)]
@@ -61,6 +86,7 @@ pub enum SelectionConfig {
 
 #[derive(Clone)]
 pub struct SystemOneSettings {
+    provider: SystemOneProvider,
     endpoint: Url,
     model: String,
     credential_reference: Option<Uuid>,
@@ -87,7 +113,14 @@ impl SelectionConfig {
                 }
                 Ok(Self::Local)
             }
-            "system-one" => {
+            name => {
+                let provider = match name {
+                    "system-one" | "typesafe" => SystemOneProvider::Typesafe,
+                    "openrouter" => SystemOneProvider::Openrouter,
+                    "openai-compatible" => SystemOneProvider::OpenaiCompatible,
+                    "local-model" => SystemOneProvider::LocalModel,
+                    _ => return Err(ConfigurationError::InvalidProvider),
+                };
                 let endpoint = raw
                     .endpoint
                     .ok_or(ConfigurationError::MissingConfiguration)?;
@@ -97,13 +130,13 @@ impl SelectionConfig {
                     .map(|value| Uuid::parse_str(&value))
                     .transpose()
                     .map_err(|_| ConfigurationError::InvalidCredentialReference)?;
-                Self::system_one(&endpoint, &model, reference)
+                Self::system_one(provider, &endpoint, &model, reference)
             }
-            _ => Err(ConfigurationError::InvalidProvider),
         }
     }
 
     pub fn system_one(
+        provider: SystemOneProvider,
         endpoint: &str,
         model: &str,
         credential_reference: Option<Uuid>,
@@ -112,25 +145,56 @@ impl SelectionConfig {
         if model.trim().is_empty() || model.len() > 256 || model.chars().any(char::is_control) {
             return Err(ConfigurationError::InvalidModel);
         }
+        let loopback = match endpoint.host() {
+            Some(Host::Ipv4(address)) => address.is_loopback(),
+            Some(Host::Ipv6(address)) => address.is_loopback(),
+            _ => false,
+        };
+        match provider {
+            SystemOneProvider::Typesafe => {}
+            _ if endpoint
+                .path()
+                .trim_end_matches('/')
+                .ends_with("/chat/completions") =>
+            {
+                return Err(ConfigurationError::ProviderEndpoint);
+            }
+            SystemOneProvider::Openrouter
+                if endpoint.as_str().trim_end_matches('/') != OPENROUTER_ENDPOINT =>
+            {
+                return Err(ConfigurationError::ProviderEndpoint);
+            }
+            SystemOneProvider::LocalModel if !loopback => {
+                return Err(ConfigurationError::ProviderEndpoint);
+            }
+            _ => {}
+        }
         Ok(Self::SystemOne(SystemOneSettings {
+            provider,
             endpoint,
             model: model.into(),
             credential_reference,
         }))
     }
-
-    pub fn typesafe(credential_reference: Option<Uuid>) -> Result<Self, ConfigurationError> {
-        Self::system_one(
-            "https://api.typesafe.ai/v1/systemone",
-            "jev-latest",
-            credential_reference,
-        )
-    }
 }
 
 impl SystemOneSettings {
+    pub fn provider(&self) -> SystemOneProvider {
+        self.provider
+    }
+
     pub fn endpoint(&self) -> &str {
         self.endpoint.as_str()
+    }
+
+    pub fn request_url(&self) -> Url {
+        if self.provider.is_typesafe() {
+            return self.endpoint.clone();
+        }
+        let mut url = self.endpoint.clone();
+        let path = format!("{}/chat/completions", url.path().trim_end_matches('/'));
+        url.set_path(&path);
+        url
     }
 
     pub fn model(&self) -> &str {
@@ -383,17 +447,44 @@ impl SystemOneSelector {
                 ),
             );
         }
-        let body = json!({
-            "model": settings.model,
-            "state": query,
-            "questions": {
-                "tool": {
-                    "type": "choice",
-                    "instructions": "Which tool is most relevant to the task? Rank only by relevance; execution requires independent permission.",
-                    "criteria": criteria
+        let body = if settings.provider.is_typesafe() {
+            json!({
+                "model": settings.model,
+                "state": query,
+                "questions": {
+                    "tool": {
+                        "type": "choice",
+                        "instructions": INSTRUCTIONS,
+                        "criteria": criteria
+                    }
                 }
-            }
-        });
+            })
+        } else {
+            let options: Vec<&String> = criteria.keys().collect();
+            let task = serde_json::to_string(&json!({"task": query, "options": criteria}))
+                .map_err(SelectorError::from)?;
+            json!({
+                "model": settings.model,
+                "messages": [
+                    {"role": "system", "content": CHAT_INSTRUCTIONS},
+                    {"role": "user", "content": task}
+                ],
+                "temperature": 0,
+                "response_format": {
+                    "type": "json_schema",
+                    "json_schema": {
+                        "name": "tool_choice",
+                        "strict": true,
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": false,
+                            "required": ["choice"],
+                            "properties": {"choice": {"type": "string", "enum": options}}
+                        }
+                    }
+                }
+            })
+        };
         let encoded = serde_json::to_vec(&body).map_err(SelectorError::from)?;
         if encoded.len() > MAX_REQUEST_BYTES {
             return self
@@ -421,7 +512,9 @@ impl SystemOneSelector {
             "version": 1,
             "selector": self.identity,
             "catalog_sha256": format!("{:x}", Sha256::digest(catalog)),
+            "provider": settings.provider,
             "endpoint": settings.endpoint.as_str(),
+            "request_url": settings.request_url().as_str(),
             "model": settings.model,
             "body": body,
             "authority": {
@@ -669,8 +762,11 @@ pub struct SystemOneDisclosure {
 }
 
 impl SystemOneDisclosure {
-    pub fn destination(&self) -> &str {
-        self.settings.endpoint()
+    pub fn destination(&self) -> String {
+        self.settings.request_url().into()
+    }
+    pub fn provider(&self) -> SystemOneProvider {
+        self.settings.provider
     }
     pub fn model(&self) -> &str {
         self.settings.model()
@@ -746,7 +842,7 @@ impl ClassificationClient {
         let operation = async {
             let mut request = self
                 .client
-                .post(disclosure.settings.endpoint.clone())
+                .post(disclosure.settings.request_url())
                 .header(CONTENT_TYPE, "application/json")
                 .body(disclosure.encoded.clone());
             if let Some(authorization) = &self.authorization {
@@ -774,7 +870,34 @@ impl ClassificationClient {
                 }
                 bytes.extend_from_slice(&chunk);
             }
-            serde_json::from_slice(&bytes).map_err(|_| ClassificationFailure::InvalidResponse)
+            if disclosure.settings.provider.is_typesafe() {
+                return serde_json::from_slice(&bytes)
+                    .map_err(|_| ClassificationFailure::InvalidResponse);
+            }
+            let response: ChatResponse = serde_json::from_slice(&bytes)
+                .map_err(|_| ClassificationFailure::InvalidResponse)?;
+            let [choice] = <[ChatChoice; 1]>::try_from(response.choices)
+                .map_err(|_| ClassificationFailure::InvalidResponse)?;
+            let answer: ChatAnswer = serde_json::from_str(
+                choice
+                    .message
+                    .content
+                    .as_deref()
+                    .ok_or(ClassificationFailure::InvalidResponse)?
+                    .trim(),
+            )
+            .map_err(|_| ClassificationFailure::InvalidResponse)?;
+            Ok(ClassificationResponse {
+                answers: BTreeMap::from([(
+                    "tool".to_owned(),
+                    ChoiceAnswer {
+                        kind: "choice".into(),
+                        choice: answer.choice,
+                        confidence: None,
+                        probabilities: None,
+                    },
+                )]),
+            })
         };
         tokio::select! {
             biased;
@@ -787,6 +910,27 @@ impl ClassificationClient {
 #[derive(Deserialize)]
 struct ClassificationResponse {
     answers: BTreeMap<String, ChoiceAnswer>,
+}
+
+#[derive(Deserialize)]
+struct ChatResponse {
+    choices: Vec<ChatChoice>,
+}
+
+#[derive(Deserialize)]
+struct ChatChoice {
+    message: ChatMessage,
+}
+
+#[derive(Deserialize)]
+struct ChatMessage {
+    content: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ChatAnswer {
+    choice: String,
 }
 
 #[derive(Deserialize)]

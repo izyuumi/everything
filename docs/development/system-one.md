@@ -2,11 +2,22 @@
 
 ## Headless Host
 
-The Host does not read a TOML file. Its selection configuration is the `selection` field of the revisioned owner settings (`{"kind":"local"}` by default, or `system_one` with `endpoint`, `model` and an optional `credential_reference`). A raw owner `replace_settings` that turns System One on or changes its endpoint/model returns `host_action_required` and changes nothing. The change is applied only through the native Settings route: an `update` of `tools.selection` returns `awaiting_confirmation`, and the matching `confirm_patch` applies it. The macOS Settings Tool Selection controls drive that route, including the "Use TypeSafe preset" button, which fills `https://api.typesafe.ai/v1/systemone` and `jev-latest` into the same fields as a custom endpoint. Turning System One off through the same route leaves the stored endpoint/model but stops remote admission.
+The Host does not read a TOML file. Its selection configuration is the `selection` field of the revisioned owner settings (`{"kind":"local"}` by default, or `system_one` with an optional `provider`, `endpoint`, `model` and an optional `credential_reference`). A raw owner `replace_settings` that turns System One on or changes its endpoint/model returns `host_action_required` and changes nothing. The change is applied only through the native Settings route: an `update` of `tools.selection` returns `awaiting_confirmation`, and the matching `confirm_patch` applies it. The macOS Settings Tool Selection controls drive that route, including the "Use TypeSafe preset" button, which fills `https://api.typesafe.ai/v1/systemone` and `jev-latest` into the same fields as a custom endpoint. Turning System One off through the same route leaves the stored endpoint/model but stops remote admission.
+
+The `provider` field picks the service. It is omitted for `typesafe`, so older clients keep reading and writing TypeSafe-style settings unchanged. Native `tools.selection` update values per provider:
+
+| Provider | Value |
+| --- | --- |
+| TypeSafe/Jev (default wire) | `{"kind":"system_one","endpoint":"https://api.typesafe.ai/v1/systemone","model":"jev-latest"}` |
+| OpenRouter | `{"kind":"system_one","provider":"openrouter","endpoint":"https://openrouter.ai/api/v1","model":"openai/gpt-4.1-mini"}` |
+| OpenAI-compatible | `{"kind":"system_one","provider":"openai_compatible","endpoint":"https://llm.example.com/v1","model":"MODEL_ID"}` |
+| Local model | `{"kind":"system_one","provider":"local_model","endpoint":"http://127.0.0.1:11434/v1","model":"llama3.2"}` |
+
+Each goes inside `{"kind":"tool_selection","selection":…}` in an `update` of `tools.selection`, followed by the matching `confirm_patch`. A changed provider is a protected change like a changed endpoint. For OpenAI-style providers the endpoint is the base URL, not the completions URL (a path ending in `/chat/completions` is rejected with "System One provider endpoint"); the Host POSTs to `<base>/chat/completions` and the disclosure `destination` shows that full URL. A key for OpenRouter or a keyed OpenAI-compatible server uses the same System One credential entry bound to the endpoint plus reference; a local model needs none. The macOS controls still edit endpoint and model only; they preserve a stored provider and the TypeSafe preset clears it. A provider picker is an Apple follow-up.
 
 With remote selection enabled, `prepare_selection` returns the exact disclosure without contacting the endpoint. Only `approve_selection` for that ticket sends one POST. The identical domain command then consumes the result, and the model receives the selected definitions plus `search_tools`. Declining with `discard_selection`, or never approving, keeps the ordinary local selection for that command. Approved or local tickets that are never submitted keep their reservation until discarded or expired. When the preflight budget is full, `prepare_selection` fails with code `busy` and "selection preflight capacity is exhausted; discard unused selection tickets". A consumed, discarded, expired or changed ticket fails with `invalid_request` and asks for a new preparation.
 
-The macOS Settings app requests System One key entry as a native credential action bound to the configured endpoint and a reference UUID. The secret travels only over the private native pipe into the platform store. On macOS that store is the user's login Keychain. The sequence is: native `request_action` (credential entry), then `details`, then `submit_credential`. A separate revision-checked owner settings write then sets `selection.credential_reference`. The key is bound to the exact endpoint plus reference. Changing the endpoint through native update clears the reference. Attaching the old reference to a new endpoint finds no key, so selection falls back locally and nothing is sent. To delete the key, send the credential operation below over `owner --sensitive-stdin`:
+The macOS Settings app requests System One key entry as a native credential action bound to the configured endpoint and a reference UUID. The secret travels only over the private native pipe into the platform store. On macOS that store is the user's login Keychain. The sequence is: native `request_action` (credential entry), then `details`, then `submit_credential`. A separate revision-checked owner settings write then sets `selection.credential_reference`. The key is bound to the exact endpoint plus reference. Changing the endpoint or the provider through native update clears the reference. Attaching the old reference to a new endpoint finds no key, so selection falls back locally and nothing is sent. To delete the key, send the credential operation below over `owner --sensitive-stdin`:
 
 ```json
 {"kind":"credential","request_id":"UNIQUE_UUID","operation":{"kind":"remove_system_one","endpoint":"https://exact.configured/endpoint","reference":"REFERENCE_UUID"}}
@@ -16,7 +27,7 @@ Removal derives the same endpoint-bound key and deletes it from the native store
 
 ## Library configuration document
 
-Offline discovery is the default and needs no service or key:
+Offline discovery is the default and needs no service or key. `provider` is `local`, `system-one` or `typesafe` (TypeSafe wire), `openrouter`, `openai-compatible` or `local-model`:
 
 ```toml
 [tools.selection]
@@ -45,6 +56,16 @@ A compatible local server can omit `credential_reference`:
 provider = "system-one"
 endpoint = "http://127.0.0.1:8080/v1/systemone"
 model = "user-installed-model"
+fallback = "local"
+```
+
+A loopback OpenAI-compatible model server uses the chat-completions wire:
+
+```toml
+[tools.selection]
+provider = "local-model"
+endpoint = "http://127.0.0.1:11434/v1"
+model = "llama3.2"
 fallback = "local"
 ```
 
@@ -81,3 +102,16 @@ A second fresh-state run used the dummy key `dummy-sysone-key-20` and the Host w
 - The dummy key appeared in no file under the disposable state, temporary or log directories, and in no captured CLI stdout/stderr. Keychain contents were not read independently.
 
 The TypeSafe endpoint was never approved or contacted. Not exercised: the macOS Settings UI itself, HTTPS endpoints, and an actual successful model turn. This walkthrough is not automated coverage. The Host's `lsof` snapshots sample socket state at a few points; they are not a full network trace.
+
+## Provider choice observations
+
+On 2026-11-01 a debug build of commit `b350db7` ([#292](https://github.com/izyuumi/everything/issues/292)) ran on macOS (Apple Silicon) as a real `serve` Host with fresh disposable state and a cleared environment. Tools were enabled with a raw owner `replace_settings`. Each provider was configured through native `update` plus `confirm_patch` of `tools.selection` over `owner --sensitive-stdin`. A scratch loopback chat-completions server, not repository code, logged every request. Observed:
+
+- Never configured, `prepare_selection` returned `method: local`. The scratch server received nothing, and `lsof` showed no Internet sockets on the Host.
+- The stored TypeSafe selection omitted `provider`. OpenRouter, OpenAI-compatible and local-model selections stored `provider` with the endpoint and model and no secret. OpenRouter with another endpoint and local-model with a non-loopback HTTPS endpoint were rejected as invalid patches.
+- The TypeSafe disclosure named provider `typesafe`, its endpoint and the TypeSafe body. The OpenRouter disclosure named `https://openrouter.ai/api/v1/chat/completions` and the full chat-completions body with the `json_schema` enum of option IDs. Both were discarded without approval. The Host held no Internet socket, and a later approval of the discarded ticket was rejected.
+- For OpenAI-compatible and local-model against the scratch server, approval sent one POST to `/v1/chat/completions` with no `Authorization` header. Its body was byte-identical to the disclosed payload. The answer `tool_000` returned `method: system_one` with `read_file`.
+- An approved request to a loopback port with no listener, and an out-of-set answer `{"choice":"shell"}`, each returned `local_fallback` with the local tools and the static transport or malformed-answer diagnostic. A discarded local-model ticket sent nothing.
+- The Host stopped on SIGINT with exit 0.
+
+Live TypeSafe and OpenRouter inference was not observed. Not exercised: HTTPS endpoints, a Keychain credential with the new providers, the identical domain command consuming the result in a model turn, and the macOS Settings UI.

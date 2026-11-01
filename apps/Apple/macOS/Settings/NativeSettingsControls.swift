@@ -171,6 +171,7 @@ struct NativeSettingsControls: View {
                     store.edit { draft in
                         draft.systemOneEndpoint = "https://api.typesafe.ai/v1/systemone"
                         draft.systemOneModel = "jev-latest"
+                        draft.systemOneProvider = nil
                     }
                 }
                 Text("The selection model ID is opaque. The Host validates endpoint policy. Changing a configured endpoint does not transfer its credential reference to another recipient.")

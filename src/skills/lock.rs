@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 use std::fs::File;
 use std::io::{self, Read};
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 
 use rustix::fs::{Mode, OFlags};
@@ -127,6 +128,101 @@ fn read(path: &Path, version: u64, minimum: bool, warnings: &mut Vec<String>) ->
         }
     }
     Lock { entries }
+}
+
+pub(super) type RawEntries = serde_json::Map<String, serde_json::Value>;
+
+pub(super) fn at(path: &Path) -> impl FnOnce(io::Error) -> io::Error + '_ {
+    move |error| io::Error::new(error.kind(), format!("{}: {error}", path.display()))
+}
+
+pub(super) fn read_global_raw(home: &Path) -> io::Result<RawEntries> {
+    let path = global_lock_path(home);
+    let bytes = read_bounded(&path).map_err(at(&path))?;
+    let document = writable(bytes.as_deref()).map_err(at(&path))?;
+    Ok(match document.get("skills") {
+        Some(serde_json::Value::Object(skills)) => skills.clone(),
+        _ => RawEntries::new(),
+    })
+}
+
+pub(super) fn write_global(home: &Path, mut change: impl FnMut(&mut RawEntries)) -> io::Result<()> {
+    let path = global_lock_path(home);
+    let parent = path
+        .parent()
+        .ok_or_else(|| io::Error::other("lock path has no parent"))?;
+    std::fs::create_dir_all(parent).map_err(at(parent))?;
+    for _ in 0..2 {
+        let before = read_bounded(&path).map_err(at(&path))?;
+        let mut document = writable(before.as_deref()).map_err(at(&path))?;
+        let skills = document
+            .entry("skills")
+            .or_insert_with(|| serde_json::Value::Object(RawEntries::new()));
+        let serde_json::Value::Object(skills) = skills else {
+            return Err(io::Error::other(format!(
+                "lock {} has a non-object skills field; fix or remove it",
+                path.display()
+            )));
+        };
+        change(skills);
+        let bytes = serde_json::to_vec_pretty(&document).map_err(io::Error::other)?;
+        if bytes.len() as u64 > MAX_LOCK_BYTES {
+            return Err(at(&path)(io::Error::other("lock would exceed 4 MiB")));
+        }
+        let temporary = parent.join(format!(".skill-lock.json.vorra-{}", uuid::Uuid::new_v4()));
+        let written = (|| {
+            let mut file = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(&temporary)?;
+            io::Write::write_all(&mut file, &bytes)?;
+            file.sync_all()
+        })();
+        if let Err(error) = written {
+            let _ = std::fs::remove_file(&temporary);
+            return Err(at(&temporary)(error));
+        }
+        if read_bounded(&path).map_err(at(&path))? == before {
+            return std::fs::rename(&temporary, &path)
+                .inspect_err(|_| {
+                    let _ = std::fs::remove_file(&temporary);
+                })
+                .map_err(at(&path));
+        }
+        let _ = std::fs::remove_file(&temporary);
+    }
+    Err(io::Error::other(format!(
+        "lock {} changed twice while Vorra was writing it; nothing was written, run the command again",
+        path.display()
+    )))
+}
+
+fn writable(bytes: Option<&[u8]>) -> io::Result<RawEntries> {
+    let Some(bytes) = bytes else {
+        return Ok(
+            serde_json::json!({"version": GLOBAL_LOCK_VERSION, "skills": {}, "dismissed": {}})
+                .as_object()
+                .cloned()
+                .unwrap_or_default(),
+        );
+    };
+    let document: serde_json::Value = serde_json::from_slice(bytes).map_err(|error| {
+        io::Error::other(format!(
+            "global lock is not valid JSON ({error}); Vorra does not overwrite it, fix or remove it"
+        ))
+    })?;
+    let serde_json::Value::Object(document) = document else {
+        return Err(io::Error::other(
+            "global lock is not a JSON object; Vorra does not overwrite it",
+        ));
+    };
+    match document.get("version").and_then(serde_json::Value::as_u64) {
+        Some(version) if version >= GLOBAL_LOCK_VERSION => Ok(document),
+        _ => Err(io::Error::other(
+            "global lock version is below 3; run `npx skills list -g` to migrate it first",
+        )),
+    }
 }
 
 fn read_bounded(path: &Path) -> io::Result<Option<Vec<u8>>> {

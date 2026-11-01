@@ -594,6 +594,7 @@ fn system_one_key(
     }
     let crate::selector::system_one::SelectionConfig::SystemOne(configuration) =
         crate::selector::system_one::SelectionConfig::system_one(
+            crate::selector::system_one::SystemOneProvider::Typesafe,
             endpoint,
             "credential-binding",
             Some(reference),

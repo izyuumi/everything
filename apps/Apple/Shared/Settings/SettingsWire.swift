@@ -356,12 +356,13 @@ extension SettingsModelSelection {
 
 enum ToolSelectionPreference: SettingsWireData {
     case local
-    case systemOne(endpoint: String, model: String)
+    case systemOne(endpoint: String, model: String, provider: String? = nil)
 
     func validate() throws {
-        if case .systemOne(let endpoint, let model) = self {
+        if case .systemOne(let endpoint, let model, let provider) = self {
             try SettingsWire.text(endpoint, maximum: 4096)
             try SettingsWire.text(model, maximum: 256)
+            if let provider { try SettingsWire.text(provider, maximum: 64) }
         }
     }
 
@@ -372,8 +373,9 @@ enum ToolSelectionPreference: SettingsWireData {
             try fields.only(["kind"])
             self = .local
         case "system_one":
-            try fields.only(["kind", "endpoint", "model"])
-            self = .systemOne(endpoint: try fields.required(String.self, "endpoint"), model: try fields.required(String.self, "model"))
+            try fields.only(["kind", "provider", "endpoint", "model"])
+            self = .systemOne(endpoint: try fields.required(String.self, "endpoint"), model: try fields.required(String.self, "model"),
+                              provider: try fields.optional(String.self, "provider"))
         default: throw SettingsWireError.invalid
         }
         try validate()
@@ -384,8 +386,9 @@ enum ToolSelectionPreference: SettingsWireData {
         switch self {
         case .local:
             try fields.encode("local", forKey: SettingsWireKey("kind"))
-        case .systemOne(let endpoint, let model):
+        case .systemOne(let endpoint, let model, let provider):
             try fields.encode("system_one", forKey: SettingsWireKey("kind"))
+            try fields.encodeIfPresent(provider, forKey: SettingsWireKey("provider"))
             try fields.encode(endpoint, forKey: SettingsWireKey("endpoint"))
             try fields.encode(model, forKey: SettingsWireKey("model"))
         }
