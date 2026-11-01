@@ -673,12 +673,16 @@ fn validate_namespace(connection: &Connection, input: &InboxInput) -> Result<(),
                     }]
         }
         (
-            OwnerCommand::Initialize { title, .. },
+            OwnerCommand::Initialize { title, agent, .. },
             ConversationEvent::ConversationCreated {
                 title: Some(original),
-                ..
+                agent_id,
             },
-        ) => *title == original,
+        ) => {
+            *title == original
+                && agent_id
+                    .is_none_or(|recorded| agent.is_none_or(|agent| *agent.as_uuid() == recorded))
+        }
         _ => false,
     };
     if matches {
