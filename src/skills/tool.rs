@@ -393,7 +393,10 @@ fn read(
                 "the skill's name, source or path is too long for a tool result",
             ));
         }
-        end = end.saturating_sub((encoded - MAX_RESULT_BYTES).max(16));
+        end = usize::try_from(end as u128 * MAX_RESULT_BYTES as u128 / encoded as u128)
+            .unwrap_or(0)
+            .min(end)
+            .saturating_sub(16);
         while !raw.is_char_boundary(end) {
             end -= 1;
         }
