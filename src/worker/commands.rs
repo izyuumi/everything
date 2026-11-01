@@ -990,6 +990,7 @@ async fn handle_payload(
                             waiting: snapshot.waiting,
                             diagnostic: snapshot.diagnostic,
                             live_text: None,
+                            agent_id: snapshot.agent_id,
                         },
                     }
                 }

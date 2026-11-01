@@ -1,6 +1,6 @@
 # Terminal UI
 
-`vorra` with no subcommand, or its alias `vorra tui`, opens an interactive full-screen chat against a Host. It talks to the Host only through the existing owner IPC (`HostClient`): conversation/task/approval queries, `Initialize` and `Text` owner commands, `ResolvePermission` and `CancelTask` domain commands, and `ChatGptModels`. It adds no runtime, store, protocol field or credential path; the Host keeps owning execution and durable state.
+`vorra` with no subcommand, or its alias `vorra tui`, opens an interactive full-screen chat against a Host. It talks to the Host only through the existing owner IPC (`HostClient`): conversation/task/approval/agent queries, `Initialize` and `Text` owner commands, `ResolvePermission` and `CancelTask` domain commands, and `ChatGptModels`. It adds no runtime, store, protocol field or credential path; the Host keeps owning execution and durable state.
 
 ```sh
 vorra                          # same as `vorra tui`
@@ -8,9 +8,10 @@ vorra tui                      # new conversation with the latest conversation's
 vorra tui --continue           # reopen the most recent conversation
 vorra tui --conversation UUID
 vorra tui --provider openai --model MODEL_ID
+vorra tui --agent NAME         # new conversations use agent NAME
 ```
 
-Flags (`--continue`, `--conversation`, `--provider`, `--model`) need the `tui` form. Without an interactive terminal on stdin and stdout, it exits non-zero with "the terminal UI needs an interactive terminal; run `vorra --help` for commands" before touching the terminal or the state directory. A conversation is created on the first message, titled from it. Provider, model and instructions stay immutable per conversation, so `/model` and `/instructions` apply to the next new conversation.
+Flags (`--continue`, `--conversation`, `--provider`, `--model`, `--agent`) need the `tui` form. `--agent` with `--conversation` or `--continue` exits with an error unless that conversation is already bound to the agent. Without an interactive terminal on stdin and stdout, it exits non-zero with "the terminal UI needs an interactive terminal; run `vorra --help` for commands" before touching the terminal or the state directory. A conversation is created on the first message, titled from it. Provider, model and instructions stay immutable per conversation, so `/model` and `/instructions` apply to the next new conversation.
 
 ## Starting the Host
 
@@ -34,11 +35,13 @@ Esc goes back (on the first screen it skips), Ctrl+C or SIGTERM exits cleanly an
 
 ## Layout
 
-The transcript starts with a banner (model, conversation, tools, Host state directory, cwd). User turns are prefixed `❯`; replies render Markdown under `◈ Vorra` with a model/duration footer, extended with `used N memories` when the Host retrieved Wiki memory excerpts for that reply. Single newlines in replies are shown as line breaks. While a task runs, provisional text from the `task` query's [`live_text`](../contracts/owner-ipc.md#live-assistant-text) streams under a spinner; the committed final message replaces it. The input sits above a status bar showing model, provider, title, message count, tool mode, state, elapsed time and queued messages. Source lives in `src/tui/` (`host` IPC adapter, `app` state, `render`, `markdown`, `input`, `theme`).
+The transcript starts with a banner (agent, model, conversation, tools, Host state directory, cwd). User turns are prefixed `❯`; replies render Markdown under `◈ Vorra` with a model/duration footer, extended with `used N memories` when the Host retrieved Wiki memory excerpts for that reply. Single newlines in replies are shown as line breaks. While a task runs, provisional text from the `task` query's [`live_text`](../contracts/owner-ipc.md#live-assistant-text) streams under a spinner; the committed final message replaces it. The input sits above a status bar showing model, provider, agent, title, message count, tool mode, state, elapsed time and queued messages. Source lives in `src/tui/` (`host` IPC adapter, `app` state, `render`, `markdown`, `input`, `theme`).
 
 ## Commands and keys
 
-`/help`, `/new [title]`, `/sessions` (also Ctrl+X), `/resume <n|id-prefix>`, `/model [id]` (lists the ChatGPT plan's models when a ChatGPT binding is selected), `/provider`, `/instructions`, `/tools on [dir] [read-only|trusted-workspace|full-host]` / `/tools off`, `/approvals`, `/vault [list]` / `/vault add LABEL` / `/vault remove ID|REF`, `/history`, `/retry`, `/copy`, `/stop`, `/status`, `/clear`, `/mouse`, `/queue`, `/quit`.
+`/help`, `/new [title]`, `/sessions` (also Ctrl+X), `/agents`, `/agent NAME`, `/agents edit NAME`, `/resume <n|id-prefix>`, `/model [id]` (lists the ChatGPT plan's models when a ChatGPT binding is selected), `/provider`, `/instructions`, `/tools on [dir] [read-only|trusted-workspace|full-host]` / `/tools off`, `/approvals`, `/vault [list]` / `/vault add LABEL` / `/vault remove ID|REF`, `/history`, `/retry`, `/copy`, `/stop`, `/status`, `/clear`, `/mouse`, `/queue`, `/quit`.
+
+`/agents` opens a picker of agents (name, `(default)`, description, model, tool ceiling); Enter, like `/agent NAME`, starts a new conversation with that agent, which is created on the first message through `Initialize` with the agent's id. An agent with a model also sets the provider and model for that conversation. The banner and status bar show the agent of the open conversation, or the chosen agent (else the current default) before the first message. `/agents edit NAME` only prints the matching `vorra agents edit` command; editing agents is a CLI task.
 
 Enter sends; Alt+Enter, Ctrl+J or a trailing `\` inserts a newline; Tab completes commands; Up/Down walk input history or lines; PageUp/PageDown or the wheel scroll; End jumps to the latest output. Ctrl+L starts a new conversation and Ctrl+D exits on empty input. `/mouse` releases mouse capture for terminal text selection.
 
@@ -55,6 +58,8 @@ Enter sends; Alt+Enter, Ctrl+J or a trailing `\` inserts a newline; Tab complete
 Typing while a reply runs queues the message; queued messages send in order after the task completes. Ctrl+C first warns, and a second Ctrl+C within three seconds (or `/stop`) submits `CancelTask`. Cancelling while a provider request is in flight makes the task a nonretryable `Failed` with an uncertain outcome, and the conversation cannot continue ([scheduler contract](../contracts/scheduler.md#cancellation-shutdown-and-recovery)). The TUI therefore asks twice. Before sending, it compares `pending_command_id` with the conversation's tasks: a terminal pending task moves to a new conversation, a running one is followed with the message queued, and one awaiting permission reopens its approval. Quitting the TUI never cancels Host work.
 
 ## Validation
+
+Agents (2026-11-01, macOS, Python pty 120×40, disposable state and `HOME` under `/tmp`, debug build, Host from the same build): `/agents` listed `default (default)` and `writer`; Down and Enter printed `new conversation · agent writer · anthropic/claude-haiku-4-5`, and the first message created a conversation whose `agent_id` was the `writer` id (its turn then stopped at the missing credential). `tui --agent writer` started on `writer`; `/agent default` switched back; `/agents edit writer` printed the CLI hint. `tui --conversation UUID --agent default` on a `writer` conversation exited with `conversation UUID is bound to agent writer; omit --agent default or start a new conversation`. Model replies were not exercised.
 
 Onboarding (2026-10-31, macOS, tmux 110×36, disposable `$HOME/.ev-test-*` state, debug build): bare `everything` with no Host reached the start offer; the background Host started and onboarding appeared. Skip left settings at revision 1 with no bindings, exited 0, and the session Host was gone. An invalid key against a local OpenAI-compatible stub on a loopback endpoint was masked, failed the test turn with "provider authentication failed" and offered Retry / Pick another / Skip; Retry failed again; a valid stub key with session storage passed and saved (revision 2, one loopback binding), and a chat message through the Host then returned the stub's reply. A fake `OPENAI_API_KEY` was detected without showing its value. Quit at the start offer printed the unreachable-host error (exit 1); Ctrl+C mid-wizard and closing the tmux server (SIGHUP) both stopped the session Host. Not exercised: ChatGPT browser sign-in through onboarding, native keychain saves, a real OpenAI or Anthropic key, the login-service install/start choices (the LaunchAgent label is global), Linux, and narrow terminals.
 

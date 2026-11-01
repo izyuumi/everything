@@ -301,6 +301,7 @@ pub struct TaskSnapshot {
     pub waiting: Option<WaitingReason>,
     pub last_output: Option<String>,
     pub diagnostic: Option<String>,
+    pub agent_id: Option<crate::host::agents::AgentId>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -449,6 +450,7 @@ impl StoredTask {
             waiting: self.checkpoint.waiting.clone(),
             last_output: self.checkpoint.last_output.clone(),
             diagnostic: self.checkpoint.diagnostic.clone(),
+            agent_id: self.definition.execution.agent.map(|agent| agent.id),
         }
     }
 }

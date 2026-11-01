@@ -239,6 +239,8 @@ pub struct ConversationInfo {
     pub native_status: Option<LoopStatus>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub memory_use: Option<MemoryUse>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agent_id: Option<crate::host::agents::AgentId>,
 }
 
 #[derive(Clone, Debug)]
@@ -937,8 +939,15 @@ fn info(
             "checkpoint identity or sequence is invalid",
         ));
     }
+    let agent_id = row
+        .agent_id
+        .as_deref()
+        .map(str::parse)
+        .transpose()
+        .map_err(|_| AgentError::InvalidData("conversation agent id is invalid"))?;
     Ok(ConversationInfo {
         id,
+        agent_id,
         title: row.title,
         provider: checkpoint.config.provider,
         model: checkpoint.config.model.clone(),
