@@ -30,6 +30,7 @@ const MAX_CANDIDATES: usize = 254;
 const MAX_APPROVAL: Duration = Duration::from_secs(300);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 const OPENROUTER_ENDPOINT: &str = "https://openrouter.ai/api/v1";
+const CHAT_COMPLETIONS_SUFFIX: &[u8] = b"/chat/completions";
 const INSTRUCTIONS: &str = "Which tool is most relevant to the task? Rank only by relevance; execution requires independent permission.";
 const CHAT_INSTRUCTIONS: &str = "Which tool is most relevant to the task? Rank only by relevance; execution requires independent permission. The user message is JSON with the task and the options keyed by option ID. Answer with only a JSON object {\"choice\": ID} where ID is exactly one option key, or \"none\" if no option is relevant.";
 
@@ -154,11 +155,14 @@ impl SelectionConfig {
         };
         match provider {
             SystemOneProvider::Typesafe => {}
-            _ if endpoint
-                .path()
-                .trim_end_matches('/')
-                .to_ascii_lowercase()
-                .ends_with("/chat/completions") =>
+            _ if {
+                let path = endpoint.path().trim_end_matches('/').as_bytes();
+                path.len()
+                    .checked_sub(CHAT_COMPLETIONS_SUFFIX.len())
+                    .is_some_and(|start| {
+                        path[start..].eq_ignore_ascii_case(CHAT_COMPLETIONS_SUFFIX)
+                    })
+            } =>
             {
                 return Err(ConfigurationError::ProviderEndpoint);
             }

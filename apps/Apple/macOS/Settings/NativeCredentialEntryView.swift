@@ -44,10 +44,19 @@ struct NativeCredentialEntryControls: View {
                     }
                 case .systemOne:
                     if let configured = metadata.systemOne {
-                        Button(configured.reference == nil ? "Add System One credential…" : "Replace System One credential…") {
-                            store.beginCredentialEntry(.systemOne)
+                        if SystemOneChoice(provider: configured.provider)?.usesKey == false {
+                            Text("The saved local model uses no key.").foregroundStyle(.secondary)
+                        } else {
+                            let draftDiffers = store.draft?.systemOneDiffers(from: configured) ?? false
+                            Button(configured.reference == nil ? "Add System One credential…" : "Replace System One credential…") {
+                                store.beginCredentialEntry(.systemOne)
+                            }
+                            .disabled(!store.canEnterCredential || connectionEdited || draftDiffers)
+                            if draftDiffers {
+                                Text("The provider or endpoint above differs from the saved one. Save and confirm it first; a key is always entered for the saved provider and endpoint.")
+                                    .foregroundStyle(.secondary)
+                            }
                         }
-                        .disabled(!store.canEnterCredential || connectionEdited)
                     } else {
                         Text("No System One endpoint is saved. Save and confirm one above before adding its credential.")
                             .foregroundStyle(.secondary)

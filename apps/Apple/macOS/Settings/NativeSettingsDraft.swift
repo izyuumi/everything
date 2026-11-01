@@ -57,10 +57,10 @@ struct NativeSettingsDraft: Equatable, Sendable {
         self.dimensions = dimensions
     }
 
-    var systemOneChoice: SystemOneChoice {
+    var systemOneChoice: SystemOneChoice? {
         get { systemOneEnabled ? SystemOneChoice(provider: systemOneProvider) : .local }
         set {
-            guard newValue != systemOneChoice else { return }
+            guard let newValue, newValue != systemOneChoice else { return }
             if case .systemOne(let endpoint, let model, let provider) = savedSystemOne,
                newValue == .local || SystemOneChoice(provider: provider) == newValue {
                 systemOneEndpoint = endpoint
@@ -76,7 +76,15 @@ struct NativeSettingsDraft: Equatable, Sendable {
     }
 
     var systemOneIssue: String? {
-        systemOneEnabled ? systemOneChoice.issue(endpoint: systemOneEndpoint, model: systemOneModel) : nil
+        systemOneEnabled ? systemOneChoice?.issue(endpoint: systemOneEndpoint, model: systemOneModel) : nil
+    }
+
+    func systemOneTargetDiffers(from saved: OwnerSettingsSystemOne) -> Bool {
+        saved.endpoint != systemOneEndpoint || (saved.provider ?? SystemOneChoice.typesafe.rawValue) != (systemOneProvider ?? SystemOneChoice.typesafe.rawValue)
+    }
+
+    func systemOneDiffers(from saved: OwnerSettingsSystemOne) -> Bool {
+        systemOneEnabled != saved.enabled || systemOneTargetDiffers(from: saved)
     }
 
     var dimensionChoices: [UInt32]? {

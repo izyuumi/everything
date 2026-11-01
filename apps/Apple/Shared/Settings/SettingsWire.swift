@@ -864,11 +864,14 @@ enum SystemOneChoice: String, CaseIterable, Identifiable, Sendable {
 
     var id: Self { self }
 
-    init(provider: String?) {
-        switch provider.flatMap(Self.init(rawValue:)) {
-        case .some(let choice) where choice != .local: self = choice
-        default: self = .typesafe
-        }
+    init?(provider: String?) {
+        guard let provider else { self = .typesafe; return }
+        guard let choice = Self(rawValue: provider), choice != .local else { return nil }
+        self = choice
+    }
+
+    static func title(provider: String?) -> String {
+        Self(provider: provider)?.title ?? provider ?? Self.typesafe.title
     }
 
     var title: String {

@@ -58,7 +58,7 @@ struct NativeSettingsControls: View {
                     NativeCredentialEntryControls(store: store, purpose: .model, connectionEdited: connectionEdited)
                 }
             case .toolSelection:
-                if store.draft?.systemOneChoice.usesKey ?? true {
+                if store.metadata?.systemOne.map({ SystemOneChoice(provider: $0.provider)?.usesKey ?? true }) ?? true {
                     Section("Native credential entry") {
                         NativeCredentialEntryControls(store: store, purpose: .systemOne, connectionEdited: connectionEdited)
                     }
@@ -159,7 +159,7 @@ struct NativeSettingsControls: View {
     private func tools(_ draft: NativeSettingsDraft) -> some View {
         Section("Tool discovery and selection") {
             Picker("System One provider", selection: binding(\.systemOneChoice, fallback: .local)) {
-                ForEach(SystemOneChoice.allCases) { choice in Text(choice.title).tag(choice) }
+                ForEach(SystemOneChoice.allCases) { choice in Text(choice.title).tag(Optional(choice)) }
             }
             .disabled(systemOneConfigurationUnknown(draft))
             if systemOneConfigurationUnknown(draft) {
@@ -251,14 +251,17 @@ struct NativeSettingsControls: View {
     @ViewBuilder
     private func systemOneFields(_ draft: NativeSettingsDraft) -> some View {
         let choice = draft.systemOneChoice
+        if choice == nil {
+            NativeSettingsNotice("The saved provider \u{201C}" + (draft.systemOneProvider ?? "") + "\u{201D} is not known to this app. Choose a provider above to replace it.", kind: .warning)
+        }
         switch choice {
-        case .openrouter:
+        case .openrouter?:
             LabeledContent("Endpoint", value: SystemOneChoice.openrouterEndpoint).textSelection(.enabled)
-        case .openaiCompatible:
+        case .openaiCompatible?:
             TextField("Base URL", text: binding(\.systemOneEndpoint, fallback: ""), prompt: Text("https://llm.example.com/v1"))
             Text("Enter the base URL, not the /chat/completions URL. The Host sends requests to <base URL>/chat/completions.")
                 .font(.caption).foregroundStyle(.secondary)
-        case .localModel:
+        case .localModel?:
             TextField("Loopback base URL", text: binding(\.systemOneEndpoint, fallback: ""), prompt: Text("http://127.0.0.1:11434/v1"))
             Text("A model server on this Mac at a literal loopback IP, such as Ollama, llama.cpp or LM Studio. Use the base URL, not the /chat/completions URL.")
                 .font(.caption).foregroundStyle(.secondary)
@@ -269,7 +272,7 @@ struct NativeSettingsControls: View {
                   prompt: Text(choice == .openrouter ? "openai/gpt-4.1-mini" : choice == .localModel ? "llama3.2" : "MODEL_ID"))
         if let issue = draft.systemOneIssue { NativeSettingsNotice(issue, kind: .warning) }
         Group {
-            if !choice.usesKey {
+            if !(choice?.usesKey ?? true) {
                 Text("A local model uses no key.")
             } else if let key = systemOneKeyNote(draft) {
                 Text(key)
@@ -286,8 +289,7 @@ struct NativeSettingsControls: View {
         guard let metadata = store.metadata, metadata.revision == draft.baseline.revision, let saved = metadata.systemOne else {
             return "After this change is confirmed, enter a key under Native credential entry below."
         }
-        guard saved.endpoint != draft.systemOneEndpoint
-                || SystemOneChoice(provider: saved.provider) != draft.systemOneChoice else { return nil }
+        guard draft.systemOneTargetDiffers(from: saved) else { return nil }
         return saved.reference == nil
             ? "After this change is confirmed, enter a key under Native credential entry below."
             : "Saving a new provider or endpoint unlinks the current key. After this change is confirmed, enter a new key under Native credential entry below."
