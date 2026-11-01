@@ -102,3 +102,16 @@ A second fresh-state run used the dummy key `dummy-sysone-key-20` and the Host w
 - The dummy key appeared in no file under the disposable state, temporary or log directories, and in no captured CLI stdout/stderr. Keychain contents were not read independently.
 
 The TypeSafe endpoint was never approved or contacted. Not exercised: the macOS Settings UI itself, HTTPS endpoints, and an actual successful model turn. This walkthrough is not automated coverage. The Host's `lsof` snapshots sample socket state at a few points; they are not a full network trace.
+
+## Provider choice observations
+
+On 2026-11-01 a debug build of commit `b350db7` ([#292](https://github.com/izyuumi/everything/issues/292)) ran on macOS (Apple Silicon) as a real `serve` Host with fresh disposable state and a cleared environment. Tools were enabled with a raw owner `replace_settings`. Each provider was configured through native `update` plus `confirm_patch` of `tools.selection` over `owner --sensitive-stdin`. A scratch loopback chat-completions server, not repository code, logged every request. Observed:
+
+- Never configured, `prepare_selection` returned `method: local`. The scratch server received nothing, and `lsof` showed no Internet sockets on the Host.
+- The stored TypeSafe selection omitted `provider`. OpenRouter, OpenAI-compatible and local-model selections stored `provider` with the endpoint and model and no secret. OpenRouter with another endpoint and local-model with a non-loopback HTTPS endpoint were rejected as invalid patches.
+- The TypeSafe disclosure named provider `typesafe`, its endpoint and the TypeSafe body. The OpenRouter disclosure named `https://openrouter.ai/api/v1/chat/completions` and the full chat-completions body with the `json_schema` enum of option IDs. Both were discarded without approval. The Host held no Internet socket, and a later approval of the discarded ticket was rejected.
+- For OpenAI-compatible and local-model against the scratch server, approval sent one POST to `/v1/chat/completions` with no `Authorization` header. Its body was byte-identical to the disclosed payload. The answer `tool_000` returned `method: system_one` with `read_file`.
+- An approved request to a loopback port with no listener, and an out-of-set answer `{"choice":"shell"}`, each returned `local_fallback` with the local tools and the static transport or malformed-answer diagnostic. A discarded local-model ticket sent nothing.
+- The Host stopped on SIGINT with exit 0.
+
+Live TypeSafe and OpenRouter inference was not observed. Not exercised: HTTPS endpoints, a Keychain credential with the new providers, the identical domain command consuming the result in a model turn, and the macOS Settings UI.
