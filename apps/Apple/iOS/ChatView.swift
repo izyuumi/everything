@@ -153,7 +153,7 @@ struct ChatView: View {
             Text(model.state?.connection ?? "Disconnected").font(.caption).foregroundStyle(.secondary)
         }
         .onChange(of: model.selectedConversation) { _, _ in Task { await model.refresh() } }
-        .sheet(item: $steering) { task in NavigationStack { SteeringView(model: model, task: task) }.modifier(InactivePrivacyCover()) }
+        .sheet(item: $steering) { task in NavigationStack { SteeringView(model: model, task: task) }.modifier(InactivePrivacyCover(enabled: model.privacyCoverEnabled)) }
         .confirmationDialog("Cancel this task?", isPresented: Binding(get: { cancelling != nil }, set: { if !$0 { cancelling = nil } })) {
             if let cancelling { Button("Cancel task", role: .destructive) { Task { await model.cancel(cancelling); self.cancelling = nil } } }
             Button("Keep running", role: .cancel) { cancelling = nil }

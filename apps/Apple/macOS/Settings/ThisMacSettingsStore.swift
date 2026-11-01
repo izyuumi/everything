@@ -581,13 +581,15 @@ final class ThisMacSettingsStore {
             guard revision == patch.expectedRevision + 1, revision <= UInt64(Int64.max) else { preferenceError = .storage; return }
             var completion = record.baseline.completion
             var attention = record.baseline.attention
+            var privacyCover = record.baseline.privacyCover
             for change in patch.changes {
                 switch change.key {
                 case .completion: completion = change.value
                 case .attention: attention = change.value
+                case .privacyCover: privacyCover = change.value
                 }
             }
-            expectedReadback = DevicePreferenceSnapshot(deviceID: patch.deviceID, revision: revision, completion: completion, attention: attention)
+            expectedReadback = DevicePreferenceSnapshot(deviceID: patch.deviceID, revision: revision, completion: completion, attention: attention, privacyCover: privacyCover)
         case .conflict(let observedRevision):
             guard observedRevision > 0, observedRevision <= UInt64(Int64.max), observedRevision != patch.expectedRevision else { preferenceError = .storage; return }
         }

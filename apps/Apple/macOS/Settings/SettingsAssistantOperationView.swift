@@ -187,7 +187,7 @@ struct SettingsAssistantOperationView: View {
 
     private func sectionName(_ section: SettingsSection) -> String {
         switch section {
-        case .general: "General"
+        case .general: "Host"
         case .models: "Models"
         case .memory: "Memory"
         case .toolSelection: "Tool Selection"

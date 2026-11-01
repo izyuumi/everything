@@ -9,15 +9,17 @@ final class ThisDeviceSettingsStore {
         let baseline: DevicePreferenceSnapshot
         var completion: Bool
         var attention: Bool
+        var privacyCover: Bool
 
         init(snapshot: DevicePreferenceSnapshot) {
             baseline = snapshot
             completion = snapshot.completion
             attention = snapshot.attention
+            privacyCover = snapshot.privacyCover
         }
 
         var isModified: Bool {
-            completion != baseline.completion || attention != baseline.attention
+            completion != baseline.completion || attention != baseline.attention || privacyCover != baseline.privacyCover
         }
     }
 
@@ -133,6 +135,7 @@ final class ThisDeviceSettingsStore {
 
     var hasDraftChanges: Bool { draft?.isModified == true }
     var savedAppearance: DeviceAppearance? { appearanceSnapshot?.appearance }
+    var savedPrivacyCover: Bool { snapshot?.privacyCover ?? false }
     var hasAppearanceDraftChanges: Bool { appearanceDraft?.isModified == true }
 
     var hasRevisionConflict: Bool {
@@ -295,6 +298,11 @@ final class ThisDeviceSettingsStore {
         draft?.attention = value
     }
 
+    func setPrivacyCover(_ value: Bool) {
+        guard canEdit else { return }
+        draft?.privacyCover = value
+    }
+
     func setAppearance(_ value: DeviceAppearance) {
         guard canEditAppearance else { return }
         appearanceDraft?.appearance = value
@@ -325,6 +333,7 @@ final class ThisDeviceSettingsStore {
         var changes: [DevicePreferenceChange] = []
         if draft.completion != draft.baseline.completion { changes.append(DevicePreferenceChange(key: .completion, value: draft.completion)) }
         if draft.attention != draft.baseline.attention { changes.append(DevicePreferenceChange(key: .attention, value: draft.attention)) }
+        if draft.privacyCover != draft.baseline.privacyCover { changes.append(DevicePreferenceChange(key: .privacyCover, value: draft.privacyCover)) }
         let patch = DevicePreferencePatch(requestID: UUID(), deviceID: draft.baseline.deviceID, expectedRevision: draft.baseline.revision, changes: changes)
         do { try patch.validate() }
         catch { preferenceError = .invalidRequest; return }
@@ -615,13 +624,15 @@ final class ThisDeviceSettingsStore {
             guard revision == patch.expectedRevision + 1, revision <= UInt64(Int64.max) else { preferenceError = .storage; return }
             var completion = record.baseline.completion
             var attention = record.baseline.attention
+            var privacyCover = record.baseline.privacyCover
             for change in patch.changes {
                 switch change.key {
                 case .completion: completion = change.value
                 case .attention: attention = change.value
+                case .privacyCover: privacyCover = change.value
                 }
             }
-            expectedReadback = DevicePreferenceSnapshot(deviceID: patch.deviceID, revision: revision, completion: completion, attention: attention)
+            expectedReadback = DevicePreferenceSnapshot(deviceID: patch.deviceID, revision: revision, completion: completion, attention: attention, privacyCover: privacyCover)
         case .conflict(let observedRevision):
             guard observedRevision > 0, observedRevision <= UInt64(Int64.max), observedRevision != patch.expectedRevision else { preferenceError = .storage; return }
         }

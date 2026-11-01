@@ -20,7 +20,7 @@ struct NativeDevicesControls: View {
                 if let host = store.information?.hostID {
                     Text("Host: \(host.uuidString.lowercased())").font(.caption.monospaced()).textSelection(.enabled)
                 }
-                if connectionEdited { Text("Apply connection edits in General first.").foregroundStyle(.secondary) }
+                if connectionEdited { Text("Apply connection edits in Host first.").foregroundStyle(.secondary) }
                 if let issue = store.issue { NativeSettingsNotice(issue.errorDescription ?? "The original Host session is unavailable.") }
                 Text("Devices belong to this Host. This list is separate from This Mac's offline notification preferences. Open and pairing are explicit; neither requires a model.")
                     .font(.caption).foregroundStyle(.secondary)

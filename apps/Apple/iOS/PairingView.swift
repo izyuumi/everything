@@ -55,7 +55,7 @@ struct PairingView: View {
                 model.startPairing(value)
             }
             .ignoresSafeArea()
-            .modifier(InactivePrivacyCover())
+            .modifier(InactivePrivacyCover(enabled: model.privacyCoverEnabled))
         }
         .task(id: link) {
             if let link { model.startPairing(link) }
