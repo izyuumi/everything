@@ -617,6 +617,7 @@ fn submission(manifest: &WorkerManifest, workspace: PathBuf) -> TaskSubmission {
             allowed_tools: Some(manifest.allowed_tools.clone()),
             budget: manifest.budget.clone(),
             limits,
+            agent: None,
         },
     }
 }

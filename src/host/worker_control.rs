@@ -378,6 +378,7 @@ impl HostInner {
             command_id: request_id,
             title: disclosure.local.title,
             configuration: disclosure.manifest.model.configuration.clone(),
+            agent: None,
         };
         let input = InboxInput::Owner(owner.clone());
         let original = serde_json::to_value(owner)?;

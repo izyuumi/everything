@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::agent::LoopLimits;
 use crate::context::ContextBudget;
+use crate::host::agents::AgentDefinition;
 use crate::protocol::{CommandId, ConversationId, TaskId, UnixMillis};
 use crate::scheduler::{ExecutionPolicy, SCHEDULER_TOOL_NAMES};
 use crate::tools::ToolRegistry;
@@ -111,6 +112,7 @@ pub fn occurrence_deadline(run: &ScheduledRun) -> ScheduleResult<UnixMillis> {
 pub(super) fn capture_policy(
     run: &ScheduledRun,
     registry: &ToolRegistry,
+    agent: &AgentDefinition,
 ) -> ScheduleResult<ExecutionPolicy> {
     let target = &run.definition.target;
     let maximum = target.configuration.max_output_tokens;
@@ -153,9 +155,12 @@ pub(super) fn capture_policy(
             max_compaction_bytes: 16_384,
         },
         limits,
-    }
-    .capture(registry)
-    .map_err(|_| ScheduleError::Invalid("scheduled native policy could not be captured"))?;
+        agent: None,
+    };
+    let policy = agent
+        .narrow(policy, registry)
+        .capture(registry)
+        .map_err(|_| ScheduleError::Invalid("scheduled native policy could not be captured"))?;
     validate_policy(run, &policy)?;
     Ok(policy)
 }

@@ -302,7 +302,12 @@ impl TaskPreparation for Composition {
     ) -> Result<PreparedTaskInputs, SchedulerError> {
         let _admission = self.enter().await.map_err(|_| SchedulerError::Stopped)?;
         let query = memory_query(&request.instruction);
-        let memory = if query.is_empty() {
+        let memory = if query.is_empty()
+            || request
+                .execution
+                .agent
+                .is_some_and(|agent| agent.memory == super::agents::MemoryAccess::Off)
+        {
             Vec::new()
         } else {
             self.memory

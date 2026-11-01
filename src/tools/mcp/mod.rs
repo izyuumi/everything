@@ -547,6 +547,20 @@ fn native_alias(server: &str, original: &str) -> String {
     format!("mcp_{server}_{readable}_{}", &digest[..16])
 }
 
+pub fn server_of(descriptor: &ToolDescriptor) -> Option<&str> {
+    let (server, _) = descriptor
+        .description
+        .strip_prefix("Call MCP server ")?
+        .split_once(" tool ")?;
+    (descriptor.capabilities.contains(&ToolCapability::Mcp)
+        && descriptor
+            .name
+            .strip_prefix("mcp_")
+            .and_then(|rest| rest.strip_prefix(server))
+            .is_some_and(|rest| rest.starts_with('_')))
+    .then_some(server)
+}
+
 struct StopOnDrop {
     stop: CancellationToken,
     armed: bool,

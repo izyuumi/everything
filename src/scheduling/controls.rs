@@ -43,6 +43,8 @@ pub enum ControlError {
     Schedule(#[from] ScheduleError),
     #[error(transparent)]
     Scheduler(#[from] SchedulerError),
+    #[error(transparent)]
+    Agents(#[from] crate::host::agents::AgentsError),
     #[error("invalid schedule control: {0}")]
     Invalid(&'static str),
     #[error("schedule control requires the actual leased host Agent")]
@@ -396,6 +398,7 @@ impl ScheduleControls {
         scope: Scope,
         cancellation: CancellationToken,
     ) -> Result<ScheduleMutationResult, ControlError> {
+        let agents = crate::host::agents::AgentRepository::for_agent(&self.agent)?;
         self.run(
             scope,
             cancellation,
@@ -405,16 +408,22 @@ impl ScheduleControls {
                 let prepared = match mutation {
                     ScheduleMutation::Create { job } => {
                         validate_draft(&job)?;
+                        validate_agent(&agents, &job)?;
                         scope.authorize(&job.definition.target, authorizer)?;
                         let next = next_run(&job, None, now, token)?;
                         PreparedMutation::Create(new_job(*job, next))
                     }
                     ScheduleMutation::Update {
-                        job,
+                        mut job,
                         expected_revision,
                     } => {
                         validate_draft(&job)?;
                         let old = required_job(repository, job.id)?;
+                        if matches!(scope, Scope::Agent(_)) && job.definition.target.agent.is_none()
+                        {
+                            job.definition.target.agent = old.definition.target.agent;
+                        }
+                        validate_agent(&agents, &job)?;
                         check_revision(old.revision, expected_revision)?;
                         scope.authorize_existing(&old.definition.target, authorizer)?;
                         scope.authorize(&job.definition.target, authorizer)?;
@@ -739,6 +748,16 @@ fn validate_limit(limit: usize) -> Result<(), ControlError> {
             "page limit must be between one and 100",
         ))
     }
+}
+
+fn validate_agent(
+    agents: &crate::host::agents::AgentRepository,
+    job: &ScheduleJobDraft,
+) -> Result<(), ControlError> {
+    if let Some(id) = job.definition.target.agent {
+        agents.snapshot()?.resolve(Some(id))?;
+    }
+    Ok(())
 }
 
 fn validate_draft(job: &ScheduleJobDraft) -> Result<(), ControlError> {

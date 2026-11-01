@@ -1463,6 +1463,23 @@ pub(super) fn public_failure(error: &HostError) -> LocalFailure {
             LocalFailureCode::Unavailable,
             "schedule controls or engine are unavailable; inspect actual status",
         ),
+        HostError::ScheduleControl(ControlError::Agents(super::agents::AgentsError::NotFound)) => (
+            LocalFailureCode::InvalidRequest,
+            "schedule target agent was not found",
+        ),
+        HostError::ScheduleControl(ControlError::Agents(
+            super::agents::AgentsError::UnsupportedSchema(_)
+            | super::agents::AgentsError::Malformed
+            | super::agents::AgentsError::TooLarge
+            | super::agents::AgentsError::UnsafeFile,
+        )) => (
+            LocalFailureCode::Unavailable,
+            "agents file is unreadable; repair agents-v1.json on the Host before editing scheduled jobs",
+        ),
+        HostError::ScheduleControl(ControlError::Agents(_)) => (
+            LocalFailureCode::Internal,
+            "schedule target agent could not be resolved",
+        ),
         HostError::ScheduleControl(
             ControlError::Schedule(_) | ControlError::Invalid(_) | ControlError::ReplyTooLarge,
         ) => (
