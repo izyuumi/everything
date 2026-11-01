@@ -8,6 +8,7 @@ use serde::Serialize;
 use thiserror::Error;
 use tokio_util::sync::CancellationToken;
 
+use super::install;
 use super::{
     Catalog, LockEntry, RejectedSkill, SkillDirName, SkillIssue, SkillRecord, SkillRoots, discover,
     read_body,
@@ -26,6 +27,51 @@ enum SkillsCommand {
     List(ListArguments),
     #[command(about = "Show one skill's frontmatter, source and issues")]
     Show(ShowArguments),
+    #[command(
+        about = "Install skills from GitHub, a git URL or a local directory into ~/.agents/skills"
+    )]
+    Add(AddArguments),
+    #[command(about = "Update git-installed global skills whose upstream folder changed")]
+    Update(UpdateArguments),
+    #[command(about = "Remove global skills, their lock entries and agent links to them")]
+    Remove(RemoveArguments),
+}
+
+#[derive(Args)]
+pub(super) struct AddArguments {
+    #[arg(
+        help = "owner/repo[/path], owner/repo@skill, github:owner/repo, a GitHub tree URL, an https or ssh .git URL, or an absolute path"
+    )]
+    pub source: String,
+    #[arg(long = "skill", value_name = "NAME")]
+    pub skills: Vec<String>,
+    #[arg(long)]
+    pub all: bool,
+    #[arg(long = "ref", value_name = "REF")]
+    pub reference: Option<String>,
+    #[arg(
+        long,
+        short = 'y',
+        help = "Replace an existing directory not installed from this source"
+    )]
+    pub yes: bool,
+}
+
+#[derive(Args)]
+pub(super) struct UpdateArguments {
+    pub names: Vec<String>,
+    #[arg(long, help = "Only report which skills have upstream changes")]
+    pub check: bool,
+}
+
+#[derive(Args)]
+pub(super) struct RemoveArguments {
+    #[arg(required = true)]
+    pub names: Vec<String>,
+    #[arg(long, short = 'y')]
+    pub yes: bool,
+    #[arg(long, value_name = "PATH")]
+    workspace: Option<PathBuf>,
 }
 
 #[derive(Args)]
@@ -59,8 +105,31 @@ pub enum SkillsCliError {
     NotFound(String),
     #[error("SKILL.md body could not be read: {0}")]
     Body(SkillIssue),
-    #[error("skills discovery was cancelled")]
+    #[error("skills command was cancelled")]
     Cancelled,
+    #[error(
+        "source {input:?} is not fetched natively: {reason}; run `npx skills add {input} -g -a codex -y`"
+    )]
+    UnsupportedSource { input: String, reason: &'static str },
+    #[error("git was not found on PATH; install git or run `{0}`")]
+    GitMissing(String),
+    #[error("git {0} timed out after 5 minutes")]
+    GitTimeout(&'static str),
+    #[error("git {action} failed: {message}")]
+    Git {
+        action: &'static str,
+        message: String,
+    },
+    #[error("another vorra skills add, update or remove is running")]
+    Busy,
+    #[error("{name:?} is in the read-only root {root}; run `{command}`")]
+    ReadOnly {
+        name: String,
+        root: PathBuf,
+        command: String,
+    },
+    #[error("{0}")]
+    Failed(String),
     #[error("could not write skills output: {0}")]
     Serialization(#[from] serde_json::Error),
     #[error(transparent)]
@@ -72,11 +141,21 @@ pub fn run(
     state_dir: &Path,
     cancellation: &CancellationToken,
 ) -> Result<(), SkillsCliError> {
+    let home = home()?;
     let (json, workspace) = match &arguments.command {
         SkillsCommand::List(list) => (list.json, list.workspace.clone()),
         SkillsCommand::Show(show) => (show.json, show.workspace.clone()),
+        SkillsCommand::Add(add) => return install::add(&home, add, cancellation),
+        SkillsCommand::Update(update) => return install::update(&home, update, cancellation),
+        SkillsCommand::Remove(remove) => {
+            let roots = roots(&home, state_dir, remove.workspace.clone())?;
+            let catalog = discover(&roots, cancellation).map_err(|_| SkillsCliError::Cancelled)?;
+            return install::remove(&home, &catalog, &roots.extra, remove);
+        }
     };
-    let catalog = load(state_dir, workspace, cancellation)?;
+    install::recover_if_idle(&home);
+    let catalog = discover(&roots(&home, state_dir, workspace)?, cancellation)
+        .map_err(|_| SkillsCliError::Cancelled)?;
     let mut stderr = io::stderr().lock();
     for warning in &catalog.warnings {
         writeln!(stderr, "vorra: warning: {}", shown(warning))?;
@@ -85,6 +164,7 @@ pub fn run(
     match arguments.command {
         SkillsCommand::List(_) => list(&catalog, json, &mut stdout),
         SkillsCommand::Show(show) => self::show(&catalog, &show, &mut stdout),
+        SkillsCommand::Add(_) | SkillsCommand::Update(_) | SkillsCommand::Remove(_) => Ok(()),
     }
 }
 
@@ -106,20 +186,23 @@ fn printable(text: &str, keep_lines: bool) -> Cow<'_, str> {
     Cow::Owned(output)
 }
 
-fn shown(value: impl fmt::Display) -> String {
+pub(super) fn shown(value: impl fmt::Display) -> String {
     printable(&value.to_string(), false).into_owned()
 }
 
-fn load(
-    state_dir: &Path,
-    workspace: Option<PathBuf>,
-    cancellation: &CancellationToken,
-) -> Result<Catalog, SkillsCliError> {
-    let home = std::env::var_os("HOME")
+fn home() -> Result<PathBuf, SkillsCliError> {
+    std::env::var_os("HOME")
         .filter(|home| !home.is_empty())
         .map(PathBuf::from)
         .filter(|home| home.is_absolute())
-        .ok_or(SkillsCliError::Home)?;
+        .ok_or(SkillsCliError::Home)
+}
+
+fn roots(
+    home: &Path,
+    state_dir: &Path,
+    workspace: Option<PathBuf>,
+) -> Result<SkillRoots, SkillsCliError> {
     let workspace = match workspace {
         Some(workspace) => {
             let absolute = std::path::absolute(&workspace)?;
@@ -131,11 +214,11 @@ fn load(
         None => std::env::current_dir()?,
     };
     let settings = read_skills_settings(state_dir)?;
-    discover(
-        &SkillRoots::new(home, Some(workspace), settings.extra_roots),
-        cancellation,
-    )
-    .map_err(|_| SkillsCliError::Cancelled)
+    Ok(SkillRoots::new(
+        home.to_owned(),
+        Some(workspace),
+        settings.extra_roots,
+    ))
 }
 
 #[derive(Serialize)]

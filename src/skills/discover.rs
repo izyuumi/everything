@@ -351,7 +351,7 @@ pub fn read_body(record: &SkillRecord) -> Result<String, SkillIssue> {
     Ok(document.body.to_owned())
 }
 
-fn read_skill_file(dir: &Path) -> Result<Option<String>, SkillIssue> {
+pub(super) fn read_skill_file(dir: &Path) -> Result<Option<String>, SkillIssue> {
     let Some(directory) = open_skill_dir(dir)? else {
         return Ok(None);
     };
