@@ -417,9 +417,38 @@ final class HostModel {
         }
     }
 
-    func saveAgent(_ definition: JSONValue, expectedRevision: UInt64?) async {
+    func knownModels(_ provider: String) -> [String] {
+        let configured = settings["default_conversation"]
+        let pairs = [(configured["provider"].string, configured["model"].string)]
+            + conversations.map { (Optional($0.provider), Optional($0.model)) }
+            + (agents?.agents ?? []).map { ($0.definition["model"]["provider"].string, $0.definition["model"]["model"].string) }
+        let models = pairs.compactMap { $0.0 == provider ? $0.1 : nil }.filter(HostAgent.identifier)
+        return Array(HostModel.sortedSet(models).prefix(64))
+    }
+
+    static func sortedSet(_ values: some Sequence<String>) -> [String] {
+        Set(values).sorted { $0.utf8.lexicographicallyPrecedes($1.utf8) }
+    }
+
+    func assignSkill(_ skill: HostSkill, to agent: HostAgent, assign: Bool) async {
+        guard canMutate, let name = skill.assignableName, case .object(var definition) = agent.definition else { return }
+        var names: [String] = switch agent.definition["skills"] {
+        case .string("all"): (skills?.skills ?? []).compactMap(\.assignableName)
+        case .string("none"): []
+        default: (agent.definition["skills"]["only"].array ?? []).compactMap(\.string)
+        }
+        if assign { names.append(name) } else { names.removeAll(where: skill.matches) }
+        let sorted = HostModel.sortedSet(names)
+        definition["skills"] = sorted.isEmpty ? .string("none") : .object(["only": .array(sorted.map(JSONValue.string))])
+        let skillName: String = DisplayText.escaped(name)
+        let agentName: String = DisplayText.escaped(agent.name)
+        let label: String = assign ? "Skill \(skillName) for \(agentName)" : "Skill removal \(skillName) from \(agentName)"
+        await saveAgent(.object(definition), expectedRevision: agent.revision, label: label)
+    }
+
+    func saveAgent(_ definition: JSONValue, expectedRevision: UInt64?, label: String? = nil) async {
         guard canMutate else { return }
-        let label = "Agent " + DisplayText.escaped(definition["name"].string ?? "")
+        let label = label ?? "Agent " + DisplayText.escaped(definition["name"].string ?? "")
         await apply(.operation("agent_put", fields: ["expected_revision": expectedRevision.map(JSONValue.unsigned) ?? .null, "definition": definition]), label: label, expectedKind: "agents")
         if pendingAction == nil && agentOperationApplied != false { editingAgent = nil; creatingAgent = false }
     }
@@ -589,7 +618,8 @@ final class HostModel {
             if settled { pendingAction = nil }
             await refresh()
         } catch OwnerClientError.hostRejected(let reason) where request.isAgentOperation || request.isCommand {
-            message = label + " was rejected: " + DisplayText.escaped(reason)
+            let shown = DisplayText.escaped(reason)
+            message = label + " was rejected: " + shown + (shown.hasSuffix(".") ? "" : ".")
             rejected = true
         } catch { message = error.localizedDescription }
         guard rejected, original == connection, !closing, !Task.isCancelled else { return }
