@@ -146,7 +146,14 @@ pub fn run(
         SkillsCommand::List(list) => (list.json, list.workspace.clone()),
         SkillsCommand::Show(show) => (show.json, show.workspace.clone()),
         SkillsCommand::Add(add) => return install::add(&home, add, cancellation),
-        SkillsCommand::Update(update) => return install::update(&home, update, cancellation),
+        SkillsCommand::Update(update) => {
+            let roots = SkillRoots::new(
+                home.clone(),
+                None,
+                read_skills_settings(state_dir)?.extra_roots,
+            );
+            return install::update(&home, &roots.extra, update, cancellation);
+        }
         SkillsCommand::Remove(remove) => {
             let roots = roots(&home, state_dir, remove.workspace.clone())?;
             let catalog = discover(&roots, cancellation).map_err(|_| SkillsCliError::Cancelled)?;
