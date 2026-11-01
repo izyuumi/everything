@@ -58,10 +58,8 @@ struct NativeSettingsControls: View {
                     NativeCredentialEntryControls(store: store, purpose: .model, connectionEdited: connectionEdited)
                 }
             case .toolSelection:
-                if store.metadata?.systemOne.map({ SystemOneChoice(provider: $0.provider)?.usesKey ?? true }) ?? true {
-                    Section("Native credential entry") {
-                        NativeCredentialEntryControls(store: store, purpose: .systemOne, connectionEdited: connectionEdited)
-                    }
+                Section("Native credential entry") {
+                    NativeCredentialEntryControls(store: store, purpose: .systemOne, connectionEdited: connectionEdited)
                 }
             case .memory: EmptyView()
             }
