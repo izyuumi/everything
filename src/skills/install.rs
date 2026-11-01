@@ -402,7 +402,7 @@ fn copy_tree(
                 let metadata = entry.metadata()?;
                 budget.charge(metadata.len(), &path)?;
                 fs::copy(&path, &output).map_err(at(&path))?;
-                fs::set_permissions(&output, fs::Permissions::from_mode(metadata.mode() & 0o777))
+                fs::set_permissions(&output, fs::Permissions::from_mode(metadata.mode() & 0o755))
                     .map_err(at(&output))?;
             }
         } else {
