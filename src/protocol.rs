@@ -491,6 +491,8 @@ impl TryFrom<PermissionInspectionWire> for PermissionInspection {
 pub enum ConversationEvent {
     ConversationCreated {
         title: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        agent_id: Option<Uuid>,
     },
     MessageAppended {
         message: ConversationMessage,

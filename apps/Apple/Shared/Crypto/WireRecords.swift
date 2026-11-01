@@ -30,6 +30,7 @@ struct WireEvent: Sendable, Equatable, Identifiable {
         switch kind {
         case "conversation_created":
             if let title = try payload.fields["title"], title != .null { _ = try title.text }
+            if let agent = try payload.fields["agent_id"], agent != .null { _ = try agent.identifier }
         case "message_appended": try Self.validateMessage(payload.field("message"))
         case "assistant_text_delta":
             _ = try payload.field("task_id").identifier

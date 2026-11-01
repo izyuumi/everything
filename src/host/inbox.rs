@@ -676,6 +676,7 @@ fn validate_namespace(connection: &Connection, input: &InboxInput) -> Result<(),
             OwnerCommand::Initialize { title, .. },
             ConversationEvent::ConversationCreated {
                 title: Some(original),
+                ..
             },
         ) => *title == original,
         _ => false,
