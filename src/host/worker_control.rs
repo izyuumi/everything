@@ -647,7 +647,8 @@ fn verify_original_history(
     admission: &WorkerAdmissionSnapshot,
     manifest: &WorkerManifest,
 ) -> Result<crate::protocol::MessageId, HostError> {
-    let Some(InboxInput::Owner(OwnerCommand::Initialize { title, .. })) = record.input()? else {
+    let Some(InboxInput::Owner(OwnerCommand::Initialize { title, agent, .. })) = record.input()?
+    else {
         return Err(HostError::Invalid("worker creation history is unavailable"));
     };
     let created = store
@@ -670,7 +671,7 @@ fn verify_original_history(
     let input: EventEnvelope = serde_json::from_value(input.events[0].payload.clone())?;
     if creation.conversation_id != record.conversation_id
         || creation.causation_id != Some(record.command_id)
-        || !matches!(creation.payload, ConversationEvent::ConversationCreated { title: Some(original), .. } if original == title)
+        || !matches!(creation.payload, ConversationEvent::ConversationCreated { title: Some(original), agent_id } if original == title && agent_id.is_none_or(|recorded| agent.map(|agent| *agent.as_uuid()) == Some(recorded)))
         || input.conversation_id != record.conversation_id
         || input.causation_id != Some(input_id)
     {
