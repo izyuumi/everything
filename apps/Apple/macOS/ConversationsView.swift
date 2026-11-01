@@ -159,6 +159,7 @@ struct AgentEditorView: View {
     @State private var memory = "shared"
     @State private var skills = "all"
     @State private var removing = false
+    @State private var saving = false
 
     private var ownID: OwnerID { agent?.id ?? newID }
     private var isDefault: Bool { agent != nil && agent?.id == model.agents?.defaultID }
@@ -238,11 +239,30 @@ struct AgentEditorView: View {
         let input = workspace
         guard !input.isEmpty, !workspaceUnchanged, input.hasPrefix("/") else { return }
         do { try await Task.sleep(for: .milliseconds(300)) } catch { return }
-        let path = await withCheckedContinuation { continuation in
-            DispatchQueue.global(qos: .userInitiated).async { continuation.resume(returning: Self.resolve(input)) }
-        }
+        let path = await Self.resolveOffMain(input)
         guard !Task.isCancelled, workspace == input else { return }
         resolution = Resolution(input: input, path: path)
+    }
+    nonisolated private static let resolver = DispatchQueue(label: "to.yumi.vorra.mac.workspace", qos: .userInitiated)
+    nonisolated private static func resolveOffMain(_ input: String) async -> String? {
+        await withCheckedContinuation { continuation in
+            resolver.async { continuation.resume(returning: resolve(input)) }
+        }
+    }
+    private func save() async {
+        let submitted = definition
+        let input = workspace
+        if !workspaceUnchanged, let checked = resolvedWorkspace {
+            saving = true
+            let current = await Self.resolveOffMain(input)
+            saving = false
+            guard current == checked else {
+                if workspace == input { resolution = Resolution(input: input, path: current) }
+                model.message = "The workspace changed since it was checked. Review it and save again."
+                return
+            }
+        }
+        await model.saveAgent(submitted, expectedRevision: agent?.revision)
     }
     private func targetLabel(_ target: OwnerID) -> String {
         guard let agent = model.agents?.agents.first(where: { $0.id == target }) else { return "Unknown agent " + target.string }
@@ -428,7 +448,7 @@ struct AgentEditorView: View {
                 }
                 Spacer()
                 Button("Cancel") { dismiss() }.keyboardShortcut(.cancelAction)
-                Button("Save") { Task { await model.saveAgent(definition, expectedRevision: agent?.revision) } }
+                Button("Save") { Task { await save() } }
                     .keyboardShortcut(.defaultAction)
                     .disabled(!canSave)
             }
@@ -445,7 +465,7 @@ struct AgentEditorView: View {
     }
 
     private var canSave: Bool {
-        guard model.canMutate, validName, !nameTaken, validDescription, validPersona else { return false }
+        guard model.canMutate, !saving, validName, !nameTaken, validDescription, validPersona else { return false }
         return modelIssue == nil && toolIssue == nil && traitIssue == nil && workspaceIssue == nil && !workspacePending && messagingIssue == nil
     }
 
@@ -529,12 +549,20 @@ struct AgentEditorView: View {
 struct BoundedMessage: View {
     let text: String
     @State private var expanded = false
+    @State private var shownHeight: CGFloat = 0
+    @State private var fullHeight: CGFloat = 0
 
     var body: some View {
         HStack(alignment: .firstTextBaseline) {
             Text(verbatim: text).font(.caption).foregroundStyle(.secondary).lineLimit(2).textSelection(.enabled)
-                .frame(maxWidth: .infinity, alignment: .leading).help(text)
-            if text.count > 140 {
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(alignment: .topLeading) {
+                    Text(verbatim: text).font(.caption).fixedSize(horizontal: false, vertical: true).hidden()
+                        .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { fullHeight = $0 }
+                }
+                .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { shownHeight = $0 }
+                .help(text)
+            if fullHeight > shownHeight + 1 {
                 Button("Full message") { expanded = true }.font(.caption).buttonStyle(.link)
                     .popover(isPresented: $expanded) {
                         ScrollView {
@@ -581,13 +609,14 @@ struct SkillsView: View {
     }
 
     private func assignmentBlocked(_ skill: HostSkill, _ agent: HostAgent) -> Bool {
-        agent.skillAssigned(skill) ? model.skillRemovalBlocked(agent) : model.skillAssignmentFull(agent)
+        agent.skillAssigned(skill) ? model.skillRemovalBlock(skill, agent) != nil : model.skillAssignmentFull(agent)
     }
 
     private func assignLabel(_ skill: HostSkill, _ agent: HostAgent) -> String {
         let name = DisplayText.escaped(agent.name)
         guard assignmentBlocked(skill, agent) else { return name }
-        return name + (agent.skillAssigned(skill) ? " (all skills; the Host omitted some)" : " (\(HostModel.maximumAssignedSkills) skills assigned)")
+        guard agent.skillAssigned(skill) else { return name + " (\(HostModel.maximumAssignedSkills) skills assigned)" }
+        return name + (model.skillRemovalBlock(skill, agent) == .omitted ? " (all skills; the Host omitted some)" : " (all skills; more than \(HostModel.maximumAssignedSkills) would remain)")
     }
 
     private func skillSummary(_ skill: HostSkill) -> String {

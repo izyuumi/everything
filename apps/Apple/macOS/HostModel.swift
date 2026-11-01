@@ -436,8 +436,13 @@ final class HostModel {
     static let maximumAssignedSkills = 256
     static let maximumMessageTargets = 64
 
-    func skillRemovalBlocked(_ agent: HostAgent) -> Bool {
-        agent.definition["skills"] == .string("all") && (skills?.omitted ?? 0) > 0
+    enum SkillRemovalBlock { case omitted, overCap }
+
+    func skillRemovalBlock(_ skill: HostSkill, _ agent: HostAgent) -> SkillRemovalBlock? {
+        guard agent.definition["skills"] == .string("all") else { return nil }
+        if (skills?.omitted ?? 0) > 0 { return .omitted }
+        let kept = (skills?.skills ?? []).compactMap(\.assignableName).filter { !skill.matches($0) }
+        return HostModel.sortedSet(kept).count > HostModel.maximumAssignedSkills ? .overCap : nil
     }
 
     func skillAssignmentFull(_ agent: HostAgent) -> Bool {
@@ -446,8 +451,11 @@ final class HostModel {
 
     func assignSkill(_ skill: HostSkill, to agent: HostAgent, assign: Bool) async {
         guard canMutate, let name = skill.assignableName, case .object(var definition) = agent.definition else { return }
-        if !assign && skillRemovalBlocked(agent) {
-            message = "The Host omitted some skills from its list, so removing one skill from an agent with all skills could drop skills this app cannot see. Choose none or all in the agent editor, or use vorra agents edit."
+        if !assign, let block = skillRemovalBlock(skill, agent) {
+            message = switch block {
+            case .omitted: "The Host omitted some skills from its list, so removing one skill from an agent with all skills could drop skills this app cannot see. Choose none or all in the agent editor, or use vorra agents edit."
+            case .overCap: "Removing one skill from an agent with all skills would list more than \(HostModel.maximumAssignedSkills) skills, the Host's limit. Choose none or all in the agent editor, or use vorra agents edit."
+            }
             return
         }
         var names: [String] = switch agent.definition["skills"] {

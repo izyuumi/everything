@@ -1677,7 +1677,7 @@ final class NativeSettingsStore {
             } catch {
                 let failure = sanitize(error)
                 owner.operations[id]?.issue = failure
-                if failure == .systemOneProviderEndpoint, let submitted = owner.submittedDrafts[id] { systemOneRejectedDraft = submitted }
+                if failure == .systemOneProviderEndpoint, isCurrent(owner), let submitted = owner.submittedDrafts[id] { systemOneRejectedDraft = submitted }
                 if let context = owner.devices[id] {
                     if context.retired { context.issue = context.issue ?? failure }
                     else { context.issue = failure }
