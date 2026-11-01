@@ -163,6 +163,7 @@ pub struct Options {
     pub provider: Option<ProviderKind>,
     pub model: Option<String>,
     pub agent: Option<String>,
+    pub explicit_route: bool,
     pub endpoint: Option<ProviderEndpoint>,
     pub default_instructions: &'static str,
 }
@@ -179,6 +180,7 @@ pub struct App {
     default_instructions: &'static str,
     pub tools: Option<Tools>,
     selected_agent: Option<AgentDefinition>,
+    base_route: (ProviderKind, Option<String>, ProviderEndpoint),
     pub agent_label: String,
     pub entries: Vec<Entry>,
     pub input: Input,
@@ -268,6 +270,7 @@ impl App {
             default_instructions: options.default_instructions,
             tools: None,
             selected_agent: None,
+            base_route: (ProviderKind::OpenAi, None, ProviderEndpoint::Official),
             agent_label: String::new(),
             entries: vec![Entry::Banner],
             input: Input::default(),
@@ -293,6 +296,7 @@ impl App {
             rendered_width: 0,
             dirty: true,
         };
+        app.base_route = (app.provider, app.model.clone(), app.endpoint.clone());
         let target = options.conversation.or_else(|| {
             options
                 .resume_latest
@@ -307,6 +311,11 @@ impl App {
                     TuiError::Setup(format!("no agent named {name}; see `vorra agents list`"))
                 })?
                 .clone();
+            if definition.model.is_some() && options.explicit_route {
+                return Err(TuiError::Setup(format!(
+                    "agent {name} sets its own model; omit --provider and --model or use another agent"
+                )));
+            }
             if let Some(conversation_id) = target {
                 let bound = match conversations.iter().find(|info| info.id == conversation_id) {
                     Some(info) => info.agent_id,
@@ -336,13 +345,36 @@ impl App {
     }
 
     fn adopt_agent(&mut self, definition: AgentDefinition) {
-        if let Some(model) = &definition.model {
-            self.provider = model.provider;
-            self.model = Some(model.model.clone());
-            self.endpoint = model.endpoint.clone();
-        }
+        (self.provider, self.model, self.endpoint) = match &definition.model {
+            Some(model) => (
+                model.provider,
+                Some(model.model.clone()),
+                model.endpoint.clone(),
+            ),
+            None => self.base_route.clone(),
+        };
         self.agent_label = definition.name.as_str().to_owned();
         self.selected_agent = Some(definition);
+    }
+
+    fn route_locked(&mut self) -> bool {
+        let Some(name) = self
+            .selected_agent
+            .as_ref()
+            .filter(|agent| agent.model.is_some())
+            .map(|agent| agent.name.as_str().to_owned())
+        else {
+            return false;
+        };
+        self.note(
+            NoteKind::Warn,
+            format!("agent {name} sets its own model · /agent NAME for an agent without one first"),
+        );
+        true
+    }
+
+    fn remember_route(&mut self) {
+        self.base_route = (self.provider, self.model.clone(), self.endpoint.clone());
     }
 
     async fn refresh_agent_label(&mut self) {
@@ -1425,7 +1457,11 @@ impl App {
     }
 
     async fn choose_model(&mut self, model: String) {
+        if self.route_locked() {
+            return;
+        }
         self.model = Some(model);
+        self.remember_route();
         self.new_conversation(None).await;
     }
 
@@ -1465,10 +1501,12 @@ impl App {
                 Some(model) => self.choose_model((*model).to_owned()).await,
                 None => self.pick_model().await,
             },
+            "/provider" if !arguments.is_empty() && self.route_locked() => {}
             "/provider" => match arguments.first().copied() {
                 Some("openai") => {
                     self.provider = ProviderKind::OpenAi;
                     self.endpoint = ProviderEndpoint::Official;
+                    self.remember_route();
                     self.note(
                         NoteKind::Ok,
                         "provider openai for new conversations · /model to pick a model",
@@ -1477,6 +1515,7 @@ impl App {
                 Some("anthropic") => {
                     self.provider = ProviderKind::Anthropic;
                     self.endpoint = ProviderEndpoint::Official;
+                    self.remember_route();
                     self.note(
                         NoteKind::Ok,
                         "provider anthropic for new conversations · /model MODEL_ID",
@@ -1609,6 +1648,9 @@ impl App {
     }
 
     async fn pick_model(&mut self) {
+        if self.route_locked() {
+            return;
+        }
         if self.provider != ProviderKind::OpenAi {
             self.note(NoteKind::Info, "type /model MODEL_ID for anthropic");
             return;
