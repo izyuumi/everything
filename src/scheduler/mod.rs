@@ -39,6 +39,13 @@ pub(crate) fn task_snapshot_with_evidence(
     Ok((task.snapshot(), task.checkpoint.terminal_evidence))
 }
 
+pub(crate) fn task_execution(
+    store: &crate::storage::Store,
+    task: crate::protocol::TaskId,
+) -> Result<ExecutionPolicy, SchedulerError> {
+    Ok(repository::load(store, task)?.definition.execution)
+}
+
 pub fn task_publication_records(
     store: &crate::storage::Store,
     task: crate::protocol::TaskId,

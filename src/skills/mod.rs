@@ -1,20 +1,28 @@
+mod agents_md;
 pub mod cli;
 mod discover;
 mod fetch;
 mod frontmatter;
 mod install;
 mod lock;
+mod tool;
 
+use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::fmt;
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
+pub use agents_md::{MAX_PROJECT_INSTRUCTIONS_BYTES, project_instructions};
 pub use discover::{
     Cancelled, Catalog, MissingSkill, RejectedSkill, SkillRoots, discover, read_body,
 };
 pub use lock::LockEntry;
+pub use tool::{
+    MAX_CATALOG_BYTES, MAX_CATALOG_SKILLS, READ_SKILL_NAME, ReadSkillTool, SkillSummary,
+    offered_catalog, read_skill_descriptor, summaries,
+};
 
 pub const MAX_SKILL_DIRS_PER_ROOT: usize = 512;
 pub const MAX_SKILL_FILE_BYTES: u64 = 256 * 1024;
@@ -25,6 +33,32 @@ pub const MAX_NAME_BYTES: usize = 256;
 pub const SPEC_MAX_NAME_BYTES: usize = 64;
 pub const MAX_DESCRIPTION_BYTES: usize = 1024;
 pub const MAX_COMPATIBILITY_BYTES: usize = 500;
+
+pub fn is_format_character(character: char) -> bool {
+    matches!(
+        character,
+        '\u{200B}'..='\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}' | '\u{FEFF}'
+    )
+}
+
+pub fn escaped(text: &str, keep_lines: bool) -> Cow<'_, str> {
+    let escape = |character: char| {
+        (character.is_control() && !(keep_lines && matches!(character, '\n' | '\t')))
+            || is_format_character(character)
+    };
+    if !text.chars().any(escape) {
+        return Cow::Borrowed(text);
+    }
+    let mut output = String::with_capacity(text.len() + 8);
+    for character in text.chars() {
+        if escape(character) {
+            output.extend(character.escape_unicode());
+        } else {
+            output.push(character);
+        }
+    }
+    Cow::Owned(output)
+}
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "String")]
@@ -54,6 +88,8 @@ impl SkillName {
             Some("contains a path separator or NUL")
         } else if raw.chars().any(char::is_control) {
             Some("contains a control character")
+        } else if raw.chars().any(is_format_character) {
+            Some("contains a bidirectional or invisible format character")
         } else if raw.starts_with('.') {
             Some("is a dot name or starts with a dot")
         } else {
@@ -176,6 +212,8 @@ pub struct SkillRecord {
     pub source: Option<LockEntry>,
     pub issues: Vec<SkillIssue>,
     pub shadowed: bool,
+    #[serde(skip)]
+    pub preview: String,
 }
 
 impl SkillRecord {
@@ -208,6 +246,7 @@ pub enum SkillIssue {
     SkillFileNotRegular,
     NotUtf8,
     SymlinkRefused { reason: &'static str },
+    Untrusted { reason: &'static str },
     Unreadable { message: String },
 }
 
@@ -268,6 +307,9 @@ impl fmt::Display for SkillIssue {
             Self::NotUtf8 => formatter.write_str("SKILL.md is not UTF-8; not offered"),
             Self::SymlinkRefused { reason } => {
                 write!(formatter, "symlinked skill directory refused: {reason}")
+            }
+            Self::Untrusted { reason } => {
+                write!(formatter, "refused: {reason}; not offered")
             }
             Self::Unreadable { message } => write!(formatter, "unreadable: {message}"),
         }

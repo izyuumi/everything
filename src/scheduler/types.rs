@@ -124,10 +124,14 @@ impl ExecutionPolicy {
         }
         let mut captured = self.clone();
         captured.workspace_root = workspace_root;
+        let skills = self.offers_skills();
         let allowed = if self.tools_enabled {
             registry
                 .descriptors()
                 .filter(|tool| {
+                    if tool.name == crate::skills::READ_SKILL_NAME {
+                        return skills;
+                    }
                     self.allowed_tools
                         .as_ref()
                         .is_none_or(|names| names.contains(&tool.name))
@@ -143,6 +147,14 @@ impl ExecutionPolicy {
         }
         captured.validate()?;
         Ok(captured)
+    }
+
+    pub fn offers_skills(&self) -> bool {
+        self.tools_enabled
+            && self
+                .agent
+                .as_ref()
+                .is_some_and(|agent| !agent.skills.is_none())
     }
 
     pub(crate) fn authority(
@@ -190,6 +202,7 @@ pub struct TaskPreparationRequest {
 
 pub struct PreparedTaskInputs {
     pub memory: Vec<MemoryExcerpt>,
+    pub quoted: Vec<crate::context::QuotedContext>,
     pub selected_tools: Vec<ToolDefinition>,
 }
 
@@ -450,7 +463,12 @@ impl StoredTask {
             waiting: self.checkpoint.waiting.clone(),
             last_output: self.checkpoint.last_output.clone(),
             diagnostic: self.checkpoint.diagnostic.clone(),
-            agent_id: self.definition.execution.agent.map(|agent| agent.id),
+            agent_id: self
+                .definition
+                .execution
+                .agent
+                .as_ref()
+                .map(|agent| agent.id),
         }
     }
 }

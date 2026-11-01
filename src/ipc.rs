@@ -167,6 +167,10 @@ pub enum OwnerQuery {
     Agent {
         id: crate::host::agents::AgentId,
     },
+    Skills {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        workspace: Option<std::path::PathBuf>,
+    },
 }
 
 impl OwnerQuery {
@@ -781,6 +785,11 @@ pub enum OwnerQueryResult {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         unavailable_tools: Option<Vec<String>>,
     },
+    Skills {
+        skills: Vec<crate::skills::SkillSummary>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        warnings: Vec<String>,
+    },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -964,6 +973,9 @@ impl OwnerQueryResult {
                     && agents.get(agents.default_agent).is_some()
             }
             (OwnerQuery::Agent { id }, Self::Agent { agent, .. }) => agent.id == *id,
+            (OwnerQuery::Skills { .. }, Self::Skills { skills, warnings }) => {
+                skills.len() <= 16_384 && warnings.len() <= 1024
+            }
             (OwnerQuery::Command { command_id }, Self::Command { receipt }) => receipt
                 .as_ref()
                 .is_none_or(|receipt| receipt.command_id == *command_id),

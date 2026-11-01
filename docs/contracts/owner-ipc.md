@@ -36,6 +36,10 @@ Agent definitions are owner data ([agents and skills](../architecture/agents-and
 
 The three operations return `agents { agents }` with the saved file and run under the Host mutation lock while it accepts work. Results are checked against the request (the put agent exists with the requested name, a removed id is absent, the default equals the requested id). Repository errors map as in the [unit 1 notes](../architecture/agents-and-skills.md#unit-1-as-built): invalid input, configuration, not found, conflict and stale revision are `invalid_request` with the error text. These are not protected Settings and are not reachable through paired-device ingress.
 
+## Skills
+
+`skills { workspace? }` (additive) discovers Agent Skills on the Host as `vorra skills list` does, for the absolute `workspace` or, when omitted, the Host's `workspace_root` setting, with the `skills.extra_roots` the Host started with. It returns `skills { skills, warnings }`. Each `SkillSummary` has `name`, `status` (`tracked`, `untracked`, `rejected`, `missing`), `offered`, `shadowed` and, when known, `dir_name`, `description`, `root` (`project`, `global`, `extra`), `path`, `source`, `source_type`, `allowed_tools` (shown, never applied), `license`, `compatibility`, `preview` (the first body lines, at most 1 KiB) and `issues` as text. Strings are raw; clients escape control and bidirectional characters before display. At most 16384 rows and 1024 warnings are accepted. A relative workspace is `invalid_request`. The query reads only the filesystem and changes nothing; assignment changes go through `agent_put`.
+
 `conversation` and `conversations` summaries carry an optional `agent_id`, omitted when the conversation row is `NULL` (the current default agent). The `task` query's `execution` metadata carries an optional `agent_id` from the task's captured execution policy.
 
 ## Memory use

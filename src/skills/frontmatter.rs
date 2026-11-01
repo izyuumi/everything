@@ -16,9 +16,18 @@ pub(super) fn split(raw: &str) -> Option<Document<'_>> {
     let rest = raw
         .strip_prefix("---\n")
         .or_else(|| raw.strip_prefix("---\r\n"))?;
-    let close = rest.find("\n---")?;
-    let frontmatter = rest[..close].strip_suffix('\r').unwrap_or(&rest[..close]);
-    let after = &rest[close + 4..];
+    let (frontmatter, after) = match rest.strip_prefix("---") {
+        Some(after) if after.is_empty() || after.starts_with('\n') || after.starts_with("\r\n") => {
+            ("", after)
+        }
+        _ => {
+            let close = rest.find("\n---")?;
+            (
+                rest[..close].strip_suffix('\r').unwrap_or(&rest[..close]),
+                &rest[close + 4..],
+            )
+        }
+    };
     let after = after.strip_prefix('\r').unwrap_or(after);
     let body = after.strip_prefix('\n').unwrap_or(after);
     Some(Document { frontmatter, body })

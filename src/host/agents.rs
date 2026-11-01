@@ -243,9 +243,10 @@ pub enum MemoryAccess {
     Off,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum SkillAssignment {
+    #[default]
     None,
     All,
     Only(BTreeSet<SkillName>),
@@ -258,12 +259,20 @@ pub enum Messaging {
     May(BTreeSet<AgentId>),
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+impl SkillAssignment {
+    pub fn is_none(&self) -> bool {
+        *self == Self::None
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CapturedAgent {
     pub id: AgentId,
     pub revision: u64,
     pub memory: MemoryAccess,
+    #[serde(default, skip_serializing_if = "SkillAssignment::is_none")]
+    pub skills: SkillAssignment,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -443,6 +452,7 @@ impl AgentDefinition {
             id: self.id,
             revision: self.revision,
             memory: self.memory,
+            skills: self.skills.clone(),
         }
     }
 

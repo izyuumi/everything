@@ -153,6 +153,7 @@ async fn run(
             Err(error) => return waiting(WaitingReason::Interrupted, error.to_string()),
         };
         setup.memory = prepared.memory;
+        setup.quoted = prepared.quoted;
         setup.selected_tools = prepared.selected_tools;
     }
     let captured = services
@@ -392,6 +393,7 @@ fn prepare(
             },
             budget: policy.budget.clone(),
             memory: Vec::new(),
+            quoted: Vec::new(),
             selected_tools,
             limits,
             provider_resume: resume,

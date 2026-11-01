@@ -22,6 +22,7 @@ use super::selection::{
     SelectionSettings, SelectionSummary,
 };
 use super::settings::HostSettings;
+use crate::context::QuotedContext;
 use crate::permissions::ExecutionAuthority;
 use crate::protocol::{Command, CommandEnvelope, CommandId, MessageContent, TaskId};
 use crate::scheduler::{
@@ -306,26 +307,118 @@ impl TaskPreparation for Composition {
             || request
                 .execution
                 .agent
+                .as_ref()
                 .is_some_and(|agent| agent.memory == super::agents::MemoryAccess::Off)
         {
             Vec::new()
         } else {
             self.memory
-                .retrieve(query, cancellation)
+                .retrieve(query, cancellation.clone())
                 .await
                 .map_err(|error| SchedulerError::Provider(error.to_string()))?
                 .excerpts
         };
-        let selected_tools = self
+        let mut selected_tools = self
             .take_selection(&request)
             .await
             .map_err(|error| SchedulerError::Provider(error.to_string()))?
-            .unwrap_or(request.selected_tools);
+            .unwrap_or_else(|| request.selected_tools.clone());
+        let quoted = quoted_context(
+            &request.execution,
+            self.effective.skills.extra_roots.clone(),
+            cancellation,
+        )
+        .await?;
+        if quoted
+            .iter()
+            .any(|block| matches!(block, QuotedContext::Skills { .. }))
+            && request
+                .authority
+                .permits_tool(crate::skills::READ_SKILL_NAME)
+            && !selected_tools
+                .iter()
+                .any(|tool| tool.name == crate::skills::READ_SKILL_NAME)
+        {
+            if selected_tools.len() >= request.execution.limits.max_selected_tools
+                && let Some(index) = selected_tools
+                    .iter()
+                    .rposition(|tool| tool.name != crate::selector::SEARCH_TOOLS_NAME)
+            {
+                selected_tools.remove(index);
+            }
+            if selected_tools.len() < request.execution.limits.max_selected_tools {
+                let descriptor = crate::skills::read_skill_descriptor();
+                selected_tools.push(crate::model::ToolDefinition {
+                    name: descriptor.name,
+                    description: descriptor.description,
+                    input_schema: descriptor.input_schema,
+                });
+            }
+        }
         Ok(PreparedTaskInputs {
             memory,
+            quoted,
             selected_tools,
         })
     }
+}
+
+async fn quoted_context(
+    execution: &ExecutionPolicy,
+    extra_roots: Option<Vec<std::path::PathBuf>>,
+    cancellation: CancellationToken,
+) -> Result<Vec<QuotedContext>, SchedulerError> {
+    let workspace = execution.workspace_root.clone();
+    let skills = execution
+        .agent
+        .as_ref()
+        .filter(|_| execution.offers_skills())
+        .map(|agent| agent.skills.clone());
+    tokio::task::spawn_blocking(move || {
+        let mut warnings = Vec::new();
+        let mut quoted = Vec::new();
+        if let Some(found) = crate::skills::project_instructions(&workspace, &mut warnings) {
+            let mut text = crate::skills::escaped(&found.text, true).into_owned();
+            if let Some(bytes) = found.truncated_from {
+                text.push_str(&format!(
+                    "\n[truncated: AGENTS.md is {bytes} bytes; only the first {} are included]",
+                    crate::skills::MAX_PROJECT_INSTRUCTIONS_BYTES
+                ));
+            }
+            if !text.trim().is_empty() {
+                quoted.push(QuotedContext::ProjectInstructions {
+                    path: crate::skills::escaped(&found.path.to_string_lossy(), false).into_owned(),
+                    text,
+                });
+            }
+        }
+        if let Some(assignment) = skills {
+            let home = std::env::var_os("HOME")
+                .map(std::path::PathBuf::from)
+                .filter(|home| home.is_absolute());
+            match home {
+                Some(home) => {
+                    let roots = crate::skills::SkillRoots::new(home, Some(workspace), extra_roots);
+                    let catalog = crate::skills::discover(&roots, &cancellation)
+                        .map_err(|_| SchedulerError::Invalid("skill discovery was cancelled"))?;
+                    warnings.extend(catalog.warnings.iter().cloned());
+                    if let Some(text) = crate::skills::offered_catalog(&catalog, &assignment) {
+                        quoted.push(QuotedContext::Skills { text });
+                    }
+                }
+                None => warnings.push("HOME is unavailable; no skills were offered".to_owned()),
+            }
+        }
+        for warning in warnings {
+            eprintln!(
+                "vorra: warning: turn context: {}",
+                crate::skills::escaped(&warning, false)
+            );
+        }
+        Ok(quoted)
+    })
+    .await
+    .map_err(|_| SchedulerError::Worker)?
 }
 
 impl HostInner {

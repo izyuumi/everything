@@ -138,6 +138,16 @@ impl Host {
         }
     }
 
+    pub async fn skills(
+        &self,
+        workspace: Option<PathBuf>,
+    ) -> Result<(Vec<crate::skills::SkillSummary>, Vec<String>), TuiError> {
+        match self.query(OwnerQuery::Skills { workspace }).await? {
+            OwnerQueryResult::Skills { skills, warnings } => Ok((skills, warnings)),
+            _ => Err(TuiError::Invalid("unexpected skills response")),
+        }
+    }
+
     pub async fn initialize(
         &self,
         title: String,

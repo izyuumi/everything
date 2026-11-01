@@ -11,7 +11,7 @@ use super::settings::{NativeAttemptFloor, SettingsProviderStop};
 use super::*;
 use crate::context::{
     BuiltContext, CompactionRecord, ContextBudget, ContextBuilder, ContextInput,
-    ContinuationBinding, HistoryEntry, MemoryExcerpt, TaskContext,
+    ContinuationBinding, HistoryEntry, MemoryExcerpt, QuotedContext, TaskContext,
 };
 use crate::permissions::{ApprovalRequest, ExecutionMode, READ_ONLY_WRITES_UNAVAILABLE};
 use crate::protocol::{OperationId, PermissionInspection, TaskId, ToolCall, ToolResult};
@@ -88,6 +88,7 @@ pub struct ToolRunSetup {
     pub task: TaskContext,
     pub budget: ContextBudget,
     pub memory: Vec<MemoryExcerpt>,
+    pub quoted: Vec<QuotedContext>,
     pub selected_tools: Vec<model::ToolDefinition>,
     pub limits: LoopLimits,
     pub provider_resume: ProviderResume,
@@ -174,6 +175,8 @@ struct Definition {
     task: TaskContext,
     budget: ContextBudget,
     memory: Vec<SavedMemory>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    quoted: Vec<QuotedContext>,
     initial_tools: Vec<model::ToolDefinition>,
     limits: LoopLimits,
 }
@@ -829,6 +832,7 @@ impl ToolRunSetup {
             task: definition.task.clone(),
             budget: definition.budget.clone(),
             memory: definition.memory.iter().map(SavedMemory::excerpt).collect(),
+            quoted: definition.quoted.clone(),
             selected_tools: definition.initial_tools.clone(),
             limits: definition.limits.clone(),
             provider_resume,
@@ -912,6 +916,7 @@ fn prepare_definition(
         task: setup.task.clone(),
         budget: setup.budget.clone(),
         memory,
+        quoted: setup.quoted.clone(),
         initial_tools: setup.selected_tools.clone(),
         limits: setup.limits.clone(),
     };
@@ -1079,6 +1084,7 @@ fn build_context(
                 .iter()
                 .map(SavedMemory::excerpt)
                 .collect(),
+            quoted: turn.definition.quoted.clone(),
             selected_tools: if turn.definition.limits.max_tool_calls == 0 {
                 Vec::new()
             } else {
@@ -2242,6 +2248,7 @@ impl Agent {
                 }
                 let setup = setup.ok_or(AgentError::NativeSetupRequired)?;
                 if !setup.memory.is_empty()
+                    || !setup.quoted.is_empty()
                     || setup.selected_tools != profile.definitions()
                     || setup.provider_resume != ProviderResume::OnlyUnstarted
                     || setup.limits.max_model_attempts > 4

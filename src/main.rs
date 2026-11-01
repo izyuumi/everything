@@ -2819,6 +2819,7 @@ async fn run_tool_chat(
             },
             budget,
             memory: Vec::new(),
+            quoted: Vec::new(),
             selected_tools: initial,
             limits,
             provider_resume,
