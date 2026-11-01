@@ -30,6 +30,51 @@ const SEARCH_DURATION: Duration = Duration::from_secs(5);
 const SEARCH_EXCERPT_BYTES: usize = 256;
 const SEARCH_CONTEXT_BYTES: usize = 96;
 const WRITE_BYTES: usize = 262_144;
+const PROTECTED: &str = "path is inside the protected Host state directory";
+
+pub(super) struct Protected {
+    path: PathBuf,
+    dev: u64,
+    ino: u64,
+}
+
+impl Protected {
+    pub(super) fn open(path: &Path) -> io::Result<Arc<Self>> {
+        let path = std::fs::canonicalize(path)?;
+        let metadata = std::fs::metadata(&path)?;
+        Ok(Arc::new(Self {
+            dev: std::os::unix::fs::MetadataExt::dev(&metadata),
+            ino: std::os::unix::fs::MetadataExt::ino(&metadata),
+            path,
+        }))
+    }
+
+    fn contains(&self, path: &Path) -> bool {
+        std::fs::canonicalize(path)
+            .ok()
+            .or_else(|| {
+                Some(
+                    std::fs::canonicalize(path.parent()?)
+                        .ok()?
+                        .join(path.file_name()?),
+                )
+            })
+            .is_some_and(|path| path.starts_with(&self.path))
+    }
+
+    fn is(&self, metadata: &Metadata) -> bool {
+        metadata.dev() == self.dev && metadata.ino() == self.ino
+    }
+
+    fn check(protected: Option<&Self>, directory: &Dir) -> io::Result<()> {
+        match protected {
+            Some(protected) if protected.is(&directory.dir_metadata()?) => {
+                Err(io::Error::new(io::ErrorKind::PermissionDenied, PROTECTED))
+            }
+            _ => Ok(()),
+        }
+    }
+}
 
 #[derive(Clone, Copy)]
 enum Operation {
@@ -42,9 +87,13 @@ struct FilesystemTool {
     descriptor: ToolDescriptor,
     operation: Operation,
     redactor: Redactor,
+    protected: Option<Arc<Protected>>,
 }
 
-pub(super) fn registrations(redactor: Redactor) -> Vec<(Arc<dyn Tool>, ToolScopeRule)> {
+pub(super) fn registrations(
+    redactor: Redactor,
+    protected: Option<Arc<Protected>>,
+) -> Vec<(Arc<dyn Tool>, ToolScopeRule)> {
     let path = json!({"type":"string","minLength":1,"maxLength":1024});
     [
         (
@@ -89,6 +138,7 @@ pub(super) fn registrations(redactor: Redactor) -> Vec<(Arc<dyn Tool>, ToolScope
                 },
                 operation,
                 redactor: redactor.clone(),
+                protected: protected.clone(),
             }) as Arc<dyn Tool>,
             ToolScopeRule::Filesystem {
                 path_pointers: vec!["/path".into()],
@@ -139,15 +189,29 @@ impl Tool for FilesystemTool {
         let operation = self.operation;
         let error_redactor = redactor.clone();
         let retained_context = context.clone();
+        let protected = self.protected.clone();
         let result = tokio::task::spawn_blocking(move || {
             let _retained_context = retained_context;
             check_cancelled(&worker_name, &cancellation)?;
-            let directory =
-                open_root(&root).map_err(|error| no_effect(&worker_name, redactor.error(error)))?;
+            let protected = protected.as_deref();
+            if let Some(guard) = protected
+                && let Some(path) = arguments.get("path").and_then(Value::as_str)
+                && guard.contains(&root.join(path))
+            {
+                return Err(no_effect(&worker_name, PROTECTED));
+            }
+            let directory = open_root(&root, protected)
+                .map_err(|error| no_effect(&worker_name, redactor.error(error)))?;
             match operation {
-                Operation::Read => read_file(&directory, arguments, &redactor, &cancellation),
-                Operation::Write => write_file(&directory, arguments, &redactor, &cancellation),
-                Operation::Search => search_files(&directory, arguments, &redactor, &cancellation),
+                Operation::Read => {
+                    read_file(&directory, arguments, &redactor, &cancellation, protected)
+                }
+                Operation::Write => {
+                    write_file(&directory, arguments, &redactor, &cancellation, protected)
+                }
+                Operation::Search => {
+                    search_files(&directory, arguments, &redactor, &cancellation, protected)
+                }
             }
         })
         .await
@@ -210,8 +274,13 @@ fn reserved_identity(directory: &Dir, name: &str, metadata: &Metadata) -> io::Re
     }
 }
 
-fn open_workspace_directory(directory: &Dir, path: &Path) -> io::Result<Dir> {
+fn open_workspace_directory(
+    directory: &Dir,
+    path: &Path,
+    protected: Option<&Protected>,
+) -> io::Result<Dir> {
     let child = open_directory(directory, path)?;
+    Protected::check(protected, &child)?;
     if reserved_identity(directory, ".everything-agents", &child.dir_metadata()?)? {
         return Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
@@ -232,7 +301,7 @@ fn ordinary_file(directory: &Dir, metadata: &Metadata) -> io::Result<()> {
     Ok(())
 }
 
-fn open_root(root: &Path) -> io::Result<Dir> {
+fn open_root(root: &Path, protected: Option<&Protected>) -> io::Result<Dir> {
     if !root.is_absolute() {
         return Err(io::Error::other("workspace root is not absolute"));
     }
@@ -243,6 +312,7 @@ fn open_root(root: &Path) -> io::Result<Dir> {
             Component::Normal(name) => directory = open_directory(&directory, Path::new(name))?,
             _ => return Err(io::Error::other("invalid workspace root")),
         }
+        Protected::check(protected, &directory)?;
     }
     Ok(directory)
 }
@@ -257,7 +327,11 @@ fn open_directory(directory: &Dir, path: &Path) -> io::Result<Dir> {
     Ok(Dir::from_std_file(file.into()))
 }
 
-fn parent(directory: &Dir, path: &Path) -> io::Result<(Dir, std::ffi::OsString)> {
+fn parent(
+    directory: &Dir,
+    path: &Path,
+    protected: Option<&Protected>,
+) -> io::Result<(Dir, std::ffi::OsString)> {
     let mut current = directory.try_clone()?;
     let filename = path
         .file_name()
@@ -265,7 +339,7 @@ fn parent(directory: &Dir, path: &Path) -> io::Result<(Dir, std::ffi::OsString)>
         .to_owned();
     if let Some(path) = path.parent() {
         for part in path.components() {
-            current = open_workspace_directory(&current, Path::new(part.as_os_str()))?;
+            current = open_workspace_directory(&current, Path::new(part.as_os_str()), protected)?;
         }
     }
     Ok((current, filename))
@@ -326,12 +400,13 @@ fn read_file(
     arguments: Value,
     redactor: &Redactor,
     cancellation: &CancellationToken,
+    protected: Option<&Protected>,
 ) -> Result<ToolOutput, ToolError> {
     let name = "read_file";
     let arguments: ReadArguments = parse(name, arguments)?;
     let path = relative_path(name, &arguments.path, false)?;
-    let (directory, filename) =
-        parent(directory, &path).map_err(|error| no_effect(name, redactor.error(error)))?;
+    let (directory, filename) = parent(directory, &path, protected)
+        .map_err(|error| no_effect(name, redactor.error(error)))?;
     let mut file =
         open_regular(&directory, &filename).map_err(|error| error.tool_error(name, redactor))?;
     let total_bytes = file
@@ -367,6 +442,7 @@ fn write_file(
     arguments: Value,
     redactor: &Redactor,
     cancellation: &CancellationToken,
+    protected: Option<&Protected>,
 ) -> Result<ToolOutput, ToolError> {
     let name = "write_file";
     let arguments: WriteArguments = parse(name, arguments)?;
@@ -374,8 +450,8 @@ fn write_file(
         return Err(no_effect(name, "write content exceeds 262144 bytes"));
     }
     let path = relative_path(name, &arguments.path, false)?;
-    let (directory, filename) =
-        parent(directory, &path).map_err(|error| no_effect(name, redactor.error(error)))?;
+    let (directory, filename) = parent(directory, &path, protected)
+        .map_err(|error| no_effect(name, redactor.error(error)))?;
     match directory.symlink_metadata(&filename) {
         Ok(metadata) => ordinary_file(&directory, &metadata)
             .map_err(|error| no_effect(name, redactor.error(error)))?,
@@ -432,6 +508,7 @@ struct SearchState<'a> {
     query: &'a str,
     redactor: &'a Redactor,
     cancellation: &'a CancellationToken,
+    protected: Option<&'a Protected>,
     deadline: Instant,
     entries: usize,
     files: usize,
@@ -447,6 +524,7 @@ fn search_files(
     arguments: Value,
     redactor: &Redactor,
     cancellation: &CancellationToken,
+    protected: Option<&Protected>,
 ) -> Result<ToolOutput, ToolError> {
     let name = "search_files";
     let arguments: SearchArguments = parse(name, arguments)?;
@@ -464,13 +542,14 @@ fn search_files(
         .try_clone()
         .map_err(|error| no_effect(name, redactor.error(error)))?;
     for part in path.components() {
-        root = open_workspace_directory(&root, Path::new(part.as_os_str()))
+        root = open_workspace_directory(&root, Path::new(part.as_os_str()), protected)
             .map_err(|error| no_effect(name, redactor.error(error)))?;
     }
     let mut state = SearchState {
         query: &arguments.query,
         redactor,
         cancellation,
+        protected,
         deadline: Instant::now() + SEARCH_DURATION,
         entries: 0,
         files: 0,
@@ -584,7 +663,7 @@ impl SearchState<'_> {
                 }
             };
             if metadata.is_dir() {
-                match open_workspace_directory(directory, Path::new(&name)) {
+                match open_workspace_directory(directory, Path::new(&name), self.protected) {
                     Ok(child) => self.visit(&child, &path, depth + 1)?,
                     Err(error) => self.warning(error),
                 }

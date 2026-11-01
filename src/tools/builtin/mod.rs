@@ -2,6 +2,7 @@ mod filesystem;
 mod shell;
 
 use std::collections::BTreeMap;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -17,6 +18,7 @@ pub const MAX_BUILTIN_OUTPUT_BYTES: usize = 65_536;
 #[derive(Clone, Default)]
 pub struct BuiltinConfig {
     pub redact_literals: Vec<String>,
+    pub state_directory: Option<PathBuf>,
 }
 
 pub struct BuiltinTools {
@@ -26,7 +28,15 @@ pub struct BuiltinTools {
 impl BuiltinTools {
     pub fn new(config: BuiltinConfig) -> Result<Self, ToolError> {
         let redactor = Redactor::new(config.redact_literals)?;
-        let mut registrations = filesystem::registrations(redactor.clone());
+        let protected = config
+            .state_directory
+            .as_deref()
+            .map(filesystem::Protected::open)
+            .transpose()
+            .map_err(|error| ToolError::InvalidContext {
+                message: format!("Host state directory cannot be protected: {error}"),
+            })?;
+        let mut registrations = filesystem::registrations(redactor.clone(), protected);
         registrations.push((
             Arc::new(shell::ShellTool::new(redactor)),
             ToolScopeRule::Host {
