@@ -12,11 +12,13 @@ use tokio_util::sync::CancellationToken;
 
 use super::cli::{SkillsCliError, shown};
 use super::discover::read_skill_file;
+use super::lock::at;
 use super::{SkillIssue, SkillName, frontmatter};
 
 const GIT_TIMEOUT: Duration = Duration::from_secs(300);
 const POLL: Duration = Duration::from_millis(50);
 const MAX_GIT_OUTPUT: u64 = 4096;
+const MAX_TREE_LISTING: u64 = 16 * 1024 * 1024;
 const MAX_SCANNED_DIRS: usize = 4096;
 const MAX_SCAN_DEPTH: usize = 5;
 const SKIP_DIRS: [&str; 5] = ["node_modules", ".git", "dist", "build", "__pycache__"];
@@ -237,16 +239,121 @@ pub(super) fn clone(
         repo: root.join("repo"),
         root,
     };
-    let mut arguments: Vec<&OsStr> = ["clone", "--depth", "1", "--filter=blob:none", "--no-tags"]
-        .into_iter()
-        .map(OsStr::new)
-        .collect();
+    let mut arguments: Vec<&OsStr> = [
+        "clone",
+        "--depth",
+        "1",
+        "--filter=blob:none",
+        "--no-tags",
+        "--no-checkout",
+    ]
+    .into_iter()
+    .map(OsStr::new)
+    .collect();
     if let Some(reference) = reference {
         arguments.extend([OsStr::new("--branch"), OsStr::new(reference)]);
     }
     arguments.extend([OsStr::new("--"), OsStr::new(url), checkout.repo.as_os_str()]);
-    git(&checkout, "clone", &arguments, fallback, cancellation)?;
+    git(
+        &checkout,
+        "clone",
+        &arguments,
+        None,
+        MAX_GIT_OUTPUT,
+        fallback,
+        cancellation,
+    )?;
+    let in_repo = |command: &'static str| {
+        [
+            OsStr::new("-C"),
+            checkout.repo.as_os_str(),
+            OsStr::new(command),
+        ]
+    };
+    let listing = git(
+        &checkout,
+        "ls-tree",
+        &[
+            &in_repo("ls-tree")[..],
+            &[
+                OsStr::new("-r"),
+                OsStr::new("-z"),
+                OsStr::new("--name-only"),
+                OsStr::new("HEAD"),
+            ],
+        ]
+        .concat(),
+        None,
+        MAX_TREE_LISTING,
+        fallback,
+        cancellation,
+    )?;
+    let folders: BTreeSet<&str> = listing
+        .split('\0')
+        .filter_map(|path| match path.rsplit_once('/') {
+            Some((folder, "SKILL.md")) => Some(folder),
+            None if path == "SKILL.md" => Some(""),
+            _ => None,
+        })
+        .filter(|folder| !folder.contains(['\n', '\r']))
+        .collect();
+    if folders.is_empty() {
+        return Ok(checkout);
+    }
+    if folders.len() > MAX_SCANNED_DIRS {
+        return Err(SkillsCliError::Failed(format!(
+            "{} has more than {MAX_SCANNED_DIRS} SKILL.md files",
+            shown(url)
+        )));
+    }
+    let patterns: String = if folders.contains("") {
+        "/*\n".to_owned()
+    } else {
+        folders
+            .iter()
+            .map(|folder| format!("/{}/\n", sparse_escape(folder)))
+            .collect()
+    };
+    let patterns_path = checkout.root.join("sparse-patterns");
+    fs::write(&patterns_path, patterns).map_err(at(&patterns_path))?;
+    git(
+        &checkout,
+        "sparse-checkout",
+        &[
+            &in_repo("sparse-checkout")[..],
+            &[
+                OsStr::new("set"),
+                OsStr::new("--no-cone"),
+                OsStr::new("--stdin"),
+            ],
+        ]
+        .concat(),
+        Some(&patterns_path),
+        MAX_GIT_OUTPUT,
+        fallback,
+        cancellation,
+    )?;
+    git(
+        &checkout,
+        "checkout",
+        &in_repo("checkout"),
+        None,
+        MAX_GIT_OUTPUT,
+        fallback,
+        cancellation,
+    )?;
     Ok(checkout)
+}
+
+fn sparse_escape(folder: &str) -> String {
+    let mut escaped = String::with_capacity(folder.len());
+    for character in folder.chars() {
+        if matches!(character, '\\' | '*' | '?' | '[' | ']' | '!' | '#' | ' ') {
+            escaped.push('\\');
+        }
+        escaped.push(character);
+    }
+    escaped
 }
 
 pub(super) fn tree_hash(
@@ -260,28 +367,43 @@ pub(super) fn tree_hash(
     } else {
         format!("HEAD:{folder}")
     };
-    let output = git(
-        checkout,
-        "rev-parse",
-        &[
-            OsStr::new("-C"),
-            checkout.repo.as_os_str(),
-            OsStr::new("rev-parse"),
-            OsStr::new("--verify"),
-            OsStr::new("--end-of-options"),
-            OsStr::new(&revision),
-        ],
-        fallback,
-        cancellation,
-    )?;
-    let hash = output.trim().to_ascii_lowercase();
-    if hash.len() == 40 && hash.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-        Ok(hash)
-    } else {
-        Err(SkillsCliError::Git {
+    let resolve = |revision: &str| {
+        git(
+            checkout,
+            "rev-parse",
+            &[
+                OsStr::new("-C"),
+                checkout.repo.as_os_str(),
+                OsStr::new("rev-parse"),
+                OsStr::new("--verify"),
+                OsStr::new("--end-of-options"),
+                OsStr::new(revision),
+            ],
+            None,
+            MAX_GIT_OUTPUT,
+            fallback,
+            cancellation,
+        )
+        .map(|output| output.trim().to_ascii_lowercase())
+    };
+    let hash = resolve(&revision)?;
+    if hash.len() != 40 || !hash.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(SkillsCliError::Git {
             action: "rev-parse",
             message: format!("unexpected output {}", shown(&hash)),
-        })
+        });
+    }
+    match resolve(&format!("{hash}^{{tree}}")) {
+        Ok(tree) if tree == hash => Ok(hash),
+        Err(error @ (SkillsCliError::Cancelled | SkillsCliError::GitMissing(_))) => Err(error),
+        _ => Err(SkillsCliError::Failed(format!(
+            "{} is not a directory in the repository",
+            shown(if folder.is_empty() {
+                "the root"
+            } else {
+                folder
+            })
+        ))),
     }
 }
 
@@ -289,6 +411,8 @@ fn git(
     checkout: &Checkout,
     action: &'static str,
     arguments: &[&OsStr],
+    stdin: Option<&Path>,
+    limit: u64,
     fallback: &str,
     cancellation: &CancellationToken,
 ) -> Result<String, SkillsCliError> {
@@ -307,10 +431,26 @@ fn git(
         .env("GIT_TERMINAL_PROMPT", "0")
         .env("GIT_ALLOW_PROTOCOL", "https:ssh")
         .env("GIT_OPTIONAL_LOCKS", "0")
-        .stdin(Stdio::null())
-        .stdout(File::create(&stdout_path)?)
-        .stderr(File::create(&stderr_path)?)
+        .stdin(match stdin {
+            Some(path) => Stdio::from(File::open(path).map_err(at(path))?),
+            None => Stdio::null(),
+        })
+        .stdout(File::create(&stdout_path).map_err(at(&stdout_path))?)
+        .stderr(File::create(&stderr_path).map_err(at(&stderr_path))?)
         .process_group(0);
+    for variable in [
+        "GIT_DIR",
+        "GIT_WORK_TREE",
+        "GIT_INDEX_FILE",
+        "GIT_OBJECT_DIRECTORY",
+        "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+        "GIT_CONFIG_PARAMETERS",
+        "GIT_CONFIG_COUNT",
+        "GIT_NAMESPACE",
+        "GIT_COMMON_DIR",
+    ] {
+        command.env_remove(variable);
+    }
     if std::env::var_os("GIT_SSH_COMMAND").is_none() {
         command.env("GIT_SSH_COMMAND", "ssh -o BatchMode=yes");
     }
@@ -335,7 +475,7 @@ fn git(
         std::thread::sleep(POLL);
     };
     if !status.success() {
-        let stderr = tail(&stderr_path)?;
+        let stderr = tail(&stderr_path).map_err(at(&stderr_path))?;
         let message = stderr
             .lines()
             .map(str::trim)
@@ -351,7 +491,14 @@ fn git(
             }),
         });
     }
-    Ok(tail(&stdout_path)?)
+    let length = fs::metadata(&stdout_path).map_err(at(&stdout_path))?.len();
+    if length > limit {
+        return Err(SkillsCliError::Failed(format!(
+            "git {action} printed more than {limit} bytes"
+        )));
+    }
+    let bytes = fs::read(&stdout_path).map_err(at(&stdout_path))?;
+    Ok(String::from_utf8_lossy(&bytes).into_owned())
 }
 
 fn tail(path: &Path) -> io::Result<String> {
@@ -361,6 +508,17 @@ fn tail(path: &Path) -> io::Result<String> {
     let mut bytes = Vec::new();
     file.take(MAX_GIT_OUTPUT).read_to_end(&mut bytes)?;
     Ok(String::from_utf8_lossy(&bytes).into_owned())
+}
+
+fn symlink_within(base: &Path, path: &Path) -> Option<PathBuf> {
+    let mut prefix = base.to_owned();
+    for part in path.strip_prefix(base).ok()?.iter() {
+        prefix.push(part);
+        if fs::symlink_metadata(&prefix).is_ok_and(|metadata| metadata.is_symlink()) {
+            return Some(prefix);
+        }
+    }
+    None
 }
 
 pub(super) struct FoundSkill {
@@ -388,7 +546,13 @@ pub(super) fn find_skills(
         Some(subpath) => base.join(subpath),
         None => base.to_owned(),
     };
-    let canonical_base = base.canonicalize()?;
+    if let Some(link) = symlink_within(base, &search) {
+        return Err(SkillsCliError::Failed(format!(
+            "{} is a symlink; skills are installed only from real directories",
+            shown(link.strip_prefix(base).unwrap_or(&link).display())
+        )));
+    }
+    let canonical_base = base.canonicalize().map_err(at(base))?;
     let canonical_search = search.canonicalize().map_err(|error| {
         SkillsCliError::Failed(format!("{} is not readable: {error}", search.display()))
     })?;
@@ -430,6 +594,9 @@ pub(super) fn find_skills(
 
 impl Finder<'_> {
     fn walk(&mut self, dir: &Path, max_depth: usize, depth: usize) -> Result<(), SkillsCliError> {
+        if symlink_within(self.base, dir).is_some() {
+            return Ok(());
+        }
         let Ok(entries) = fs::read_dir(dir) else {
             return Ok(());
         };

@@ -14,6 +14,7 @@ use tokio_util::sync::CancellationToken;
 use super::cli::{AddArguments, RemoveArguments, SkillsCliError, UpdateArguments, shown};
 use super::discover::read_skill_file;
 use super::fetch::{self, Checkout, FoundSkill, Source};
+use super::lock::at;
 use super::{Catalog, LockEntry, SkillDirName, SkillRoot, lock};
 
 const MAX_COPY_ENTRIES: usize = 4096;
@@ -24,6 +25,7 @@ const HASH_EXCLUDED_DIRS: [&str; 2] = [".git", "node_modules"];
 const NPX_UPDATE: &str = "npx skills update -g -y";
 
 pub(super) struct Staging {
+    home: PathBuf,
     skills: PathBuf,
     root: PathBuf,
     _lock: OwnedFd,
@@ -53,14 +55,14 @@ pub(super) fn recover_if_idle(home: &Path) {
 impl Staging {
     pub fn open(home: &Path) -> Result<Self, SkillsCliError> {
         let skills = home.join(".agents").join("skills");
-        fs::create_dir_all(&skills)?;
+        fs::create_dir_all(&skills).map_err(at(&skills))?;
         let root = staging_root(home);
         match fs::DirBuilder::new().mode(0o700).create(&root) {
             Ok(()) => {}
             Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
-            Err(error) => return Err(error.into()),
+            Err(error) => return Err(at(&root)(error).into()),
         }
-        let metadata = fs::symlink_metadata(&root)?;
+        let metadata = fs::symlink_metadata(&root).map_err(at(&root))?;
         if !metadata.is_dir()
             || metadata.uid() != rustix::process::geteuid().as_raw()
             || metadata.mode() & 0o077 != 0
@@ -70,18 +72,20 @@ impl Staging {
                 root.display()
             )));
         }
+        let lock_path = root.join(".lock");
         let lock = rustix::fs::open(
-            root.join(".lock"),
+            &lock_path,
             OFlags::RDWR | OFlags::CREATE | OFlags::NOFOLLOW | OFlags::CLOEXEC,
             Mode::from_raw_mode(0o600),
         )
-        .map_err(io::Error::from)?;
+        .map_err(|error| at(&lock_path)(error.into()))?;
         match rustix::fs::flock(&lock, FlockOperation::NonBlockingLockExclusive) {
             Ok(()) => {}
             Err(rustix::io::Errno::WOULDBLOCK) => return Err(SkillsCliError::Busy),
-            Err(error) => return Err(io::Error::from(error).into()),
+            Err(error) => return Err(at(&lock_path)(error.into()).into()),
         }
         let staging = Self {
+            home: home.to_owned(),
             skills,
             root,
             _lock: lock,
@@ -91,97 +95,217 @@ impl Staging {
     }
 
     fn recover(&self) -> Result<(), SkillsCliError> {
-        for entry in fs::read_dir(&self.root)? {
-            let entry = entry?;
-            if !entry.file_type()?.is_dir() {
+        for entry in fs::read_dir(&self.root).map_err(at(&self.root))? {
+            let entry = entry.map_err(at(&self.root))?;
+            if !entry.file_type().map_err(at(&entry.path()))?.is_dir() {
                 continue;
             }
             let stage = entry.path();
-            let old = stage.join("old");
-            match target_name(&stage) {
-                Some(name) => {
-                    let target = self.skills.join(name.as_str());
-                    if present(&old) && !present(&target) {
-                        fs::rename(&old, &target)?;
-                        eprintln!(
-                            "vorra: restored {} from an interrupted skills command",
-                            shown(target.display())
-                        );
-                    }
-                }
-                None if present(&old) => {
+            let Some(name) = target_name(&stage) else {
+                if present(&stage.join("old")) || present(&stage.join("swapped")) {
                     eprintln!(
-                        "vorra: warning: {} holds a previous skill with no recorded target; left in place",
+                        "vorra: warning: {} holds a skill with no recorded target; left in place",
+                        shown(stage.display())
+                    );
+                } else {
+                    discard_stage(&stage);
+                }
+                continue;
+            };
+            let target = self.skills.join(&name);
+            match roll_back(&stage, &target, &self.home) {
+                Ok(true) => eprintln!(
+                    "vorra: restored {} from an interrupted skills command",
+                    shown(target.display())
+                ),
+                Ok(false) => {}
+                Err(error) => {
+                    eprintln!(
+                        "vorra: warning: interrupted change to {} was not rolled back ({}); its previous version stays in {}",
+                        shown(target.display()),
+                        shown(error),
                         shown(stage.display())
                     );
                     continue;
                 }
-                None => {}
             }
-            fs::remove_dir_all(&stage)?;
+            discard_stage(&stage);
         }
         Ok(())
     }
 
     pub fn replace(
         &self,
-        dir_name: &SkillDirName,
+        folder: &str,
         source: Option<&Path>,
+        expected: &Expected,
         commit: impl FnOnce() -> Result<(), SkillsCliError>,
     ) -> Result<PathBuf, SkillsCliError> {
         let stage = self.root.join(uuid::Uuid::new_v4().to_string());
-        fs::DirBuilder::new().mode(0o700).create(&stage)?;
-        let result = self.swap(&stage, dir_name, source, commit);
-        if let Err(error) = fs::remove_dir_all(&stage) {
+        fs::DirBuilder::new()
+            .mode(0o700)
+            .create(&stage)
+            .map_err(at(&stage))?;
+        let target = self.skills.join(folder);
+        let result = swap(&stage, folder, &target, source, expected, commit);
+        if result.is_err()
+            && (present(&stage.join("old")) || present(&stage.join("swapped")))
+            && let Err(error) = roll_back(&stage, &target, &self.home)
+        {
             eprintln!(
-                "vorra: warning: staging {} was not removed ({error}); the next skills command removes it",
+                "vorra: warning: rollback of {} failed ({}); its previous version stays in {}",
+                shown(target.display()),
+                shown(error),
                 shown(stage.display())
             );
+            return result;
         }
+        discard_stage(&stage);
         result
-    }
-
-    fn swap(
-        &self,
-        stage: &Path,
-        dir_name: &SkillDirName,
-        source: Option<&Path>,
-        commit: impl FnOnce() -> Result<(), SkillsCliError>,
-    ) -> Result<PathBuf, SkillsCliError> {
-        fs::write(stage.join("target"), dir_name.as_str())?;
-        let target = self.skills.join(dir_name.as_str());
-        let new = stage.join("new");
-        let old = stage.join("old");
-        if let Some(source) = source {
-            copy_tree(source, &new, &mut Budget::default(), 0)?;
-        }
-        let had_old = match fs::rename(&target, &old) {
-            Ok(()) => true,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => false,
-            Err(error) => return Err(error.into()),
-        };
-        if source.is_some()
-            && let Err(error) = fs::rename(&new, &target)
-        {
-            if had_old {
-                let _ = fs::rename(&old, &target);
-            }
-            return Err(error.into());
-        }
-        if let Err(error) = commit() {
-            if source.is_some() {
-                let _ = fs::rename(&target, stage.join("failed"));
-            }
-            if had_old {
-                let _ = fs::rename(&old, &target);
-            }
-            return Err(error);
-        }
-        Ok(target)
     }
 }
 
-fn target_name(stage: &Path) -> Option<SkillDirName> {
+pub(super) enum Expected<'a> {
+    Hash { key: &'a str, hash: &'a str },
+    Absent { key: &'a str },
+}
+
+fn swap(
+    stage: &Path,
+    folder: &str,
+    target: &Path,
+    source: Option<&Path>,
+    expected: &Expected,
+    commit: impl FnOnce() -> Result<(), SkillsCliError>,
+) -> Result<PathBuf, SkillsCliError> {
+    let marker = |name: &str| {
+        let path = stage.join(name);
+        fs::write(&path, b"").map_err(at(&path))
+    };
+    let recorded = stage.join("target");
+    fs::write(&recorded, folder).map_err(at(&recorded))?;
+    let expectation = match expected {
+        Expected::Hash { key, hash } => json!({ "key": key, "hash": hash }),
+        Expected::Absent { key } => json!({ "key": key }),
+    };
+    let expect_path = stage.join("expect");
+    fs::write(&expect_path, expectation.to_string()).map_err(at(&expect_path))?;
+    let new = stage.join("new");
+    let old = stage.join("old");
+    if let Some(source) = source {
+        copy_tree(source, &new, &mut Budget::default(), 0)?;
+    }
+    match fs::rename(target, &old) {
+        Ok(()) => {}
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => return Err(at(target)(error).into()),
+    }
+    if source.is_some() {
+        marker("swapped")?;
+        fs::rename(&new, target).map_err(at(target))?;
+    }
+    commit()?;
+    marker("committed")?;
+    if present(&old) {
+        let discard = stage.join("discard");
+        fs::rename(&old, &discard).map_err(at(&old))?;
+    }
+    let swapped = stage.join("swapped");
+    if present(&swapped) {
+        fs::remove_file(&swapped).map_err(at(&swapped))?;
+    }
+    Ok(target.to_owned())
+}
+
+fn committed(stage: &Path, home: &Path) -> io::Result<bool> {
+    if present(&stage.join("committed")) {
+        return Ok(true);
+    }
+    let path = stage.join("expect");
+    let bytes = match fs::read(&path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(at(&path)(error)),
+    };
+    let expectation: Value =
+        serde_json::from_slice(&bytes).map_err(|error| at(&path)(io::Error::other(error)))?;
+    let key = expectation
+        .get("key")
+        .and_then(Value::as_str)
+        .ok_or_else(|| at(&path)(io::Error::other("no lock key recorded")))?;
+    let skills = lock::read_global_raw(home)?;
+    let entry = skills.get(key);
+    Ok(match expectation.get("hash").and_then(Value::as_str) {
+        Some(hash) => {
+            entry
+                .and_then(|entry| entry.get("skillFolderHash"))
+                .and_then(Value::as_str)
+                == Some(hash)
+        }
+        None => entry.is_none(),
+    })
+}
+
+fn roll_back(stage: &Path, target: &Path, home: &Path) -> io::Result<bool> {
+    if committed(stage, home)? {
+        return Ok(false);
+    }
+    let old = stage.join("old");
+    if present(&stage.join("swapped")) && !present(&stage.join("new")) && present(target) {
+        let failed = stage.join("failed");
+        fs::rename(target, &failed).map_err(at(target))?;
+    }
+    if !present(&old) {
+        return Ok(false);
+    }
+    if present(target) {
+        return Err(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            format!("{} exists again", target.display()),
+        ));
+    }
+    fs::rename(&old, target).map_err(at(target))?;
+    Ok(true)
+}
+
+fn discard_stage(stage: &Path) {
+    if let Err(error) = remove_tree(stage) {
+        eprintln!(
+            "vorra: warning: staging {} was not removed ({error}); remove it by hand",
+            shown(stage.display())
+        );
+    }
+}
+
+fn remove_tree(path: &Path) -> io::Result<()> {
+    match fs::remove_dir_all(path) {
+        Ok(()) => return Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(_) => {}
+    }
+    make_writable(path)?;
+    fs::remove_dir_all(path).map_err(at(path))
+}
+
+fn make_writable(dir: &Path) -> io::Result<()> {
+    if !fs::symlink_metadata(dir).map_err(at(dir))?.is_dir() {
+        return Ok(());
+    }
+    fs::set_permissions(dir, fs::Permissions::from_mode(0o700)).map_err(at(dir))?;
+    for entry in fs::read_dir(dir).map_err(at(dir))? {
+        let entry = entry.map_err(at(dir))?;
+        if entry.file_type().map_err(at(&entry.path()))?.is_dir() {
+            make_writable(&entry.path())?;
+        }
+    }
+    Ok(())
+}
+
+fn valid_folder(name: &str) -> bool {
+    !name.is_empty() && name.len() <= 255 && !name.starts_with('.') && !name.contains(['/', '\0'])
+}
+
+fn target_name(stage: &Path) -> Option<String> {
     let mut bytes = Vec::new();
     File::open(stage.join("target"))
         .ok()?
@@ -189,8 +313,7 @@ fn target_name(stage: &Path) -> Option<SkillDirName> {
         .read_to_end(&mut bytes)
         .ok()?;
     let name = String::from_utf8(bytes).ok()?;
-    let sanitized = SkillDirName::sanitize(&name);
-    (sanitized.as_str() == name).then_some(sanitized)
+    valid_folder(&name).then_some(name)
 }
 
 #[derive(Default)]
@@ -214,7 +337,9 @@ impl Budget {
 }
 
 fn sorted_entries(dir: &Path) -> io::Result<Vec<fs::DirEntry>> {
-    let mut entries = fs::read_dir(dir)?.collect::<Result<Vec<_>, _>>()?;
+    let mut entries = fs::read_dir(dir)
+        .and_then(|entries| entries.collect::<Result<Vec<_>, _>>())
+        .map_err(at(dir))?;
     entries.sort_by_key(fs::DirEntry::file_name);
     Ok(entries)
 }
@@ -238,7 +363,10 @@ fn copy_tree(
             shown(source.display())
         )));
     }
-    fs::DirBuilder::new().mode(0o755).create(destination)?;
+    fs::DirBuilder::new()
+        .mode(0o755)
+        .create(destination)
+        .map_err(at(destination))?;
     for entry in sorted_entries(source)? {
         let path = entry.path();
         let kind = entry.file_type()?;
@@ -257,8 +385,9 @@ fn copy_tree(
             if !named(&entry, &["metadata.json"]) {
                 let metadata = entry.metadata()?;
                 budget.charge(metadata.len(), &path)?;
-                fs::copy(&path, &output)?;
-                fs::set_permissions(&output, fs::Permissions::from_mode(metadata.mode() & 0o777))?;
+                fs::copy(&path, &output).map_err(at(&path))?;
+                fs::set_permissions(&output, fs::Permissions::from_mode(metadata.mode() & 0o777))
+                    .map_err(at(&output))?;
             }
         } else {
             return Err(SkillsCliError::Failed(format!(
@@ -307,7 +436,7 @@ fn folder_hash(dir: &Path) -> Result<String, SkillsCliError> {
     let mut hasher = Sha256::new();
     for (relative, path) in files {
         hasher.update(relative.as_bytes());
-        hasher.update(fs::read(path)?);
+        hasher.update(fs::read(&path).map_err(at(&path))?);
     }
     Ok(format!("{:x}", hasher.finalize()))
 }
@@ -435,31 +564,40 @@ pub(super) fn add(
         };
         let key = skill.name.as_str().to_owned();
         let now = timestamp();
-        let target = staging.replace(&skill.name.dir_name(), Some(&skill.dir), || {
-            lock::write_global(home, |skills| {
-                let installed_at = skills
-                    .get(&key)
-                    .and_then(|entry| entry.get("installedAt"))
-                    .cloned()
-                    .unwrap_or_else(|| json!(now));
-                let mut entry = json!({
-                    "source": lock_source,
-                    "sourceType": source_type,
-                    "sourceUrl": source_url,
-                    "skillFolderHash": hash,
-                    "installedAt": installed_at,
-                    "updatedAt": now,
-                });
-                if let Some(reference) = &reference {
-                    entry["ref"] = json!(reference);
-                }
-                if let Some(skill_path) = &skill_path {
-                    entry["skillPath"] = json!(skill_path);
-                }
-                skills.insert(key.clone(), entry);
-            })
-            .map_err(SkillsCliError::from)
-        })?;
+        let expected = Expected::Hash {
+            key: &key,
+            hash: &hash,
+        };
+        let target = staging.replace(
+            skill.name.dir_name().as_str(),
+            Some(&skill.dir),
+            &expected,
+            || {
+                lock::write_global(home, |skills| {
+                    let installed_at = skills
+                        .get(&key)
+                        .and_then(|entry| entry.get("installedAt"))
+                        .cloned()
+                        .unwrap_or_else(|| json!(now));
+                    let mut entry = json!({
+                        "source": lock_source,
+                        "sourceType": source_type,
+                        "sourceUrl": source_url,
+                        "skillFolderHash": hash,
+                        "installedAt": installed_at,
+                        "updatedAt": now,
+                    });
+                    if let Some(reference) = &reference {
+                        entry["ref"] = json!(reference);
+                    }
+                    if let Some(skill_path) = &skill_path {
+                        entry["skillPath"] = json!(skill_path);
+                    }
+                    skills.insert(key.clone(), entry);
+                })
+                .map_err(SkillsCliError::from)
+            },
+        )?;
         println!(
             "installed {} -> {} ({source_type} {}, {hash})",
             shown(&key),
@@ -605,7 +743,7 @@ pub(super) fn update(
         } else if entry
             .skill_folder_hash
             .as_ref()
-            .is_none_or(|hash| hash.is_empty())
+            .is_none_or(String::is_empty)
         {
             Some("no skillFolderHash recorded".to_owned())
         } else if entry.skill_path.as_deref().and_then(skill_folder).is_none() {
@@ -736,8 +874,19 @@ fn update_one(
     cancellation: &CancellationToken,
 ) -> Result<Outcome, SkillsCliError> {
     let dir = checkout.repo.join(folder);
-    if read_skill_file(&dir).ok().flatten().is_none() {
+    if !present(&dir) {
         return Ok(Outcome::Deleted);
+    }
+    match read_skill_file(&dir) {
+        Ok(Some(_)) => {}
+        Ok(None) => return Ok(Outcome::Deleted),
+        Err(issue) => {
+            return Err(SkillsCliError::Failed(format!(
+                "upstream SKILL.md in {} is unusable: {}",
+                shown(folder),
+                shown(issue)
+            )));
+        }
     }
     let hash = fetch::tree_hash(checkout, folder, NPX_UPDATE, cancellation)?;
     if Some(&hash) == entry.skill_folder_hash.as_ref() {
@@ -758,15 +907,21 @@ fn update_one(
         )));
     }
     let now = timestamp();
-    staging.replace(&skill.name.dir_name(), Some(&skill.dir), || {
-        lock::write_global(home, |skills| {
-            if let Some(Value::Object(entry)) = skills.get_mut(key) {
-                entry.insert("skillFolderHash".to_owned(), json!(hash));
-                entry.insert("updatedAt".to_owned(), json!(now));
-            }
-        })
-        .map_err(SkillsCliError::from)
-    })?;
+    let expected = Expected::Hash { key, hash: &hash };
+    staging.replace(
+        skill.name.dir_name().as_str(),
+        Some(&skill.dir),
+        &expected,
+        || {
+            lock::write_global(home, |skills| {
+                if let Some(Value::Object(entry)) = skills.get_mut(key) {
+                    entry.insert("skillFolderHash".to_owned(), json!(hash));
+                    entry.insert("updatedAt".to_owned(), json!(now));
+                }
+            })
+            .map_err(SkillsCliError::from)
+        },
+    )?;
     Ok(Outcome::Updated(hash))
 }
 
@@ -809,34 +964,42 @@ pub(super) fn remove(
     let staging = Staging::open(home)?;
     let raw = lock::read_global_raw(home)?;
     let root = skills_root(home);
-    let mut identities: BTreeMap<SkillDirName, String> = BTreeMap::new();
-    for entry in fs::read_dir(&root)? {
-        let entry = entry?;
+    let mut identities: BTreeMap<SkillDirName, (String, Option<String>)> = BTreeMap::new();
+    for entry in fs::read_dir(&root).map_err(at(&root))? {
+        let entry = entry.map_err(at(&root))?;
         let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
             continue;
         };
         if !name.starts_with('.')
-            && entry.file_type()?.is_dir()
+            && entry.file_type().map_err(at(&entry.path()))?.is_dir()
             && present(&entry.path().join("SKILL.md"))
         {
-            identities.insert(SkillDirName::sanitize(&name), name);
+            identities.insert(SkillDirName::sanitize(&name), (name.clone(), Some(name)));
         }
     }
     for key in raw.keys() {
-        identities.insert(SkillDirName::sanitize(key), key.clone());
+        identities
+            .entry(SkillDirName::sanitize(key))
+            .or_insert_with(|| (key.clone(), None))
+            .0 = key.clone();
     }
-    let mut matched = BTreeSet::new();
+    let mut matched: BTreeMap<String, Option<String>> = BTreeMap::new();
     let mut missing = Vec::new();
     for name in &arguments.names {
         let sanitized = SkillDirName::sanitize(name);
-        if let Some(identity) = identities.get(&sanitized) {
-            matched.insert(identity.clone());
+        if let Some((identity, folder)) = identities.get(&sanitized) {
+            matched.insert(identity.clone(), folder.clone());
             continue;
         }
         let by_source: Vec<_> = raw
             .iter()
             .filter(|(_, entry)| entry.get("source").and_then(Value::as_str) == Some(name))
-            .map(|(key, _)| key.clone())
+            .map(|(key, _)| {
+                let folder = identities
+                    .get(&SkillDirName::sanitize(key))
+                    .and_then(|(_, folder)| folder.clone());
+                (key.clone(), folder)
+            })
             .collect();
         if !by_source.is_empty() {
             matched.extend(by_source);
@@ -872,7 +1035,7 @@ pub(super) fn remove(
         return Err(SkillsCliError::NotFound(missing.join(", ")));
     }
     if !arguments.yes {
-        let listed = matched.iter().map(shown).collect::<Vec<_>>().join(", ");
+        let listed = matched.keys().map(shown).collect::<Vec<_>>().join(", ");
         if !io::stdin().is_terminal() {
             return Err(SkillsCliError::Failed(format!(
                 "would remove {listed}; pass --yes to confirm without a terminal"
@@ -887,9 +1050,10 @@ pub(super) fn remove(
         }
     }
     let agent_dirs = agent_dirs(home, extra_roots);
-    for identity in matched {
+    for (identity, folder) in matched {
         let dir_name = SkillDirName::sanitize(&identity);
-        let target = root.join(dir_name.as_str());
+        let folder = folder.unwrap_or_else(|| dir_name.as_str().to_owned());
+        let target = root.join(&folder);
         let links: Vec<PathBuf> = match target.canonicalize() {
             Ok(canonical) => agent_dirs
                 .iter()
@@ -904,7 +1068,7 @@ pub(super) fn remove(
             Err(_) => Vec::new(),
         };
         let tracked = raw.contains_key(&identity);
-        staging.replace(&dir_name, None, || {
+        staging.replace(&folder, None, &Expected::Absent { key: &identity }, || {
             if tracked {
                 lock::write_global(home, |skills| {
                     skills.remove(&identity);

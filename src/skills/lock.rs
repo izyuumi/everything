@@ -132,8 +132,14 @@ fn read(path: &Path, version: u64, minimum: bool, warnings: &mut Vec<String>) ->
 
 pub(super) type RawEntries = serde_json::Map<String, serde_json::Value>;
 
+pub(super) fn at(path: &Path) -> impl FnOnce(io::Error) -> io::Error + '_ {
+    move |error| io::Error::new(error.kind(), format!("{}: {error}", path.display()))
+}
+
 pub(super) fn read_global_raw(home: &Path) -> io::Result<RawEntries> {
-    let document = writable(read_bounded(&global_lock_path(home))?.as_deref())?;
+    let path = global_lock_path(home);
+    let bytes = read_bounded(&path).map_err(at(&path))?;
+    let document = writable(bytes.as_deref()).map_err(at(&path))?;
     Ok(match document.get("skills") {
         Some(serde_json::Value::Object(skills)) => skills.clone(),
         _ => RawEntries::new(),
@@ -145,10 +151,10 @@ pub(super) fn write_global(home: &Path, mut change: impl FnMut(&mut RawEntries))
     let parent = path
         .parent()
         .ok_or_else(|| io::Error::other("lock path has no parent"))?;
-    std::fs::create_dir_all(parent)?;
+    std::fs::create_dir_all(parent).map_err(at(parent))?;
     for _ in 0..2 {
-        let before = read_bounded(&path)?;
-        let mut document = writable(before.as_deref())?;
+        let before = read_bounded(&path).map_err(at(&path))?;
+        let mut document = writable(before.as_deref()).map_err(at(&path))?;
         let skills = document
             .entry("skills")
             .or_insert_with(|| serde_json::Value::Object(RawEntries::new()));
@@ -161,7 +167,7 @@ pub(super) fn write_global(home: &Path, mut change: impl FnMut(&mut RawEntries))
         change(skills);
         let bytes = serde_json::to_vec_pretty(&document).map_err(io::Error::other)?;
         if bytes.len() as u64 > MAX_LOCK_BYTES {
-            return Err(io::Error::other("lock would exceed 4 MiB"));
+            return Err(at(&path)(io::Error::other("lock would exceed 4 MiB")));
         }
         let temporary = parent.join(format!(".skill-lock.json.vorra-{}", uuid::Uuid::new_v4()));
         let written = (|| {
@@ -175,12 +181,14 @@ pub(super) fn write_global(home: &Path, mut change: impl FnMut(&mut RawEntries))
         })();
         if let Err(error) = written {
             let _ = std::fs::remove_file(&temporary);
-            return Err(error);
+            return Err(at(&temporary)(error));
         }
-        if read_bounded(&path)? == before {
-            return std::fs::rename(&temporary, &path).inspect_err(|_| {
-                let _ = std::fs::remove_file(&temporary);
-            });
+        if read_bounded(&path).map_err(at(&path))? == before {
+            return std::fs::rename(&temporary, &path)
+                .inspect_err(|_| {
+                    let _ = std::fs::remove_file(&temporary);
+                })
+                .map_err(at(&path));
         }
         let _ = std::fs::remove_file(&temporary);
     }
