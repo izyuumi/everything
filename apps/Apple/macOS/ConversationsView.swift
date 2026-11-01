@@ -96,9 +96,23 @@ struct AgentEditorView: View {
         var value: String
     }
 
+    struct Resolution: Equatable {
+        let input: String
+        let path: String?
+    }
+
     struct ToolPick: Hashable {
         let server: Bool
         let name: String
+
+        static func == (left: ToolPick, right: ToolPick) -> Bool {
+            left.server == right.server && left.name.utf8.elementsEqual(right.name.utf8)
+        }
+
+        func hash(into hasher: inout Hasher) {
+            hasher.combine(server)
+            for byte in name.utf8 { hasher.combine(byte) }
+        }
 
         var label: String {
             if server { return "mcp:" + name }
@@ -140,6 +154,7 @@ struct AgentEditorView: View {
     @State private var newTool = ""
     @State private var traits: [Trait] = []
     @State private var workspace = ""
+    @State private var resolution: Resolution?
     @State private var messaging: Set<OwnerID> = []
     @State private var memory = "shared"
     @State private var skills = "all"
@@ -159,13 +174,30 @@ struct AgentEditorView: View {
     private var nameTaken: Bool {
         model.agents?.agents.contains { $0.id != agent?.id && $0.name.lowercased() == name.lowercased() } ?? false
     }
+    private var storedModel: JSONValue { agent?.definition["model"] ?? .null }
+    private var endpointUnchanged: Bool {
+        storedModel["endpoint"]["kind"].string == "loopback" && storedModel["endpoint"]["url"].string == endpoint
+    }
+    private var sentEndpoint: String? { endpointUnchanged ? endpoint : HostAgent.loopbackEndpoint(endpoint) }
     private var modelIssue: String? {
         guard !provider.isEmpty else { return nil }
         if !HostAgent.identifier(modelName) { return "Model names are 1 to 256 bytes without spaces or control characters." }
-        if !endpoint.isEmpty && (!(endpoint.hasPrefix("http://") || endpoint.hasPrefix("https://")) || endpoint.utf8.count > 2048) {
-            return "Leave the endpoint empty for the official API, or give an http(s) loopback URL such as http://127.0.0.1:8080/."
+        if !endpoint.isEmpty && sentEndpoint == nil {
+            return "Leave the endpoint empty for the official API, or give an http(s) URL to an explicit loopback IP (127.x.x.x or [::1]) without user info, query or fragment, in its canonical form such as http://127.0.0.1:8080/."
         }
         return nil
+    }
+    private var endpointNote: String? {
+        guard let sent = sentEndpoint, !endpoint.isEmpty, sent != endpoint else { return nil }
+        return "Sent as " + sent
+    }
+    private var droppedModelSettings: String? {
+        guard provider.isEmpty else { return nil }
+        var dropped: [String] = []
+        if let tokens = storedModel["max_output_tokens"].unsigned { dropped.append("max output tokens \(tokens)") }
+        if storedModel["temperature"] != .null { dropped.append("temperature " + storedModel["temperature"].formatted) }
+        guard !dropped.isEmpty else { return nil }
+        return "Saving drops this agent's " + dropped.joined(separator: " and ") + ", set with vorra agents edit."
     }
     private var toolIssue: String? {
         guard toolMode != "off", !allTools else { return nil }
@@ -191,7 +223,7 @@ struct AgentEditorView: View {
         if value.utf8.count > 256 { return true }
         return value.unicodeScalars.contains { $0.properties.generalCategory == .control }
     }
-    private var resolvedWorkspace: String? {
+    nonisolated private static func resolve(_ workspace: String) -> String? {
         guard workspace.hasPrefix("/"), workspace.utf8.count <= 4096, !workspace.utf8.contains(0),
               let resolved = realpath(workspace, nil) else { return nil }
         defer { free(resolved) }
@@ -199,6 +231,18 @@ struct AgentEditorView: View {
         var directory: ObjCBool = false
         guard FileManager.default.fileExists(atPath: path, isDirectory: &directory), directory.boolValue, path.utf8.count <= 4096 else { return nil }
         return path
+    }
+    private var workspaceResolved: Bool { resolution?.input == workspace }
+    private var resolvedWorkspace: String? { workspaceResolved ? resolution?.path : nil }
+    private func resolveWorkspace() async {
+        let input = workspace
+        guard !input.isEmpty, !workspaceUnchanged, input.hasPrefix("/") else { return }
+        do { try await Task.sleep(for: .milliseconds(300)) } catch { return }
+        let path = await withCheckedContinuation { continuation in
+            DispatchQueue.global(qos: .userInitiated).async { continuation.resume(returning: Self.resolve(input)) }
+        }
+        guard !Task.isCancelled, workspace == input else { return }
+        resolution = Resolution(input: input, path: path)
     }
     private func targetLabel(_ target: OwnerID) -> String {
         guard let agent = model.agents?.agents.first(where: { $0.id == target }) else { return "Unknown agent " + target.string }
@@ -218,8 +262,13 @@ struct AgentEditorView: View {
     private var workspaceIssue: String? {
         guard !workspace.isEmpty, !workspaceUnchanged else { return nil }
         guard workspace.hasPrefix("/") else { return "The workspace must be an absolute path." }
+        guard workspaceResolved else { return nil }
         guard resolvedWorkspace != nil else { return "The workspace must be an existing directory on this Mac." }
         return nil
+    }
+    private var workspacePending: Bool { !workspace.isEmpty && !workspaceUnchanged && workspace.hasPrefix("/") && !workspaceResolved }
+    private var messagingIssue: String? {
+        messaging.filter({ $0 != ownID }).count > HostModel.maximumMessageTargets ? "At most \(HostModel.maximumMessageTargets) agents can be message targets." : nil
     }
     private var workspaceNote: String? {
         guard !workspaceUnchanged, let resolved = resolvedWorkspace, resolved != workspace else { return nil }
@@ -269,13 +318,15 @@ struct AgentEditorView: View {
                             .fixedSize().disabled(known.isEmpty)
                         }
                         TextField("Endpoint", text: $endpoint, prompt: Text("Official API"))
-                        if let modelIssue { Text(modelIssue).font(.caption).foregroundStyle(.red).fixedSize(horizontal: false, vertical: true) }
-                        else if !endpoint.isEmpty {
-                            Text("The Host accepts only the canonical form of an explicit loopback IP, including the trailing /, for example http://127.0.0.1:8080/.")
-                                .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                        if let modelIssue { Text(verbatim: modelIssue).font(.caption).foregroundStyle(.red).fixedSize(horizontal: false, vertical: true) }
+                        else if let endpointNote {
+                            Text(verbatim: endpointNote).font(.caption).foregroundStyle(.secondary).textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
                         }
                     } else {
                         Text("Conversations use the Host's default model.").font(.caption).foregroundStyle(.secondary)
+                        if let droppedModelSettings {
+                            Text(droppedModelSettings).font(.caption).foregroundStyle(.orange).fixedSize(horizontal: false, vertical: true)
+                        }
                     }
                 }
                 Section("Tools") {
@@ -306,11 +357,20 @@ struct AgentEditorView: View {
                     }
                 }
                 Section("Traits") {
+                    if !traits.isEmpty {
+                        HStack(spacing: 8) {
+                            Text("Key").frame(width: 140, alignment: .leading)
+                            Text("Value").frame(maxWidth: .infinity, alignment: .leading)
+                            Spacer().frame(width: 24)
+                        }
+                        .font(.caption).foregroundStyle(.secondary).accessibilityHidden(true)
+                    }
                     ForEach($traits) { $item in
-                        HStack {
-                            TextField("Key", text: $item.key, prompt: Text("tone")).frame(width: 120)
-                            TextField("Value", text: $item.value, prompt: Text("terse"))
-                            Button("Remove", systemImage: "minus.circle") { traits.removeAll { $0.id == item.id } }.labelStyle(.iconOnly)
+                        HStack(spacing: 8) {
+                            TextField("Trait key", text: $item.key, prompt: Text("tone")).labelsHidden().frame(width: 140)
+                            TextField("Trait value", text: $item.value, prompt: Text("terse")).labelsHidden().frame(maxWidth: .infinity)
+                            Button("Remove trait", systemImage: "minus.circle") { traits.removeAll { $0.id == item.id } }
+                                .labelStyle(.iconOnly).buttonStyle(.borderless).frame(width: 24)
                         }
                     }
                     Button("Add Trait", systemImage: "plus") { traits.append(Trait(key: "", value: "")) }
@@ -320,6 +380,7 @@ struct AgentEditorView: View {
                 Section("Workspace") {
                     TextField("Workspace", text: $workspace, prompt: Text("None (Host workspace)"))
                     if let workspaceIssue { Text(workspaceIssue).font(.caption).foregroundStyle(.red) }
+                    else if workspacePending { Text("Checking the workspace…").font(.caption).foregroundStyle(.secondary) }
                     else if let workspaceNote { Text(workspaceNote).font(.caption).foregroundStyle(.secondary) }
                 }
                 Section("Messaging") {
@@ -328,8 +389,13 @@ struct AgentEditorView: View {
                     }
                     ForEach(messageTargets) { target in
                         Toggle(targetLabel(target), isOn: targetBinding(target))
+                            .disabled(!messaging.contains(target) && messaging.filter({ $0 != ownID }).count >= HostModel.maximumMessageTargets)
                     }
                     Text(messaging.isEmpty ? "Messaging is closed." : "This agent may message the selected agents.").font(.caption).foregroundStyle(.secondary)
+                    if let messagingIssue { Text(messagingIssue).font(.caption).foregroundStyle(.red) }
+                    else if messaging.filter({ $0 != ownID }).count >= HostModel.maximumMessageTargets {
+                        Text("The Host allows at most \(HostModel.maximumMessageTargets) message targets.").font(.caption).foregroundStyle(.secondary)
+                    }
                 }
                 Section("Memory and skills") {
                     Picker("Memory", selection: $memory) {
@@ -347,12 +413,10 @@ struct AgentEditorView: View {
                 }
             }
             .formStyle(.grouped)
-            .frame(minHeight: 240, maxHeight: 460)
+            .frame(minHeight: 420, maxHeight: .infinity)
             Text("Assign individual skills from the Skills tab. Set max output tokens and temperature with vorra agents edit.")
                 .font(.caption).foregroundStyle(.secondary)
-            if let message = model.message {
-                Text(message).font(.caption).foregroundStyle(.secondary).textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
-            }
+            if let message = model.message { BoundedMessage(text: message) }
             HStack {
                 if let agent {
                     Button("New Chat") { Task { dismiss(); await model.newConversation(agent: agent) } }
@@ -369,8 +433,10 @@ struct AgentEditorView: View {
                     .disabled(!canSave)
             }
         }
-        .padding(20).frame(width: 560)
+        .padding(20).frame(width: 560).frame(minHeight: 600)
+        .background(Color(nsColor: .windowBackgroundColor))
         .onAppear(perform: load)
+        .task(id: workspace) { await resolveWorkspace() }
         .confirmationDialog("Remove this agent?", isPresented: $removing, titleVisibility: .visible) {
             Button("Remove", role: .destructive) { if let agent { Task { await model.removeAgent(agent) } } }
         } message: {
@@ -380,7 +446,7 @@ struct AgentEditorView: View {
 
     private var canSave: Bool {
         guard model.canMutate, validName, !nameTaken, validDescription, validPersona else { return false }
-        return modelIssue == nil && toolIssue == nil && traitIssue == nil && workspaceIssue == nil
+        return modelIssue == nil && toolIssue == nil && traitIssue == nil && workspaceIssue == nil && !workspacePending && messagingIssue == nil
     }
 
     private func toolBinding(_ tool: ToolPick) -> Binding<Bool> {
@@ -403,6 +469,7 @@ struct AgentEditorView: View {
     }
 
     private func load() {
+        if model.pendingAction == nil { model.message = nil }
         guard let agent else { return }
         let value = agent.definition
         name = agent.name
@@ -438,7 +505,7 @@ struct AgentEditorView: View {
             if case .object(let object) = agent?.definition["model"] { stored = object }
             stored["provider"] = .string(provider)
             stored["model"] = .string(modelName)
-            stored["endpoint"] = endpoint.isEmpty ? .object(["kind": .string("official")]) : .object(["kind": .string("loopback"), "url": .string(endpoint)])
+            stored["endpoint"] = endpoint.isEmpty ? .object(["kind": .string("official")]) : .object(["kind": .string("loopback"), "url": .string(sentEndpoint ?? endpoint)])
             value["model"] = .object(stored)
         }
         value["traits"] = traits.isEmpty ? nil : .object(Dictionary(traits.map { ($0.key, JSONValue.string($0.value)) }, uniquingKeysWith: { first, _ in first }))
@@ -456,6 +523,27 @@ struct AgentEditorView: View {
         value["memory"] = .string(memory)
         value["skills"] = skills == "only" ? (agent?.definition["skills"] ?? .string("none")) : .string(skills)
         return .object(value)
+    }
+}
+
+struct BoundedMessage: View {
+    let text: String
+    @State private var expanded = false
+
+    var body: some View {
+        HStack(alignment: .firstTextBaseline) {
+            Text(verbatim: text).font(.caption).foregroundStyle(.secondary).lineLimit(2).textSelection(.enabled)
+                .frame(maxWidth: .infinity, alignment: .leading).help(text)
+            if text.count > 140 {
+                Button("Full message") { expanded = true }.font(.caption).buttonStyle(.link)
+                    .popover(isPresented: $expanded) {
+                        ScrollView {
+                            Text(verbatim: text).font(.caption).textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading).padding()
+                        }
+                        .frame(width: 420, height: 220)
+                    }
+            }
+        }
     }
 }
 
@@ -492,6 +580,26 @@ struct SkillsView: View {
         })
     }
 
+    private func assignmentBlocked(_ skill: HostSkill, _ agent: HostAgent) -> Bool {
+        agent.skillAssigned(skill) ? model.skillRemovalBlocked(agent) : model.skillAssignmentFull(agent)
+    }
+
+    private func assignLabel(_ skill: HostSkill, _ agent: HostAgent) -> String {
+        let name = DisplayText.escaped(agent.name)
+        guard assignmentBlocked(skill, agent) else { return name }
+        return name + (agent.skillAssigned(skill) ? " (all skills; the Host omitted some)" : " (\(HostModel.maximumAssignedSkills) skills assigned)")
+    }
+
+    private func skillSummary(_ skill: HostSkill) -> String {
+        var parts: [String] = [DisplayText.escaped(skill.name)]
+        parts += [skill.root, skill.status, skill.shadowed ? "shadowed" : nil, skill.offered ? nil : "not offered"].compactMap { $0 }
+        if let description = skill.description { parts.append(DisplayText.escaped(description)) }
+        if let source = skill.source { parts.append("source " + DisplayText.escaped(source)) }
+        if let tools = skill.allowedTools { parts.append("allowed-tools (never applied): " + DisplayText.escaped(tools)) }
+        parts += skill.issues.map { DisplayText.escaped($0) }
+        return parts.joined(separator: ", ")
+    }
+
     private var removalShown: Binding<Bool> {
         Binding(get: { removal != nil }, set: { shown in if !shown { removal = nil } })
     }
@@ -511,29 +619,37 @@ struct SkillsView: View {
                 ForEach(skills.warnings.prefix(3), id: \.self) { warning in
                     Text(DisplayText.escaped(warning)).font(.caption).foregroundStyle(.orange).lineLimit(2)
                 }
-                if skills.omitted > 0 { Text("\(skills.omitted) more skills were omitted.").font(.caption).foregroundStyle(.orange) }
+                if skills.omitted > 0 {
+                    Text("\(skills.omitted) more skills were omitted. Removing one skill from an agent with all skills is unavailable, because the skills this app cannot see would stop being assigned.")
+                        .font(.caption).foregroundStyle(.orange).fixedSize(horizontal: false, vertical: true)
+                }
                 if skills.skills.isEmpty {
                     ContentUnavailableView("No skills found", systemImage: "book.closed", description: Text("Install skills with vorra skills add."))
                 } else {
                     List(skills.skills) { skill in
                         VStack(alignment: .leading, spacing: 4) {
-                            HStack {
-                                Text(DisplayText.escaped(skill.name)).bold().lineLimit(2)
-                                Text([skill.root, skill.status, skill.shadowed ? "shadowed" : nil, skill.offered ? nil : "not offered"].compactMap { $0 }.joined(separator: " • "))
-                                    .font(.caption2).foregroundStyle(.secondary)
+                            VStack(alignment: .leading, spacing: 4) {
+                                HStack {
+                                    Text(DisplayText.escaped(skill.name)).bold().lineLimit(2)
+                                    Text([skill.root, skill.status, skill.shadowed ? "shadowed" : nil, skill.offered ? nil : "not offered"].compactMap { $0 }.joined(separator: " • "))
+                                        .font(.caption2).foregroundStyle(.secondary)
+                                }
+                                if let description = skill.description { Text(DisplayText.escaped(description)).font(.caption).lineLimit(3) }
+                                if let source = skill.source { Text(DisplayText.escaped(source)).font(.caption2).foregroundStyle(.secondary).lineLimit(1) }
+                                if let tools = skill.allowedTools {
+                                    Text("allowed-tools (never applied): " + DisplayText.escaped(tools)).font(.caption2).foregroundStyle(.secondary).lineLimit(2)
+                                }
+                                ForEach(skill.issues, id: \.self) { issue in
+                                    Text(DisplayText.escaped(issue)).font(.caption2).foregroundStyle(.orange).lineLimit(2)
+                                }
                             }
-                            if let description = skill.description { Text(DisplayText.escaped(description)).font(.caption).lineLimit(3) }
-                            if let source = skill.source { Text(DisplayText.escaped(source)).font(.caption2).foregroundStyle(.secondary).lineLimit(1) }
-                            if let tools = skill.allowedTools {
-                                Text("allowed-tools (never applied): " + DisplayText.escaped(tools)).font(.caption2).foregroundStyle(.secondary).lineLimit(2)
-                            }
-                            ForEach(skill.issues, id: \.self) { issue in
-                                Text(DisplayText.escaped(issue)).font(.caption2).foregroundStyle(.orange).lineLimit(2)
-                            }
+                            .accessibilityElement(children: .ignore)
+                            .accessibilityLabel(skillSummary(skill))
                             if skill.assignableName != nil, let agents = model.agents {
                                 Menu("Assign to…") {
                                     ForEach(agents.agents) { agent in
-                                        Toggle(DisplayText.escaped(agent.name), isOn: assignment(skill, agent))
+                                        Toggle(assignLabel(skill, agent), isOn: assignment(skill, agent))
+                                            .disabled(assignmentBlocked(skill, agent))
                                     }
                                 }
                                 .fixedSize()

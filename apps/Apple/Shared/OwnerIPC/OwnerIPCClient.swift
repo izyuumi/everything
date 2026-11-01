@@ -295,7 +295,11 @@ final class OwnerIPCClient: @unchecked Sendable {
                     String(String.UnicodeScalarView(line.dropFirst(marker.count).prefix(512).unicodeScalars.filter { ![.control, .format].contains($0.properties.generalCategory) }))
                 }
                 : nil
-            failure = process.terminationReason == .exit && errorPrefix.range(of: Data("System One provider endpoint".utf8)) != nil
+            let reason = "invalid native settings patch: System One provider endpoint"
+            let lastLine = process.terminationReason == .exit
+                ? String(decoding: errorPrefix, as: UTF8.self).split(separator: "\n").last(where: { $0.hasPrefix("vorra: ") }).map(String.init)
+                : nil
+            failure = rejection == reason || lastLine == "vorra: invalid local IPC protocol: " + reason
                 ? OwnerClientError.systemOneProviderEndpoint
                 : rejection.map(OwnerClientError.hostRejected) ?? OwnerClientError.commandFailed(process.terminationStatus)
         }

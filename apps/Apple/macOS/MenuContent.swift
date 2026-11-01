@@ -32,10 +32,7 @@ struct MenuContent: View {
                 Label("Tool cleanup needs owner inspection", systemImage: "exclamationmark.triangle")
                     .font(.caption).foregroundStyle(.orange)
             }
-            if let message = model.message {
-                Text(message).font(.caption).foregroundStyle(.secondary)
-                    .textSelection(.enabled).lineLimit(5)
-            }
+            if let message = model.message { BoundedMessage(text: message) }
             if model.pendingAction != nil {
                 VStack(alignment: .leading) {
                     Text("An owner action needs reconciliation.").font(.caption.bold())

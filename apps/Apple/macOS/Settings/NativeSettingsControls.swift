@@ -160,6 +160,7 @@ struct NativeSettingsControls: View {
                 ForEach(SystemOneChoice.allCases) { choice in Text(choice.title).tag(Optional(choice)) }
             }
             .disabled(systemOneConfigurationUnknown(draft))
+            if let rejection = store.systemOneRejection { NativeSettingsNotice(rejection) }
             if systemOneConfigurationUnknown(draft) {
                 Text("The retained System One configuration was not observed for this draft's revision. Reload before choosing a provider so a saved endpoint and its credential reference are not replaced.")
                     .foregroundStyle(.secondary)
