@@ -156,6 +156,7 @@ pub(super) fn capture_policy(
         },
         limits,
         agent: None,
+        delegation_ceiling: None,
     };
     let policy = agent
         .narrow(policy, registry)

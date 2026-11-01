@@ -53,6 +53,7 @@ pub struct ShutdownReport {
 }
 
 type Reply = oneshot::Sender<Result<TaskSnapshot, SchedulerError>>;
+pub(super) type MessageReceipt = (TaskSnapshot, Option<String>);
 
 enum Control {
     Activate(oneshot::Sender<Result<(), SchedulerError>>),
@@ -148,6 +149,15 @@ enum Control {
         target: TaskId,
         instruction: String,
         reply: Reply,
+    },
+    Message {
+        caller: TaskId,
+        workspace: PathBuf,
+        operation: CommandId,
+        to: String,
+        text: String,
+        wait: bool,
+        reply: oneshot::Sender<Result<MessageReceipt, SchedulerError>>,
     },
     ScopedStatus {
         caller: TaskId,
@@ -644,6 +654,36 @@ impl Scheduler {
             reply,
         })
         .await
+    }
+
+    pub(super) async fn tool_message(
+        &self,
+        caller: TaskId,
+        workspace: PathBuf,
+        operation: CommandId,
+        to: String,
+        text: String,
+        wait: bool,
+    ) -> Result<MessageReceipt, SchedulerError> {
+        let (reply, result) = oneshot::channel();
+        self.inner
+            .sender
+            .send(Control::Message {
+                caller,
+                workspace,
+                operation,
+                to,
+                text,
+                wait,
+                reply,
+            })
+            .await
+            .map_err(|_| SchedulerError::Stopped)?;
+        result.await.map_err(|_| {
+            SchedulerError::MutationUncertain(
+                "control actor stopped after accepting the request".into(),
+            )
+        })?
     }
 
     pub(super) async fn tool_status(
@@ -1288,7 +1328,25 @@ impl Actor {
                 let result = if self.stopping {
                     Err(SchedulerError::Stopped)
                 } else {
-                    self.wait(caller, workspace, operation, children).await
+                    self.wait(caller, workspace, operation, children, "wait_agents")
+                        .await
+                };
+                let _ = reply.send(result);
+            }
+            Control::Message {
+                caller,
+                workspace,
+                operation,
+                to,
+                text,
+                wait,
+                reply,
+            } => {
+                let result = if self.stopping {
+                    Err(SchedulerError::Stopped)
+                } else {
+                    self.message(caller, workspace, operation, to, text, wait)
+                        .await
                 };
                 let _ = reply.send(result);
             }
@@ -1947,6 +2005,241 @@ impl Actor {
         admitted.map_err(mutation_uncertain)
     }
 
+    async fn message(
+        &mut self,
+        caller: TaskId,
+        workspace_root: PathBuf,
+        operation: CommandId,
+        to: String,
+        text: String,
+        wait: bool,
+    ) -> Result<MessageReceipt, SchedulerError> {
+        validate_instruction(&text)?;
+        let parent = self.validate_caller(caller, &workspace_root)?;
+        let now = self.operation_time(caller, operation, "message_agent")?;
+        let ids = MessageIds {
+            task: TaskId::try_from(derived_id(operation, b"task"))?,
+            conversation: ConversationId::try_from(derived_id(operation, b"conversation"))?,
+            create: CommandId::try_from(derived_id(operation, b"create"))?,
+            instruction: CommandId::try_from(derived_id(operation, b"instruction"))?,
+        };
+        let id = ids.task;
+        let snapshot = match repository::load(&self.store(), id) {
+            Ok(existing) => {
+                if existing.definition.initial.parent_task_id != Some(caller)
+                    || existing.definition.initial.instruction != text
+                    || existing.definition.initial.conversation_id != ids.conversation
+                    || existing
+                        .definition
+                        .delegation
+                        .as_ref()
+                        .is_none_or(|delegation| delegation.name.as_str() != to)
+                {
+                    return Err(SchedulerError::Conflict(id));
+                }
+                existing.snapshot()
+            }
+            Err(SchedulerError::NotFound(_)) => {
+                self.admit_message(caller, parent, &workspace_root, now, ids, &to, text)
+                    .await?
+            }
+            Err(error) => return Err(error),
+        };
+        if !wait {
+            return Ok((snapshot, None));
+        }
+        match self
+            .wait(caller, workspace_root, operation, vec![id], "message_agent")
+            .await
+        {
+            Ok(_) => Ok((snapshot, None)),
+            Err(error @ SchedulerError::MutationUncertain(_)) => Err(error),
+            Err(error) => Ok((snapshot, Some(error.to_string()))),
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn admit_message(
+        &mut self,
+        caller: TaskId,
+        parent: StoredTask,
+        workspace_root: &std::path::Path,
+        now: UnixMillis,
+        ids: MessageIds,
+        to: &str,
+        text: String,
+    ) -> Result<TaskSnapshot, SchedulerError> {
+        let refuse = |code, message| SchedulerError::Delegation { code, message };
+        let agents = crate::host::agents::AgentRepository::for_agent(&self.services.agent)
+            .and_then(|repository| repository.snapshot())
+            .map_err(|_| refuse("agents_unavailable", "the agents file cannot be read"))?;
+        let caller_agent = parent
+            .definition
+            .execution
+            .agent
+            .and_then(|agent| agents.get(agent.id))
+            .ok_or(refuse(
+                "agent_not_found",
+                "the calling task's agent no longer exists",
+            ))?;
+        let target = agents
+            .by_name(to)
+            .ok_or(refuse("agent_not_found", "no agent has that name"))?;
+        if !matches!(&caller_agent.messaging, crate::host::agents::Messaging::May(targets) if targets.contains(&target.id))
+        {
+            return Err(refuse(
+                "agent_not_allowed",
+                "the owner has not allowed this agent to message that agent",
+            ));
+        }
+        let lineage = repository::lineage(&self.store(), caller)?;
+        let root = lineage.last().ok_or(SchedulerError::NotFound(caller))?;
+        let mut path = lineage
+            .iter()
+            .find_map(|task| task.definition.delegation.as_ref())
+            .map_or_else(
+                || vec![caller_agent.id],
+                |delegation| delegation.path.clone(),
+            );
+        if path.contains(&target.id) {
+            return Err(refuse(
+                "agent_loop",
+                "that agent is already in this message chain",
+            ));
+        }
+        if path.len() > 3 {
+            return Err(refuse(
+                "agent_depth",
+                "a message chain is limited to three hops below the root turn",
+            ));
+        }
+        if repository::delegated_children(&self.store(), caller)? >= 16 {
+            return Err(refuse(
+                "agent_message_limit",
+                "a task can send at most sixteen agent messages",
+            ));
+        }
+        let ceiling = root
+            .definition
+            .execution
+            .delegation_ceiling
+            .clone()
+            .ok_or(refuse(
+                "agent_messaging_unavailable",
+                "the root turn did not capture an agent messaging ceiling",
+            ))?;
+        let root_authority = repository::delegation_authority(root)?;
+        repository::check_capacity(&self.store(), self.limits.max_pending_tasks)?;
+        repository::check_child_depth(&self.store(), caller)?;
+        if parent.definition.initial.parent_task_id.is_some()
+            && self.active.values().filter(|active| active.child).count()
+                >= self.limits.max_subagents
+        {
+            return Err(SchedulerError::Capacity("nested subagent execution slots"));
+        }
+        let mut policy = parent.definition.execution.clone();
+        policy.mode = ceiling.mode;
+        policy.allowed_tools = ceiling.allowed_tools;
+        policy.tools_enabled = true;
+        let mut policy = target.narrow(policy, &self.services.registry);
+        policy.delegation_ceiling = None;
+        let conversation = self
+            .services
+            .agent
+            .conversation(parent.definition.initial.conversation_id)
+            .await?;
+        if let Some(run) = conversation
+            .native_run()
+            .filter(|run| run.task_id == caller)
+        {
+            let remaining = parent
+                .definition
+                .execution
+                .limits
+                .max_charged_tokens
+                .saturating_sub(run.charged_tokens);
+            if remaining == 0 {
+                return Err(SchedulerError::Capacity("caller token budget"));
+            }
+            policy.limits.max_charged_tokens = remaining;
+            let deadline = UnixMillis::try_from(run.deadline_ms)?;
+            policy.limits.absolute_deadline = Some(
+                policy
+                    .limits
+                    .absolute_deadline
+                    .map_or(deadline, |current| current.min(deadline)),
+            );
+        }
+        let mut base = parent.definition.configuration.clone();
+        base.instructions = crate::host::agents::DEFAULT_INSTRUCTIONS.to_owned();
+        let configuration = target.configure(base).map_err(|_| {
+            refuse(
+                "agent_configuration",
+                "the target agent produces an invalid conversation configuration",
+            )
+        })?;
+        path.push(target.id);
+        let delegation = Delegation {
+            from: caller_agent.id,
+            to: target.id,
+            name: target.name.clone(),
+            path,
+        };
+        let title = format!("Agent {} {}", target.name.as_str(), ids.task);
+        let workspace =
+            workspace::prepare(workspace_root, caller, ids.task).map_err(|error| match error {
+                SchedulerError::Capacity(_) => error,
+                _ => mutation_uncertain(error),
+            })?;
+        let admitted = async {
+            policy.workspace_root = workspace;
+            let policy = policy.capture(&self.services.registry)?;
+            root_authority.delegate(
+                ids.conversation.to_string(),
+                ids.task.to_string(),
+                policy.workspace_root.clone(),
+                policy.mode,
+                policy
+                    .allowed_tools
+                    .clone()
+                    .ok_or(SchedulerError::Invalid("delegated policy was not captured"))?,
+            )?;
+            self.services
+                .agent
+                .create_conversation_as(
+                    ids.conversation,
+                    ids.create,
+                    title,
+                    configuration.clone(),
+                    Some(delegation.to),
+                )
+                .await?;
+            let mut initial = TaskRecord::new(
+                ids.conversation,
+                Some(caller),
+                ids.instruction,
+                text.clone(),
+                now,
+            );
+            initial.id = ids.task;
+            let mut task = initial_task(initial, configuration, policy);
+            task.definition.delegation = Some(delegation);
+            repository::insert(&self.store(), &task, self.limits.max_pending_tasks)?;
+            self.services
+                .agent
+                .accept_text(TextCommand {
+                    conversation_id: ids.conversation,
+                    command_id: ids.instruction,
+                    text,
+                })
+                .await?;
+            self.queue(ids.task);
+            Ok(repository::load(&self.store(), ids.task)?.snapshot())
+        }
+        .await;
+        admitted.map_err(mutation_uncertain)
+    }
+
     async fn send(
         &mut self,
         caller: TaskId,
@@ -2006,6 +2299,7 @@ impl Actor {
         workspace: PathBuf,
         operation: CommandId,
         children: Vec<TaskId>,
+        tool: &str,
     ) -> Result<TaskSnapshot, SchedulerError> {
         if children.is_empty()
             || children.len() > 32
@@ -2020,7 +2314,7 @@ impl Actor {
             ));
         }
         let mut task = self.validate_caller(caller, &workspace)?;
-        let accepted_at = self.operation_time(caller, operation, "wait_agents")?;
+        let accepted_at = self.operation_time(caller, operation, tool)?;
         let wait_id = CommandId::try_from(derived_id(operation, b"wait"))?;
         for child in &children {
             repository::authorize_target(&self.store(), caller, *child, false)?;
@@ -2793,6 +3087,13 @@ fn repair_handoff(
     Ok(())
 }
 
+struct MessageIds {
+    task: TaskId,
+    conversation: ConversationId,
+    create: CommandId,
+    instruction: CommandId,
+}
+
 fn initial_task(
     initial: TaskRecord,
     configuration: crate::agent::ConversationConfig,
@@ -2805,6 +3106,7 @@ fn initial_task(
             configuration,
             execution,
             remote: None,
+            delegation: None,
         },
         checkpoint: TaskCheckpoint {
             scheduler_version: 1,

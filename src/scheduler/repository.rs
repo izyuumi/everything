@@ -624,21 +624,149 @@ pub(super) fn authority(store: &Store, id: TaskId) -> Result<ExecutionAuthority,
                 .ok_or(SchedulerError::Invalid("child parent is missing"))?,
             child.definition.initial.id,
         )?;
-        authority = authority
-            .child_in_workspace(
+        let allowed = policy
+            .allowed_tools
+            .clone()
+            .ok_or(SchedulerError::Invalid("child policy was not captured"))?;
+        authority = if child.definition.delegation.is_some() {
+            delegation_authority(root)?.delegate(
                 child.definition.initial.conversation_id.to_string(),
                 child.definition.initial.id.to_string(),
                 policy.workspace_root.clone(),
                 policy.mode,
+                allowed,
             )?
-            .restrict_tools(
-                policy
-                    .allowed_tools
-                    .clone()
-                    .ok_or(SchedulerError::Invalid("child policy was not captured"))?,
-            )?;
+        } else {
+            authority
+                .child_in_workspace(
+                    child.definition.initial.conversation_id.to_string(),
+                    child.definition.initial.id.to_string(),
+                    policy.workspace_root.clone(),
+                    policy.mode,
+                )?
+                .restrict_tools(allowed)?
+        };
     }
     Ok(authority)
+}
+
+pub(super) fn delegation_authority(
+    root: &StoredTask,
+) -> Result<ExecutionAuthority, SchedulerError> {
+    let ceiling = root
+        .definition
+        .execution
+        .delegation_ceiling
+        .as_ref()
+        .ok_or(SchedulerError::Delegation {
+            code: "agent_messaging_unavailable",
+            message: "the root turn did not capture an agent messaging ceiling",
+        })?;
+    let authority = ExecutionAuthority::new(
+        root.definition.initial.conversation_id.to_string(),
+        root.definition.initial.id.to_string(),
+        root.definition.execution.workspace_root.clone(),
+        ceiling.mode,
+    )?;
+    Ok(match &ceiling.allowed_tools {
+        Some(allowed) => authority.restrict_tools(allowed.clone())?,
+        None => authority,
+    })
+}
+
+pub(super) fn lineage(store: &Store, id: TaskId) -> Result<Vec<StoredTask>, SchedulerError> {
+    let mut chain = vec![load(store, id)?];
+    while let Some(parent) = chain
+        .last()
+        .and_then(|task| task.definition.initial.parent_task_id)
+    {
+        if chain.len() >= 16 {
+            return Err(SchedulerError::Capacity("subagent nesting"));
+        }
+        chain.push(load(store, parent)?);
+    }
+    Ok(chain)
+}
+
+pub(super) fn delegated_children(store: &Store, caller: TaskId) -> Result<usize, SchedulerError> {
+    let count: i64 = store.connection()?.query_row(
+        "SELECT count(*) FROM tasks WHERE parent_task_id=?1 AND json_type(input,'$.delegation')='object'",
+        [caller.to_string()],
+        |row| row.get(0),
+    )?;
+    usize::try_from(count).map_err(|_| SchedulerError::Invalid("negative task count"))
+}
+
+pub(super) fn agent_log(
+    store: &Store,
+    agent: Option<crate::host::agents::AgentId>,
+    conversation: Option<crate::protocol::ConversationId>,
+    limit: usize,
+) -> Result<Vec<super::types::AgentHop>, SchedulerError> {
+    if !(1..=100).contains(&limit) {
+        return Err(SchedulerError::Invalid("agent log limit must be 1 to 100"));
+    }
+    let ids: Vec<String> = {
+        let connection = store.connection()?;
+        let mut statement = connection.prepare(
+            "SELECT t.id FROM tasks t LEFT JOIN tasks p ON p.id=t.parent_task_id \
+             WHERE json_type(t.input,'$.delegation')='object' \
+             AND (?1 IS NULL OR json_extract(t.input,'$.delegation.from')=?1 OR json_extract(t.input,'$.delegation.to')=?1) \
+             AND (?2 IS NULL OR t.conversation_id=?2 OR p.conversation_id=?2) \
+             ORDER BY t.created_at DESC, t.id LIMIT ?3",
+        )?;
+        statement
+            .query_map(
+                rusqlite::params![
+                    agent.map(|id| id.to_string()),
+                    conversation.map(|id| id.to_string()),
+                    i64::try_from(limit).map_err(|_| SchedulerError::Invalid("limit"))?
+                ],
+                |row| row.get(0),
+            )?
+            .collect::<Result<_, _>>()?
+    };
+    let mut hops = Vec::with_capacity(ids.len());
+    for id in ids {
+        let task = load(store, id.parse()?)?;
+        let delegation = task
+            .definition
+            .delegation
+            .as_ref()
+            .ok_or(SchedulerError::Invalid(
+                "delegated task lost its delegation",
+            ))?;
+        let parent_task_id = task
+            .definition
+            .initial
+            .parent_task_id
+            .ok_or(SchedulerError::Invalid("delegated task has no parent"))?;
+        let parent = load(store, parent_task_id)?;
+        let line = task
+            .definition
+            .initial
+            .instruction
+            .lines()
+            .next()
+            .unwrap_or("");
+        let mut end = line.len().min(200);
+        while !line.is_char_boundary(end) {
+            end -= 1;
+        }
+        hops.push(super::types::AgentHop {
+            task_id: task.definition.initial.id,
+            parent_task_id,
+            caller_conversation_id: parent.definition.initial.conversation_id,
+            conversation_id: task.definition.initial.conversation_id,
+            from: delegation.from,
+            to: delegation.to,
+            status: task.checkpoint.task.status,
+            created_at: task.definition.initial.created_at,
+            updated_at: task.checkpoint.task.updated_at,
+            text: line[..end].to_owned(),
+        });
+    }
+    Ok(hops)
 }
 
 pub(super) fn command_exists(

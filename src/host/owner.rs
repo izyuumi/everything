@@ -293,6 +293,23 @@ impl HostInner {
                 })
                 .await
             }
+            OwnerQuery::AgentLog {
+                agent,
+                conversation_id,
+                limit,
+            } => {
+                self.blocking(move |host| {
+                    Ok(OwnerQueryResult::AgentLog {
+                        hops: crate::scheduler::agent_log(
+                            &host.agent.store(),
+                            agent,
+                            conversation_id,
+                            limit,
+                        )?,
+                    })
+                })
+                .await
+            }
             OwnerQuery::Agent { id } => {
                 self.blocking(move |host| {
                     let agents = host.agents.snapshot()?;

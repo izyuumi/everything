@@ -4760,6 +4760,77 @@
               }
             ],
             "subcommands": []
+          },
+          {
+            "name": "log",
+            "about": "Show agent-to-agent messages, newest first",
+            "arguments": [
+              {
+                "id": "agent",
+                "long": "agent",
+                "short": null,
+                "positional": false,
+                "required": false,
+                "takes_value": true,
+                "value_names": [
+                  "NAME"
+                ],
+                "possible_values": [],
+                "default_values": [],
+                "env": null,
+                "help": null
+              },
+              {
+                "id": "conversation",
+                "long": "conversation",
+                "short": null,
+                "positional": false,
+                "required": false,
+                "takes_value": true,
+                "value_names": [
+                  "UUID"
+                ],
+                "possible_values": [],
+                "default_values": [],
+                "env": null,
+                "help": null
+              },
+              {
+                "id": "limit",
+                "long": "limit",
+                "short": null,
+                "positional": false,
+                "required": false,
+                "takes_value": true,
+                "value_names": [
+                  "LIMIT"
+                ],
+                "possible_values": [],
+                "default_values": [
+                  "20"
+                ],
+                "env": null,
+                "help": null
+              },
+              {
+                "id": "json",
+                "long": "json",
+                "short": null,
+                "positional": false,
+                "required": false,
+                "takes_value": false,
+                "value_names": [
+                  "JSON"
+                ],
+                "possible_values": [],
+                "default_values": [
+                  "false"
+                ],
+                "env": null,
+                "help": null
+              }
+            ],
+            "subcommands": []
           }
         ]
       },

@@ -19,6 +19,7 @@ const SNAPSHOT_LIMIT: usize = 1_000;
 const APPROVAL_LIFETIME_MS: i64 = 30 * 60 * 1_000;
 const VAULT_LEASE_MS: i64 = 60 * 60 * 1_000;
 pub const READ_ONLY_WRITES_UNAVAILABLE: &str = "writes are unavailable because the current execution mode is read-only; the trusted-workspace and full-host execution modes allow writes";
+pub const CHILD_APPROVAL_UNAVAILABLE: &str = "blocked: this call needs owner approval, and a child task cannot ask the owner; stop and reply with a short final report that starts with BLOCKED: and says what the parent or owner must do";
 
 #[derive(Debug, Error)]
 pub enum PermissionError {
@@ -59,6 +60,7 @@ pub struct ExecutionAuthority {
     workspace_root: PathBuf,
     mode: ExecutionMode,
     allowed_tools: Option<Arc<BTreeSet<String>>>,
+    asks_owner: bool,
 }
 
 impl ExecutionAuthority {
@@ -96,6 +98,7 @@ impl ExecutionAuthority {
             workspace_root,
             mode,
             allowed_tools: None,
+            asks_owner: true,
         })
     }
 
@@ -162,6 +165,7 @@ impl ExecutionAuthority {
             workspace_root: self.workspace_root.clone(),
             mode,
             allowed_tools: self.allowed_tools.clone(),
+            asks_owner: false,
         })
     }
 
@@ -216,7 +220,20 @@ impl ExecutionAuthority {
             workspace_root,
             mode,
             allowed_tools: self.allowed_tools.clone(),
+            asks_owner: false,
         })
+    }
+
+    pub(crate) fn delegate(
+        &self,
+        conversation_id: impl Into<String>,
+        task_id: impl Into<String>,
+        workspace_root: PathBuf,
+        mode: ExecutionMode,
+        allowed_tools: BTreeSet<String>,
+    ) -> Result<Self, PermissionError> {
+        self.child_in_workspace(conversation_id, task_id, workspace_root, mode)?
+            .restrict_tools(allowed_tools)
     }
 
     pub fn restrict_tools(
@@ -535,6 +552,9 @@ impl Authorizer {
         let request = if let Some(request) = existing_request {
             request
         } else {
+            if !authority.asks_owner {
+                return Ok(deny(CHILD_APPROVAL_UNAVAILABLE));
+            }
             let expires_at = now
                 .checked_add(APPROVAL_LIFETIME_MS)
                 .ok_or_else(|| PermissionError::InvalidAuthority("timestamp overflow".into()))?;

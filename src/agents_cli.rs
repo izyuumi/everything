@@ -50,6 +50,17 @@ enum AgentsCommand {
     },
     #[command(about = "Show the default agent, or make NAME the default")]
     Default { name: Option<String> },
+    #[command(about = "Show agent-to-agent messages, newest first")]
+    Log {
+        #[arg(long, value_name = "NAME")]
+        agent: Option<String>,
+        #[arg(long, value_name = "UUID")]
+        conversation: Option<vorra::protocol::ConversationId>,
+        #[arg(long, default_value_t = 20, value_parser = clap::value_parser!(u8).range(1..=100))]
+        limit: u8,
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Args)]
@@ -240,9 +251,75 @@ pub async fn run(
     arguments: AgentsArguments,
     cancellation: CancellationToken,
 ) -> Result<(), CliError> {
-    let backend = Backend::open(state).await?;
+    let backend = Backend::open(state.clone()).await?;
     let agents = backend.agents(cancellation.clone()).await?;
     match arguments.command {
+        AgentsCommand::Log {
+            agent,
+            conversation,
+            limit,
+            json,
+        } => {
+            let agent = agent
+                .map(|name| find(&agents, &name).map(|agent| agent.id))
+                .transpose()?;
+            let limit = usize::from(limit);
+            let hops = match backend {
+                Backend::Host(client) => match client
+                    .query(
+                        OwnerQuery::AgentLog {
+                            agent,
+                            conversation_id: conversation,
+                            limit,
+                        },
+                        cancellation,
+                    )
+                    .await?
+                {
+                    OwnerQueryResult::AgentLog { hops } => hops,
+                    _ => return Err(CliError::OwnerInput),
+                },
+                Backend::Offline(repository) => {
+                    drop(repository);
+                    let store = vorra::agent::Agent::open(&state).await?.store();
+                    tokio::task::spawn_blocking(move || {
+                        vorra::scheduler::agent_log(&store, agent, conversation, limit)
+                    })
+                    .await
+                    .map_err(|_| CliError::Worker)?
+                    .map_err(|error| invalid(error.to_string()))?
+                }
+            };
+            if json {
+                return write_json(hops).await;
+            }
+            let name = |id: AgentId| {
+                agents
+                    .get(id)
+                    .map_or_else(|| id.to_string(), |agent| agent.name.as_str().to_owned())
+            };
+            for hop in &hops {
+                let time = chrono::DateTime::from_timestamp_millis(
+                    i64::try_from(hop.created_at.get()).unwrap_or(i64::MAX),
+                )
+                .map_or_else(
+                    || hop.created_at.get().to_string(),
+                    |time| time.to_rfc3339(),
+                );
+                println!(
+                    "{time}\t{} -> {}\t{}\t{}\t{}",
+                    name(hop.from),
+                    name(hop.to),
+                    serde_json::to_value(hop.status)
+                        .ok()
+                        .and_then(|value| value.as_str().map(str::to_owned))
+                        .unwrap_or_default(),
+                    hop.conversation_id,
+                    hop.text
+                );
+            }
+            Ok(())
+        }
         AgentsCommand::List { json } => {
             if json {
                 return write_json(agents).await;

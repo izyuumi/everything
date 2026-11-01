@@ -22,6 +22,7 @@ pub const SCHEDULER_TOOL_NAMES: &[&str] = &[
     "agent_status",
     "cancel_agent",
     "wait_agents",
+    "message_agent",
 ];
 
 const MAX_INSTRUCTION_BYTES: usize = 32_768;
@@ -50,6 +51,7 @@ impl SchedulerTools {
             ControlOperation::Status,
             ControlOperation::Cancel,
             ControlOperation::Wait,
+            ControlOperation::Message,
         ]
         .map(|operation| {
             Arc::new(SchedulerTool {
@@ -132,6 +134,7 @@ enum ControlOperation {
     Status,
     Cancel,
     Wait,
+    Message,
 }
 
 struct SchedulerTool {
@@ -166,6 +169,19 @@ struct WaitArguments {
     task_ids: Vec<String>,
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MessageArguments {
+    to: String,
+    text: String,
+    #[serde(default = "default_wait")]
+    wait: bool,
+}
+
+fn default_wait() -> bool {
+    true
+}
+
 enum ControlRequest {
     Wait {
         children: Vec<TaskId>,
@@ -183,6 +199,11 @@ enum ControlRequest {
     },
     Cancel {
         target: TaskId,
+    },
+    Message {
+        to: String,
+        text: String,
+        wait: bool,
     },
 }
 
@@ -229,33 +250,36 @@ impl Tool for SchedulerTool {
         }
         let workspace = context.workspace_root().to_owned();
         let result = match request {
-            ControlRequest::Wait { children } => {
-                scheduler
-                    .tool_wait(caller, workspace, operation, children)
-                    .await
-            }
-            ControlRequest::Spawn { instruction, mode } => {
-                scheduler
-                    .tool_spawn(caller, workspace, operation, instruction, mode)
-                    .await
-            }
+            ControlRequest::Wait { children } => scheduler
+                .tool_wait(caller, workspace, operation, children)
+                .await
+                .map(snapshot_output),
+            ControlRequest::Spawn { instruction, mode } => scheduler
+                .tool_spawn(caller, workspace, operation, instruction, mode)
+                .await
+                .map(snapshot_output),
             ControlRequest::Send {
                 target,
                 instruction,
-            } => {
-                scheduler
-                    .tool_send(caller, workspace, operation, target, instruction)
-                    .await
-            }
-            ControlRequest::Status { target } => {
-                scheduler.tool_status(caller, workspace, target).await
-            }
-            ControlRequest::Cancel { target } => {
-                scheduler.tool_cancel(caller, workspace, target).await
-            }
+            } => scheduler
+                .tool_send(caller, workspace, operation, target, instruction)
+                .await
+                .map(snapshot_output),
+            ControlRequest::Status { target } => scheduler
+                .tool_status(caller, workspace, target)
+                .await
+                .map(snapshot_output),
+            ControlRequest::Cancel { target } => scheduler
+                .tool_cancel(caller, workspace, target)
+                .await
+                .map(snapshot_output),
+            ControlRequest::Message { to, text, wait } => scheduler
+                .tool_message(caller, workspace, operation, to.clone(), text, wait)
+                .await
+                .map(|(snapshot, wait_error)| message_output(snapshot, &to, wait, wait_error)),
         };
         match result {
-            Ok(snapshot) => Ok(snapshot_output(snapshot)),
+            Ok(output) => Ok(output),
             Err(error)
                 if !matches!(self.operation, ControlOperation::Status)
                     && matches!(error, SchedulerError::MutationUncertain(_)) =>
@@ -266,9 +290,37 @@ impl Tool for SchedulerTool {
                     cleanup_completed: false,
                 })
             }
+            Err(SchedulerError::Delegation { code, message }) => Ok(ToolOutput {
+                content: json!({"error":{"code":code,"message":message}}),
+                is_error: true,
+            }),
             Err(error) => Ok(error_output(&error.to_string())),
         }
     }
+}
+
+fn message_output(
+    snapshot: TaskSnapshot,
+    to: &str,
+    wait: bool,
+    wait_error: Option<String>,
+) -> ToolOutput {
+    let mut output = snapshot_output(snapshot);
+    if let Value::Object(fields) = &mut output.content {
+        fields.insert("to".into(), Value::String(to.to_owned()));
+        let reply = match (wait, wait_error) {
+            (true, None) => {
+                "the final report arrives as an agent_reply input after this tool round".to_owned()
+            }
+            (true, Some(error)) => format!(
+                "the message was admitted but no wait was registered ({}); use wait_agents or agent_status with task_id",
+                bounded(&error, MAX_DIAGNOSTIC_BYTES)
+            ),
+            (false, _) => "not waiting; use wait_agents or agent_status with task_id".to_owned(),
+        };
+        fields.insert("reply".into(), Value::String(reply));
+    }
+    output
 }
 
 fn descriptor(operation: ControlOperation) -> ToolDescriptor {
@@ -294,6 +346,11 @@ fn descriptor(operation: ControlOperation) -> ToolDescriptor {
             "agent_status",
             "Read bounded durable task state and output within the caller's permitted task scope",
             json!({"type":"object","properties":{"task_id":target},"required":["task_id"],"additionalProperties":false}),
+        ),
+        ControlOperation::Message => (
+            "message_agent",
+            "Send a task to another named agent the owner allows this agent to message; it runs with its own tools inside this turn's workspace bounds and returns only its final report as data. wait defaults to true",
+            json!({"type":"object","properties":{"to":{"type":"string","minLength":1,"maxLength":32,"pattern":"^[a-z0-9]+(-[a-z0-9]+)*$"},"text":instruction,"wait":{"type":"boolean"}},"required":["to","text"],"additionalProperties":false}),
         ),
         ControlOperation::Cancel => (
             "cancel_agent",
@@ -352,6 +409,18 @@ fn parse_request(
             Ok(ControlRequest::Send {
                 target: task_id(&arguments.task_id)?,
                 instruction: arguments.instruction,
+            })
+        }
+        ControlOperation::Message => {
+            let arguments: MessageArguments =
+                serde_json::from_value(arguments).map_err(|_| "invalid agent message arguments")?;
+            validate_instruction(&arguments.text)?;
+            crate::host::agents::AgentName::try_from(arguments.to.clone())
+                .map_err(|_| "to must be an agent name")?;
+            Ok(ControlRequest::Message {
+                to: arguments.to,
+                text: arguments.text,
+                wait: arguments.wait,
             })
         }
         ControlOperation::Status | ControlOperation::Cancel => {
