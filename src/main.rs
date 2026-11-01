@@ -360,10 +360,14 @@ impl ModelArguments {
     ) -> Result<ConversationConfig, CliError> {
         let fallback = agent.and_then(|agent| agent.model.as_ref());
         if let Some(agent) = agent.filter(|_| fallback.is_some())
-            && (self.provider.is_some() || self.model.is_some() || self.loopback_endpoint.is_some())
+            && (self.provider.is_some()
+                || self.model.is_some()
+                || self.loopback_endpoint.is_some()
+                || self.temperature.is_some()
+                || self.max_output_tokens.is_some())
         {
             return Err(CliError::AgentInput(format!(
-                "agent {} sets its own model; omit --provider, --model and --loopback-endpoint or use another agent",
+                "agent {} sets its own model; omit --provider, --model, --loopback-endpoint, --temperature and --max-output-tokens or use another agent",
                 agent.name.as_str()
             )));
         }
@@ -1493,7 +1497,8 @@ async fn proxy_cli(
             let conversation_id = arguments.conversation.unwrap_or_default();
             let command_id = arguments.command_id.unwrap_or_default();
             let agents = host_agents(&client, cancellation.clone()).await?;
-            let configuration = arguments.model.create(Some(agents.resolve(None)?))?;
+            let default = agents.resolve(None)?;
+            let configuration = arguments.model.create(Some(default))?;
             eprintln!("conversation {conversation_id} initialization command {command_id}");
             client
                 .submit(
@@ -1502,7 +1507,7 @@ async fn proxy_cli(
                         command_id,
                         title: arguments.title,
                         configuration,
-                        agent: None,
+                        agent: Some(default.id),
                     },
                     cancellation.clone(),
                 )
@@ -1665,6 +1670,7 @@ async fn proxy_chat(
             _ => return Err(CliError::OwnerInput),
         },
         None => {
+            let configuration = arguments.model.create(requested)?;
             let conversation_id = ConversationId::new();
             let command_id = CommandId::new();
             eprintln!("conversation {conversation_id} initialization command {command_id}");
@@ -1680,8 +1686,8 @@ async fn proxy_chat(
                                 .take(80)
                                 .collect()
                         }),
-                        configuration: arguments.model.create(requested)?,
-                        agent: requested_agent,
+                        configuration,
+                        agent: requested.map(|agent| agent.id),
                     },
                     cancellation.clone(),
                 )

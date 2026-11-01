@@ -332,6 +332,20 @@ impl App {
                 }
             }
             app.adopt_agent(definition);
+        } else {
+            let agents = app.host.agents().await?;
+            let default = agents
+                .resolve(None)
+                .map_err(|error| TuiError::Setup(error.to_string()))?;
+            if default.model.is_some() {
+                if options.explicit_route {
+                    return Err(TuiError::Setup(format!(
+                        "default agent {} sets its own model; omit --provider and --model or use another agent",
+                        default.name.as_str()
+                    )));
+                }
+                app.adopt_agent(default.clone());
+            }
         }
         if let Some(conversation_id) = target {
             app.switch(conversation_id).await;
@@ -357,13 +371,15 @@ impl App {
         self.selected_agent = Some(definition);
     }
 
-    fn route_locked(&mut self) -> bool {
-        let Some(name) = self
-            .selected_agent
+    fn locked_agent(&self) -> Option<String> {
+        self.selected_agent
             .as_ref()
             .filter(|agent| agent.model.is_some())
             .map(|agent| agent.name.as_str().to_owned())
-        else {
+    }
+
+    fn route_locked(&mut self) -> bool {
+        let Some(name) = self.locked_agent() else {
             return false;
         };
         self.note(
@@ -1242,6 +1258,9 @@ impl App {
             return;
         }
         if self.conversation.is_none() {
+            if let Some(definition) = self.selected_agent.clone() {
+                self.adopt_agent(definition);
+            }
             let configuration = match self.configuration() {
                 Ok(configuration) => configuration,
                 Err(error) => {
@@ -1294,6 +1313,9 @@ impl App {
                 "wait for the current reply first (or Ctrl+C twice to cancel it)",
             );
             return;
+        }
+        if let Some(definition) = self.selected_agent.clone() {
+            self.adopt_agent(definition);
         }
         self.conversation = None;
         self.stopped = false;
@@ -1501,7 +1523,9 @@ impl App {
                 Some(model) => self.choose_model((*model).to_owned()).await,
                 None => self.pick_model().await,
             },
-            "/provider" if !arguments.is_empty() && self.route_locked() => {}
+            "/provider" if !arguments.is_empty() && self.locked_agent().is_some() => {
+                self.route_locked();
+            }
             "/provider" => match arguments.first().copied() {
                 Some("openai") => {
                     self.provider = ProviderKind::OpenAi;
