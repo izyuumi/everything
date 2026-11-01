@@ -55,6 +55,13 @@ pub(crate) fn task_execution(
     Ok(repository::load(store, task)?.definition.execution)
 }
 
+pub(crate) fn delegated_spend(
+    store: &crate::storage::Store,
+    task: crate::protocol::TaskId,
+) -> Result<(u64, Vec<crate::protocol::TaskId>), SchedulerError> {
+    repository::subtree_spend(store, task)
+}
+
 pub fn task_publication_records(
     store: &crate::storage::Store,
     task: crate::protocol::TaskId,
