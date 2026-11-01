@@ -3,6 +3,7 @@ import Foundation
 enum DevicePreferenceKey: String, Codable, CaseIterable, Sendable {
     case completion = "notifications.completion"
     case attention = "notifications.attention"
+    case privacyCover = "privacy.cover"
 }
 
 struct DevicePreferenceChange: Codable, Equatable, Sendable {
@@ -67,11 +68,13 @@ struct DevicePreferenceSnapshot: Equatable, Sendable {
     let revision: UInt64
     let completion: Bool
     let attention: Bool
+    let privacyCover: Bool
 
     func value(for key: DevicePreferenceKey) -> Bool {
         switch key {
         case .completion: completion
         case .attention: attention
+        case .privacyCover: privacyCover
         }
     }
 }

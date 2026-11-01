@@ -6,9 +6,14 @@ struct ConversationsView: View {
 
     var body: some View {
         VStack(alignment: .leading) {
-            Text("Up to 100 conversations").font(.caption).foregroundStyle(.secondary)
+            HStack {
+                Text("Up to 100 conversations").font(.caption).foregroundStyle(.secondary)
+                Spacer()
+                Button("New Conversation", systemImage: "square.and.pencil") { Task { await model.newConversation() } }
+                    .disabled(!model.canMutate)
+            }
             if model.conversations.isEmpty {
-                ContentUnavailableView("No conversations loaded", systemImage: "bubble.left.and.bubble.right", description: Text("Connect to the headless host to read its conversations."))
+                ContentUnavailableView("No conversations loaded", systemImage: "bubble.left.and.bubble.right", description: Text("Connect to the headless host to read its conversations, or start a new one."))
             } else {
                 List(model.conversations) { conversation in
                     Button { model.open(conversation) } label: {
