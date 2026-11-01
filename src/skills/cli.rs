@@ -168,9 +168,13 @@ pub fn run(
     }
 }
 
-fn printable(text: &str, keep_lines: bool) -> Cow<'_, str> {
+pub fn printable(text: &str, keep_lines: bool) -> Cow<'_, str> {
     let escaped = |character: char| {
-        character.is_control() && !(keep_lines && matches!(character, '\n' | '\t'))
+        (character.is_control() && !(keep_lines && matches!(character, '\n' | '\t')))
+            || matches!(
+                character,
+                '\u{061c}' | '\u{200e}' | '\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}'
+            )
     };
     if !text.chars().any(escaped) {
         return Cow::Borrowed(text);

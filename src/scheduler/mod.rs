@@ -17,12 +17,21 @@ pub use remote::{
     RemoteTaskSubmission,
 };
 pub use schedule_context::ScheduleCallerContext;
-pub use tools::{SCHEDULER_TOOL_NAMES, SchedulerToolBinding, SchedulerTools};
+pub use tools::{MESSAGE_AGENT, SCHEDULER_TOOL_NAMES, SchedulerToolBinding, SchedulerTools};
 pub use types::{
-    DiscoveryServices, ExecutionPolicy, LiveText, PreparedTaskInputs, SchedulerError,
-    SchedulerLimits, SchedulerServices, TaskPreparation, TaskPreparationRequest,
+    AgentHop, DelegationCeiling, DiscoveryServices, ExecutionPolicy, LiveText, PreparedTaskInputs,
+    SchedulerError, SchedulerLimits, SchedulerServices, TaskPreparation, TaskPreparationRequest,
     TaskProviderFactory, TaskSnapshot, TaskSubmission, WaitingReason,
 };
+
+pub fn agent_log(
+    store: &crate::storage::Store,
+    agent: Option<crate::host::agents::AgentId>,
+    conversation: Option<crate::protocol::ConversationId>,
+    limit: usize,
+) -> Result<Vec<AgentHop>, SchedulerError> {
+    repository::agent_log(store, agent, conversation, limit)
+}
 
 pub fn task_snapshot(
     store: &crate::storage::Store,

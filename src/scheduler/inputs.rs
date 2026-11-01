@@ -142,6 +142,8 @@ pub(super) async fn repair(
                     status: delivery.status,
                     output: delivery.output,
                     outcome_unknown: delivery.outcome_unknown,
+                    agent: delivery.agent.clone(),
+                    blocked: delivery.blocked,
                 },
             })
             .await;
@@ -219,6 +221,8 @@ pub(super) async fn retire_consumed(
                     status: delivery.status,
                     output: delivery.output.clone(),
                     outcome_unknown: delivery.outcome_unknown,
+                    agent: delivery.agent.clone(),
+                    blocked: delivery.blocked,
                 },
             })
             .await?;
@@ -236,6 +240,8 @@ fn same_delivery(saved: &ChildDelivery, current: &ChildDelivery) -> bool {
         && saved.command_id == current.command_id
         && saved.status == current.status
         && saved.outcome_unknown == current.outcome_unknown
+        && saved.agent == current.agent
+        && saved.blocked == current.blocked
         && current.output.starts_with(&saved.output)
 }
 
@@ -288,6 +294,14 @@ async fn terminal_delivery(
                 | WaitingReason::ChildOutcomeUnknown { .. }
         )
     );
+    let blocked: bool = store.connection()?.query_row(
+        "SELECT EXISTS(SELECT 1 FROM tool_calls WHERE task_id=?1 AND state='denied' AND json_extract(result,'$.result.code')=?2)",
+        [
+            task.definition.initial.id.to_string(),
+            crate::permissions::CHILD_APPROVAL_CODE.to_owned(),
+        ],
+        |row| row.get(0),
+    )?;
     let output = task
         .checkpoint
         .last_output
@@ -305,6 +319,12 @@ async fn terminal_delivery(
         status: task.checkpoint.task.status,
         output: output[..end].to_owned(),
         outcome_unknown: native_unknown || journal_unknown || waiting_unknown,
+        agent: task
+            .definition
+            .delegation
+            .as_ref()
+            .map(|delegation| delegation.name.as_str().to_owned()),
+        blocked,
     })
 }
 

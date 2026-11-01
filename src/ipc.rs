@@ -167,6 +167,13 @@ pub enum OwnerQuery {
     Agent {
         id: crate::host::agents::AgentId,
     },
+    AgentLog {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        agent: Option<crate::host::agents::AgentId>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        conversation_id: Option<ConversationId>,
+        limit: usize,
+    },
 }
 
 impl OwnerQuery {
@@ -186,7 +193,7 @@ impl OwnerQuery {
         }
         if matches!(
             self,
-            Self::Conversations { limit } | Self::Tasks { limit, .. } | Self::Devices { limit } | Self::Approvals { limit, .. } | Self::VaultList { limit }
+            Self::Conversations { limit } | Self::Tasks { limit, .. } | Self::Devices { limit } | Self::Approvals { limit, .. } | Self::VaultList { limit } | Self::AgentLog { limit, .. }
                 if !(1..=100).contains(limit)
         ) {
             return Err("query limit must be between one and one hundred");
@@ -781,6 +788,9 @@ pub enum OwnerQueryResult {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         unavailable_tools: Option<Vec<String>>,
     },
+    AgentLog {
+        hops: Vec<crate::scheduler::AgentHop>,
+    },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -964,6 +974,23 @@ impl OwnerQueryResult {
                     && agents.get(agents.default_agent).is_some()
             }
             (OwnerQuery::Agent { id }, Self::Agent { agent, .. }) => agent.id == *id,
+            (
+                OwnerQuery::AgentLog {
+                    agent,
+                    conversation_id,
+                    limit,
+                },
+                Self::AgentLog { hops },
+            ) => {
+                hops.len() <= *limit
+                    && hops.iter().all(|hop| {
+                        agent.is_none_or(|agent| hop.from == agent || hop.to == agent)
+                            && conversation_id.is_none_or(|conversation| {
+                                hop.conversation_id == conversation
+                                    || hop.caller_conversation_id == conversation
+                            })
+                    })
+            }
             (OwnerQuery::Command { command_id }, Self::Command { receipt }) => receipt
                 .as_ref()
                 .is_none_or(|receipt| receipt.command_id == *command_id),

@@ -69,6 +69,11 @@ pub enum SchedulerError {
     Worker,
     #[error("native task mutation outcome is uncertain: {0}")]
     MutationUncertain(String),
+    #[error("{code}: {message}")]
+    Delegation {
+        code: &'static str,
+        message: &'static str,
+    },
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -82,6 +87,39 @@ pub struct ExecutionPolicy {
     pub limits: LoopLimits,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent: Option<crate::host::agents::CapturedAgent>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delegation_ceiling: Option<DelegationCeiling>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DelegationCeiling {
+    pub mode: ExecutionMode,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allowed_tools: Option<BTreeSet<String>>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Delegation {
+    pub from: crate::host::agents::AgentId,
+    pub to: crate::host::agents::AgentId,
+    pub name: crate::host::agents::AgentName,
+    pub path: Vec<crate::host::agents::AgentId>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct AgentHop {
+    pub task_id: TaskId,
+    pub parent_task_id: TaskId,
+    pub caller_conversation_id: ConversationId,
+    pub conversation_id: ConversationId,
+    pub from: crate::host::agents::AgentId,
+    pub to: crate::host::agents::AgentId,
+    pub status: crate::protocol::TaskStatus,
+    pub created_at: UnixMillis,
+    pub updated_at: UnixMillis,
+    pub text: String,
 }
 
 impl ExecutionPolicy {
@@ -313,6 +351,8 @@ pub(super) struct Definition {
     pub execution: ExecutionPolicy,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub remote: Option<super::remote::RemoteDefinition>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delegation: Option<Delegation>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -396,6 +436,12 @@ pub(super) struct TaskCheckpoint {
     pub terminal_evidence: Option<super::evidence::TerminalTaskEvidence>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub remote: Option<super::remote::RemoteCheckpoint>,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub followups: u32,
+}
+
+fn is_zero(value: &u32) -> bool {
+    *value == 0
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -431,6 +477,10 @@ pub(super) struct ChildDelivery {
     pub status: crate::protocol::TaskStatus,
     pub output: String,
     pub outcome_unknown: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub blocked: bool,
 }
 
 #[derive(Clone)]

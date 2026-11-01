@@ -2114,7 +2114,7 @@ fn output_from_record(
             ),
             true,
         ),
-        OperationResult::Denied { reason } => (
+        OperationResult::Denied { reason, .. } => (
             json!({"error":{"code":"permission_denied","message":reason}}),
             true,
         ),

@@ -33,7 +33,7 @@ pub(super) fn patch_candidate(
                                 provider: selection.provider,
                                 endpoint: selection.endpoint.as_native(),
                                 model: selection.model.clone(),
-                                instructions: "You are Vorra, a helpful assistant.".into(),
+                                instructions: crate::host::agents::DEFAULT_INSTRUCTIONS.into(),
                                 max_output_tokens: 4096,
                                 temperature: None,
                             });

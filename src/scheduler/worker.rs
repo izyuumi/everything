@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::fmt::Write as _;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -466,12 +467,18 @@ pub(super) fn completed(conversation: &Conversation, command_id: CommandId) -> E
     }) {
         for content in &message.message.content {
             if let MessageContent::Text { text } = content {
-                output.push_str(&bounded(
-                    text,
-                    MAX_OUTPUT_BYTES.saturating_sub(output.len()),
-                ));
+                output.push_str(text);
             }
         }
+    }
+    if output.len() > MAX_OUTPUT_BYTES {
+        let total = output.len();
+        output = bounded(&output, MAX_OUTPUT_BYTES - 96);
+        let kept = output.len();
+        let _ = write!(
+            output,
+            "\n[report truncated: first {kept} of {total} bytes]"
+        );
     }
     ExecutionStop::Completed { output }
 }

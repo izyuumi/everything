@@ -136,6 +136,8 @@ pub enum OperationResult {
     },
     Denied {
         reason: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        code: Option<String>,
     },
     Unknown {
         reason: UnknownReason,
@@ -1328,9 +1330,14 @@ impl BrokerInner {
                 operation_id: call.id.clone(),
                 approval,
             })),
-            AuthorizationDecision::Deny { reason } => Ok(Some(
-                self.finish_pending(call, OperationResult::Denied { reason }, owner, journal)
-                    .await?,
+            AuthorizationDecision::Deny { reason, code } => Ok(Some(
+                self.finish_pending(
+                    call,
+                    OperationResult::Denied { reason, code },
+                    owner,
+                    journal,
+                )
+                .await?,
             )),
         }
     }

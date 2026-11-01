@@ -618,6 +618,7 @@ fn submission(manifest: &WorkerManifest, workspace: PathBuf) -> TaskSubmission {
             budget: manifest.budget.clone(),
             limits,
             agent: None,
+            delegation_ceiling: None,
         },
     }
 }
