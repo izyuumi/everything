@@ -393,12 +393,25 @@ impl App {
             );
             return None;
         };
-        let shown = (self.provider, self.model.clone(), self.endpoint.clone());
+        let shown = (
+            self.agent_label.clone(),
+            self.provider,
+            self.model.clone(),
+            self.endpoint.clone(),
+        );
         let id = fresh.id;
         if fresh.model.is_some() || self.selected_agent.is_some() {
             self.adopt_agent(fresh);
+        } else {
+            fresh.name.as_str().clone_into(&mut self.agent_label);
         }
-        if (self.provider, self.model.clone(), self.endpoint.clone()) != shown {
+        if (
+            self.agent_label.clone(),
+            self.provider,
+            self.model.clone(),
+            self.endpoint.clone(),
+        ) != shown
+        {
             self.note(
                 NoteKind::Warn,
                 format!(
