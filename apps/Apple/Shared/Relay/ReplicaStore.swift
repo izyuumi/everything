@@ -213,6 +213,20 @@ private final class ReplicaDatabase: @unchecked Sendable {
         try execute("UPDATE conversations SET agent=? WHERE id=?", [.text(agent.identifier.uuidString.lowercased()), .text(event.conversationID.uuidString.lowercased())])
     }
 
+    func restoreAgents() throws {
+        let created = try rows("SELECT e.conversation,e.sequence,e.event_id,e.envelope FROM events e JOIN conversations c ON c.id=e.conversation WHERE c.agent IS NULL AND e.kind='conversation_created' ORDER BY e.rowid LIMIT 64") { row in
+            let length = Int(sqlite3_column_bytes(row, 3))
+            guard length > 0, length <= 262_144 else { throw WireError.storage }
+            let event = try WireEvent(WireValue.parse(Self.data(row, 3), maximum: 262_144))
+            guard event.kind == "conversation_created",
+                  event.conversationID.uuidString.lowercased() == (try Self.text(row, 0)),
+                  Int64(event.sequence) == sqlite3_column_int64(row, 1),
+                  event.id.uuidString.lowercased() == (try Self.text(row, 2)) else { throw WireError.conflict }
+            return event
+        }
+        for event in created { try projectAgent(event) }
+    }
+
     func restorePermissionDecisions() throws {
         var after: Int64 = 0
         var records = 0
@@ -275,14 +289,8 @@ actor ReplicaStore: DurableEnvelopeInbox {
             }
             if version < 3 { try database.restorePermissionDecisions() }
             let conversationColumns = try database.rows("PRAGMA table_info(conversations)") { try ReplicaDatabase.text($0, 1) }
-            if !conversationColumns.contains("agent") {
-                try database.execute("ALTER TABLE conversations ADD COLUMN agent TEXT")
-                let created = try database.rows("SELECT envelope FROM events WHERE kind='conversation_created'") { try ReplicaDatabase.data($0, 0) }
-                for envelope in created {
-                    guard let event = try? WireEvent(WireValue.parse(envelope, maximum: 262_144)) else { continue }
-                    try database.projectAgent(event)
-                }
-            }
+            if !conversationColumns.contains("agent") { try database.execute("ALTER TABLE conversations ADD COLUMN agent TEXT") }
+            try database.restoreAgents()
             try database.execute("PRAGMA user_version=3")
         }
         for name in ["replica-v1.sqlite3", "replica-v1.sqlite3-wal", "replica-v1.sqlite3-shm"] {
