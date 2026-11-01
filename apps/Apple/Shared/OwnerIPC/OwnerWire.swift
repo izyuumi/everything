@@ -56,16 +56,21 @@ struct OwnerRequest: Sendable {
     let body: JSONValue
     let mutating: Bool
 
+    var isCommand: Bool { ["command", "owner_command"].contains(body["kind"].string ?? "") }
+    var isAgentOperation: Bool { body["kind"].string == "operation" && (body["operation"]["kind"].string ?? "").hasPrefix("agent_") }
+
     func validateForFileTransfer() throws {
         switch body["kind"].string {
         case "query", "command", "synchronize": return
+        case "owner_command" where body["command"]["kind"].string == "initialize": return
         case "operation":
             switch body["operation"]["kind"].string {
             case "worker_coordinator", "revoke_worker_peer", "schedule", "acknowledge_scheduled_unknown",
                  "prepare_selection", "approve_selection", "discard_selection", "memory_enqueue", "memory_cancel",
                  "memory_retry", "apply_memory_plan", "rebuild_embeddings", "discard_unapplied", "replace_settings", "reconcile_settings",
                  "revoke_device", "wake_task", "retry_provider", "resume_interrupted", "chatgpt",
-                 "acknowledge_cleanup", "reconcile_drained", "vault_remove", "vault_disconnect": return
+                 "acknowledge_cleanup", "reconcile_drained", "vault_remove", "vault_disconnect",
+                 "agent_put", "agent_remove", "agent_set_default": return
             case "vault_connect" where body["operation"]["token"] == .null: return
             default: throw OwnerPrivateTransportError.requiresPrivatePipe
             }
@@ -96,6 +101,15 @@ struct OwnerRequest: Sendable {
             "issued_at": .integer(Int64(milliseconds)), "payload": .object(payload)
         ])
         return OwnerRequest(id: id, body: .object(["kind": .string("command"), "command": command]), mutating: true)
+    }
+
+    static func initialize(conversation: OwnerID, title: String, configuration: JSONValue, agent: OwnerID) -> OwnerRequest {
+        let id = OwnerID()
+        let command: JSONValue = .object([
+            "kind": .string("initialize"), "conversation_id": .string(conversation.string), "command_id": .string(id.string),
+            "title": .string(title), "configuration": configuration, "agent": .string(agent.string)
+        ])
+        return OwnerRequest(id: id, body: .object(["kind": .string("owner_command"), "command": command]), mutating: true)
     }
 
     static func operation(_ kind: String, fields: [String: JSONValue] = [:]) -> OwnerRequest {

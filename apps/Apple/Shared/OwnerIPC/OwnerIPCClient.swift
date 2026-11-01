@@ -289,9 +289,15 @@ final class OwnerIPCClient: @unchecked Sendable {
         do { try errors.fileHandleForReading.close() }
         catch { cleanupFailures.append(error) }
         if failure == nil && (process.terminationReason != .exit || process.terminationStatus != 0) {
+            let marker = "vorra: host rejected the operation: "
+            let rejection = process.terminationReason == .exit
+                ? String(decoding: errorPrefix, as: UTF8.self).split(separator: "\n").last(where: { $0.hasPrefix(marker) }).map { line in
+                    String(String.UnicodeScalarView(line.dropFirst(marker.count).prefix(512).unicodeScalars.filter { ![.control, .format].contains($0.properties.generalCategory) }))
+                }
+                : nil
             failure = process.terminationReason == .exit && errorPrefix.range(of: Data("System One provider endpoint".utf8)) != nil
                 ? OwnerClientError.systemOneProviderEndpoint
-                : OwnerClientError.commandFailed(process.terminationStatus)
+                : rejection.map(OwnerClientError.hostRejected) ?? OwnerClientError.commandFailed(process.terminationStatus)
         }
         if !cleanupFailures.isEmpty { throw OwnerCleanupFailure(original: failure, failures: cleanupFailures) }
         if let failure { throw failure }

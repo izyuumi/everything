@@ -37,6 +37,15 @@ final class HostModel {
     @ObservationIgnored private var historyGeneration = UUID()
     var tasks: [HostTask] = []
     var conversations: [HostConversation] = []
+    var agents: HostAgents?
+    var agentsError: String?
+    var newChatAgent: OwnerID?
+    var editingAgent: HostAgent?
+    var creatingAgent = false
+    @ObservationIgnored private var agentOperationApplied: Bool?
+    var skills: HostSkills?
+    var skillsError: String?
+    var skillsLoading = false
     var approvals: [PendingApproval] = []
     var approvalsLimited = false
     var approvalLoading = false
@@ -141,6 +150,13 @@ final class HostModel {
         schedulesUpdated = nil
         tasks = []
         conversations = []
+        agents = nil
+        agentsError = nil
+        newChatAgent = nil
+        editingAgent = nil
+        creatingAgent = false
+        skills = nil
+        skillsError = nil
         approvals = []
         approvalsLimited = false
         openConversation = nil
@@ -178,7 +194,20 @@ final class HostModel {
             let list = try await client.request(.query("conversations", fields: ["limit": .integer(100)]), connection: original)
             guard list["kind"].string == "conversations", let list = list["conversations"].array, list.count <= 100 else { throw OwnerClientError.invalidResponse }
             let conversations = try list.map(HostConversation.init)
+            let agents: Result<HostAgents, Error>
+            do { agents = .success(try HostAgents(await client.request(.query("agents"), connection: original))) }
+            catch { agents = .failure(error) }
             guard !Task.isCancelled, original == connection, !closing else { return }
+            switch agents {
+            case .success(let agents):
+                self.agents = agents
+                agentsError = nil
+                if let selected = newChatAgent, !agents.agents.contains(where: { $0.id == selected }) { newChatAgent = nil }
+            case .failure(let error):
+                self.agents = nil
+                newChatAgent = nil
+                agentsError = "Cannot read agents: " + error.localizedDescription
+            }
             self.draining = draining
             self.quarantined = quarantined
             self.tasks = tasks
@@ -373,7 +402,118 @@ final class HostModel {
         } catch { if !Task.isCancelled { message = error.localizedDescription } }
     }
 
+    func loadSkills() async {
+        guard !closing, !skillsLoading, !connection.executable.isEmpty else { return }
+        skillsLoading = true
+        defer { skillsLoading = false }
+        let original = connection
+        do {
+            let result = try HostSkills(await client.request(.query("skills"), connection: original))
+            guard original == connection, !closing, !Task.isCancelled else { return }
+            skills = result
+            skillsError = nil
+        } catch {
+            if original == connection, !closing, !Task.isCancelled { skillsError = error.localizedDescription }
+        }
+    }
+
+    func saveAgent(_ definition: JSONValue, expectedRevision: UInt64?) async {
+        guard canMutate else { return }
+        let label = "Agent " + DisplayText.escaped(definition["name"].string ?? "")
+        await apply(.operation("agent_put", fields: ["expected_revision": expectedRevision.map(JSONValue.unsigned) ?? .null, "definition": definition]), label: label, expectedKind: "agents")
+        if pendingAction == nil && agentOperationApplied != false { editingAgent = nil; creatingAgent = false }
+    }
+
+    func removeAgent(_ agent: HostAgent) async {
+        guard canMutate else { return }
+        await apply(.operation("agent_remove", fields: ["id": .string(agent.id.string), "expected_revision": .unsigned(agent.revision)]), label: "Agent removal", expectedKind: "agents")
+        if pendingAction == nil && agentOperationApplied != false { editingAgent = nil }
+    }
+
+    func setDefaultAgent(_ agent: HostAgent) async {
+        guard canMutate else { return }
+        await apply(.operation("agent_set_default", fields: ["id": .string(agent.id.string), "expected_revision": .unsigned(agent.revision)]), label: "Default agent", expectedKind: "agents")
+    }
+
+    func newConversation(agent: HostAgent, asDefault: Bool = false) async {
+        guard pendingAction == nil else { message = "Resolve the pending action first."; return }
+        guard canMutate else { return }
+        let original = connection
+        let id = OwnerID()
+        do {
+            let current = try await client.request(.query("agent", fields: ["id": .string(agent.id.string)]), connection: original)
+            guard current["kind"].string == "agent", try HostAgent(current["agent"]) == agent,
+                  !asDefault || current["default"] == .bool(true) else {
+                message = "Agent " + DisplayText.escaped(agent.name) + " changed or was removed. Review it and try again."
+                await refresh()
+                return
+            }
+            let settings = try await client.request(.query("settings"), connection: original)
+            guard settings["kind"].string == "settings" else { throw OwnerClientError.invalidResponse }
+            var configuration = settings["settings"]["default_conversation"]
+            let own = agent.definition["model"]
+            if configuration == .null, own != .null {
+                configuration = .object([
+                    "provider": own["provider"], "model": own["model"], "endpoint": own["endpoint"],
+                    "instructions": .string("You are Vorra, a helpful assistant."),
+                    "max_output_tokens": own["max_output_tokens"] == .null ? .unsigned(4096) : own["max_output_tokens"],
+                    "temperature": own["temperature"]
+                ])
+            }
+            guard configuration != .null else {
+                message = "Configure a default model in Settings or give the agent a model before starting a conversation."
+                return
+            }
+            guard original == connection, !closing else { return }
+            let request = OwnerRequest.initialize(conversation: id, title: "New conversation", configuration: configuration, agent: agent.id)
+            await apply(request, label: "New conversation with " + DisplayText.escaped(agent.name), expectedKind: "command")
+            if let created = conversations.first(where: { $0.id == id }) { open(created) }
+        } catch { if !Task.isCancelled { message = error.localizedDescription } }
+    }
+
+    func reconcileAgentOperation(_ request: OwnerRequest, note: String? = nil) async {
+        guard !acting, !closing, pendingAction?.id == request.id else { return }
+        acting = true
+        defer { acting = false }
+        let original = connection
+        do {
+            let current = try HostAgents(await client.request(.query("agents"), connection: original))
+            guard original == connection, pendingAction?.id == request.id, !closing, !Task.isCancelled else { return }
+            let operation = request.body["operation"]
+            let id = operation["id"].string ?? operation["definition"]["id"].string
+            let agent = current.agents.first { $0.id.string == id }
+            let applied: Bool
+            switch operation["kind"].string {
+            case "agent_put":
+                let keys = ["name", "description", "persona", "model", "traits", "tools", "workspace", "memory", "skills", "messaging"]
+                applied = agent.map { agent in
+                    agent.revision > (operation["expected_revision"].unsigned ?? 0) && keys.allSatisfy { operation["definition"][$0] == agent.definition[$0] }
+                } ?? false
+            case "agent_remove": applied = agent == nil
+            case "agent_set_default": applied = current.defaultID.string == id
+            default: applied = false
+            }
+            agents = current
+            agentOperationApplied = applied
+            if !applied, let editing = editingAgent, let fresh = current.agents.first(where: { $0.id == editing.id }) { editingAgent = fresh }
+            pendingAction = nil
+            message = (note.map { $0 + " " } ?? "") + (applied
+                ? pendingActionLabel + " is applied in the current Host state."
+                : pendingActionLabel + " is not reflected in the current Host state. Review the agent and try again.")
+        } catch { if !Task.isCancelled { message = (note.map { $0 + " " } ?? "") + error.localizedDescription } }
+    }
+
     func newConversation() async {
+        guard pendingAction == nil else { message = "Resolve the pending action first."; return }
+        if let selected = newChatAgent {
+            if let agent = agents?.agents.first(where: { $0.id == selected }) { await newConversation(agent: agent) }
+            else { message = "The selected agent is no longer available." }
+            return
+        }
+        if let agents, let agent = agents.agents.first(where: { $0.id == agents.defaultID }) {
+            await newConversation(agent: agent, asDefault: true)
+            return
+        }
         let id = OwnerID()
         do {
             let request = try OwnerRequest.command(conversation: id, payload: ["kind": .string("create_conversation"), "title": .string("New conversation")])
@@ -427,8 +567,10 @@ final class HostModel {
         acting = true
         pendingAction = request
         pendingActionLabel = label
+        agentOperationApplied = nil
         defer { acting = false }
         let original = connection
+        var rejected = false
         do {
             let result = try await client.request(request, connection: original)
             guard original == connection, !closing, !Task.isCancelled else { return }
@@ -446,7 +588,14 @@ final class HostModel {
             }
             if settled { pendingAction = nil }
             await refresh()
+        } catch OwnerClientError.hostRejected(let reason) where request.isAgentOperation || request.isCommand {
+            message = label + " was rejected: " + DisplayText.escaped(reason)
+            rejected = true
         } catch { message = error.localizedDescription }
+        guard rejected, original == connection, !closing, !Task.isCancelled else { return }
+        acting = false
+        if request.isAgentOperation { await reconcileAgentOperation(request, note: message) }
+        else { await inspectPendingCommand(note: message) }
     }
 
     private func adoptSettingsReceipt(_ result: JSONValue, request: OwnerRequest) throws -> Bool {
@@ -534,12 +683,16 @@ final class HostModel {
 
     func repeatPending() async {
         guard let request = pendingAction else { return }
-        let kind = request.body["kind"].string == "command" ? "command" : request.body["operation"]["kind"].string == "replace_settings" ? "settings" : "applied"
+        if request.isAgentOperation {
+            await reconcileAgentOperation(request)
+            return
+        }
+        let kind = request.isCommand ? "command" : request.body["operation"]["kind"].string == "replace_settings" ? "settings" : "applied"
         await apply(request, label: pendingActionLabel, expectedKind: kind)
     }
 
-    func inspectPendingCommand() async {
-        guard let request = pendingAction, request.body["kind"].string == "command", !acting, !closing else { return }
+    func inspectPendingCommand(note: String? = nil) async {
+        guard let request = pendingAction, request.isCommand, !acting, !closing else { return }
         acting = true
         defer { acting = false }
         let original = connection
@@ -549,17 +702,17 @@ final class HostModel {
             guard response["kind"].string == "command" else { throw OwnerClientError.invalidResponse }
             let receipt = response["receipt"]
             if receipt == .null {
-                message = "This host has no durable record of the command. Its exact original request remains available for an explicit retry."
+                message = (note.map { $0 + " " } ?? "") + "This host has no durable record of the command. Its exact original request remains available for an explicit retry."
                 return
             }
             guard receipt["command_id"].string == request.id.string,
                   receipt["conversation_id"] == request.body["command"]["conversation_id"],
                   let phase = receipt["phase"].string,
                   ["accepted", "applied", "completed", "rejected"].contains(phase) else { throw OwnerClientError.invalidResponse }
-            message = "Command state: " + phase + ". " + receipt["result"].formatted
+            message = (note.map { $0 + " " } ?? "") + "Command state: " + phase + ". " + receipt["result"].formatted
             if ["completed", "rejected"].contains(phase) { pendingAction = nil }
             await refresh()
-        } catch { if !Task.isCancelled { message = error.localizedDescription } }
+        } catch { if !Task.isCancelled { message = (note.map { $0 + " " } ?? "") + error.localizedDescription } }
     }
 
     func loadSettings() async {
