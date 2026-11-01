@@ -93,6 +93,7 @@ struct AgentEditorView: View {
     @Bindable var model: HostModel
     let agent: HostAgent?
     @Environment(\.dismiss) private var dismiss
+    @State private var newID = OwnerID()
     @State private var name = ""
     @State private var description = ""
     @State private var persona = ""
@@ -206,7 +207,7 @@ struct AgentEditorView: View {
     }
 
     private var definition: JSONValue {
-        var value: [String: JSONValue] = ["id": .string(OwnerID().string), "messaging": .string("closed")]
+        var value: [String: JSONValue] = ["id": .string(newID.string), "messaging": .string("closed")]
         if case .object(let object) = agent?.definition { value = object }
         value["name"] = .string(name)
         value["description"] = .string(description)

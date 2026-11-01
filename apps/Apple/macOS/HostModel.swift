@@ -500,7 +500,7 @@ final class HostModel {
             message = (note.map { $0 + " " } ?? "") + (applied
                 ? pendingActionLabel + " is applied in the current Host state."
                 : pendingActionLabel + " is not reflected in the current Host state. Review the agent and try again.")
-        } catch { if !Task.isCancelled { message = error.localizedDescription } }
+        } catch { if !Task.isCancelled { message = (note.map { $0 + " " } ?? "") + error.localizedDescription } }
     }
 
     func newConversation() async {
@@ -702,7 +702,7 @@ final class HostModel {
             guard response["kind"].string == "command" else { throw OwnerClientError.invalidResponse }
             let receipt = response["receipt"]
             if receipt == .null {
-                message = "This host has no durable record of the command. Its exact original request remains available for an explicit retry."
+                message = (note.map { $0 + " " } ?? "") + "This host has no durable record of the command. Its exact original request remains available for an explicit retry."
                 return
             }
             guard receipt["command_id"].string == request.id.string,
@@ -712,7 +712,7 @@ final class HostModel {
             message = (note.map { $0 + " " } ?? "") + "Command state: " + phase + ". " + receipt["result"].formatted
             if ["completed", "rejected"].contains(phase) { pendingAction = nil }
             await refresh()
-        } catch { if !Task.isCancelled { message = error.localizedDescription } }
+        } catch { if !Task.isCancelled { message = (note.map { $0 + " " } ?? "") + error.localizedDescription } }
     }
 
     func loadSettings() async {
