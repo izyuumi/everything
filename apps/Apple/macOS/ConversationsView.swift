@@ -209,6 +209,10 @@ struct AgentEditorView: View {
                         }
                         TextField("Endpoint", text: $endpoint, prompt: Text("Official API"))
                         if let modelIssue { Text(modelIssue).font(.caption).foregroundStyle(.red).fixedSize(horizontal: false, vertical: true) }
+                        else if !endpoint.isEmpty {
+                            Text("The Host accepts only the canonical form of an explicit loopback IP, including the trailing /, for example http://127.0.0.1:8080/.")
+                                .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                        }
                     } else {
                         Text("Conversations use the Host's default model.").font(.caption).foregroundStyle(.secondary)
                     }

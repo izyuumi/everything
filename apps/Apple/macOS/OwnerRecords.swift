@@ -386,11 +386,15 @@ struct HostScheduleHistory: Sendable {
 }
 
 enum DisplayText {
+    static func isFormat(_ scalar: Unicode.Scalar) -> Bool {
+        scalar.value == 0x061C || (0x200B...0x200F).contains(scalar.value) || (0x202A...0x202E).contains(scalar.value)
+            || (0x2066...0x2069).contains(scalar.value) || scalar.value == 0xFEFF || (0xE0000...0xE007F).contains(scalar.value)
+    }
+
     static func escaped(_ value: String, multiline: Bool = false) -> String {
         var result = ""
         for scalar in value.unicodeScalars {
-            let format = scalar.value == 0x061C || (0x200B...0x200F).contains(scalar.value) || (0x202A...0x202E).contains(scalar.value)
-                || (0x2066...0x2069).contains(scalar.value) || scalar.value == 0xFEFF || (0xE0000...0xE007F).contains(scalar.value)
+            let format = isFormat(scalar)
             let control = scalar.properties.generalCategory == .control && !(multiline && (scalar == "\n" || scalar == "\t"))
             if format || control { result += "\\u{" + String(scalar.value, radix: 16) + "}" }
             else { result.unicodeScalars.append(scalar) }
@@ -442,7 +446,9 @@ struct HostAgent: Identifiable, Sendable, Equatable {
         switch definition["skills"] {
         case .string("all"): skill.offered
         case .string("none"): false
-        default: skill.offered && (definition["skills"]["only"].array ?? []).contains { $0.string.map(skill.matches) == true }
+        default: skill.offered && (definition["skills"]["only"].array ?? []).contains { entry in
+            entry.string.map { !$0.unicodeScalars.contains(where: DisplayText.isFormat) && skill.matches($0) } == true
+        }
         }
     }
 

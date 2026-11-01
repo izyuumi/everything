@@ -616,7 +616,8 @@ final class HostModel {
             if settled { pendingAction = nil }
             await refresh()
         } catch OwnerClientError.hostRejected(let reason) where request.isAgentOperation || request.isCommand {
-            message = label + " was rejected: " + DisplayText.escaped(reason)
+            let shown = DisplayText.escaped(reason)
+            message = label + " was rejected: " + shown + (shown.hasSuffix(".") ? "" : ".")
             rejected = true
         } catch { message = error.localizedDescription }
         guard rejected, original == connection, !closing, !Task.isCancelled else { return }
