@@ -1,6 +1,8 @@
 pub mod cli;
 mod discover;
+mod fetch;
 mod frontmatter;
+mod install;
 mod lock;
 
 use std::collections::BTreeMap;

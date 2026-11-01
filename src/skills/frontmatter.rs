@@ -38,6 +38,7 @@ struct RawFrontmatter {
 
 enum Scalar {
     Text(String),
+    True,
     Other,
 }
 
@@ -45,7 +46,7 @@ impl Scalar {
     fn bytes(&self) -> usize {
         match self {
             Self::Text(text) => text.len(),
-            Self::Other => 0,
+            Self::True | Self::Other => 0,
         }
     }
 }
@@ -73,8 +74,8 @@ impl<'de> Visitor<'de> for ScalarVisitor {
         Ok(Scalar::Text(value))
     }
 
-    fn visit_bool<E: de::Error>(self, _: bool) -> Result<Scalar, E> {
-        Ok(Scalar::Other)
+    fn visit_bool<E: de::Error>(self, value: bool) -> Result<Scalar, E> {
+        Ok(if value { Scalar::True } else { Scalar::Other })
     }
 
     fn visit_i64<E: de::Error>(self, _: i64) -> Result<Scalar, E> {
@@ -110,6 +111,7 @@ impl<'de> Visitor<'de> for ScalarVisitor {
 struct Metadata {
     entries: BTreeMap<String, String>,
     non_string: Vec<String>,
+    internal: bool,
     not_a_map: bool,
     bytes: usize,
 }
@@ -185,6 +187,10 @@ impl<'de> Visitor<'de> for MetadataVisitor {
                 Scalar::Text(value) => {
                     metadata.entries.insert(key, value);
                 }
+                Scalar::True => {
+                    metadata.internal |= key == "internal";
+                    metadata.non_string.push(key);
+                }
                 Scalar::Other => metadata.non_string.push(key),
             }
         }
@@ -200,6 +206,7 @@ pub(super) struct Fields {
     pub compatibility: Option<String>,
     pub allowed_tools: Option<String>,
     pub metadata: BTreeMap<String, String>,
+    pub internal: bool,
     pub issues: Vec<SkillIssue>,
 }
 
@@ -251,6 +258,7 @@ pub(super) fn parse(yaml: &str) -> Result<Fields, SkillIssue> {
             .map(|key| SkillIssue::MetadataValueNotString { key }),
     );
     fields.metadata = metadata.entries;
+    fields.internal = metadata.internal;
     Ok(fields)
 }
 
@@ -262,7 +270,7 @@ fn string_field(
     match value {
         None => None,
         Some(Scalar::Text(value)) => Some(value),
-        Some(Scalar::Other) => {
+        Some(Scalar::True | Scalar::Other) => {
             issues.push(SkillIssue::NotAString { field });
             None
         }
