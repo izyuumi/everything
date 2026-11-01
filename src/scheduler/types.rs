@@ -366,6 +366,8 @@ pub(super) struct Definition {
     pub remote: Option<super::remote::RemoteDefinition>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub delegation: Option<Delegation>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub admitting_command: Option<CommandId>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]

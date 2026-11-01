@@ -704,6 +704,7 @@ fn skill_folder(skill_path: &str) -> Option<&str> {
 
 pub(super) fn update(
     home: &Path,
+    extra_roots: &[PathBuf],
     arguments: &UpdateArguments,
     cancellation: &CancellationToken,
 ) -> Result<(), SkillsCliError> {
@@ -749,7 +750,9 @@ pub(super) fn update(
     }
     let mut groups: BTreeMap<(String, Option<String>), Vec<Checkable>> = BTreeMap::new();
     let (mut skipped, mut current, mut changed, mut failed) = (0, 0, 0, 0);
+    let agent_dirs = agent_dirs(home, extra_roots);
     for (key, entry) in entries {
+        let dir_name = SkillDirName::sanitize(&key);
         let reason = if !matches!(entry.source_type.as_str(), "github" | "git") {
             Some(format!(
                 "{} source; Vorra fetches only github and git sources",
@@ -765,8 +768,27 @@ pub(super) fn update(
             Some("no skillFolderHash recorded".to_owned())
         } else if entry.skill_path.as_deref().and_then(skill_folder).is_none() {
             Some("no usable skillPath recorded".to_owned())
-        } else if !present(&skills_root(home).join(SkillDirName::sanitize(&key).as_str())) {
-            Some("not installed on disk; reinstall it with vorra skills add".to_owned())
+        } else if !present(&skills_root(home).join(dir_name.as_str())) {
+            match agent_dirs
+                .iter()
+                .find(|dir| dir.join(dir_name.as_str()).is_dir())
+            {
+                Some(dir) => Some(format!(
+                    "agent-only npx install in {}, not managed by Vorra; run {NPX_UPDATE} {}",
+                    dir.display(),
+                    if key
+                        .chars()
+                        .all(|c| c.is_ascii_alphanumeric() || "._-".contains(c))
+                    {
+                        key.clone()
+                    } else {
+                        format!("'{}'", key.replace('\'', r"'\''"))
+                    }
+                )),
+                None => {
+                    Some("not installed on disk; reinstall it with vorra skills add".to_owned())
+                }
+            }
         } else if entry
             .reference
             .as_deref()

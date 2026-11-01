@@ -7,7 +7,9 @@ use crate::protocol::{CommandId, TaskId};
 use crate::storage::Store;
 
 use super::repository;
-use super::types::{ChildDelivery, ChildWaitSet, SchedulerError, StoredTask, WaitingReason};
+use super::types::{
+    ChildDelivery, ChildWaitSet, SchedulerError, StoredTask, WaitChild, WaitingReason,
+};
 
 pub(super) fn validate_wait(wait: &ChildWaitSet) -> Result<(), SchedulerError> {
     if wait.children.is_empty()
@@ -32,6 +34,66 @@ pub(super) fn validate_wait(wait: &ChildWaitSet) -> Result<(), SchedulerError> {
         {
             return Err(SchedulerError::Invalid("invalid saved child completion"));
         }
+    }
+    Ok(())
+}
+
+pub(super) fn adopt(
+    store: &Store,
+    task: &mut StoredTask,
+    conversation: &crate::agent::Conversation,
+    wait_id: CommandId,
+) -> Result<(), SchedulerError> {
+    let state = conversation.task_input_state();
+    if state.wait_id != Some(wait_id) {
+        return Err(SchedulerError::Invalid(
+            "native child wait is not in the task inbox",
+        ));
+    }
+    if task
+        .checkpoint
+        .child_wait
+        .as_ref()
+        .is_some_and(|wait| wait.children.iter().any(|child| child.delivery.is_none()))
+    {
+        return Err(SchedulerError::Capacity(
+            "task already has an unresolved child wait",
+        ));
+    }
+    let original = store
+        .command_request(&wait_id.to_string())?
+        .ok_or(SchedulerError::Invalid(
+            "native child wait was not recorded",
+        ))?;
+    let event = original
+        .events
+        .first()
+        .filter(|_| original.events.len() == 1)
+        .ok_or(SchedulerError::Invalid(
+            "native child wait was not recorded",
+        ))?;
+    let event: crate::protocol::EventEnvelope = serde_json::from_value(event.payload.clone())?;
+    for child in &state.outstanding_children {
+        repository::authorize_target(store, task.definition.initial.id, *child, false)?;
+    }
+    let wait = ChildWaitSet {
+        wait_id,
+        active_command_id: task.checkpoint.active_command,
+        accepted_at: event.occurred_at,
+        children: state
+            .outstanding_children
+            .into_iter()
+            .map(|task_id| WaitChild {
+                task_id,
+                delivery: None,
+            })
+            .collect(),
+    };
+    validate_wait(&wait)?;
+    let previous = task.checkpoint.child_wait.replace(wait);
+    if let Err(error) = repository::encode_checkpoint(&task.checkpoint) {
+        task.checkpoint.child_wait = previous;
+        return Err(error);
     }
     Ok(())
 }
