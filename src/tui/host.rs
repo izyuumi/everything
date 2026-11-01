@@ -138,6 +138,27 @@ impl Host {
         }
     }
 
+    pub async fn skills(
+        &self,
+        workspace: Option<PathBuf>,
+    ) -> Result<(Vec<crate::skills::SkillSummary>, Vec<String>), TuiError> {
+        match self.query(OwnerQuery::Skills { workspace }).await? {
+            OwnerQueryResult::Skills {
+                skills,
+                mut warnings,
+                omitted,
+            } => {
+                if omitted > 0 {
+                    warnings.push(format!(
+                        "{omitted} more skills were not sent because the list exceeds the response limit"
+                    ));
+                }
+                Ok((skills, warnings))
+            }
+            _ => Err(TuiError::Invalid("unexpected skills response")),
+        }
+    }
+
     pub async fn initialize(
         &self,
         title: String,

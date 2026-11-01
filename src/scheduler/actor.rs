@@ -1218,7 +1218,11 @@ impl Actor {
                         operation,
                         tool_name,
                         active.cancellation.child_token(),
-                        task.definition.execution.agent.map(|agent| agent.id),
+                        task.definition
+                            .execution
+                            .agent
+                            .as_ref()
+                            .map(|agent| agent.id),
                     ))
                 })();
                 let _ = reply.send(result);
@@ -2088,6 +2092,7 @@ impl Actor {
             .definition
             .execution
             .agent
+            .as_ref()
             .and_then(|agent| agents.get(agent.id))
             .ok_or(refuse(
                 "agent_not_found",
@@ -2153,6 +2158,13 @@ impl Actor {
         policy.allowed_tools = ceiling.allowed_tools;
         policy.tools_enabled = true;
         let mut policy = target.narrow(policy, &self.services.registry);
+        if root_authority
+            .allowed_tools()
+            .is_some_and(|allowed| !allowed.contains(crate::skills::READ_SKILL_NAME))
+            && let Some(captured) = policy.agent.as_mut()
+        {
+            captured.skills = crate::host::agents::SkillAssignment::None;
+        }
         policy.delegation_ceiling = None;
         apply_budget(&mut policy, self.carved_budget(&parent).await?);
         let mut base = parent.definition.configuration.clone();

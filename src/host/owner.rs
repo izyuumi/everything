@@ -310,6 +310,36 @@ impl HostInner {
                 })
                 .await
             }
+            OwnerQuery::Skills { workspace } => {
+                if workspace.as_ref().is_some_and(|path| !path.is_absolute()) {
+                    return Err(HostError::Invalid(
+                        "skills workspace must be an absolute path",
+                    ));
+                }
+                let extra_roots = self.composition.effective.skills.extra_roots.clone();
+                let home = std::env::var_os("HOME")
+                    .map(std::path::PathBuf::from)
+                    .filter(|home| home.is_absolute())
+                    .ok_or(HostError::Invalid(
+                        "HOME is unavailable for skill discovery",
+                    ))?;
+                self.blocking(move |host| {
+                    let workspace = match workspace {
+                        Some(workspace) => workspace,
+                        None => host.settings.snapshot()?.workspace_root,
+                    };
+                    let roots = crate::skills::SkillRoots::new(home, Some(workspace), extra_roots);
+                    let catalog = crate::skills::discover(&roots, &cancellation)
+                        .map_err(|_| HostError::Invalid("skill discovery was cancelled"))?;
+                    let (skills, warnings, omitted) = crate::skills::bounded_summaries(&catalog);
+                    Ok(OwnerQueryResult::Skills {
+                        skills,
+                        warnings,
+                        omitted,
+                    })
+                })
+                .await
+            }
             OwnerQuery::Agent { id } => {
                 self.blocking(move |host| {
                     let agents = host.agents.snapshot()?;

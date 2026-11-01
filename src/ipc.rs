@@ -174,6 +174,10 @@ pub enum OwnerQuery {
         conversation_id: Option<ConversationId>,
         limit: usize,
     },
+    Skills {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        workspace: Option<std::path::PathBuf>,
+    },
 }
 
 impl OwnerQuery {
@@ -791,6 +795,13 @@ pub enum OwnerQueryResult {
     AgentLog {
         hops: Vec<crate::scheduler::AgentHop>,
     },
+    Skills {
+        skills: Vec<crate::skills::SkillSummary>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        warnings: Vec<String>,
+        #[serde(default, skip_serializing_if = "is_zero")]
+        omitted: usize,
+    },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -990,6 +1001,15 @@ impl OwnerQueryResult {
                                     || hop.caller_conversation_id == conversation
                             })
                     })
+            }
+            (
+                OwnerQuery::Skills { .. },
+                Self::Skills {
+                    skills, warnings, ..
+                },
+            ) => {
+                skills.len() <= crate::skills::MAX_SUMMARY_ROWS
+                    && warnings.len() <= crate::skills::MAX_SUMMARY_WARNINGS
             }
             (OwnerQuery::Command { command_id }, Self::Command { receipt }) => receipt
                 .as_ref()
@@ -1538,4 +1558,8 @@ fn schedule_mutation_matches(
         }
         _ => false,
     }
+}
+
+fn is_zero(value: &usize) -> bool {
+    *value == 0
 }

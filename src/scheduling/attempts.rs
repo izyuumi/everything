@@ -158,8 +158,16 @@ pub(super) fn capture_policy(
         agent: None,
         delegation_ceiling: None,
     };
-    let policy = agent
-        .narrow(policy, registry)
+    let mut policy = agent.narrow(policy, registry);
+    if !target
+        .permissions
+        .allowed_tools
+        .contains(crate::skills::READ_SKILL_NAME)
+        && let Some(captured) = policy.agent.as_mut()
+    {
+        captured.skills = crate::host::agents::SkillAssignment::None;
+    }
+    let policy = policy
         .capture(registry)
         .map_err(|_| ScheduleError::Invalid("scheduled native policy could not be captured"))?;
     validate_policy(run, &policy)?;

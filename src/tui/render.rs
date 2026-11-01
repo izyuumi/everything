@@ -711,6 +711,11 @@ fn draw_picker(frame: &mut Frame, app: &App, area: Rect) {
         PickerKind::Session => " ◈ conversations ",
         PickerKind::Model => " ◈ models · starts a new conversation ",
         PickerKind::Agent => " ◈ agents · starts a new conversation ",
+        PickerKind::Skill => " ◈ skills · ◈ marks skills assigned to the current agent ",
+    };
+    let footer = match kind {
+        PickerKind::Skill => " ↑↓ move · Enter details · a toggle · Esc close ",
+        _ => " ↑↓ move · Enter choose · Esc close ",
     };
     let width = area.width.saturating_sub(4).min(100);
     let visible = (area.height.saturating_sub(6) as usize)
@@ -752,11 +757,7 @@ fn draw_picker(frame: &mut Frame, app: &App, area: Rect) {
     let rect = centered(area, width, visible as u16 + 2);
     frame.render_widget(Clear, rect);
     frame.render_widget(
-        Paragraph::new(lines).block(overlay_block(
-            title.into(),
-            BORDER,
-            " ↑↓ move · Enter choose · Esc close ",
-        )),
+        Paragraph::new(lines).block(overlay_block(title.into(), BORDER, footer)),
         rect,
     );
 }

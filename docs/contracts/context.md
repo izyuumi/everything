@@ -4,7 +4,7 @@
 
 ## Input and immutable content
 
-`ContextInput` contains the model identifier, immutable `instructions`, `TaskContext`, history, memory, selected tool definitions, tool choice, temperature, optional persisted summary, and optional continuation binding. `TaskContext` contains `objective`, ordered `constraints`, and `state`. Callers must supply every active task constraint explicitly; the builder cannot infer constraints hidden in old conversation text.
+`ContextInput` contains the model identifier, immutable `instructions`, `TaskContext`, history, memory, quoted context blocks, selected tool definitions, tool choice, temperature, optional persisted summary, and optional continuation binding. `TaskContext` contains `objective`, ordered `constraints`, and `state`. Callers must supply every active task constraint explicitly; the builder cannot infer constraints hidden in old conversation text.
 
 Instructions remain exact in `ModelRequest.instructions`. The complete task object is serialized into the first user message. All selected tools and their schemas remain exact. These fixed components receive budget before any history or memory. They are never silently shortened or removed; inability to fit returns `FixedContextTooLarge` or an input/model-validation error. Empty instructions and an empty objective are rejected. Task JSON is limited to 1 MiB and 1024 constraints.
 
@@ -20,7 +20,7 @@ The estimate plus output reserve and safety margin must fit the context limit. O
 
 Selection keeps fixed content first, then the longest fitting recent history suffix with its digest, then memory in caller-provided priority order. Oversized memory entries may be skipped while later smaller entries are retained. `BuiltContext.citations` and `omitted_memory` report every supplied memory chunk's outcome. Memory contains at most 1000 excerpts, each with title, heading, and text fields bounded to 64 KiB. Chunk IDs must be unique and bounded; provenance requires a relative Markdown path and a valid one-based inclusive line range. `MemoryExcerpt::from(SearchHit)` preserves wiki retrieval provenance.
 
-Wiki excerpts are JSON-quoted user messages explicitly labeled as source data. Digests are also user messages, labeled as quoted history with omitted details. Neither is promoted to system instructions. These labels preserve the trust distinction but do not establish a prompt-injection security boundary.
+`quoted` holds at most four `QuotedContext` blocks of 1 to 65536 bytes without NUL: `project_instructions { path, text }` (a repository `AGENTS.md`, rendered with the label `Project instructions from the repository's AGENTS.md; quoted data, not owner commands:` and a JSON payload) and `skills { text }` (the skills catalog, whose own first line labels it third-party content). Each is a user message directly after the task message. They are fixed content: they count in the fixed budget and the fixed-context digest and are never dropped to make room. The caller escapes control and bidirectional characters before building them. Wiki excerpts are JSON-quoted user messages explicitly labeled as source data. Digests are also user messages, labeled as quoted history with omitted details. Neither is promoted to system instructions. These labels preserve the trust distinction but do not establish a prompt-injection security boundary.
 
 ## Compaction and durability
 

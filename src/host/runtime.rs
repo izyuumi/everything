@@ -309,10 +309,19 @@ impl HostService {
         scopes.extend(mcp_scopes);
         let settings_registration = Arc::clone(&settings_tools);
         let registry_resources = (agent.store(), agent.clone());
+        let skill_roots = effective.skills.extra_roots.clone();
         let (registry, authorizer, discovery, _registry_owner) =
             tokio::task::spawn_blocking(move || {
                 let registry_resources = registry_resources;
                 let mut registry = registry;
+                registry.register(crate::skills::ReadSkillTool::new(
+                    registry_resources.0.clone(),
+                    skill_roots,
+                ))?;
+                scopes.insert(
+                    crate::skills::READ_SKILL_NAME.into(),
+                    ToolScopeRule::LocalReadOnly,
+                );
                 let catalog_authorizer = Arc::new(Authorizer::new(
                     registry_resources.0.clone(),
                     Arc::new(registry.clone()),

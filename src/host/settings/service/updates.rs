@@ -202,6 +202,7 @@ pub(super) fn owner_difference(
 ) -> Result<OwnerDifference, SettingsServiceError> {
     let model_changed = model_selection(before) != model_selection(after);
     let tool_changed = tool_selection(before)? != tool_selection(after)?;
+    let skill_roots_changed = before.skills.extra_roots != after.skills.extra_roots;
     let mut changed_keys = Vec::new();
     if model_changed {
         changed_keys.push(SettingKey::ModelSelection);
@@ -229,7 +230,8 @@ pub(super) fn owner_difference(
         .map_err(|_| SettingsServiceError::Encoding)?
         || !same_value(&before.mcp, &after.mcp)?
         || before.worker != after.worker
-        || before.relay_origin != after.relay_origin;
+        || before.relay_origin != after.relay_origin
+        || skill_roots_changed;
     let configured_selection_before = configured_selection(before)?;
     let configured_selection_after = configured_selection(after)?;
     Ok(OwnerDifference {
@@ -238,6 +240,7 @@ pub(super) fn owner_difference(
         selection_changed,
         protected: model_changed
             || tool_changed
+            || skill_roots_changed
             || configured_selection_before != configured_selection_after,
         restart_required,
     })

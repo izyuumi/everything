@@ -101,7 +101,7 @@ pub async fn run(
         terminal.draw(|frame| render::draw(frame, &mut app))?;
         tokio::select! {
             () = cancellation.cancelled() => break,
-            _ = tick.tick() => {}
+            _ = tick.tick() => app.poll_background().await,
             Some(event) = receiver.recv() => app.on_host(event).await,
             event = events.next() => match event {
                 Some(Ok(event)) => app.on_terminal(event).await,

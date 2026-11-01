@@ -169,25 +169,7 @@ pub fn run(
 }
 
 pub fn printable(text: &str, keep_lines: bool) -> Cow<'_, str> {
-    let escaped = |character: char| {
-        (character.is_control() && !(keep_lines && matches!(character, '\n' | '\t')))
-            || matches!(
-                character,
-                '\u{061c}' | '\u{200e}' | '\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}'
-            )
-    };
-    if !text.chars().any(escaped) {
-        return Cow::Borrowed(text);
-    }
-    let mut output = String::with_capacity(text.len() + 8);
-    for character in text.chars() {
-        if escaped(character) {
-            output.extend(character.escape_default());
-        } else {
-            output.push(character);
-        }
-    }
-    Cow::Owned(output)
+    super::escaped(text, keep_lines)
 }
 
 pub(super) fn shown(value: impl fmt::Display) -> String {
