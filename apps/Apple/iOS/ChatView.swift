@@ -112,6 +112,9 @@ struct ChatView: View {
                     Text(conversation.title.isEmpty ? conversation.id.uuidString.lowercased() : conversation.title).tag(Optional(conversation.id))
                 }
             }.padding(.horizontal)
+            if let agent = model.state?.snapshot.conversations.first(where: { $0.id == model.selectedConversation })?.agentID {
+                Text("Agent: " + agent.uuidString.lowercased()).font(.caption.monospaced()).foregroundStyle(.secondary).textSelection(.enabled).padding(.horizontal)
+            }
             List {
                 Section {
                     ForEach(rows) { row in

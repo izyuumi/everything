@@ -670,7 +670,7 @@ fn verify_original_history(
     let input: EventEnvelope = serde_json::from_value(input.events[0].payload.clone())?;
     if creation.conversation_id != record.conversation_id
         || creation.causation_id != Some(record.command_id)
-        || !matches!(creation.payload, ConversationEvent::ConversationCreated { title: Some(original) } if original == title)
+        || !matches!(creation.payload, ConversationEvent::ConversationCreated { title: Some(original), .. } if original == title)
         || input.conversation_id != record.conversation_id
         || input.causation_id != Some(input_id)
     {

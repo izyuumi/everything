@@ -6,6 +6,7 @@ struct ReplicaConversation: Identifiable, Sendable {
     let id: UUID
     let title: String
     let cursor: UInt64
+    let agentID: UUID?
 }
 
 struct ReplicaTask: Identifiable, Sendable {
@@ -207,6 +208,11 @@ private final class ReplicaDatabase: @unchecked Sendable {
         try execute("UPDATE approvals SET decided=1 WHERE id=? AND conversation=?", [.text(operation), .text(conversation)])
     }
 
+    func projectAgent(_ event: WireEvent) throws {
+        guard event.kind == "conversation_created", let agent = try event.payload.fields["agent_id"], agent != .null else { return }
+        try execute("UPDATE conversations SET agent=? WHERE id=?", [.text(agent.identifier.uuidString.lowercased()), .text(event.conversationID.uuidString.lowercased())])
+    }
+
     func restorePermissionDecisions() throws {
         var after: Int64 = 0
         var records = 0
@@ -253,7 +259,7 @@ actor ReplicaStore: DurableEnvelopeInbox {
             "CREATE TABLE IF NOT EXISTS metadata(key TEXT PRIMARY KEY,value BLOB NOT NULL)",
             "CREATE TABLE IF NOT EXISTS inbox(id TEXT PRIMARY KEY,digest BLOB NOT NULL,sender TEXT NOT NULL,recipient TEXT NOT NULL,expires INTEGER NOT NULL,payload BLOB,done INTEGER NOT NULL DEFAULT 0)",
             "CREATE TABLE IF NOT EXISTS outbox(id TEXT PRIMARY KEY,envelope BLOB NOT NULL,expires INTEGER NOT NULL,created INTEGER NOT NULL,attempts INTEGER NOT NULL DEFAULT 0,not_before INTEGER NOT NULL DEFAULT 0)",
-            "CREATE TABLE IF NOT EXISTS conversations(id TEXT PRIMARY KEY,title TEXT NOT NULL,cursor INTEGER NOT NULL DEFAULT 0)",
+            "CREATE TABLE IF NOT EXISTS conversations(id TEXT PRIMARY KEY,title TEXT NOT NULL,cursor INTEGER NOT NULL DEFAULT 0,agent TEXT)",
             "CREATE TABLE IF NOT EXISTS events(conversation TEXT NOT NULL,sequence INTEGER NOT NULL,event_id TEXT NOT NULL UNIQUE,kind TEXT NOT NULL,envelope BLOB NOT NULL,PRIMARY KEY(conversation,sequence))",
             "CREATE TABLE IF NOT EXISTS commands(id TEXT PRIMARY KEY,conversation TEXT NOT NULL,original BLOB NOT NULL,envelope BLOB NOT NULL,state TEXT NOT NULL,result BLOB)",
             "CREATE TABLE IF NOT EXISTS tasks(id TEXT PRIMARY KEY,conversation TEXT NOT NULL,instruction TEXT NOT NULL,status TEXT NOT NULL)",
@@ -268,6 +274,15 @@ actor ReplicaStore: DurableEnvelopeInbox {
                 try database.execute("ALTER TABLE approvals ADD COLUMN inspection BLOB")
             }
             if version < 3 { try database.restorePermissionDecisions() }
+            let conversationColumns = try database.rows("PRAGMA table_info(conversations)") { try ReplicaDatabase.text($0, 1) }
+            if !conversationColumns.contains("agent") {
+                try database.execute("ALTER TABLE conversations ADD COLUMN agent TEXT")
+                let created = try database.rows("SELECT envelope FROM events WHERE kind='conversation_created'") { try ReplicaDatabase.data($0, 0) }
+                for envelope in created {
+                    guard let event = try? WireEvent(WireValue.parse(envelope, maximum: 262_144)) else { continue }
+                    try database.projectAgent(event)
+                }
+            }
             try database.execute("PRAGMA user_version=3")
         }
         for name in ["replica-v1.sqlite3", "replica-v1.sqlite3-wal", "replica-v1.sqlite3-shm"] {
@@ -695,6 +710,7 @@ actor ReplicaStore: DurableEnvelopeInbox {
                 let text = try title.text
                 try database.execute("UPDATE conversations SET title=? WHERE id=?", [.text(String(text.prefix(256))), .text(conversation)])
             }
+            try database.projectAgent(event)
         case "task_created":
             let task = try payload.field("task")
             try database.execute("INSERT INTO tasks(id,conversation,instruction,status) VALUES (?,?,?,?)", [.text(task.field("id").identifier.uuidString.lowercased()), .text(conversation), .text(task.field("instruction").text), .text(task.field("status").text)])
@@ -783,9 +799,14 @@ actor ReplicaStore: DurableEnvelopeInbox {
     }
 
     func snapshot() throws -> ReplicaSnapshot {
-        let conversations = try database.rows("SELECT id,title,cursor FROM conversations ORDER BY title,id LIMIT 64") { row in
+        let conversations = try database.rows("SELECT id,title,cursor,agent FROM conversations ORDER BY title,id LIMIT 64") { row in
             guard let id = UUID(uuidString: try ReplicaDatabase.text(row, 0)) else { throw WireError.storage }
-            return ReplicaConversation(id: id, title: try ReplicaDatabase.text(row, 1), cursor: UInt64(sqlite3_column_int64(row, 2)))
+            var agent: UUID?
+            if sqlite3_column_type(row, 3) != SQLITE_NULL {
+                guard let parsed = UUID(uuidString: try ReplicaDatabase.text(row, 3)) else { throw WireError.storage }
+                agent = parsed
+            }
+            return ReplicaConversation(id: id, title: try ReplicaDatabase.text(row, 1), cursor: UInt64(sqlite3_column_int64(row, 2)), agentID: agent)
         }
         let tasks = try database.rows("SELECT id,conversation,instruction,status FROM (SELECT id,conversation,instruction,status,rowid,sum(length(instruction)+length(status)+108) OVER (ORDER BY rowid DESC) AS bytes FROM tasks WHERE status NOT IN ('completed','failed','cancelled')) WHERE bytes<=2097152 ORDER BY rowid DESC LIMIT 100") { row in
             guard let id = UUID(uuidString: try ReplicaDatabase.text(row, 0)), let conversation = UUID(uuidString: try ReplicaDatabase.text(row, 1)) else { throw WireError.storage }

@@ -450,7 +450,7 @@ impl Agent {
                 let event: EventEnvelope = serde_json::from_value(original.events[0].payload.clone())
                     .map_err(|_| AgentError::CommandConflict(command_id))?;
                 if event.causation_id != Some(command_id)
-                    || !matches!(event.payload, ConversationEvent::ConversationCreated { title: Some(ref original) } if *original == title)
+                    || !matches!(event.payload, ConversationEvent::ConversationCreated { title: Some(ref original), .. } if *original == title)
                 {
                     return Err(AgentError::CommandConflict(command_id));
                 }
@@ -463,6 +463,7 @@ impl Agent {
             let now = UnixMillis::now()?;
             match store.conversation(&id.to_string())? {
                 Some(existing) if existing.last_sequence == 0 && existing.title == title
+                    && existing.agent_id == agent_id.map(|agent| agent.to_string())
                     && store.conversation_state(&id.to_string())?.is_none() => {}
                 Some(_) => return Err(AgentError::InvalidData("conversation ID already exists")),
                 None => { store.create_conversation(&id.to_string(), &title, timestamp(now)?, agent_id.map(|agent| agent.to_string()).as_deref())?; }
@@ -471,7 +472,7 @@ impl Agent {
                 version: CHECKPOINT_VERSION, config, message_head: 0, message_count: 0,
                 pending: None, continuation: None, last_turn: None, native: None, inputs: Default::default(),
             };
-            let event = event_input(id, 1, command_id, now, ConversationEvent::ConversationCreated { title: Some(title) })?;
+            let event = event_input(id, 1, command_id, now, ConversationEvent::ConversationCreated { title: Some(title), agent_id: agent_id.map(|agent| *agent.as_uuid()) })?;
             store.append_with_state(
                 &AppendRequest { conversation_id: id.to_string(), command_id: command_id.to_string(), expected_sequence: 0, events: vec![event] },
                 &ConversationStateUpdate { expected_revision: 0, payload: checkpoint_payload(&checkpoint)? },
