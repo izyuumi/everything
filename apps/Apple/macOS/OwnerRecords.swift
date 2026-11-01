@@ -391,11 +391,23 @@ enum DisplayText {
         for scalar in value.unicodeScalars {
             let format = scalar.value == 0x061C || (0x200B...0x200F).contains(scalar.value) || (0x202A...0x202E).contains(scalar.value)
                 || (0x2066...0x2069).contains(scalar.value) || scalar.value == 0xFEFF || (0xE0000...0xE007F).contains(scalar.value)
-            let control = CharacterSet.controlCharacters.contains(scalar) && !(multiline && (scalar == "\n" || scalar == "\t"))
+            let control = scalar.properties.generalCategory == .control && !(multiline && (scalar == "\n" || scalar == "\t"))
             if format || control { result += "\\u{" + String(scalar.value, radix: 16) + "}" }
             else { result.unicodeScalars.append(scalar) }
         }
         return result
+    }
+
+    static func clipped(_ value: String, maximum: Int) -> String {
+        guard value.utf8.count > maximum else { return value }
+        var result = ""
+        var size = 0
+        for character in value {
+            size += character.utf8.count
+            if size > maximum { break }
+            result.append(character)
+        }
+        return result + "…"
     }
 }
 
@@ -486,22 +498,33 @@ struct HostSkill: Identifiable, Sendable {
     let shadowed: Bool
     let issues: [String]
 
-    init(_ value: JSONValue, index: Int) throws {
+    init(_ value: JSONValue, index: Int) {
+        func text(_ key: String, _ maximum: Int) -> String? { value[key].string.map { DisplayText.clipped($0, maximum: maximum) } }
         id = index
-        name = try value.requiringString("name", maximum: 1024)
-        status = try value.requiringString("status", maximum: 16)
-        guard ["tracked", "untracked", "rejected", "missing"].contains(status),
-              let offered = value["offered"].bool, let shadowed = value["shadowed"].bool else { throw OwnerClientError.invalidResponse }
-        self.offered = offered
-        self.shadowed = shadowed
-        root = try ScheduleFields.optionalText(value["root"], maximum: 16)
-        description = try ScheduleFields.optionalText(value["description"], maximum: 4096)
-        source = try ScheduleFields.optionalText(value["source"], maximum: 4096)
-        path = try ScheduleFields.optionalText(value["path"], maximum: 4096)
-        allowedTools = try ScheduleFields.optionalText(value["allowed_tools"], maximum: 4096)
-        preview = try ScheduleFields.optionalText(value["preview"], maximum: 1024) ?? ""
-        guard value["issues"] == .null || value["issues"].array != nil, (value["issues"].array?.count ?? 0) <= 64 else { throw OwnerClientError.invalidResponse }
-        issues = try (value["issues"].array ?? []).map { guard let issue = $0.string, issue.utf8.count <= 4096 else { throw OwnerClientError.invalidResponse }; return issue }
+        root = text("root", 16)
+        description = text("description", 4096)
+        source = text("source", 4096)
+        path = text("path", 4096)
+        allowedTools = text("allowed_tools", 4096)
+        preview = text("preview", 1024) ?? ""
+        shadowed = value["shadowed"].bool ?? false
+        let rows = value["issues"].array ?? []
+        var issues = rows.prefix(64).compactMap { $0.string.map { DisplayText.clipped($0, maximum: 4096) } }
+        if rows.count > 64 { issues.append("\(rows.count - 64) more issues") }
+        let status = value["status"].string ?? ""
+        let wellFormed = value["name"].string != nil && ["tracked", "untracked", "rejected", "missing"].contains(status)
+            && value["offered"].bool != nil && (value["issues"] == .null || value["issues"].array != nil)
+            && rows.allSatisfy { $0.string != nil }
+        name = text("name", 1024) ?? "unnamed skill"
+        if wellFormed {
+            self.status = status
+            offered = value["offered"].bool ?? false
+        } else {
+            self.status = "rejected"
+            offered = false
+            issues.append("The Host sent this skill in a shape this app does not recognize; it is shown as rejected.")
+        }
+        self.issues = issues
     }
 }
 
@@ -511,12 +534,9 @@ struct HostSkills: Sendable {
     let omitted: UInt64
 
     init(_ response: JSONValue) throws {
-        guard response["kind"].string == "skills", let rows = response["skills"].array, rows.count <= 8192,
-              response["warnings"] == .null || response["warnings"].array != nil,
-              (response["warnings"].array?.count ?? 0) <= 64,
-              response["omitted"] == .null || response["omitted"].unsigned != nil else { throw OwnerClientError.invalidResponse }
-        skills = try rows.enumerated().map { try HostSkill($1, index: $0) }
-        warnings = try (response["warnings"].array ?? []).map { guard let text = $0.string, text.utf8.count <= 1024 else { throw OwnerClientError.invalidResponse }; return text }
+        guard response["kind"].string == "skills", let rows = response["skills"].array, rows.count <= 8192 else { throw OwnerClientError.invalidResponse }
+        skills = rows.enumerated().map { HostSkill($1, index: $0) }
+        warnings = (response["warnings"].array ?? []).prefix(64).compactMap { $0.string.map { DisplayText.clipped($0, maximum: 1024) } }
         omitted = response["omitted"].unsigned ?? 0
     }
 }

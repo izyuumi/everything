@@ -10,6 +10,7 @@ enum OwnerClientError: Error, LocalizedError, Sendable {
     case unavailable
     case privateInputCleanup
     case commandFailed(Int32)
+    case hostRejected(String)
     case systemOneProviderEndpoint
     case processOutputSetupFailed(Int32)
     case processSignalFailed(signal: Int32, code: Int32)
@@ -25,6 +26,7 @@ enum OwnerClientError: Error, LocalizedError, Sendable {
         case .unavailable: "The host or configured executable is unavailable."
         case .privateInputCleanup: "The private owner request file could not be removed."
         case .commandFailed(let status): "The owner command failed with exit status \(status). Refresh current state before retrying."
+        case .hostRejected(let reason): "The host rejected the request: " + reason
         case .systemOneProviderEndpoint: "The Host rejected the System One provider endpoint."
         case .processOutputSetupFailed(let code): "The owner command output could not be configured (OS error \(code)). Its action may have committed; inspect current state."
         case .processSignalFailed(let signal, let code): "The owner CLI child could not be signalled (signal \(signal), OS error \(code))."

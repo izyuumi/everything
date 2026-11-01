@@ -57,6 +57,7 @@ struct OwnerRequest: Sendable {
     let mutating: Bool
 
     var isCommand: Bool { ["command", "owner_command"].contains(body["kind"].string ?? "") }
+    var isAgentOperation: Bool { body["kind"].string == "operation" && (body["operation"]["kind"].string ?? "").hasPrefix("agent_") }
 
     func validateForFileTransfer() throws {
         switch body["kind"].string {

@@ -109,10 +109,21 @@ struct AgentEditorView: View {
     }
     private var validDescription: Bool {
         !description.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && description.utf8.count <= 1024
-            && !description.unicodeScalars.contains(where: CharacterSet.controlCharacters.contains)
+            && !description.unicodeScalars.contains { $0.properties.generalCategory == .control }
     }
     private var validPersona: Bool {
-        persona.utf8.count <= 32768 && !persona.unicodeScalars.contains { CharacterSet.controlCharacters.contains($0) && $0 != "\n" && $0 != "\t" }
+        (persona.isEmpty || !persona.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty) && persona.utf8.count <= 32768
+            && !persona.unicodeScalars.contains { $0.properties.generalCategory == .control && $0 != "\n" && $0 != "\t" }
+    }
+    private var nameTaken: Bool {
+        model.agents?.agents.contains { $0.id != agent?.id && $0.name.lowercased() == name.lowercased() } ?? false
+    }
+    private var toolsNote: String? {
+        let hadAllowlist = agent?.definition["tools"]["on"]["allow"]["only"].array != nil
+        let wasOff = agent.map { $0.toolMode == "off" } ?? true
+        if toolMode == "off" && hadAllowlist { return "Turning tools off drops this agent's tool allowlist. Turning them on again later allows all tools." }
+        if toolMode != "off" && wasOff { return "Tools on allows all tools up to this ceiling. Restrict them with vorra agents edit --allow-tool." }
+        return nil
     }
     private var keepsSkillList: Bool { agent?.definition["skills"]["only"].array != nil }
 
@@ -124,6 +135,8 @@ struct AgentEditorView: View {
                 TextField("Name", text: $name, prompt: Text("lowercase-name"))
                 if !name.isEmpty && !validName {
                     Text("Use 1 to 32 lowercase letters, digits and single hyphens.").font(.caption).foregroundStyle(.red)
+                } else if nameTaken {
+                    Text("Another agent already uses this name.").font(.caption).foregroundStyle(.red)
                 }
                 TextField("Description", text: $description)
                 LabeledContent("Persona") {
@@ -133,6 +146,9 @@ struct AgentEditorView: View {
                     .font(.caption).foregroundStyle(validPersona ? Color.secondary : Color.red)
                 Picker("Tool ceiling", selection: $toolMode) {
                     ForEach(HostAgent.modes, id: \.self) { mode in Text(mode == "off" ? "Off" : JSONSummary.label(mode)).tag(mode) }
+                }
+                if let toolsNote {
+                    Text(toolsNote).font(.caption).foregroundStyle(.orange).fixedSize(horizontal: false, vertical: true)
                 }
                 Picker("Memory", selection: $memory) {
                     Text("Shared").tag("shared")
@@ -164,7 +180,7 @@ struct AgentEditorView: View {
                 Button("Cancel") { dismiss() }.keyboardShortcut(.cancelAction)
                 Button("Save") { Task { await model.saveAgent(definition, expectedRevision: agent?.revision) } }
                     .keyboardShortcut(.defaultAction)
-                    .disabled(!model.canMutate || !validName || !validDescription || !validPersona)
+                    .disabled(!model.canMutate || !validName || nameTaken || !validDescription || !validPersona)
             }
         }
         .padding(20).frame(width: 520)
@@ -226,7 +242,7 @@ struct SkillsView: View {
                     List(skills.skills) { skill in
                         VStack(alignment: .leading, spacing: 4) {
                             HStack {
-                                Text(DisplayText.escaped(skill.name)).bold()
+                                Text(DisplayText.escaped(skill.name)).bold().lineLimit(2)
                                 Text([skill.root, skill.status, skill.shadowed ? "shadowed" : nil, skill.offered ? nil : "not offered"].compactMap { $0 }.joined(separator: " • "))
                                     .font(.caption2).foregroundStyle(.secondary)
                             }

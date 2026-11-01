@@ -43,7 +43,7 @@ struct MenuContent: View {
                         Text(request.id.string).font(.caption2.monospaced()).textSelection(.enabled)
                     }
                     HStack {
-                        Button("Repeat exact action") { Task { await model.repeatPending() } }
+                        Button(model.pendingAction?.isAgentOperation == true ? "Check agent state" : "Repeat exact action") { Task { await model.repeatPending() } }
                             .disabled(model.acting || !model.connected || model.draining)
                         if model.pendingAction?.isCommand == true {
                             Button("Inspect result") { Task { await model.inspectPendingCommand() } }

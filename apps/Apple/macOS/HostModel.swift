@@ -204,6 +204,7 @@ final class HostModel {
                 if let selected = newChatAgent, !agents.agents.contains(where: { $0.id == selected }) { newChatAgent = nil }
             case .failure(let error):
                 self.agents = nil
+                newChatAgent = nil
                 agentsError = "Cannot read agents: " + error.localizedDescription
             }
             self.draining = draining
@@ -467,10 +468,42 @@ final class HostModel {
         } catch { if !Task.isCancelled { message = error.localizedDescription } }
     }
 
+    func reconcileAgentOperation(_ request: OwnerRequest) async {
+        guard !acting, !closing, pendingAction?.id == request.id else { return }
+        acting = true
+        defer { acting = false }
+        let original = connection
+        do {
+            let current = try HostAgents(await client.request(.query("agents"), connection: original))
+            guard original == connection, pendingAction?.id == request.id, !closing, !Task.isCancelled else { return }
+            let operation = request.body["operation"]
+            let id = operation["id"].string ?? operation["definition"]["id"].string
+            let agent = current.agents.first { $0.id.string == id }
+            let applied: Bool
+            switch operation["kind"].string {
+            case "agent_put":
+                let keys = ["name", "description", "persona", "model", "traits", "tools", "workspace", "memory", "skills", "messaging"]
+                applied = agent.map { agent in keys.allSatisfy { operation["definition"][$0] == agent.definition[$0] } } ?? false
+            case "agent_remove": applied = agent == nil
+            case "agent_set_default": applied = current.defaultID.string == id
+            default: applied = false
+            }
+            agents = current
+            pendingAction = nil
+            message = applied
+                ? pendingActionLabel + " is applied in the current Host state."
+                : pendingActionLabel + " is not reflected in the current Host state. Review the agent and try again."
+        } catch { if !Task.isCancelled { message = error.localizedDescription } }
+    }
+
     func newConversation() async {
         if let selected = newChatAgent {
             if let agent = agents?.agents.first(where: { $0.id == selected }) { await newConversation(agent: agent) }
             else { message = "The selected agent is no longer available." }
+            return
+        }
+        if let agents, let agent = agents.agents.first(where: { $0.id == agents.defaultID }) {
+            await newConversation(agent: agent)
             return
         }
         let id = OwnerID()
@@ -544,6 +577,10 @@ final class HostModel {
                 message = label + " applied."
             }
             if settled { pendingAction = nil }
+            await refresh()
+        } catch OwnerClientError.hostRejected(let reason) where request.isAgentOperation {
+            pendingAction = nil
+            message = label + " was rejected: " + DisplayText.escaped(reason)
             await refresh()
         } catch { message = error.localizedDescription }
     }
@@ -633,8 +670,11 @@ final class HostModel {
 
     func repeatPending() async {
         guard let request = pendingAction else { return }
-        let operation = request.body["operation"]["kind"].string ?? ""
-        let kind = request.isCommand ? "command" : operation == "replace_settings" ? "settings" : operation.hasPrefix("agent_") ? "agents" : "applied"
+        if request.isAgentOperation {
+            await reconcileAgentOperation(request)
+            return
+        }
+        let kind = request.isCommand ? "command" : request.body["operation"]["kind"].string == "replace_settings" ? "settings" : "applied"
         await apply(request, label: pendingActionLabel, expectedKind: kind)
     }
 
