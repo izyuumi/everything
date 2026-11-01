@@ -1394,6 +1394,7 @@ actor NativeSettingsSession {
                 if assistantOpen != nil || assistantSend != nil || assistantChat != nil {
                     return .failure(error as? NativeSettingsSessionError ?? .operationUncertain)
                 }
+                if case OwnerClientError.systemOneProviderEndpoint = error { return .failure(.systemOneProviderEndpoint) }
                 return .failure(.operationUncertain)
             }
         }

@@ -16,9 +16,9 @@ use super::agent::{
     SettingsAssistantReply, SettingsChatStatus, SettingsOpenState, SettingsOperationLookup,
 };
 use super::contract::{
-    MAX_SETTINGS_DEVICE_PAGE, NativeSettingsAction, SettingRegistry, SettingsActionRequest,
-    SettingsDeviceAction, SettingsDevicePage, SettingsDeviceRequest, SettingsOperationResult,
-    SettingsPatch, SettingsScope, SettingsSnapshot, SettingsToolName,
+    MAX_SETTINGS_DEVICE_PAGE, NativeSettingsAction, SYSTEM_ONE_PROVIDER_ENDPOINT, SettingRegistry,
+    SettingsActionRequest, SettingsDeviceAction, SettingsDevicePage, SettingsDeviceRequest,
+    SettingsOperationResult, SettingsPatch, SettingsScope, SettingsSnapshot, SettingsToolName,
 };
 use super::service::{
     NativeDeviceActionResult, NativePairingApprovalInput, NativePairingApprovalResult,
@@ -242,7 +242,7 @@ impl NativeSettingsOperation {
             Self::Update { patch, .. } => {
                 patch.validate().map_err(|error| match error {
                     super::contract::SettingsContractError::Invalid(
-                        "System One provider endpoint",
+                        SYSTEM_ONE_PROVIDER_ENDPOINT,
                     ) => "invalid native settings patch: System One provider endpoint",
                     _ => "invalid native settings patch",
                 })?;

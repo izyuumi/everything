@@ -19,7 +19,7 @@ private func hostSettingValue(_ value: SettingValue?) -> String {
     case .model(let selection):
         selection.map { "\($0.provider == .anthropic ? "Anthropic" : "OpenAI") \($0.model)" } ?? "Not configured"
     case .toolSelection(.local): "Local"
-    case .toolSelection(.systemOne(let endpoint, let model, let provider)): "System One · " + (provider ?? "typesafe") + " · " + model + " · " + endpoint
+    case .toolSelection(.systemOne(let endpoint, let model, let provider)): "System One · " + SystemOneChoice(provider: provider).title + " · " + model + " · " + endpoint
     case .boolean(let value): value ? "On" : "Off"
     case .dimensions(let value): value.map(String.init) ?? "Backend default"
     case .embeddingModel(let model): model ?? "Not set"

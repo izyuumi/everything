@@ -17,6 +17,7 @@ struct NativeSettingsDraft: Equatable, Sendable {
     var systemOneEndpoint: String
     var systemOneModel: String
     var systemOneProvider: String?
+    let savedSystemOne: ToolSelectionPreference
     var embeddingsEnabled: Bool
     var dimensions: UInt32?
 
@@ -42,8 +43,8 @@ struct NativeSettingsDraft: Equatable, Sendable {
         switch tools {
         case .local:
             systemOneEnabled = false
-            systemOneEndpoint = systemOne?.endpoint ?? "https://api.typesafe.ai/v1/systemone"
-            systemOneModel = systemOne?.model ?? "jev-latest"
+            systemOneEndpoint = systemOne?.endpoint ?? SystemOneChoice.typesafeEndpoint
+            systemOneModel = systemOne?.model ?? SystemOneChoice.typesafeModel
             systemOneProvider = systemOne?.provider
         case .systemOne(let endpoint, let model, let provider):
             systemOneEnabled = true
@@ -51,8 +52,31 @@ struct NativeSettingsDraft: Equatable, Sendable {
             systemOneModel = model
             systemOneProvider = provider
         }
+        savedSystemOne = .systemOne(endpoint: systemOneEndpoint, model: systemOneModel, provider: systemOneProvider)
         embeddingsEnabled = enabled
         self.dimensions = dimensions
+    }
+
+    var systemOneChoice: SystemOneChoice {
+        get { systemOneEnabled ? SystemOneChoice(provider: systemOneProvider) : .local }
+        set {
+            guard newValue != systemOneChoice else { return }
+            if case .systemOne(let endpoint, let model, let provider) = savedSystemOne,
+               newValue == .local || SystemOneChoice(provider: provider) == newValue {
+                systemOneEndpoint = endpoint
+                systemOneModel = model
+                systemOneProvider = provider
+            } else {
+                systemOneEndpoint = newValue.defaultEndpoint
+                systemOneModel = newValue.defaultModel
+                systemOneProvider = newValue.wireProvider
+            }
+            systemOneEnabled = newValue != .local
+        }
+    }
+
+    var systemOneIssue: String? {
+        systemOneEnabled ? systemOneChoice.issue(endpoint: systemOneEndpoint, model: systemOneModel) : nil
     }
 
     var dimensionChoices: [UInt32]? {
@@ -66,6 +90,7 @@ struct NativeSettingsDraft: Equatable, Sendable {
     }
 
     var validationMessage: String? {
+        if toolsChanged, let systemOneIssue { return systemOneIssue }
         do { _ = try changes(); return nil }
         catch { return "Review the changed fields. Model IDs and endpoints must be nonempty and within the Host's limits; dimensions require current model metadata." }
     }
@@ -99,6 +124,7 @@ struct NativeSettingsDraft: Equatable, Sendable {
             changes.append(SettingChange(key: .modelSelection, value: .model(selection: selection)))
         }
         if toolsChanged {
+            guard systemOneIssue == nil else { throw SettingsWireError.invalid }
             let selection: ToolSelectionPreference = systemOneEnabled ? .systemOne(endpoint: systemOneEndpoint, model: systemOneModel, provider: systemOneProvider) : .local
             changes.append(SettingChange(key: .toolSelection, value: .toolSelection(selection: selection)))
         }

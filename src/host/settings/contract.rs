@@ -16,6 +16,7 @@ pub const MAX_SETTINGS_PATCH_BYTES: usize = 16 * 1024;
 pub const MAX_SETTINGS_SNAPSHOT_BYTES: usize = 32 * 1024;
 pub const MAX_SETTINGS_DEVICE_PAGE: usize = 100;
 pub const MAX_SETTINGS_ACTION_LIFETIME_MS: u64 = 300_000;
+pub const SYSTEM_ONE_PROVIDER_ENDPOINT: &str = "System One provider endpoint";
 const MAX_MODEL_BYTES: usize = 256;
 
 #[derive(Debug, Error)]
@@ -212,7 +213,7 @@ impl ToolSelectionPreference {
             bounded_text(model, MAX_MODEL_BYTES)?;
             SelectionConfig::system_one(*provider, endpoint, model, None).map_err(|error| {
                 SettingsContractError::Invalid(match error {
-                    ConfigurationError::ProviderEndpoint => "System One provider endpoint",
+                    ConfigurationError::ProviderEndpoint => SYSTEM_ONE_PROVIDER_ENDPOINT,
                     _ => "System One configuration",
                 })
             })?;

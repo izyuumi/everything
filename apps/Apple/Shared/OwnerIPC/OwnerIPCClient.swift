@@ -191,6 +191,7 @@ final class OwnerIPCClient: @unchecked Sendable {
         }
         var data = Data()
         var errorBytes = 0
+        var errorPrefix = Data()
         let deadline = DispatchTime.now().uptimeNanoseconds + 45_000_000_000
         var stopAt: UInt64?
         var sentTerminate = false
@@ -231,6 +232,7 @@ final class OwnerIPCClient: @unchecked Sendable {
                             else if failure == nil { failure = OwnerClientError.outputLimit }
                         } else {
                             errorBytes += count
+                            if errorPrefix.count < 4096 { errorPrefix.append(contentsOf: buffer.prefix(min(count, 4096 - errorPrefix.count))) }
                             if errorBytes > 64 * 1024 && failure == nil { failure = OwnerClientError.outputLimit }
                         }
                     } else if count == 0 {
@@ -287,7 +289,9 @@ final class OwnerIPCClient: @unchecked Sendable {
         do { try errors.fileHandleForReading.close() }
         catch { cleanupFailures.append(error) }
         if failure == nil && (process.terminationReason != .exit || process.terminationStatus != 0) {
-            failure = OwnerClientError.commandFailed(process.terminationStatus)
+            failure = process.terminationReason == .exit && errorPrefix.range(of: Data("System One provider endpoint".utf8)) != nil
+                ? OwnerClientError.systemOneProviderEndpoint
+                : OwnerClientError.commandFailed(process.terminationStatus)
         }
         if !cleanupFailures.isEmpty { throw OwnerCleanupFailure(original: failure, failures: cleanupFailures) }
         if let failure { throw failure }

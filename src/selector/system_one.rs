@@ -40,7 +40,7 @@ pub enum ConfigurationError {
     #[error("invalid selection TOML or unsupported field; credentials belong in the native store")]
     InvalidDocument,
     #[error(
-        "selection provider must be local, system-one, typesafe, openrouter, openai-compatible or local-model and fallback must be local"
+        "selection provider must be local, system-one, typesafe, openrouter, openai-compatible or openai_compatible, local-model or local_model and fallback must be local"
     )]
     InvalidProvider,
     #[error("system-one requires an endpoint and model")]
@@ -117,8 +117,10 @@ impl SelectionConfig {
                 let provider = match name {
                     "system-one" | "typesafe" => SystemOneProvider::Typesafe,
                     "openrouter" => SystemOneProvider::Openrouter,
-                    "openai-compatible" => SystemOneProvider::OpenaiCompatible,
-                    "local-model" => SystemOneProvider::LocalModel,
+                    "openai-compatible" | "openai_compatible" => {
+                        SystemOneProvider::OpenaiCompatible
+                    }
+                    "local-model" | "local_model" => SystemOneProvider::LocalModel,
                     _ => return Err(ConfigurationError::InvalidProvider),
                 };
                 let endpoint = raw
@@ -155,6 +157,7 @@ impl SelectionConfig {
             _ if endpoint
                 .path()
                 .trim_end_matches('/')
+                .to_ascii_lowercase()
                 .ends_with("/chat/completions") =>
             {
                 return Err(ConfigurationError::ProviderEndpoint);

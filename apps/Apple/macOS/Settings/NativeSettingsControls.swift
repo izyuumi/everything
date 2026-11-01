@@ -58,8 +58,10 @@ struct NativeSettingsControls: View {
                     NativeCredentialEntryControls(store: store, purpose: .model, connectionEdited: connectionEdited)
                 }
             case .toolSelection:
-                Section("Native credential entry") {
-                    NativeCredentialEntryControls(store: store, purpose: .systemOne, connectionEdited: connectionEdited)
+                if store.draft?.systemOneChoice.usesKey ?? true {
+                    Section("Native credential entry") {
+                        NativeCredentialEntryControls(store: store, purpose: .systemOne, connectionEdited: connectionEdited)
+                    }
                 }
             case .memory: EmptyView()
             }
@@ -156,27 +158,17 @@ struct NativeSettingsControls: View {
     @ViewBuilder
     private func tools(_ draft: NativeSettingsDraft) -> some View {
         Section("Tool discovery and selection") {
-            Toggle("Use System One", isOn: binding(\.systemOneEnabled, fallback: false))
-                .disabled(systemOneConfigurationUnknown(draft))
+            Picker("System One provider", selection: binding(\.systemOneChoice, fallback: .local)) {
+                ForEach(SystemOneChoice.allCases) { choice in Text(choice.title).tag(choice) }
+            }
+            .disabled(systemOneConfigurationUnknown(draft))
             if systemOneConfigurationUnknown(draft) {
-                Text("The retained System One configuration was not observed for this draft's revision. Reload before enabling it so a saved endpoint and its credential reference are not replaced.")
+                Text("The retained System One configuration was not observed for this draft's revision. Reload before choosing a provider so a saved endpoint and its credential reference are not replaced.")
                     .foregroundStyle(.secondary)
             }
-            Text("Local selection is the default. System One is optional remote tool selection; enabling it configures an external endpoint.")
+            Text("Local is the default and sends nothing. Other providers are optional remote tool selection: each request is shown for your approval before the task summary and tool descriptions are sent.")
                 .font(.caption).foregroundStyle(.secondary)
-            Group {
-                TextField("System One endpoint", text: binding(\.systemOneEndpoint, fallback: ""))
-                TextField("Selection model ID", text: binding(\.systemOneModel, fallback: ""))
-                Button("Use TypeSafe preset") {
-                    store.edit { draft in
-                        draft.systemOneEndpoint = "https://api.typesafe.ai/v1/systemone"
-                        draft.systemOneModel = "jev-latest"
-                        draft.systemOneProvider = nil
-                    }
-                }
-                Text("The selection model ID is opaque. The Host validates endpoint policy. Changing a configured endpoint does not transfer its credential reference to another recipient.")
-                    .font(.caption).foregroundStyle(.secondary)
-            }.disabled(!draft.systemOneEnabled)
+            if draft.systemOneEnabled { systemOneFields(draft) }
             observed(.toolSelection)
         }
         Section("Configured System One credential reference") {
@@ -256,11 +248,56 @@ struct NativeSettingsControls: View {
         }
     }
 
+    @ViewBuilder
+    private func systemOneFields(_ draft: NativeSettingsDraft) -> some View {
+        let choice = draft.systemOneChoice
+        switch choice {
+        case .openrouter:
+            LabeledContent("Endpoint", value: SystemOneChoice.openrouterEndpoint).textSelection(.enabled)
+        case .openaiCompatible:
+            TextField("Base URL", text: binding(\.systemOneEndpoint, fallback: ""), prompt: Text("https://llm.example.com/v1"))
+            Text("Enter the base URL, not the /chat/completions URL. The Host sends requests to <base URL>/chat/completions.")
+                .font(.caption).foregroundStyle(.secondary)
+        case .localModel:
+            TextField("Loopback base URL", text: binding(\.systemOneEndpoint, fallback: ""), prompt: Text("http://127.0.0.1:11434/v1"))
+            Text("A model server on this Mac at a literal loopback IP, such as Ollama, llama.cpp or LM Studio. Use the base URL, not the /chat/completions URL.")
+                .font(.caption).foregroundStyle(.secondary)
+        default:
+            TextField("Endpoint", text: binding(\.systemOneEndpoint, fallback: ""), prompt: Text(SystemOneChoice.typesafeEndpoint))
+        }
+        TextField("Model ID", text: binding(\.systemOneModel, fallback: ""),
+                  prompt: Text(choice == .openrouter ? "openai/gpt-4.1-mini" : choice == .localModel ? "llama3.2" : "MODEL_ID"))
+        if let issue = draft.systemOneIssue { NativeSettingsNotice(issue, kind: .warning) }
+        Group {
+            if !choice.usesKey {
+                Text("A local model uses no key.")
+            } else if let key = systemOneKeyNote(draft) {
+                Text(key)
+            } else {
+                Text("Add or replace the key under Native credential entry below." + (choice == .openaiCompatible ? " A key is optional for this provider." : ""))
+            }
+        }
+        .font(.caption).foregroundStyle(.secondary)
+        Text("The model ID is opaque. The Host validates endpoint policy again and has the final say.")
+            .font(.caption).foregroundStyle(.secondary)
+    }
+
+    private func systemOneKeyNote(_ draft: NativeSettingsDraft) -> String? {
+        guard let metadata = store.metadata, metadata.revision == draft.baseline.revision, let saved = metadata.systemOne else {
+            return "After this change is confirmed, enter a key under Native credential entry below."
+        }
+        guard saved.endpoint != draft.systemOneEndpoint
+                || SystemOneChoice(provider: saved.provider) != draft.systemOneChoice else { return nil }
+        return saved.reference == nil
+            ? "After this change is confirmed, enter a key under Native credential entry below."
+            : "Saving a new provider or endpoint unlinks the current key. After this change is confirmed, enter a new key under Native credential entry below."
+    }
+
     private func systemOneConfigurationUnknown(_ draft: NativeSettingsDraft) -> Bool {
         guard !draft.systemOneEnabled, draft.baseline.entry(.toolSelection)?.desired == .toolSelection(selection: .local) else { return false }
         guard let metadata = store.metadata, metadata.revision == draft.baseline.revision else { return true }
-        return (metadata.systemOne?.endpoint ?? "https://api.typesafe.ai/v1/systemone") != draft.systemOneEndpoint
-            || (metadata.systemOne?.model ?? "jev-latest") != draft.systemOneModel
+        return (metadata.systemOne?.endpoint ?? SystemOneChoice.typesafeEndpoint) != draft.systemOneEndpoint
+            || (metadata.systemOne?.model ?? SystemOneChoice.typesafeModel) != draft.systemOneModel
     }
 
     private func binding<Value>(_ keyPath: WritableKeyPath<NativeSettingsDraft, Value>, fallback: Value) -> Binding<Value> {
