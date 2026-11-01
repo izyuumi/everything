@@ -425,6 +425,26 @@ struct HostAgent: Identifiable, Sendable, Equatable {
     let definition: JSONValue
 
     static let modes = ["off", "read_only", "trusted_workspace", "full_host"]
+    static let providers = ["anthropic", "openai"]
+
+    static func handle(_ value: String) -> Bool {
+        value.utf8.count <= 32 && value.split(separator: "-", omittingEmptySubsequences: false).allSatisfy { part in
+            !part.isEmpty && part.unicodeScalars.allSatisfy { ("a"..."z").contains($0) || ("0"..."9").contains($0) }
+        }
+    }
+
+    static func identifier(_ value: String) -> Bool {
+        !value.isEmpty && value.utf8.count <= 256
+            && !value.unicodeScalars.contains { $0.properties.generalCategory == .control || $0.properties.isWhitespace }
+    }
+
+    func skillAssigned(_ skill: HostSkill) -> Bool {
+        switch definition["skills"] {
+        case .string("all"): skill.offered
+        case .string("none"): false
+        default: skill.offered && (definition["skills"]["only"].array ?? []).contains { $0.string.map(skill.matches) == true }
+        }
+    }
 
     init(_ value: JSONValue) throws {
         id = try OwnerID(value.requiringString("id", maximum: 36))
@@ -497,6 +517,30 @@ struct HostSkill: Identifiable, Sendable {
     let offered: Bool
     let shadowed: Bool
     let issues: [String]
+    let assignableName: String?
+    let folder: String?
+
+    static func dirName(_ raw: String) -> String {
+        var result = ""
+        var run = false
+        for scalar in raw.lowercased().unicodeScalars {
+            if ("a"..."z").contains(scalar) || ("0"..."9").contains(scalar) || scalar == "." || scalar == "_" {
+                result.unicodeScalars.append(scalar)
+                run = false
+            } else if !run {
+                result += "-"
+                run = true
+            }
+        }
+        let trimmed = result.trimmingCharacters(in: CharacterSet(charactersIn: ".-"))
+        return trimmed.isEmpty ? "unnamed-skill" : String(trimmed.prefix(255))
+    }
+
+    func matches(_ assigned: String) -> Bool {
+        guard let assignableName else { return false }
+        let wanted = HostSkill.dirName(assigned)
+        return wanted == HostSkill.dirName(assignableName) || folder.map { HostSkill.dirName($0) == wanted } == true
+    }
 
     init(_ value: JSONValue, index: Int) {
         func text(_ key: String, _ maximum: Int) -> String? { value[key].string.map { DisplayText.clipped($0, maximum: maximum) } }
@@ -525,6 +569,8 @@ struct HostSkill: Identifiable, Sendable {
             issues.append("The Host sent this skill in a shape this app does not recognize; it is shown as rejected.")
         }
         self.issues = issues
+        assignableName = offered ? value["name"].string.flatMap { $0.utf8.count <= 1024 ? $0 : nil } : nil
+        folder = value["path"].string.flatMap { $0.utf8.count <= 4096 ? URL(fileURLWithPath: $0).lastPathComponent : nil }
     }
 }
 
