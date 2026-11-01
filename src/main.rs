@@ -2685,7 +2685,12 @@ async fn run_tool_chat(
                 .filter_map(|name| std::env::var(name).ok())
                 .filter(|value| !value.is_empty())
                 .collect();
-            let builtins = BuiltinTools::new(BuiltinConfig { redact_literals })?;
+            let builtins = BuiltinTools::new(BuiltinConfig {
+                redact_literals,
+                state_directory: retained_agent
+                    .state_directory()
+                    .map(std::path::Path::to_owned),
+            })?;
             let mut registry = ToolRegistry::new();
             let mut scopes = builtins.register_into(&mut registry)?;
             let selection_authorizer = Arc::new(Authorizer::new(

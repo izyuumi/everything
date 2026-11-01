@@ -229,8 +229,11 @@ impl HostService {
             let settings = SettingsRepository::open(Arc::clone(&prepared_lease))?;
             let agent = Agent::from_leased_store(store, prepared_lease);
             let mut registry = ToolRegistry::new();
-            let mut scopes =
-                BuiltinTools::new(BuiltinConfig::default())?.register_into(&mut registry)?;
+            let mut scopes = BuiltinTools::new(BuiltinConfig {
+                state_directory: Some(preparation_lease.path().to_owned()),
+                ..BuiltinConfig::default()
+            })?
+            .register_into(&mut registry)?;
             let task_tools = SchedulerTools::new();
             scopes.extend(task_tools.register_into(&mut registry)?);
             let schedule_tools = ScheduleTools::new();
