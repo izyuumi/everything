@@ -29,6 +29,7 @@ const MAX_RESPONSE_BYTES: usize = 64 * 1_024;
 const MAX_CANDIDATES: usize = 254;
 const MAX_APPROVAL: Duration = Duration::from_secs(300);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
+const OPENROUTER_ENDPOINT: &str = "https://openrouter.ai/api/v1";
 const INSTRUCTIONS: &str = "Which tool is most relevant to the task? Rank only by relevance; execution requires independent permission.";
 const CHAT_INSTRUCTIONS: &str = "Which tool is most relevant to the task? Rank only by relevance; execution requires independent permission. The user message is JSON with the task and the options keyed by option ID. Answer with only a JSON object {\"choice\": ID} where ID is exactly one option key, or \"none\" if no option is relevant.";
 
@@ -55,7 +56,7 @@ pub enum ConfigurationError {
     #[error("credential reference must be a UUID, never a secret")]
     InvalidCredentialReference,
     #[error(
-        "OpenRouter requires https://openrouter.ai/api/v1 and local-model requires a literal-loopback endpoint"
+        "chat-completions providers take a base URL, not the completions URL; OpenRouter requires https://openrouter.ai/api/v1 and local-model requires a literal-loopback endpoint"
     )]
     ProviderEndpoint,
 }
@@ -73,19 +74,6 @@ pub enum SystemOneProvider {
 impl SystemOneProvider {
     pub fn is_typesafe(&self) -> bool {
         matches!(self, Self::Typesafe)
-    }
-
-    pub fn default_endpoint(self) -> Option<&'static str> {
-        match self {
-            Self::Typesafe => Some("https://api.typesafe.ai/v1/systemone"),
-            Self::Openrouter => Some("https://openrouter.ai/api/v1"),
-            Self::OpenaiCompatible => None,
-            Self::LocalModel => Some("http://127.0.0.1:11434/v1"),
-        }
-    }
-
-    pub fn default_model(self) -> Option<&'static str> {
-        self.is_typesafe().then_some("jev-latest")
     }
 }
 
@@ -163,9 +151,16 @@ impl SelectionConfig {
             _ => false,
         };
         match provider {
+            SystemOneProvider::Typesafe => {}
+            _ if endpoint
+                .path()
+                .trim_end_matches('/')
+                .ends_with("/chat/completions") =>
+            {
+                return Err(ConfigurationError::ProviderEndpoint);
+            }
             SystemOneProvider::Openrouter
-                if Some(endpoint.as_str().trim_end_matches('/'))
-                    != SystemOneProvider::Openrouter.default_endpoint() =>
+                if endpoint.as_str().trim_end_matches('/') != OPENROUTER_ENDPOINT =>
             {
                 return Err(ConfigurationError::ProviderEndpoint);
             }

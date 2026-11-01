@@ -7,7 +7,7 @@ use uuid::Uuid;
 use crate::agent::{ConversationConfig, ProviderEndpoint, ProviderKind};
 use crate::memory::embedding::{Embedder, EmbeddingProfile};
 use crate::protocol::{CommandId, DeviceId, UnixMillis};
-use crate::selector::system_one::{SelectionConfig, SystemOneProvider};
+use crate::selector::system_one::{ConfigurationError, SelectionConfig, SystemOneProvider};
 
 use super::{CredentialStorage, ModelCredentialReference};
 
@@ -210,8 +210,12 @@ impl ToolSelectionPreference {
         {
             bounded_text(endpoint, 4096)?;
             bounded_text(model, MAX_MODEL_BYTES)?;
-            SelectionConfig::system_one(*provider, endpoint, model, None)
-                .map_err(|_| SettingsContractError::Invalid("System One configuration"))?;
+            SelectionConfig::system_one(*provider, endpoint, model, None).map_err(|error| {
+                SettingsContractError::Invalid(match error {
+                    ConfigurationError::ProviderEndpoint => "System One provider endpoint",
+                    _ => "System One configuration",
+                })
+            })?;
         }
         Ok(())
     }

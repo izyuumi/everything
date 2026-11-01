@@ -4,7 +4,7 @@
 
 `PreparedSelection` contains either a local `ToolSelection` or a `SystemOneDisclosure`. The disclosure exposes the provider, the exact POST destination, model, JSON payload, authority and SHA256 fingerprint. The host `SelectionDisclosure` carries the same `provider` field; it defaults to `typesafe` when absent. `approve(Duration)` consumes it and produces a non-cloneable, non-deserializable `ApprovedSelection`, valid for at most five minutes of monotonic time. Only a trusted owner interaction may call this method. Neither configuration parsing, model output, remote commands nor tool arguments constitute approval. The host passes its current authority to `select_approved`; a different selector, task, conversation, workspace, mode or optional allowlist invalidates the approval.
 
-`SelectionConfig::system_one(provider, endpoint, model, reference)` validates the endpoint as below and then the provider: `openrouter` requires exactly `https://openrouter.ai/api/v1` (a trailing slash is tolerated) and `local_model` requires a literal-loopback IP host; violations return `ProviderEndpoint`. Provider values on the wire are `typesafe`, `openrouter`, `openai_compatible` and `local_model`.
+`SelectionConfig::system_one(provider, endpoint, model, reference)` validates the endpoint as below and then the provider: `openrouter` requires exactly `https://openrouter.ai/api/v1` (a trailing slash is tolerated), `local_model` requires a literal-loopback IP host, and every chat-completions provider takes a base URL, not the completions URL, so a path ending in `/chat/completions` is refused; violations return `ProviderEndpoint`, surfaced by Settings as "System One provider endpoint". Provider values on the wire are `typesafe`, `openrouter`, `openai_compatible` and `local_model`.
 
 For `typesafe` the HTTP POST uses the configured full endpoint, including ordinary query parameters, and this body shape:
 
@@ -46,7 +46,7 @@ For `openrouter`, `openai_compatible` and `local_model` the POST goes to the bas
 }
 ```
 
-The response must be a chat completion with exactly one `choices` entry whose `message.content`, after trimming whitespace, is exactly a JSON object `{"choice": ID}` with no other fields. It is then validated as a choice-only answer below. Servers or models that reject `response_format` return an HTTP error and fall back locally.
+The response must be a chat completion with exactly one `choices` entry whose `message.content`, after trimming whitespace, is exactly a JSON object `{"choice": ID}` with no other fields. It is then validated as a choice-only answer below. Servers or models that reject `response_format` or `temperature` return an HTTP error and fall back locally. Reasoning models whose response, including any reasoning fields, exceeds 64 KiB, or whose answer takes longer than ten seconds, also fall back locally.
 
 Candidate IDs are request-local positions, never executable names supplied by the service. There are at most 254 candidates plus `none`. Denied tools are absent; approval-requiring tools retain their permission metadata and disclosure warning. Locally unmatched tools may be considered remotely, with local ranking deciding which candidates fit the bound.
 
