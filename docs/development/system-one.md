@@ -2,7 +2,18 @@
 
 ## Headless Host
 
-The Host does not read a TOML file. Its selection configuration is the `selection` field of the revisioned owner settings (`{"kind":"local"}` by default, or `system_one` with `endpoint`, `model` and an optional `credential_reference`). A raw owner `replace_settings` that turns System One on or changes its endpoint/model returns `host_action_required` and changes nothing. The change is applied only through the native Settings route: an `update` of `tools.selection` returns `awaiting_confirmation`, and the matching `confirm_patch` applies it. The macOS Settings Tool Selection controls drive that route, including the "Use TypeSafe preset" button, which fills `https://api.typesafe.ai/v1/systemone` and `jev-latest` into the same fields as a custom endpoint. Turning System One off through the same route leaves the stored endpoint/model but stops remote admission.
+The Host does not read a TOML file. Its selection configuration is the `selection` field of the revisioned owner settings (`{"kind":"local"}` by default, or `system_one` with an optional `provider`, `endpoint`, `model` and an optional `credential_reference`). A raw owner `replace_settings` that turns System One on or changes its endpoint/model returns `host_action_required` and changes nothing. The change is applied only through the native Settings route: an `update` of `tools.selection` returns `awaiting_confirmation`, and the matching `confirm_patch` applies it. The macOS Settings Tool Selection controls drive that route, including the "Use TypeSafe preset" button, which fills `https://api.typesafe.ai/v1/systemone` and `jev-latest` into the same fields as a custom endpoint. Turning System One off through the same route leaves the stored endpoint/model but stops remote admission.
+
+The `provider` field picks the service. It is omitted for `typesafe`, so older clients keep reading and writing TypeSafe-style settings unchanged. Native `tools.selection` update values per provider:
+
+| Provider | Value |
+| --- | --- |
+| TypeSafe/Jev (default wire) | `{"kind":"system_one","endpoint":"https://api.typesafe.ai/v1/systemone","model":"jev-latest"}` |
+| OpenRouter | `{"kind":"system_one","provider":"openrouter","endpoint":"https://openrouter.ai/api/v1","model":"openai/gpt-4.1-mini"}` |
+| OpenAI-compatible | `{"kind":"system_one","provider":"openai_compatible","endpoint":"https://llm.example.com/v1","model":"MODEL_ID"}` |
+| Local model | `{"kind":"system_one","provider":"local_model","endpoint":"http://127.0.0.1:11434/v1","model":"llama3.2"}` |
+
+Each goes inside `{"kind":"tool_selection","selection":…}` in an `update` of `tools.selection`, followed by the matching `confirm_patch`. A changed provider is a protected change like a changed endpoint. For OpenAI-style providers the endpoint is the base URL; the Host POSTs to `<base>/chat/completions` and the disclosure `destination` shows that full URL. A key for OpenRouter or a keyed OpenAI-compatible server uses the same System One credential entry bound to the endpoint plus reference; a local model needs none. The macOS controls still edit endpoint and model only; they preserve a stored provider and the TypeSafe preset clears it. A provider picker is an Apple follow-up.
 
 With remote selection enabled, `prepare_selection` returns the exact disclosure without contacting the endpoint. Only `approve_selection` for that ticket sends one POST. The identical domain command then consumes the result, and the model receives the selected definitions plus `search_tools`. Declining with `discard_selection`, or never approving, keeps the ordinary local selection for that command. Approved or local tickets that are never submitted keep their reservation until discarded or expired. When the preflight budget is full, `prepare_selection` fails with code `busy` and "selection preflight capacity is exhausted; discard unused selection tickets". A consumed, discarded, expired or changed ticket fails with `invalid_request` and asks for a new preparation.
 
@@ -16,7 +27,7 @@ Removal derives the same endpoint-bound key and deletes it from the native store
 
 ## Library configuration document
 
-Offline discovery is the default and needs no service or key:
+Offline discovery is the default and needs no service or key. `provider` is `local`, `system-one` or `typesafe` (TypeSafe wire), `openrouter`, `openai-compatible` or `local-model`:
 
 ```toml
 [tools.selection]
@@ -45,6 +56,16 @@ A compatible local server can omit `credential_reference`:
 provider = "system-one"
 endpoint = "http://127.0.0.1:8080/v1/systemone"
 model = "user-installed-model"
+fallback = "local"
+```
+
+A loopback OpenAI-compatible model server uses the chat-completions wire:
+
+```toml
+[tools.selection]
+provider = "local-model"
+endpoint = "http://127.0.0.1:11434/v1"
+model = "llama3.2"
 fallback = "local"
 ```
 

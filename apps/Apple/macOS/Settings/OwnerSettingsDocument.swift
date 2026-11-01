@@ -27,6 +27,7 @@ struct OwnerSettingsSystemOne: Equatable, Sendable {
     let model: String
     let reference: UUID?
     let enabled: Bool
+    var provider: String? = nil
 }
 
 struct OwnerSettingsDocument: Sendable {
@@ -111,7 +112,8 @@ struct OwnerSettingsDocument: Sendable {
                 try SettingsWire.text(model, maximum: 256)
                 let reference = try Self.optionalReference(referenceValue)
                 if let reference { reserved.insert(reference) }
-                systemOne = OwnerSettingsSystemOne(endpoint: endpoint, model: model, reference: reference, enabled: enabled ?? true)
+                systemOne = OwnerSettingsSystemOne(endpoint: endpoint, model: model, reference: reference, enabled: enabled ?? true,
+                                                   provider: selectionFields["provider"]?.string)
             default: throw OwnerSettingsMetadataError.invalidDocument
             }
             let mcpFields = try Self.object(mcp)

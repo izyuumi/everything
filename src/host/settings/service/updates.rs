@@ -48,11 +48,15 @@ pub(super) fn patch_candidate(
                     ToolSelectionPreference::Local => {
                         candidate.preference_overrides.system_one_enabled = Some(false);
                     }
-                    ToolSelectionPreference::SystemOne { endpoint, model } => {
-                        let SelectionConfig::SystemOne(selected) =
-                            SelectionConfig::system_one(endpoint, model, None).map_err(|_| {
-                                SettingsServiceError::Invalid("System One selection")
-                            })?
+                    ToolSelectionPreference::SystemOne {
+                        provider,
+                        endpoint,
+                        model,
+                    } => {
+                        let SelectionConfig::SystemOne(selected) = SelectionConfig::system_one(
+                            *provider, endpoint, model, None,
+                        )
+                        .map_err(|_| SettingsServiceError::Invalid("System One selection"))?
                         else {
                             return Err(SettingsServiceError::Invalid("System One selection"));
                         };
@@ -74,6 +78,7 @@ pub(super) fn patch_candidate(
                                 _ => None,
                             };
                         candidate.selection = SelectionSettings::SystemOne {
+                            provider: selected.provider(),
                             endpoint: selected.endpoint().into(),
                             model: selected.model().into(),
                             credential_reference,
@@ -144,6 +149,7 @@ pub(super) fn tool_selection(
     {
         SelectionConfig::Local => Ok(ToolSelectionPreference::Local),
         SelectionConfig::SystemOne(settings) => Ok(ToolSelectionPreference::SystemOne {
+            provider: settings.provider(),
             endpoint: settings.endpoint().into(),
             model: settings.model().into(),
         }),
@@ -238,6 +244,7 @@ fn configured_selection(
     {
         SelectionConfig::Local => Ok(ToolSelectionPreference::Local),
         SelectionConfig::SystemOne(settings) => Ok(ToolSelectionPreference::SystemOne {
+            provider: settings.provider(),
             endpoint: settings.endpoint().into(),
             model: settings.model().into(),
         }),

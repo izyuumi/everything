@@ -2,9 +2,11 @@
 
 `SystemOneSelector::new(ToolSelector, SelectionConfig)` wraps an immutable offline selector. `from_toml` turns a sanitized configuration error into explicit local-fallback diagnostics. `with_credential_store` shares a host-owned native store without replacing its real backend. Call synchronous `prepare(&ExecutionAuthority, query, limit)` on a blocking worker. Queries, result limits and final selection budgets remain those of the [offline selector](selector.md).
 
-`PreparedSelection` contains either a local `ToolSelection` or a `SystemOneDisclosure`. The disclosure exposes the exact canonical destination, model, JSON payload, authority and SHA256 fingerprint. `approve(Duration)` consumes it and produces a non-cloneable, non-deserializable `ApprovedSelection`, valid for at most five minutes of monotonic time. Only a trusted owner interaction may call this method. Neither configuration parsing, model output, remote commands nor tool arguments constitute approval. The host passes its current authority to `select_approved`; a different selector, task, conversation, workspace, mode or optional allowlist invalidates the approval.
+`PreparedSelection` contains either a local `ToolSelection` or a `SystemOneDisclosure`. The disclosure exposes the provider, the exact POST destination, model, JSON payload, authority and SHA256 fingerprint. The host `SelectionDisclosure` carries the same `provider` field; it defaults to `typesafe` when absent. `approve(Duration)` consumes it and produces a non-cloneable, non-deserializable `ApprovedSelection`, valid for at most five minutes of monotonic time. Only a trusted owner interaction may call this method. Neither configuration parsing, model output, remote commands nor tool arguments constitute approval. The host passes its current authority to `select_approved`; a different selector, task, conversation, workspace, mode or optional allowlist invalidates the approval.
 
-The HTTP POST uses the configured full endpoint, including ordinary query parameters. TypeSafe and custom endpoints receive this same body shape:
+`SelectionConfig::system_one(provider, endpoint, model, reference)` validates the endpoint as below and then the provider: `openrouter` requires exactly `https://openrouter.ai/api/v1` (a trailing slash is tolerated) and `local_model` requires a literal-loopback IP host; violations return `ProviderEndpoint`. Provider values on the wire are `typesafe`, `openrouter`, `openai_compatible` and `local_model`.
+
+For `typesafe` the HTTP POST uses the configured full endpoint, including ordinary query parameters, and this body shape:
 
 ```json
 {
@@ -22,6 +24,29 @@ The HTTP POST uses the configured full endpoint, including ordinary query parame
   }
 }
 ```
+
+For `openrouter`, `openai_compatible` and `local_model` the POST goes to the base URL's path plus `/chat/completions`, keeping its query. The body carries the same task summary and candidate descriptions:
+
+```json
+{
+  "model": "user-selected-model",
+  "messages": [
+    {"role": "system", "content": "Which tool is most relevant to the task? Rank only by relevance; execution requires independent permission. The user message is JSON with the task and the options keyed by option ID. Answer with only a JSON object {\"choice\": ID} where ID is exactly one option key, or \"none\" if no option is relevant."},
+    {"role": "user", "content": "{\"options\":{\"none\":\"No listed tool is relevant\",\"tool_000\":\"tool_name: approved tool description\"},\"task\":\"approved task summary\"}"}
+  ],
+  "temperature": 0,
+  "response_format": {
+    "type": "json_schema",
+    "json_schema": {
+      "name": "tool_choice",
+      "strict": true,
+      "schema": {"type": "object", "additionalProperties": false, "required": ["choice"], "properties": {"choice": {"type": "string", "enum": ["none", "tool_000"]}}}
+    }
+  }
+}
+```
+
+The response must be a chat completion with exactly one `choices` entry whose `message.content`, after trimming whitespace, is exactly a JSON object `{"choice": ID}` with no other fields. It is then validated as a choice-only answer below. Servers or models that reject `response_format` return an HTTP error and fall back locally.
 
 Candidate IDs are request-local positions, never executable names supplied by the service. There are at most 254 candidates plus `none`. Denied tools are absent; approval-requiring tools retain their permission metadata and disclosure warning. Locally unmatched tools may be considered remotely, with local ranking deciding which candidates fit the bound.
 

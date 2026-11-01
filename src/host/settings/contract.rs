@@ -7,7 +7,7 @@ use uuid::Uuid;
 use crate::agent::{ConversationConfig, ProviderEndpoint, ProviderKind};
 use crate::memory::embedding::{Embedder, EmbeddingProfile};
 use crate::protocol::{CommandId, DeviceId, UnixMillis};
-use crate::selector::system_one::SelectionConfig;
+use crate::selector::system_one::{SelectionConfig, SystemOneProvider};
 
 use super::{CredentialStorage, ModelCredentialReference};
 
@@ -192,15 +192,25 @@ impl ModelSelection {
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ToolSelectionPreference {
     Local,
-    SystemOne { endpoint: String, model: String },
+    SystemOne {
+        #[serde(default, skip_serializing_if = "SystemOneProvider::is_typesafe")]
+        provider: SystemOneProvider,
+        endpoint: String,
+        model: String,
+    },
 }
 
 impl ToolSelectionPreference {
     fn validate(&self) -> Result<(), SettingsContractError> {
-        if let Self::SystemOne { endpoint, model } = self {
+        if let Self::SystemOne {
+            provider,
+            endpoint,
+            model,
+        } = self
+        {
             bounded_text(endpoint, 4096)?;
             bounded_text(model, MAX_MODEL_BYTES)?;
-            SelectionConfig::system_one(endpoint, model, None)
+            SelectionConfig::system_one(*provider, endpoint, model, None)
                 .map_err(|_| SettingsContractError::Invalid("System One configuration"))?;
         }
         Ok(())
@@ -706,6 +716,7 @@ impl SettingsActionRequest {
                         non_nil(*reference)?;
                         bounded_text(endpoint, 4096)?;
                         SelectionConfig::system_one(
+                            SystemOneProvider::Typesafe,
                             endpoint,
                             "credential-binding",
                             Some(*reference),
