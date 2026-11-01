@@ -157,8 +157,16 @@ pub(super) fn capture_policy(
         limits,
         agent: None,
     };
-    let policy = agent
-        .narrow(policy, registry)
+    let mut policy = agent.narrow(policy, registry);
+    if !target
+        .permissions
+        .allowed_tools
+        .contains(crate::skills::READ_SKILL_NAME)
+        && let Some(captured) = policy.agent.as_mut()
+    {
+        captured.skills = crate::host::agents::SkillAssignment::None;
+    }
+    let policy = policy
         .capture(registry)
         .map_err(|_| ScheduleError::Invalid("scheduled native policy could not be captured"))?;
     validate_policy(run, &policy)?;
@@ -182,10 +190,7 @@ pub(super) fn validate_policy(run: &ScheduledRun, policy: &ExecutionPolicy) -> S
     };
     if policy.workspace_root != target.workspace_root
         || policy.mode > target.permissions.mode
-        || !allowed
-            .iter()
-            .filter(|name| !(policy.offers_skills() && *name == crate::skills::READ_SKILL_NAME))
-            .all(|name| target.permissions.allowed_tools.contains(name))
+        || !allowed.is_subset(&target.permissions.allowed_tools)
         || allowed.iter().any(|name| {
             SCHEDULER_TOOL_NAMES.contains(&name.as_str())
                 || super::controls::SCHEDULE_CONTROL_NAMES.contains(&name.as_str())

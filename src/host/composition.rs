@@ -329,6 +329,7 @@ impl TaskPreparation for Composition {
             cancellation,
         )
         .await?;
+        let mut quoted = quoted;
         if quoted
             .iter()
             .any(|block| matches!(block, QuotedContext::Skills { .. }))
@@ -355,6 +356,13 @@ impl TaskPreparation for Composition {
                 });
             }
         }
+        if request.execution.limits.max_tool_calls == 0
+            || !selected_tools
+                .iter()
+                .any(|tool| tool.name == crate::skills::READ_SKILL_NAME)
+        {
+            quoted.retain(|block| !matches!(block, QuotedContext::Skills { .. }));
+        }
         Ok(PreparedTaskInputs {
             memory,
             quoted,
@@ -378,11 +386,21 @@ async fn quoted_context(
         let mut warnings = Vec::new();
         let mut quoted = Vec::new();
         if let Some(found) = crate::skills::project_instructions(&workspace, &mut warnings) {
-            let mut text = crate::skills::escaped(&found.text, true).into_owned();
-            if let Some(bytes) = found.truncated_from {
+            let limit = crate::skills::MAX_PROJECT_INSTRUCTIONS_BYTES as usize;
+            let mut text =
+                crate::skills::escaped(&found.text.replace("\r\n", "\n"), true).into_owned();
+            let mut truncated_from = found.truncated_from;
+            if text.len() > limit {
+                let mut end = limit;
+                while !text.is_char_boundary(end) {
+                    end -= 1;
+                }
+                text.truncate(end);
+                truncated_from = truncated_from.or(Some(found.text.len() as u64));
+            }
+            if let Some(bytes) = truncated_from {
                 text.push_str(&format!(
-                    "\n[truncated: AGENTS.md is {bytes} bytes; only the first {} are included]",
-                    crate::skills::MAX_PROJECT_INSTRUCTIONS_BYTES
+                    "\n[truncated: AGENTS.md is {bytes} bytes; only the first {limit} bytes of its escaped text are included]"
                 ));
             }
             if !text.trim().is_empty() {

@@ -326,7 +326,7 @@ fn read(
         record.root.label(),
         attribute(&parts.map_or_else(|| "SKILL.md".to_owned(), |parts| parts.join("/")))
     );
-    let mut body = escaped(&text, true).replace("</skill>", "<\\/skill>");
+    let mut body = escaped(&text.replace("\r\n", "\n"), true).replace("</", "<\\/");
     let mut truncated = truncated;
     if body.len() as u64 > budget {
         let mut end = budget as usize;

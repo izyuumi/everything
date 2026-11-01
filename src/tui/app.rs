@@ -761,7 +761,12 @@ impl App {
             SkillAssignment::Only(names) => names.clone(),
         };
         if assigned {
-            names.retain(|other| other.dir_name() != wanted);
+            let folder = skill
+                .path
+                .as_ref()
+                .and_then(|path| path.file_name())
+                .map(|folder| crate::skills::SkillDirName::sanitize(&folder.to_string_lossy()));
+            names.retain(|other| other.dir_name() != wanted && Some(other.dir_name()) != folder);
         } else {
             names.insert(name);
         }
