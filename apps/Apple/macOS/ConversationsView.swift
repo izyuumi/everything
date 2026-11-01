@@ -214,14 +214,15 @@ struct AgentEditorView: View {
         if renderedBytes > 32768 { return "The persona and traits together exceed 32768 bytes." }
         return nil
     }
+    private var workspaceUnchanged: Bool { workspace == (agent?.definition["workspace"].string ?? "") }
     private var workspaceIssue: String? {
-        guard !workspace.isEmpty else { return nil }
+        guard !workspace.isEmpty, !workspaceUnchanged else { return nil }
         guard workspace.hasPrefix("/") else { return "The workspace must be an absolute path." }
         guard resolvedWorkspace != nil else { return "The workspace must be an existing directory on this Mac." }
         return nil
     }
     private var workspaceNote: String? {
-        guard let resolved = resolvedWorkspace, resolved != workspace else { return nil }
+        guard !workspaceUnchanged, let resolved = resolvedWorkspace, resolved != workspace else { return nil }
         return "Saved as " + resolved
     }
     private var messageTargets: [OwnerID] {
@@ -449,7 +450,7 @@ struct AgentEditorView: View {
         let allow: JSONValue = allTools ? .string("all") : .object(["only": .array(references)])
         let on: JSONValue = .object(["max_mode": .string(toolMode), "allow": allow])
         value["tools"] = toolMode == "off" ? .string("off") : .object(["on": on])
-        value["workspace"] = resolvedWorkspace.map(JSONValue.string) ?? .null
+        value["workspace"] = workspaceUnchanged ? (agent?.definition["workspace"] ?? .null) : (resolvedWorkspace.map(JSONValue.string) ?? .null)
         let targets = messaging.filter { $0 != ownID }.map(\.string).sorted()
         value["messaging"] = targets.isEmpty ? .string("closed") : .object(["may": .array(targets.map(JSONValue.string))])
         value["memory"] = .string(memory)
