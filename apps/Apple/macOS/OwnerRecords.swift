@@ -442,6 +442,56 @@ struct HostAgent: Identifiable, Sendable, Equatable {
             && !value.unicodeScalars.contains { $0.properties.generalCategory == .control || $0.properties.isWhitespace }
     }
 
+    static func loopbackEndpoint(_ text: String) -> String? {
+        let allowed = Set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-._~!$&'()*+,;=:@/%[]".unicodeScalars)
+        guard text.utf8.count <= 2048, text.unicodeScalars.allSatisfy(allowed.contains),
+              let separator = text.range(of: "://") else { return nil }
+        let scheme = text[..<separator.lowerBound].lowercased()
+        guard scheme == "http" || scheme == "https" else { return nil }
+        let rest = text[separator.upperBound...]
+        let authority = rest.prefix { $0 != "/" }
+        let path = rest.dropFirst(authority.count)
+        guard !authority.contains("@"), !path.contains("["), !path.contains("]") else { return nil }
+        let bytes = Array(path.utf8)
+        for (index, byte) in bytes.enumerated() where byte == UInt8(ascii: "%") {
+            guard index + 2 < bytes.count, Character(Unicode.Scalar(bytes[index + 1])).isHexDigit,
+                  Character(Unicode.Scalar(bytes[index + 2])).isHexDigit else { return nil }
+        }
+        let dots: Set<String> = [".", "..", "%2e", ".%2e", "%2e.", "%2e%2e"]
+        guard !path.split(separator: "/", omittingEmptySubsequences: false).contains(where: { dots.contains($0.lowercased()) }) else { return nil }
+        let host: String
+        let portText: Substring
+        if authority.hasPrefix("[") {
+            guard let close = authority.firstIndex(of: "]") else { return nil }
+            var address = in6_addr()
+            guard inet_pton(AF_INET6, String(authority[authority.index(after: authority.startIndex)..<close]), &address) == 1,
+                  withUnsafeBytes(of: &address, { Array($0) }) == Array(repeating: 0, count: 15) + [1] else { return nil }
+            host = "[::1]"
+            portText = authority[authority.index(after: close)...]
+        } else {
+            let name = authority.prefix { $0 != ":" }
+            var address = in_addr()
+            guard !name.contains("["), inet_pton(AF_INET, String(name), &address) == 1,
+                  UInt32(bigEndian: address.s_addr) >> 24 == 127 else { return nil }
+            var buffer = [CChar](repeating: 0, count: Int(INET_ADDRSTRLEN))
+            guard inet_ntop(AF_INET, &address, &buffer, socklen_t(buffer.count)) != nil else { return nil }
+            host = String(decoding: buffer.prefix { $0 != 0 }.map { UInt8(bitPattern: $0) }, as: UTF8.self)
+            portText = authority.dropFirst(name.count)
+        }
+        var port = ""
+        if !portText.isEmpty {
+            guard portText.first == ":" else { return nil }
+            let digits = portText.dropFirst()
+            let significant = digits.drop { $0 == "0" }
+            guard digits.allSatisfy({ $0.isASCII && $0.isNumber }), significant.count <= 5 else { return nil }
+            let number = Int(significant) ?? 0
+            guard number <= 65535 else { return nil }
+            if !digits.isEmpty && number != (scheme == "https" ? 443 : 80) { port = ":" + String(number) }
+        }
+        let canonical = scheme + "://" + host + port + (path.isEmpty ? "/" : String(path))
+        return canonical.utf8.count <= 2048 ? canonical : nil
+    }
+
     func skillAssigned(_ skill: HostSkill) -> Bool {
         switch definition["skills"] {
         case .string("all"): skill.offered
@@ -474,7 +524,7 @@ struct HostAgent: Identifiable, Sendable, Equatable {
             if on["allow"] == .string("all") { tools = ceiling + " · all tools" }
             else if let only = on["allow"]["only"].array, only.count <= 256 {
                 let names = try only.map { reference -> String in
-                    if let tool = reference["tool"].string, tool.utf8.count <= 256 { return tool }
+                    if let tool = reference["tool"].string, tool.utf8.count <= 256 { return tool.hasPrefix("mcp:") ? "tool \"" + tool + "\"" : tool }
                     if let server = reference["mcp_server"].string, server.utf8.count <= 256 { return "mcp:" + server }
                     throw OwnerClientError.invalidResponse
                 }

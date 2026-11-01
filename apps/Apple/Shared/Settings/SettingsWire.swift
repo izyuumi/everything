@@ -375,7 +375,7 @@ enum ToolSelectionPreference: SettingsWireData {
         case "system_one":
             try fields.only(["kind", "provider", "endpoint", "model"])
             self = .systemOne(endpoint: try fields.required(String.self, "endpoint"), model: try fields.required(String.self, "model"),
-                              provider: try fields.optional(String.self, "provider"))
+                              provider: fields.container.contains(SettingsWireKey("provider")) ? try fields.required(String.self, "provider") : nil)
         default: throw SettingsWireError.invalid
         }
         try validate()
@@ -906,43 +906,123 @@ enum SystemOneChoice: String, CaseIterable, Identifiable, Sendable {
     func issue(endpoint: String, model: String) -> String? {
         guard self != .local else { return nil }
         if let issue = endpointIssue(endpoint) { return issue }
-        if model.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || model.utf8.count > 256
-            || model.unicodeScalars.contains(where: CharacterSet.controlCharacters.contains) {
+        if model.unicodeScalars.allSatisfy(\.properties.isWhitespace) || model.utf8.count > 256
+            || model.unicodeScalars.contains(where: { $0.properties.generalCategory == .control }) {
             return "Enter a model ID of 1 to 256 bytes without control characters."
         }
         return nil
     }
 
     func endpointIssue(_ endpoint: String) -> String? {
-        guard !endpoint.isEmpty, endpoint.utf8.count <= 4096,
-              !endpoint.unicodeScalars.contains(where: CharacterSet.controlCharacters.contains),
+        guard !endpoint.isEmpty, endpoint.utf8.count <= 4096, !endpoint.contains("\\"),
+              !endpoint.unicodeScalars.contains(where: { $0.properties.generalCategory == .control }),
               let components = URLComponents(string: endpoint), let scheme = components.scheme?.lowercased(),
               let separator = endpoint.range(of: "://") else { return Self.endpointRule }
-        let authority = String(endpoint[separator.upperBound...].prefix { !"/?#".contains($0) })
-        let rawHost = authority.hasPrefix("[")
-            ? String(authority.dropFirst().prefix { $0 != "]" })
+        let authority = String(String.UnicodeScalarView(endpoint[separator.upperBound...].unicodeScalars.prefix { !"/?#".unicodeScalars.contains($0) }))
+        let bracketed = authority.hasPrefix("[")
+        let rawHost = bracketed
+            ? (authority.contains("]") ? String(authority.dropFirst().prefix { $0 != "]" }) : "")
             : String(authority.prefix { $0 != ":" })
+        let portText = bracketed
+            ? authority.split(separator: "]", maxSplits: 1, omittingEmptySubsequences: false).dropFirst().first.map(String.init) ?? ""
+            : String(authority.dropFirst(rawHost.count))
+        let portDigits = portText.hasPrefix(":") ? String(portText.dropFirst()) : portText
+        let significant = portDigits.drop { $0 == "0" }
+        let port: Int? = portDigits.isEmpty ? nil
+            : portDigits.allSatisfy({ $0.isASCII && $0.isNumber }) && significant.count <= 5 ? Int(significant) ?? 0 : -1
+        let query = components.percentEncodedQuery
         guard !authority.isEmpty, !authority.contains("@"), components.user == nil, components.password == nil,
-              components.fragment == nil, (components.percentEncodedQuery?.utf8.count ?? 0) <= 1024,
+              (port ?? 0) >= 0, (port ?? 0) <= 65535, components.fragment == nil, Self.serializedQueryBytes(query) <= 1024,
               (scheme == "https" && !(components.host ?? "").isEmpty) || (scheme == "http" && Self.isLoopback(rawHost)) else {
             return Self.endpointRule
         }
-        let pairs = components.queryItems ?? []
-        let credentialQuery = pairs.contains { item in
-            Self.credentialQueryKeys.contains(String(String.UnicodeScalarView(item.name.unicodeScalars.filter {
-                $0.isASCII && CharacterSet.alphanumerics.contains($0)
-            })).lowercased())
-        }
-        if pairs.count > 32 || credentialQuery { return Self.endpointRule }
+        let names = Self.queryNames(query)
+        if names.count > 32 || names.contains(where: Self.credentialQueryKeys.contains) { return Self.endpointRule }
         guard self != .typesafe else { return nil }
-        var path = components.path
+        var path = Self.serializedPath(components.percentEncodedPath)
         while path.hasSuffix("/") { path.removeLast() }
-        if path.lowercased().hasSuffix("/chat/completions") { return "Enter the base URL, not the /chat/completions URL." }
-        if self == .openrouter, (endpoint.hasSuffix("/") ? String(endpoint.dropLast()) : endpoint) != Self.openrouterEndpoint {
-            return "OpenRouter uses exactly " + Self.openrouterEndpoint + "."
+        if path.utf8.count >= 17, String(decoding: path.utf8.suffix(17), as: UTF8.self).lowercased() == "/chat/completions" {
+            return "Enter the base URL, not the /chat/completions URL."
         }
-        if self == .localModel, !Self.isLoopback(rawHost) { return "A local model needs a literal loopback IP, such as http://127.0.0.1:11434/v1." }
+        if self == .openrouter {
+            var serialized = scheme + "://" + (components.percentEncodedHost ?? "").lowercased()
+            if let port, port != (scheme == "https" ? 443 : 80) { serialized += ":" + String(port) }
+            serialized += Self.serializedPath(components.percentEncodedPath) + (query.map { "?" + $0 } ?? "")
+            while serialized.hasSuffix("/") { serialized.removeLast() }
+            if serialized != Self.openrouterEndpoint { return "OpenRouter uses exactly " + Self.openrouterEndpoint + "." }
+        }
+        if self == .localModel, !Self.isParsedLoopback(components.host ?? "") { return "A local model needs a literal loopback IP, such as http://127.0.0.1:11434/v1." }
         return nil
+    }
+
+    private static func isParsedLoopback(_ host: String) -> Bool {
+        if isLoopback(host) { return true }
+        if host.hasPrefix("[") && host.hasSuffix("]") { return isLoopback(String(host.dropFirst().dropLast())) }
+        var parts = host.lowercased().split(separator: ".", omittingEmptySubsequences: false).map(String.init)
+        if parts.count > 1, parts.last == "" { parts.removeLast() }
+        guard (1...4).contains(parts.count) else { return false }
+        var numbers: [UInt64] = []
+        for part in parts {
+            let hex = part.hasPrefix("0x")
+            let octal = !hex && part.count > 1 && part.hasPrefix("0")
+            let digits = hex ? String(part.dropFirst(2)) : octal ? String(part.dropFirst()) : part
+            let radix = hex ? 16 : octal ? 8 : 10
+            guard !part.isEmpty, digits.count <= 32, digits.allSatisfy({ $0.isASCII && $0.isHexDigit }),
+                  let value = digits.isEmpty ? 0 : UInt64(digits, radix: radix) else { return false }
+            numbers.append(value)
+        }
+        guard numbers.dropLast().allSatisfy({ $0 <= 255 }), let last = numbers.last,
+              last < UInt64(1) << (8 * UInt64(5 - numbers.count)) else { return false }
+        return (numbers.count == 1 ? last >> 24 : numbers[0]) == 127
+    }
+
+    private static func serializedPath(_ raw: String) -> String {
+        let parts = Array(raw.split(separator: "/", omittingEmptySubsequences: false).dropFirst())
+        var output: [Substring] = []
+        for (index, part) in parts.enumerated() {
+            let lower = part.lowercased()
+            let last = index == parts.count - 1
+            if ["..", ".%2e", "%2e.", "%2e%2e"].contains(lower) {
+                if !output.isEmpty { output.removeLast() }
+                if last { output.append("") }
+            } else if [".", "%2e"].contains(lower) {
+                if last { output.append("") }
+            } else { output.append(part) }
+        }
+        return "/" + output.joined(separator: "/")
+    }
+
+    private static func serializedQueryBytes(_ query: String?) -> Int {
+        guard let query else { return 0 }
+        return query.utf8.reduce(0) { total, byte in total + (byte <= 0x20 || byte >= 0x7F || "\"#<>'".utf8.contains(byte) ? 3 : 1) }
+    }
+
+    private static func queryNames(_ query: String?) -> [String] {
+        guard let query else { return [] }
+        func hex(_ byte: UInt8) -> UInt8? {
+            switch byte {
+            case 0x30...0x39: byte - 0x30
+            case 0x41...0x46: byte - 0x37
+            case 0x61...0x66: byte - 0x57
+            default: nil
+            }
+        }
+        return query.utf8.split(separator: UInt8(ascii: "&")).map { pair in
+            let name = Array(pair.prefix { $0 != UInt8(ascii: "=") })
+            var bytes: [UInt8] = []
+            var index = 0
+            while index < name.count {
+                if name[index] == UInt8(ascii: "%"), index + 2 < name.count, let high = hex(name[index + 1]), let low = hex(name[index + 2]) {
+                    bytes.append(high << 4 | low)
+                    index += 3
+                } else {
+                    bytes.append(name[index])
+                    index += 1
+                }
+            }
+            let kept = bytes.filter { (0x30...0x39).contains($0) || (0x41...0x5A).contains($0) || (0x61...0x7A).contains($0) }
+            return String(decoding: kept, as: UTF8.self).lowercased()
+        }
     }
 
     private static func isLoopback(_ host: String) -> Bool {

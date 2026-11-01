@@ -279,6 +279,7 @@ final class NativeSettingsStore {
     private(set) var draft: NativeSettingsDraft?
     private(set) var draftConflict = false
     private(set) var draftMessage: String?
+    private var systemOneRejectedDraft: NativeSettingsDraft?
     private(set) var operations: [NativeSettingsOperation] = []
     private(set) var devicePage: SettingsDevicePage?
     private(set) var devicesLoading = false
@@ -341,6 +342,11 @@ final class NativeSettingsStore {
     var canEdit: Bool {
         !isClosed && !isOpening && !isRefreshing && draft != nil && !operations.contains(where: \.blocksNewChanges)
             && current.map({ !credentialLinksNeedRecovery($0) && !deviceApprovalsNeedRecovery($0) }) == true
+    }
+
+    var systemOneRejection: String? {
+        guard let draft, draft == systemOneRejectedDraft else { return nil }
+        return NativeSettingsSessionError.systemOneProviderEndpoint.errorDescription
     }
 
     var canSave: Bool {
@@ -1594,6 +1600,7 @@ final class NativeSettingsStore {
             observedAt = nil
         }
         draftMessage = nil
+        systemOneRejectedDraft = nil
         operations = []
         credentialPresentation?.field?.clear()
         credentialPresentation = nil
@@ -1670,6 +1677,7 @@ final class NativeSettingsStore {
             } catch {
                 let failure = sanitize(error)
                 owner.operations[id]?.issue = failure
+                if failure == .systemOneProviderEndpoint, isCurrent(owner), let submitted = owner.submittedDrafts[id] { systemOneRejectedDraft = submitted }
                 if let context = owner.devices[id] {
                     if context.retired { context.issue = context.issue ?? failure }
                     else { context.issue = failure }

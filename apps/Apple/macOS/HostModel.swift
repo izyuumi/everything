@@ -427,11 +427,37 @@ final class HostModel {
     }
 
     static func sortedSet(_ values: some Sequence<String>) -> [String] {
-        Set(values).sorted { $0.utf8.lexicographicallyPrecedes($1.utf8) }
+        var result: [String] = []
+        for value in values.sorted(by: { $0.utf8.lexicographicallyPrecedes($1.utf8) })
+        where result.last.map({ !$0.utf8.elementsEqual(value.utf8) }) ?? true { result.append(value) }
+        return result
+    }
+
+    static let maximumAssignedSkills = 256
+    static let maximumMessageTargets = 64
+
+    enum SkillRemovalBlock { case omitted, overCap }
+
+    func skillRemovalBlock(_ skill: HostSkill, _ agent: HostAgent) -> SkillRemovalBlock? {
+        guard agent.definition["skills"] == .string("all") else { return nil }
+        if (skills?.omitted ?? 0) > 0 { return .omitted }
+        let kept = (skills?.skills ?? []).compactMap(\.assignableName).filter { !skill.matches($0) }
+        return HostModel.sortedSet(kept).count > HostModel.maximumAssignedSkills ? .overCap : nil
+    }
+
+    func skillAssignmentFull(_ agent: HostAgent) -> Bool {
+        (agent.definition["skills"]["only"].array?.count ?? 0) >= HostModel.maximumAssignedSkills
     }
 
     func assignSkill(_ skill: HostSkill, to agent: HostAgent, assign: Bool) async {
         guard canMutate, let name = skill.assignableName, case .object(var definition) = agent.definition else { return }
+        if !assign, let block = skillRemovalBlock(skill, agent) {
+            message = switch block {
+            case .omitted: "The Host omitted some skills from its list, so removing one skill from an agent with all skills could drop skills this app cannot see. Choose none or all in the agent editor, or use vorra agents edit."
+            case .overCap: "Removing one skill from an agent with all skills would list more than \(HostModel.maximumAssignedSkills) skills, the Host's limit. Choose none or all in the agent editor, or use vorra agents edit."
+            }
+            return
+        }
         var names: [String] = switch agent.definition["skills"] {
         case .string("all"): (skills?.skills ?? []).compactMap(\.assignableName)
         case .string("none"): []
@@ -439,6 +465,10 @@ final class HostModel {
         }
         if assign { names.append(name) } else { names.removeAll(where: skill.matches) }
         let sorted = HostModel.sortedSet(names)
+        guard sorted.count <= HostModel.maximumAssignedSkills else {
+            message = "An agent can have at most \(HostModel.maximumAssignedSkills) assigned skills."
+            return
+        }
         definition["skills"] = sorted.isEmpty ? .string("none") : .object(["only": .array(sorted.map(JSONValue.string))])
         let skillName: String = DisplayText.escaped(name)
         let agentName: String = DisplayText.escaped(agent.name)
