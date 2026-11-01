@@ -1,6 +1,6 @@
 mod control_events;
 mod foreground;
-mod native;
+pub(crate) mod native;
 mod remote;
 mod scheduled;
 pub(crate) mod settings;

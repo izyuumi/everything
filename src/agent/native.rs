@@ -21,7 +21,7 @@ use crate::tools::{
     broker::{BrokerOutcome, OperationResult, TaskToolBroker, ToolInvocation},
 };
 
-const MAX_RESULT_BYTES: usize = 32 * 1_024;
+pub(crate) const MAX_RESULT_BYTES: usize = 32 * 1_024;
 const MAX_PREVIEW_BYTES: usize = 4 * 1_024;
 
 type Admission = Arc<tokio::sync::OwnedMutexGuard<()>>;

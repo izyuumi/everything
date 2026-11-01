@@ -127,6 +127,22 @@ pub fn discover(
     let mut project_scanned = false;
     for root in roots.roots() {
         if let SkillRoot::Project(path) = &root {
+            let workspace = roots
+                .workspace
+                .as_ref()
+                .and_then(|workspace| workspace.canonicalize().ok());
+            if let Ok(real) = path.canonicalize()
+                && !workspace
+                    .as_ref()
+                    .is_some_and(|workspace| real.starts_with(workspace))
+            {
+                catalog.warnings.push(format!(
+                    "project root {} was not scanned: it resolves to {}, outside the project",
+                    path.display(),
+                    real.display()
+                ));
+                continue;
+            }
             project_scanned = trusted_root(path, &mut catalog.warnings);
             if !project_scanned {
                 continue;
