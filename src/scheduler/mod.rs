@@ -58,7 +58,7 @@ pub(crate) fn task_execution(
 pub(crate) fn delegated_spend(
     store: &crate::storage::Store,
     task: crate::protocol::TaskId,
-) -> Result<u64, SchedulerError> {
+) -> Result<(u64, Vec<crate::protocol::TaskId>), SchedulerError> {
     repository::subtree_spend(store, task)
 }
 

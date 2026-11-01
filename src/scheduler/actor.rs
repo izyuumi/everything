@@ -2262,7 +2262,7 @@ impl Actor {
             .limits
             .max_charged_tokens
             .saturating_sub(run.charged_tokens)
-            .saturating_sub(repository::subtree_spend(&self.store(), id)?);
+            .saturating_sub(repository::subtree_spend(&self.store(), id)?.0);
         let floor = u64::from(caller.definition.execution.budget.reserved_output_tokens);
         if remaining <= floor {
             return Err(SchedulerError::Capacity("caller token budget"));
@@ -3038,6 +3038,20 @@ impl Actor {
                         self.repair_child_deliveries().await?;
                         return Ok(());
                     }
+                }
+                if let WaitingReason::Children { wait_id } = reason
+                    && task
+                        .checkpoint
+                        .child_wait
+                        .as_ref()
+                        .is_none_or(|wait| wait.wait_id != wait_id)
+                {
+                    let conversation = self
+                        .services
+                        .agent
+                        .conversation(task.definition.initial.conversation_id)
+                        .await?;
+                    super::inputs::adopt(&self.store(), &mut task, &conversation, wait_id)?;
                 }
                 if matches!(reason, WaitingReason::Children { .. })
                     && !self.stopping

@@ -723,16 +723,20 @@ pub(super) fn in_delegation(store: &Store, id: TaskId) -> Result<bool, Scheduler
         .any(|task| task.definition.delegation.is_some()))
 }
 
-pub(super) fn subtree_spend(store: &Store, caller: TaskId) -> Result<u64, SchedulerError> {
+pub(super) fn subtree_spend(
+    store: &Store,
+    caller: TaskId,
+) -> Result<(u64, Vec<TaskId>), SchedulerError> {
     let mut pending = child_ids(store, caller, false)?;
     if pending.is_empty() {
-        return Ok(0);
+        return Ok((0, Vec::new()));
     }
     if !in_delegation(store, caller)? {
         pending = child_ids(store, caller, true)?;
     }
     let mut visited = 0_usize;
     let mut total = 0_u64;
+    let mut unfinished = Vec::new();
     while let Some(id) = pending.pop() {
         visited += 1;
         if visited > 4096 {
@@ -744,6 +748,9 @@ pub(super) fn subtree_spend(store: &Store, caller: TaskId) -> Result<u64, Schedu
         total = total.saturating_add(followups);
         if !task.checkpoint.task.status.is_terminal() {
             total = total.saturating_add(grant);
+            if unfinished.len() < 32 {
+                unfinished.push(id);
+            }
             continue;
         }
         let conversation =
@@ -753,7 +760,7 @@ pub(super) fn subtree_spend(store: &Store, caller: TaskId) -> Result<u64, Schedu
         }
         pending.extend(child_ids(store, id, false)?);
     }
-    Ok(total)
+    Ok((total, unfinished))
 }
 
 pub(super) fn agent_log(
