@@ -37,6 +37,8 @@ jobs:
     timeout-minutes: 60
     permissions:
       contents: read
+      id-token: write
+      attestations: write
     strategy:
       fail-fast: true
       matrix:
@@ -103,6 +105,29 @@ jobs:
       - name: Forget signing credentials
         if: always() && runner.os == 'macOS'
         run: security delete-keychain "$RUNNER_TEMP/release.keychain-db" 2>/dev/null || true
+      - name: SBOM
+        uses: anchore/sbom-action@66cbf4bc1f1c0d2edc94016e65bc221b6bb0ad6c # v0.24.3
+        with:
+          path: .
+          format: spdx-json
+          output-file: ${{ runner.temp }}/vorra-${{ matrix.target }}.spdx.json
+          upload-artifact: false
+          upload-release-assets: false
+      # Attest build provenance for the release tarball.
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: ${{ runner.temp }}/dist/vorra-${{ matrix.target }}.tar.gz
+      # Attach the SPDX SBOM to the release tarball as an attestation.
+      - name: Attest SBOM
+        uses: actions/attest-sbom@c604332985a26aa8cf1bdc465b92731239ec6b9e # v4.1.0
+        with:
+          subject-path: ${{ runner.temp }}/dist/vorra-${{ matrix.target }}.tar.gz
+          sbom-path: ${{ runner.temp }}/vorra-${{ matrix.target }}.spdx.json
+      - name: Verify attestation
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh attestation verify "$RUNNER_TEMP/dist/vorra-${{ matrix.target }}.tar.gz" --repo izyuumi/everything
       - uses: actions/upload-artifact@v4
         with:
           name: vorra-${{ matrix.target }}
@@ -117,6 +142,8 @@ jobs:
     timeout-minutes: 120
     permissions:
       contents: read
+      id-token: write
+      attestations: write
     env:
       VERSION: ${{ needs.next.outputs.version }}
       BUILD: ${{ needs.next.outputs.build }}
@@ -178,6 +205,17 @@ jobs:
         run: |
           rm -f "$RUNNER_TEMP/sparkle.key" "$RUNNER_TEMP/AuthKey.p8"
           security delete-keychain "$RUNNER_TEMP/release.keychain-db" 2>/dev/null || true
+      # Attest build provenance for the signed and notarized Mac DMG.
+      - name: Attest the Mac DMG
+        if: steps.signing.outputs.ready == 'true'
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: ${{ runner.temp }}/dist/Vorra.dmg
+      - name: Verify the DMG attestation
+        if: steps.signing.outputs.ready == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh attestation verify "$RUNNER_TEMP/dist/Vorra.dmg" --repo izyuumi/everything
       - uses: actions/upload-artifact@v4
         if: steps.signing.outputs.ready == 'true'
         with:
