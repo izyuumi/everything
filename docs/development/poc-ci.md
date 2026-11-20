@@ -7,6 +7,7 @@ Normal pull requests and pushes to main run the lightweight Validate and Apple v
 Validate preserves the `rust (ubuntu-latest)` context and runs only:
 
 ```sh
+python3 scripts/check_comments.py
 cargo fmt --all --check
 cargo clippy --workspace --all-targets --locked -- -D warnings
 cargo clippy --workspace --all-targets --all-features --locked -- -D warnings

@@ -30,6 +30,8 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
+      - name: No source comments (ratchet)
+        run: python3 scripts/check_comments.py
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
